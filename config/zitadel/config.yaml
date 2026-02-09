@@ -1,0 +1,35 @@
+Log:
+  Level: info
+
+ExternalSecure: false
+ExternalDomain: localhost
+ExternalPort: 8080
+
+Database:
+  Postgres:
+    Host: zitadel-db
+    Port: 5432
+    Database: zitadel
+    User:
+      Username: zitadel
+      Password: zitadel
+      SSL:
+        Mode: disable
+    Admin:
+      Username: postgres
+      Password: postgres
+      SSL:
+        Mode: disable
+
+FirstInstance:
+  Org:
+    Name: "Axigraph"
+    Human:
+      UserName: "admin"
+      FirstName: "Admin"
+      LastName: "User"
+      Email:
+        Address: "admin@localhost"
+        Verified: true
+      Password: "Admin123!"
+      PasswordChangeRequired: false

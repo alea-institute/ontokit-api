@@ -1,9 +1,9 @@
 """Ontology service for managing OWL ontologies."""
 
-from typing import Literal
+from typing import Any, Literal as TypingLiteral
 from uuid import UUID
 
-from rdflib import Graph, Namespace, URIRef
+from rdflib import Graph, Literal as RDFLiteral, Namespace, URIRef
 from rdflib.namespace import OWL, RDF, RDFS
 
 from app.schemas.ontology import (
@@ -33,8 +33,8 @@ class OntologyService:
         # TODO: Implement with database storage
         raise NotImplementedError("Database integration pending")
 
-    async def list(self, skip: int = 0, limit: int = 20) -> OntologyListResponse:
-        """List ontologies."""
+    async def list_all(self, skip: int = 0, limit: int = 20) -> OntologyListResponse:
+        """List all ontologies."""
         # TODO: Implement with database query
         raise NotImplementedError("Database integration pending")
 
@@ -82,12 +82,12 @@ class OntologyService:
         # TODO: Store graph and update database
         raise NotImplementedError("Storage integration pending")
 
-    async def get_history(self, ontology_id: UUID, limit: int = 50) -> list[dict]:
+    async def get_history(self, ontology_id: UUID, limit: int = 50) -> list[dict[str, Any]]:
         """Get version history for an ontology."""
         # TODO: Implement with Git integration
         raise NotImplementedError("Git integration pending")
 
-    async def diff(self, ontology_id: UUID, from_version: str, to_version: str) -> dict:
+    async def diff(self, ontology_id: UUID, from_version: str, to_version: str) -> dict[str, Any]:
         """Compare two versions of an ontology."""
         # TODO: Implement semantic diff
         raise NotImplementedError("Diff implementation pending")
@@ -130,7 +130,7 @@ class OntologyService:
 
         # Add labels
         for label in owl_class.labels:
-            graph.add((class_uri, RDFS.label, rdflib.Literal(label.value, lang=label.lang)))
+            graph.add((class_uri, RDFS.label, RDFLiteral(label.value, lang=label.lang)))
 
         # TODO: Persist changes
         return await self._class_to_response(graph, class_uri)
@@ -163,7 +163,7 @@ class OntologyService:
         class_iri: str,
         direction: str = "both",
         depth: int = 3,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """Get class hierarchy around a specific class."""
         # TODO: Implement hierarchy traversal
         raise NotImplementedError("Hierarchy implementation pending")
@@ -173,7 +173,7 @@ class OntologyService:
     async def list_properties(
         self,
         ontology_id: UUID,
-        property_type: Literal["object", "data", "annotation"] | None = None,
+        property_type: TypingLiteral["object", "data", "annotation"] | None = None,
         include_imported: bool = False,
     ) -> OWLPropertyListResponse:
         """List properties in an ontology."""

@@ -48,7 +48,7 @@ async def list_ontologies(
     limit: int = 20,
 ) -> OntologyListResponse:
     """List all ontologies the user has access to."""
-    return await service.list(skip=skip, limit=limit)
+    return await service.list_all(skip=skip, limit=limit)
 
 
 @router.get("/{ontology_id}")

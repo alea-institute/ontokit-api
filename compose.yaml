@@ -1,0 +1,187 @@
+# Axigraph Development Stack
+# Run with: docker compose up -d
+#
+# After starting, access Zitadel Console at: http://localhost:8080/ui/console
+# Default admin: admin@Axigraph.localhost / Admin123!
+
+services:
+  # PostgreSQL Database (for Axigraph API)
+  postgres:
+    image: postgres:16-alpine
+    container_name: axigraph-postgres
+    environment:
+      POSTGRES_USER: axigraph
+      POSTGRES_PASSWORD: axigraph
+      POSTGRES_DB: axigraph
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U axigraph"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - axigraph
+
+  # Redis for caching and pub/sub
+  redis:
+    image: redis:7-alpine
+    container_name: axigraph-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - axigraph
+
+  # MinIO for object storage
+  minio:
+    image: minio/minio:latest
+    container_name: axigraph-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minio
+      MINIO_ROOT_PASSWORD: minio123
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - axigraph
+
+  # Zitadel Identity Provider
+  zitadel:
+    restart: unless-stopped
+    image: ghcr.io/zitadel/zitadel:latest
+    container_name: axigraph-zitadel
+    command: 'start-from-init --masterkey "MasterkeyNeedsToHave32Characters"'
+    environment:
+      ZITADEL_EXTERNALDOMAIN: localhost
+      ZITADEL_EXTERNALSECURE: false
+      ZITADEL_TLS_ENABLED: false
+
+      # Database configuration
+      ZITADEL_DATABASE_POSTGRES_HOST: zitadel-db
+      ZITADEL_DATABASE_POSTGRES_PORT: 5432
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+
+      # Login V2 client machine user (creates PAT for login container)
+      ZITADEL_FIRSTINSTANCE_LOGINCLIENTPATPATH: /zitadel-data/login-client.pat
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: false
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: Login V2 Client
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_PAT_EXPIRATIONDATE: '2030-01-01T00:00:00Z'
+
+      # Enable Login V2
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: true
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_BASEURI: http://localhost:8081/ui/v2/login
+      ZITADEL_OIDC_DEFAULTLOGINURLV2: http://localhost:8081/ui/v2/login/login?authRequest=
+      ZITADEL_OIDC_DEFAULTLOGOUTURLV2: http://localhost:8081/ui/v2/login/logout?post_logout_redirect=
+      ZITADEL_SAML_DEFAULTLOGINURLV2: http://localhost:8081/ui/v2/login/login?samlRequest=
+
+      # Admin machine user (creates PAT for API access)
+      ZITADEL_FIRSTINSTANCE_PATPATH: /zitadel-data/admin.pat
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: api-admin
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: API Admin Machine User
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: '2030-01-01T00:00:00Z'
+
+      # Human admin user
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: "Axigraph"
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: admin
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: Admin123!
+
+      # Debug logging
+      ZITADEL_LOG_LEVEL: debug
+      ZITADEL_LOGSTORE_ACCESS_STDOUT_ENABLED: true
+
+    healthcheck:
+      test: ["CMD", "/app/zitadel", "ready"]
+      interval: 10s
+      timeout: 60s
+      retries: 5
+      start_period: 10s
+    user: "0"
+    volumes:
+      - zitadel_data:/zitadel-data
+    ports:
+      - "8080:8080"
+      - "8081:3000"
+    networks:
+      - axigraph
+    depends_on:
+      zitadel-db:
+        condition: service_healthy
+
+  # Login V2 - Next.js based login UI
+  login:
+    restart: unless-stopped
+    image: ghcr.io/zitadel/zitadel-login:latest
+    container_name: axigraph-zitadel-login
+    environment:
+      ZITADEL_API_URL: http://localhost:8080
+      NEXT_PUBLIC_BASE_PATH: /ui/v2/login
+      ZITADEL_SERVICE_USER_TOKEN_FILE: /zitadel-data/login-client.pat
+      EMAIL_VERIFICATION: true
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "const http = require('http'); const req = http.get('http://localhost:3000/ui/v2/login', (res) => { process.exit(res.statusCode === 200 ? 0 : 1); }); req.on('error', () => process.exit(1)); req.setTimeout(5000, () => { req.destroy(); process.exit(1); });"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    network_mode: service:zitadel
+    user: "0"
+    volumes:
+      - zitadel_data:/zitadel-data:ro
+    depends_on:
+      zitadel:
+        condition: service_healthy
+        restart: false
+
+  # PostgreSQL for Zitadel
+  zitadel-db:
+    restart: unless-stopped
+    image: postgres:17
+    container_name: axigraph-zitadel-db
+    environment:
+      PGUSER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d zitadel -U postgres"]
+      interval: 10s
+      timeout: 30s
+      retries: 5
+    networks:
+      - axigraph
+    volumes:
+      - zitadel_db_data:/var/lib/postgresql/data
+
+networks:
+  axigraph:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  minio_data:
+  zitadel_data:
+  zitadel_db_data:

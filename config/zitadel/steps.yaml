@@ -1,0 +1,17 @@
+FirstInstance:
+  InstanceName: "Axigraph"
+  DefaultLanguage: "en"
+  Org:
+    Name: "Axigraph"
+    Human:
+      UserName: "admin"
+      FirstName: "Admin"
+      LastName: "User"
+      NickName: "admin"
+      DisplayName: "Admin User"
+      Email:
+        Address: "admin@localhost"
+        Verified: true
+      PreferredLanguage: "en"
+      Password: "Admin123!"
+      PasswordChangeRequired: false
