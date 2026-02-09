@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
 from app.core.database import get_db
 from app.schemas.owl_class import OWLClassResponse, OWLClassTreeNode, OWLClassTreeResponse
+from app.git import GitRepositoryService, get_git_service
 from app.schemas.project import (
     MemberCreate,
     MemberListResponse,
@@ -19,6 +20,11 @@ from app.schemas.project import (
     ProjectListResponse,
     ProjectResponse,
     ProjectUpdate,
+    RevisionCommit,
+    RevisionDiffChange,
+    RevisionDiffResponse,
+    RevisionFileResponse,
+    RevisionHistoryResponse,
 )
 from app.services.ontology import OntologyService, get_ontology_service
 from app.services.project_service import ProjectService, get_project_service
@@ -44,6 +50,11 @@ def get_ontology() -> OntologyService:
     """Dependency to get ontology service with storage."""
     storage = get_storage_service()
     return get_ontology_service(storage)
+
+
+def get_git() -> GitRepositoryService:
+    """Dependency to get git repository service."""
+    return get_git_service()
 
 
 @router.get("", response_model=ProjectListResponse)
@@ -342,3 +353,144 @@ async def get_ontology_class(
             detail=f"Class not found: {class_iri}",
         )
     return result
+
+
+# Revision history endpoints
+
+
+@router.get("/{project_id}/revisions", response_model=RevisionHistoryResponse)
+async def get_revision_history(
+    project_id: UUID,
+    service: Annotated[ProjectService, Depends(get_service)],
+    git: Annotated[GitRepositoryService, Depends(get_git)],
+    user: OptionalUser,
+    limit: int = Query(default=50, ge=1, le=200),
+) -> RevisionHistoryResponse:
+    """
+    Get the revision history for a project.
+
+    Returns a list of commits showing changes to the ontology over time.
+    Each commit includes the author, timestamp, and commit message.
+    """
+    # Check project access
+    await service.get(project_id, user)
+
+    # Check if repository exists
+    if not git.repository_exists(project_id):
+        return RevisionHistoryResponse(
+            project_id=project_id,
+            commits=[],
+            total=0,
+        )
+
+    # Get commit history
+    commits = git.get_history(project_id, limit=limit)
+
+    return RevisionHistoryResponse(
+        project_id=project_id,
+        commits=[
+            RevisionCommit(
+                hash=c.hash,
+                short_hash=c.short_hash,
+                message=c.message,
+                author_name=c.author_name,
+                author_email=c.author_email,
+                timestamp=c.timestamp,
+            )
+            for c in commits
+        ],
+        total=len(commits),
+    )
+
+
+@router.get("/{project_id}/revisions/{version}/file", response_model=RevisionFileResponse)
+async def get_file_at_revision(
+    project_id: UUID,
+    version: str,
+    service: Annotated[ProjectService, Depends(get_service)],
+    git: Annotated[GitRepositoryService, Depends(get_git)],
+    user: OptionalUser,
+    filename: str = Query(default="ontology.ttl", description="Filename to retrieve"),
+) -> RevisionFileResponse:
+    """
+    Get the ontology file content at a specific revision.
+
+    Use this to view the ontology as it existed at a particular point in time.
+    """
+    # Check project access
+    project = await service.get(project_id, user)
+
+    # Check if repository exists
+    if not git.repository_exists(project_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No revision history found for this project",
+        )
+
+    # Try to determine the filename from the project's source_file_path
+    if project.source_file_path and filename == "ontology.ttl":
+        # Extract the actual filename
+        import os
+        actual_filename = os.path.basename(project.source_file_path)
+        # Use the stored filename pattern (e.g., ontology.ttl)
+        if actual_filename.startswith("ontology."):
+            filename = actual_filename
+
+    try:
+        content = git.get_file_at_version(project_id, filename, version)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Could not retrieve file at revision: {e}",
+        )
+
+    return RevisionFileResponse(
+        project_id=project_id,
+        version=version,
+        filename=filename,
+        content=content,
+    )
+
+
+@router.get("/{project_id}/revisions/diff", response_model=RevisionDiffResponse)
+async def get_revision_diff(
+    project_id: UUID,
+    service: Annotated[ProjectService, Depends(get_service)],
+    git: Annotated[GitRepositoryService, Depends(get_git)],
+    user: OptionalUser,
+    from_version: str = Query(..., description="Starting revision (commit hash)"),
+    to_version: str = Query(default="HEAD", description="Ending revision (commit hash or HEAD)"),
+) -> RevisionDiffResponse:
+    """
+    Get the diff between two revisions.
+
+    Shows which files changed between the two specified commits.
+    """
+    # Check project access
+    await service.get(project_id, user)
+
+    # Check if repository exists
+    if not git.repository_exists(project_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No revision history found for this project",
+        )
+
+    try:
+        diff = git.diff_versions(project_id, from_version, to_version)
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Could not compute diff: {e}",
+        )
+
+    return RevisionDiffResponse(
+        project_id=project_id,
+        from_version=diff.from_version,
+        to_version=diff.to_version,
+        files_changed=diff.files_changed,
+        changes=[
+            RevisionDiffChange(path=c["path"], change_type=c["change_type"])
+            for c in diff.changes
+        ],
+    )

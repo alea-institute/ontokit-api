@@ -137,3 +137,51 @@ class MemberListResponse(BaseModel):
 
     items: list[MemberResponse]
     total: int
+
+
+# Revision History Schemas
+
+
+class RevisionCommit(BaseModel):
+    """Information about a single commit/revision."""
+
+    hash: str
+    short_hash: str
+    message: str
+    author_name: str
+    author_email: str
+    timestamp: str
+
+
+class RevisionHistoryResponse(BaseModel):
+    """List of revisions for a project."""
+
+    project_id: UUID
+    commits: list[RevisionCommit]
+    total: int
+
+
+class RevisionDiffChange(BaseModel):
+    """A single file change in a diff."""
+
+    path: str
+    change_type: str
+
+
+class RevisionDiffResponse(BaseModel):
+    """Diff between two revisions."""
+
+    project_id: UUID
+    from_version: str
+    to_version: str
+    files_changed: int
+    changes: list[RevisionDiffChange]
+
+
+class RevisionFileResponse(BaseModel):
+    """File content at a specific revision."""
+
+    project_id: UUID
+    version: str
+    filename: str
+    content: str

@@ -42,6 +42,9 @@ class Settings(BaseSettings):
     minio_bucket: str = "axigraph"
     minio_secure: bool = False
 
+    # Git Repository Storage
+    git_repos_base_path: str = "/data/repos"
+
     # Zitadel Authentication
     zitadel_issuer: str = "http://localhost:8080"
     zitadel_internal_url: str | None = None  # Internal URL for JWKS fetch (defaults to issuer)

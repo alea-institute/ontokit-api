@@ -1,6 +1,7 @@
 """Project service for managing projects and members."""
 
 import json
+import logging
 from pathlib import Path
 from uuid import UUID
 
@@ -10,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.auth import CurrentUser
+from app.git import GitRepositoryService, get_git_service
 from app.models.project import Project, ProjectMember
 from app.schemas.project import (
     MemberCreate,
@@ -32,12 +34,17 @@ from app.services.ontology_extractor import (
 )
 from app.services.storage import StorageError, StorageService
 
+logger = logging.getLogger(__name__)
+
 
 class ProjectService:
     """Service for project CRUD operations and member management."""
 
-    def __init__(self, db: AsyncSession) -> None:
+    def __init__(
+        self, db: AsyncSession, git_service: GitRepositoryService | None = None
+    ) -> None:
         self.db = db
+        self.git_service = git_service or get_git_service()
 
     async def create(self, project: ProjectCreate, owner: CurrentUser) -> ProjectResponse:
         """Create a new project."""
@@ -163,6 +170,24 @@ class ProjectService:
         # Explicitly load members relationship
         await self.db.refresh(db_project, ["members"])
 
+        # Initialize git repository for version control
+        try:
+            git_filename = f"ontology{extension}"
+            self.git_service.initialize_repository(
+                project_id=db_project.id,
+                ontology_content=file_content,
+                filename=git_filename,
+                author_name=owner.name,
+                author_email=owner.email,
+                project_name=project_name,
+            )
+            logger.info(f"Initialized git repository for project {db_project.id}")
+        except Exception as e:
+            # Log the error but don't fail the import - git is supplementary
+            logger.warning(
+                f"Failed to initialize git repository for project {db_project.id}: {e}"
+            )
+
         return self._to_import_response(db_project, owner, file_path)
 
     async def list_accessible(
@@ -280,6 +305,13 @@ class ProjectService:
 
         await self.db.delete(project)
         await self.db.commit()
+
+        # Clean up git repository
+        try:
+            self.git_service.delete_repository(project_id)
+            logger.info(f"Deleted git repository for project {project_id}")
+        except Exception as e:
+            logger.warning(f"Failed to delete git repository for project {project_id}: {e}")
 
     # Member management
 

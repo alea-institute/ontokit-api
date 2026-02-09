@@ -213,11 +213,15 @@ services:
       ZITADEL_CLIENT_SECRET: ${ZITADEL_CLIENT_SECRET:-}
       # CORS
       CORS_ORIGINS: '["http://localhost:3000","http://localhost:5173"]'
+      # Git Repository Storage
+      GIT_REPOS_BASE_PATH: /data/repos
     ports:
       - "8000:8000"
     volumes:
       # Mount source code for hot reload in development
       - ./app:/home/axigraph/app/app:ro
+      # Git repositories for version control
+      - git_repos:/data/repos
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -241,3 +245,4 @@ volumes:
   redis_data:
   minio_data:
   zitadel_data:
+  git_repos:

@@ -13,8 +13,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN useradd --create-home --shell /bin/bash axigraph
+# Create non-root user and git repos directory
+RUN useradd --create-home --shell /bin/bash axigraph && \
+    mkdir -p /data/repos && \
+    chown -R axigraph:axigraph /data/repos
 WORKDIR /home/axigraph/app
 
 # Install Python dependencies
