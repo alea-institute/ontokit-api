@@ -133,6 +133,35 @@ async def validate_token(token: str) -> TokenPayload:
         )
 
 
+async def fetch_userinfo(access_token: str) -> dict | None:
+    """Fetch user info from Zitadel's userinfo endpoint."""
+    base_url = settings.zitadel_internal_url or settings.zitadel_issuer
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+    }
+
+    # If using internal URL, set Host header
+    if settings.zitadel_internal_url:
+        from urllib.parse import urlparse
+        parsed = urlparse(settings.zitadel_issuer)
+        headers["Host"] = parsed.netloc
+
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{base_url}/oidc/v1/userinfo",
+                headers=headers,
+                timeout=10.0,
+            )
+            if response.status_code == 200:
+                return response.json()
+    except httpx.HTTPError:
+        pass
+
+    return None
+
+
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
 ) -> CurrentUser:
@@ -150,11 +179,23 @@ async def get_current_user(
 
     token_payload = await validate_token(credentials.credentials)
 
+    # Try to get additional user info from userinfo endpoint
+    name = token_payload.name
+    email = token_payload.email
+    username = token_payload.preferred_username
+
+    if not name or not email:
+        userinfo = await fetch_userinfo(credentials.credentials)
+        if userinfo:
+            name = name or userinfo.get("name") or userinfo.get("preferred_username")
+            email = email or userinfo.get("email")
+            username = username or userinfo.get("preferred_username")
+
     return CurrentUser(
         id=token_payload.sub,
-        email=token_payload.email,
-        name=token_payload.name,
-        username=token_payload.preferred_username,
+        email=email,
+        name=name,
+        username=username,
         roles=[],  # TODO: Extract roles from token claims
     )
 
@@ -176,9 +217,51 @@ async def get_current_user_optional(
         return None
 
 
+async def get_current_user_with_token(
+    credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+) -> tuple[CurrentUser, str]:
+    """
+    Get the current authenticated user and their access token.
+
+    Raises 401 if not authenticated.
+    Returns tuple of (CurrentUser, access_token).
+    """
+    if credentials is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Not authenticated",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    token_payload = await validate_token(credentials.credentials)
+
+    # Try to get additional user info from userinfo endpoint
+    name = token_payload.name
+    email = token_payload.email
+    username = token_payload.preferred_username
+
+    if not name or not email:
+        userinfo = await fetch_userinfo(credentials.credentials)
+        if userinfo:
+            name = name or userinfo.get("name") or userinfo.get("preferred_username")
+            email = email or userinfo.get("email")
+            username = username or userinfo.get("preferred_username")
+
+    user = CurrentUser(
+        id=token_payload.sub,
+        email=email,
+        name=name,
+        username=username,
+        roles=[],
+    )
+
+    return user, credentials.credentials
+
+
 # Type aliases for dependency injection
 RequiredUser = Annotated[CurrentUser, Depends(get_current_user)]
 OptionalUser = Annotated[CurrentUser | None, Depends(get_current_user_optional)]
+RequiredUserWithToken = Annotated[tuple[CurrentUser, str], Depends(get_current_user_with_token)]
 
 
 # Permission checking

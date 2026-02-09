@@ -1,5 +1,6 @@
 """Project service for managing projects and members."""
 
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -14,13 +15,21 @@ from app.schemas.project import (
     MemberListResponse,
     MemberResponse,
     MemberUpdate,
+    MemberUser,
     ProjectCreate,
+    ProjectImportResponse,
     ProjectListResponse,
     ProjectOwner,
     ProjectResponse,
     ProjectRole,
     ProjectUpdate,
 )
+from app.services.ontology_extractor import (
+    OntologyMetadataExtractor,
+    OntologyParseError,
+    UnsupportedFormatError,
+)
+from app.services.storage import StorageError, StorageService
 
 
 class ProjectService:
@@ -53,6 +62,107 @@ class ProjectService:
         await self.db.refresh(db_project, ["members"])
 
         return self._to_response(db_project, owner)
+
+    async def create_from_import(
+        self,
+        file_content: bytes,
+        filename: str,
+        is_public: bool,
+        owner: CurrentUser,
+        storage: StorageService,
+        name_override: str | None = None,
+        description_override: str | None = None,
+    ) -> ProjectImportResponse:
+        """
+        Create a project by importing an ontology file.
+
+        Args:
+            file_content: The ontology file content as bytes
+            filename: The original filename
+            is_public: Whether the project should be public
+            owner: The user creating the project
+            storage: Storage service for file upload
+            name_override: Optional name to use instead of extracted name
+            description_override: Optional description to use instead of extracted
+
+        Returns:
+            ProjectImportResponse with project info and file path
+
+        Raises:
+            HTTPException: If file format is unsupported, parsing fails, or storage fails
+        """
+        extractor = OntologyMetadataExtractor()
+
+        # Extract metadata from the ontology file
+        try:
+            metadata = extractor.extract_metadata(file_content, filename)
+        except UnsupportedFormatError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            ) from e
+        except OntologyParseError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e),
+            ) from e
+
+        # Determine project name (priority: override > extracted > filename)
+        project_name = name_override
+        if not project_name:
+            project_name = metadata.title
+        if not project_name:
+            # Derive from filename (strip extension)
+            project_name = Path(filename).stem
+
+        # Determine project description
+        project_description = description_override or metadata.description
+
+        # Create the project in the database
+        db_project = Project(
+            name=project_name,
+            description=project_description,
+            is_public=is_public,
+            owner_id=owner.id,
+            ontology_iri=metadata.ontology_iri,
+        )
+        self.db.add(db_project)
+        await self.db.flush()
+
+        # Add owner as a member with owner role
+        owner_member = ProjectMember(
+            project_id=db_project.id,
+            user_id=owner.id,
+            role="owner",
+        )
+        self.db.add(owner_member)
+
+        # Determine file extension and storage path
+        extension = Path(filename).suffix.lower()
+        object_name = f"projects/{db_project.id}/ontology{extension}"
+        content_type = extractor.get_content_type(extension)
+
+        # Upload file to storage
+        try:
+            file_path = await storage.upload_file(object_name, file_content, content_type)
+        except StorageError as e:
+            # Rollback the database transaction
+            await self.db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Failed to store file: {e}",
+            ) from e
+
+        # Update project with file path
+        db_project.source_file_path = file_path
+
+        await self.db.commit()
+        # Refresh all attributes including updated_at and members relationship
+        await self.db.refresh(db_project)
+        # Explicitly load members relationship
+        await self.db.refresh(db_project, ["members"])
+
+        return self._to_import_response(db_project, owner, file_path)
 
     async def list_accessible(
         self,
@@ -170,7 +280,7 @@ class ProjectService:
     # Member management
 
     async def list_members(
-        self, project_id: UUID, user: CurrentUser
+        self, project_id: UUID, user: CurrentUser, access_token: str | None = None
     ) -> MemberListResponse:
         """List members of a project."""
         project = await self._get_project(project_id)
@@ -181,7 +291,36 @@ class ProjectService:
                 detail="You don't have access to this project",
             )
 
-        items = [self._member_to_response(m) for m in project.members]
+        # Fetch user info for all members
+        user_info_map: dict[str, MemberUser] = {}
+
+        # Add current user's info from their token
+        user_info_map[user.id] = MemberUser(
+            id=user.id,
+            name=user.name,
+            email=user.email,
+        )
+
+        # Try to fetch other users' info from Zitadel if we have a token
+        if access_token:
+            from app.services.user_service import get_user_service
+
+            user_service = get_user_service()
+            other_user_ids = [m.user_id for m in project.members if m.user_id != user.id]
+
+            if other_user_ids:
+                fetched_users = await user_service.get_users_info(other_user_ids, access_token)
+                for uid, info in fetched_users.items():
+                    user_info_map[uid] = MemberUser(
+                        id=info["id"],
+                        name=info["name"],
+                        email=info["email"],
+                    )
+
+        items = [
+            self._member_to_response(m, user_info_map.get(m.user_id))
+            for m in project.members
+        ]
 
         return MemberListResponse(items=items, total=len(items))
 
@@ -399,14 +538,38 @@ class ProjectService:
             user_role=user_role,
         )
 
-    def _member_to_response(self, member: ProjectMember) -> MemberResponse:
+    def _to_import_response(
+        self, project: Project, user: CurrentUser, file_path: str
+    ) -> ProjectImportResponse:
+        """Convert Project model to import response schema."""
+        user_role = self._get_user_role(project, user)
+        owner = ProjectOwner(id=project.owner_id)
+
+        return ProjectImportResponse(
+            id=project.id,
+            name=project.name,
+            description=project.description,
+            is_public=project.is_public,
+            owner_id=project.owner_id,
+            owner=owner,
+            created_at=project.created_at,
+            updated_at=project.updated_at,
+            member_count=len(project.members),
+            user_role=user_role,
+            ontology_iri=project.ontology_iri,
+            file_path=file_path,
+        )
+
+    def _member_to_response(
+        self, member: ProjectMember, user_info: MemberUser | None = None
+    ) -> MemberResponse:
         """Convert ProjectMember model to response schema."""
         return MemberResponse(
             id=member.id,
             project_id=member.project_id,
             user_id=member.user_id,
             role=member.role,  # type: ignore[arg-type]
-            user=None,  # Would be populated from user service
+            user=user_info,
             created_at=member.created_at,
         )
 

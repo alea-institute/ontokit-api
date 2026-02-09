@@ -56,6 +56,22 @@ class ProjectResponse(ProjectBase):
         from_attributes = True
 
 
+class ExtractedOntologyMetadata(BaseModel):
+    """Metadata extracted from an ontology file during import."""
+
+    ontology_iri: str | None = None
+    title: str | None = None
+    description: str | None = None
+    format_detected: str
+
+
+class ProjectImportResponse(ProjectResponse):
+    """Schema for project import responses."""
+
+    ontology_iri: str | None = None
+    file_path: str
+
+
 class ProjectListResponse(BaseModel):
     """Paginated list of projects."""
 

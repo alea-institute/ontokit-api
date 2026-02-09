@@ -26,6 +26,10 @@ class Project(Base):
         DateTime(timezone=True), onupdate=func.now()
     )
 
+    # Import-related fields (optional, only set when project was created via import)
+    source_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    ontology_iri: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+
     members: Mapped[list["ProjectMember"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )

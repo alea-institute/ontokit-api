@@ -3,10 +3,10 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import OptionalUser, RequiredUser
+from app.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
 from app.core.database import get_db
 from app.schemas.project import (
     MemberCreate,
@@ -14,18 +14,28 @@ from app.schemas.project import (
     MemberResponse,
     MemberUpdate,
     ProjectCreate,
+    ProjectImportResponse,
     ProjectListResponse,
     ProjectResponse,
     ProjectUpdate,
 )
 from app.services.project_service import ProjectService, get_project_service
+from app.services.storage import StorageService, get_storage_service
 
 router = APIRouter()
+
+# Maximum file size for import (50 MB)
+MAX_IMPORT_FILE_SIZE = 50 * 1024 * 1024
 
 
 def get_service(db: Annotated[AsyncSession, Depends(get_db)]) -> ProjectService:
     """Dependency to get project service with database session."""
     return get_project_service(db)
+
+
+def get_storage() -> StorageService:
+    """Dependency to get storage service."""
+    return get_storage_service()
 
 
 @router.get("", response_model=ProjectListResponse)
@@ -56,6 +66,50 @@ async def create_project(
 ) -> ProjectResponse:
     """Create a new project. Requires authentication."""
     return await service.create(project, user)
+
+
+@router.post("/import", response_model=ProjectImportResponse, status_code=status.HTTP_201_CREATED)
+async def import_project(
+    file: UploadFile,
+    is_public: Annotated[bool, Form()],
+    service: Annotated[ProjectService, Depends(get_service)],
+    storage: Annotated[StorageService, Depends(get_storage)],
+    user: RequiredUser,
+    name: Annotated[str | None, Form()] = None,
+    description: Annotated[str | None, Form()] = None,
+) -> ProjectImportResponse:
+    """
+    Create a project by importing an ontology file.
+
+    Supported formats: OWL (.owl), RDF/XML (.rdf), Turtle (.ttl), N3 (.n3), JSON-LD (.jsonld)
+
+    The project name and description will be extracted from the ontology metadata
+    (dc:title, dcterms:title, rdfs:label for name; dc:description, dcterms:description,
+    rdfs:comment for description). You can override these by providing the name and
+    description form fields.
+
+    Requires authentication.
+    """
+    # Check file size
+    content = await file.read()
+    if len(content) > MAX_IMPORT_FILE_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large. Maximum size is {MAX_IMPORT_FILE_SIZE // (1024 * 1024)} MB",
+        )
+
+    # Get filename
+    filename = file.filename or "ontology.owl"
+
+    return await service.create_from_import(
+        file_content=content,
+        filename=filename,
+        is_public=is_public,
+        owner=user,
+        storage=storage,
+        name_override=name,
+        description_override=description,
+    )
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
@@ -108,14 +162,15 @@ async def delete_project(
 async def list_members(
     project_id: UUID,
     service: Annotated[ProjectService, Depends(get_service)],
-    user: RequiredUser,
+    user_with_token: RequiredUserWithToken,
 ) -> MemberListResponse:
     """
     List members of a project.
 
     Only members can see the member list.
     """
-    return await service.list_members(project_id, user)
+    user, access_token = user_with_token
+    return await service.list_members(project_id, user, access_token)
 
 
 @router.post(
