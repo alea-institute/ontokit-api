@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.models.pull_request import GitHubIntegration, PullRequest
+    from app.models.lint import LintRun
 
 from app.core.database import Base
 
@@ -51,6 +52,9 @@ class Project(Base):
     )
     github_integration: Mapped["GitHubIntegration | None"] = relationship(
         back_populates="project", cascade="all, delete-orphan", uselist=False
+    )
+    lint_runs: Mapped[list["LintRun"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
     )
 
     def __repr__(self) -> str:

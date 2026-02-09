@@ -238,6 +238,47 @@ services:
       redis:
         condition: service_healthy
 
+  # ============================================================================
+  # ARQ Worker (background task processing)
+  # ============================================================================
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: axigraph/api:latest
+    container_name: axigraph-worker
+    restart: unless-stopped
+    command: ["arq", "app.worker.WorkerSettings"]
+    environment:
+      APP_ENV: development
+      DEBUG: "true"
+      # Database - connects to shared postgres container
+      DATABASE_URL: postgresql+asyncpg://axigraph:axigraph@postgres:5432/axigraph
+      # Redis
+      REDIS_URL: redis://redis:6379/0
+      # MinIO
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minio
+      MINIO_SECRET_KEY: minio123
+      MINIO_BUCKET: axigraph
+      MINIO_SECURE: "false"
+      # Git Repository Storage
+      GIT_REPOS_BASE_PATH: /data/repos
+    volumes:
+      # Mount source code for hot reload in development
+      - ./app:/home/axigraph/app/app:ro
+      # Git repositories (shared with API)
+      - git_repos:/data/repos
+    networks:
+      - axigraph
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
 networks:
   axigraph:
     driver: bridge

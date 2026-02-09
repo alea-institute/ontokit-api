@@ -9,6 +9,12 @@ from app.models.pull_request import (
     PullRequestReview,
     ReviewStatus,
 )
+from app.models.lint import (
+    LintIssue,
+    LintIssueType,
+    LintRun,
+    LintRunStatus,
+)
 
 __all__ = [
     "Project",
@@ -19,4 +25,8 @@ __all__ = [
     "GitHubIntegration",
     "PRStatus",
     "ReviewStatus",
+    "LintRun",
+    "LintRunStatus",
+    "LintIssue",
+    "LintIssueType",
 ]
