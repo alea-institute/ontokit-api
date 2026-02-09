@@ -3,8 +3,12 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.models.pull_request import GitHubIntegration, PullRequest
 
 from app.core.database import Base
 
@@ -34,8 +38,19 @@ class Project(Base):
     # Format: ["rdfs:label@en", "rdfs:label@it", "rdfs:label", "skos:prefLabel@en"]
     label_preferences: Mapped[str | None] = mapped_column(String(2000), nullable=True)
 
+    # PR workflow settings
+    # 0 = no approval required, 1+ = minimum number of approvals before merge
+    pr_approval_required: Mapped[int] = mapped_column(Integer, default=0)
+
+    # Relationships
     members: Mapped[list["ProjectMember"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
+    )
+    pull_requests: Mapped[list["PullRequest"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    github_integration: Mapped["GitHubIntegration | None"] = relationship(
+        back_populates="project", cascade="all, delete-orphan", uselist=False
     )
 
     def __repr__(self) -> str:

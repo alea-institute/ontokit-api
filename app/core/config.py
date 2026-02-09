@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     github_app_id: str = ""
     github_app_private_key: str = ""
 
+    # Superadmin - comma-separated list of user IDs with full system access
+    superadmin_user_ids: str = ""
+
+    @property
+    def superadmin_ids(self) -> set[str]:
+        """Get set of superadmin user IDs."""
+        if not self.superadmin_user_ids:
+            return set()
+        return {uid.strip() for uid in self.superadmin_user_ids.split(",") if uid.strip()}
+
     @property
     def is_development(self) -> bool:
         """Check if running in development mode."""

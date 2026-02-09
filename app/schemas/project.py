@@ -55,6 +55,7 @@ class ProjectResponse(ProjectBase):
     updated_at: datetime | None = None
     member_count: int = 0
     user_role: ProjectRole | None = None  # Current user's role in the project
+    is_superadmin: bool = False  # Whether the current user is a superadmin
     # Import-related fields (optional, only set when project was created via import)
     source_file_path: str | None = None
     ontology_iri: str | None = None

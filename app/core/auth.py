@@ -38,6 +38,11 @@ class CurrentUser(BaseModel):
     username: str | None = None
     roles: list[str] = []
 
+    @property
+    def is_superadmin(self) -> bool:
+        """Check if user is a superadmin."""
+        return self.id in settings.superadmin_ids
+
 
 # Cache for JWKS (JSON Web Key Set)
 _jwks_cache: dict | None = None

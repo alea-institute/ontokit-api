@@ -271,7 +271,7 @@ class ProjectService:
         project = await self._get_project(project_id)
         user_role = self._get_user_role(project, user)
 
-        if user_role not in ("owner", "admin"):
+        if user_role not in ("owner", "admin") and not user.is_superadmin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only owner or admin can update project settings",
@@ -294,10 +294,10 @@ class ProjectService:
         return self._to_response(project, user)
 
     async def delete(self, project_id: UUID, user: CurrentUser) -> None:
-        """Delete a project (owner only)."""
+        """Delete a project (owner or superadmin only)."""
         project = await self._get_project(project_id)
 
-        if project.owner_id != user.id:
+        if project.owner_id != user.id and not user.is_superadmin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only the owner can delete a project",
@@ -367,7 +367,7 @@ class ProjectService:
         project = await self._get_project(project_id)
         user_role = self._get_user_role(project, user)
 
-        if user_role not in ("owner", "admin"):
+        if user_role not in ("owner", "admin") and not user.is_superadmin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only owner or admin can add members",
@@ -416,7 +416,7 @@ class ProjectService:
         project = await self._get_project(project_id)
         user_role = self._get_user_role(project, user)
 
-        if user_role not in ("owner", "admin"):
+        if user_role not in ("owner", "admin") and not user.is_superadmin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only owner or admin can update member roles",
@@ -451,8 +451,8 @@ class ProjectService:
                 detail="Cannot set role to owner. Use transfer ownership instead.",
             )
 
-        # Admins cannot promote others to admin
-        if user_role == "admin" and member_update.role == "admin":
+        # Admins cannot promote others to admin (unless superadmin)
+        if user_role == "admin" and member_update.role == "admin" and not user.is_superadmin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only owner can promote members to admin",
@@ -474,7 +474,7 @@ class ProjectService:
         # Users can remove themselves
         is_self_removal = member_user_id == user.id
 
-        if not is_self_removal and user_role not in ("owner", "admin"):
+        if not is_self_removal and user_role not in ("owner", "admin") and not user.is_superadmin:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only owner or admin can remove members",
@@ -580,6 +580,7 @@ class ProjectService:
             updated_at=project.updated_at,
             member_count=len(project.members),
             user_role=user_role,
+            is_superadmin=user.is_superadmin if user else False,
             source_file_path=project.source_file_path,
             ontology_iri=project.ontology_iri,
             label_preferences=label_prefs,
