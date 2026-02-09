@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
 from app.core.database import get_db
+from app.schemas.owl_class import OWLClassResponse, OWLClassTreeNode, OWLClassTreeResponse
 from app.schemas.project import (
     MemberCreate,
     MemberListResponse,
@@ -19,8 +20,9 @@ from app.schemas.project import (
     ProjectResponse,
     ProjectUpdate,
 )
+from app.services.ontology import OntologyService, get_ontology_service
 from app.services.project_service import ProjectService, get_project_service
-from app.services.storage import StorageService, get_storage_service
+from app.services.storage import StorageService, StorageError, get_storage_service
 
 router = APIRouter()
 
@@ -36,6 +38,12 @@ def get_service(db: Annotated[AsyncSession, Depends(get_db)]) -> ProjectService:
 def get_storage() -> StorageService:
     """Dependency to get storage service."""
     return get_storage_service()
+
+
+def get_ontology() -> OntologyService:
+    """Dependency to get ontology service with storage."""
+    storage = get_storage_service()
+    return get_ontology_service(storage)
 
 
 @router.get("", response_model=ProjectListResponse)
@@ -227,3 +235,110 @@ async def remove_member(
     Cannot remove the project owner.
     """
     await service.remove_member(project_id, user_id, user)
+
+
+# Ontology tree navigation endpoints
+
+
+async def _ensure_ontology_loaded(
+    project_id: UUID,
+    service: ProjectService,
+    ontology: OntologyService,
+    user: OptionalUser,
+) -> ProjectResponse:
+    """
+    Helper to ensure the ontology graph is loaded from storage.
+
+    Returns the project response so callers can access label_preferences.
+    """
+    # Always get the project to check access and get preferences
+    project = await service.get(project_id, user)
+
+    if not project.source_file_path:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Project does not have an ontology file",
+        )
+
+    # Load if not already loaded
+    if not ontology.is_loaded(project_id):
+        try:
+            await ontology.load_from_storage(project_id, project.source_file_path)
+        except StorageError as e:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Failed to load ontology from storage: {e}",
+            )
+        except ValueError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e),
+            )
+
+    return project
+
+
+@router.get("/{project_id}/ontology/tree", response_model=OWLClassTreeResponse)
+async def get_ontology_tree_root(
+    project_id: UUID,
+    service: Annotated[ProjectService, Depends(get_service)],
+    ontology: Annotated[OntologyService, Depends(get_ontology)],
+    user: OptionalUser,
+) -> OWLClassTreeResponse:
+    """
+    Get the root classes of the ontology tree.
+
+    Returns the top-level classes (classes with no parent or only owl:Thing as parent)
+    as tree nodes optimized for tree view rendering.
+    """
+    project = await _ensure_ontology_loaded(project_id, service, ontology, user)
+
+    nodes = await ontology.get_root_tree_nodes(project_id, project.label_preferences)
+    total_classes = await ontology.get_class_count(project_id)
+
+    return OWLClassTreeResponse(nodes=nodes, total_classes=total_classes)
+
+
+@router.get("/{project_id}/ontology/tree/{class_iri:path}/children", response_model=OWLClassTreeResponse)
+async def get_ontology_tree_children(
+    project_id: UUID,
+    class_iri: str,
+    service: Annotated[ProjectService, Depends(get_service)],
+    ontology: Annotated[OntologyService, Depends(get_ontology)],
+    user: OptionalUser,
+) -> OWLClassTreeResponse:
+    """
+    Get the children of a specific class.
+
+    Returns direct subclasses as tree nodes for lazy-loading tree expansion.
+    """
+    project = await _ensure_ontology_loaded(project_id, service, ontology, user)
+
+    nodes = await ontology.get_children_tree_nodes(project_id, class_iri, project.label_preferences)
+    total_classes = await ontology.get_class_count(project_id)
+
+    return OWLClassTreeResponse(nodes=nodes, total_classes=total_classes)
+
+
+@router.get("/{project_id}/ontology/classes/{class_iri:path}", response_model=OWLClassResponse)
+async def get_ontology_class(
+    project_id: UUID,
+    class_iri: str,
+    service: Annotated[ProjectService, Depends(get_service)],
+    ontology: Annotated[OntologyService, Depends(get_ontology)],
+    user: OptionalUser,
+) -> OWLClassResponse:
+    """
+    Get details of a specific class.
+
+    Returns full class information including labels, comments, parents, etc.
+    """
+    project = await _ensure_ontology_loaded(project_id, service, ontology, user)
+
+    result = await ontology.get_class(project_id, class_iri, project.label_preferences)
+    if not result:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Class not found: {class_iri}",
+        )
+    return result

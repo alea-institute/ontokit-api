@@ -31,6 +31,10 @@ class ProjectUpdate(BaseModel):
     name: str | None = Field(None, min_length=1, max_length=255)
     description: str | None = None
     is_public: bool | None = None
+    label_preferences: list[str] | None = Field(
+        None,
+        description="Label preferences for ontology display. Format: ['rdfs:label@en', 'skos:prefLabel', ...]",
+    )
 
 
 class ProjectOwner(BaseModel):
@@ -51,6 +55,11 @@ class ProjectResponse(ProjectBase):
     updated_at: datetime | None = None
     member_count: int = 0
     user_role: ProjectRole | None = None  # Current user's role in the project
+    # Import-related fields (optional, only set when project was created via import)
+    source_file_path: str | None = None
+    ontology_iri: str | None = None
+    # Label preferences for ontology display
+    label_preferences: list[str] | None = None
 
     class Config:
         from_attributes = True

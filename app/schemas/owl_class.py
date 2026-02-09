@@ -46,6 +46,10 @@ class OWLClassResponse(OWLClassBase):
     """Schema for OWL class responses."""
 
     parent_iris: list[str] = Field(default_factory=list)
+    parent_labels: dict[str, str] = Field(
+        default_factory=dict,
+        description="Map of parent IRI to resolved label",
+    )
     equivalent_iris: list[str] = Field(default_factory=list)
     disjoint_iris: list[str] = Field(default_factory=list)
     child_count: int = 0
@@ -62,3 +66,22 @@ class OWLClassListResponse(BaseModel):
 
     items: list[OWLClassResponse]
     total: int
+
+
+class OWLClassTreeNode(BaseModel):
+    """Simplified class node for tree view."""
+
+    iri: str = Field(..., description="The class IRI")
+    label: str = Field(..., description="Display label (from rdfs:label or local name)")
+    child_count: int = Field(0, description="Number of direct subclasses")
+    deprecated: bool = False
+
+    class Config:
+        from_attributes = True
+
+
+class OWLClassTreeResponse(BaseModel):
+    """Response for tree navigation endpoints."""
+
+    nodes: list[OWLClassTreeNode]
+    total_classes: int = Field(0, description="Total number of classes in the ontology")

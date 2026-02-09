@@ -30,6 +30,10 @@ class Project(Base):
     source_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     ontology_iri: Mapped[str | None] = mapped_column(String(1000), nullable=True)
 
+    # Label preferences for ontology display (JSON array)
+    # Format: ["rdfs:label@en", "rdfs:label@it", "rdfs:label", "skos:prefLabel@en"]
+    label_preferences: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+
     members: Mapped[list["ProjectMember"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )

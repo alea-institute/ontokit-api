@@ -1,5 +1,6 @@
 """Project service for managing projects and members."""
 
+import json
 from pathlib import Path
 from uuid import UUID
 
@@ -258,6 +259,9 @@ class ProjectService:
             project.description = project_update.description
         if project_update.is_public is not None:
             project.is_public = project_update.is_public
+        if project_update.label_preferences is not None:
+            # Store as JSON string
+            project.label_preferences = json.dumps(project_update.label_preferences)
 
         await self.db.commit()
         await self.db.refresh(project)
@@ -525,6 +529,14 @@ class ProjectService:
         # from Zitadel or a user cache
         owner = ProjectOwner(id=project.owner_id)
 
+        # Deserialize label_preferences from JSON string
+        label_prefs = None
+        if project.label_preferences:
+            try:
+                label_prefs = json.loads(project.label_preferences)
+            except json.JSONDecodeError:
+                label_prefs = None
+
         return ProjectResponse(
             id=project.id,
             name=project.name,
@@ -536,6 +548,9 @@ class ProjectService:
             updated_at=project.updated_at,
             member_count=len(project.members),
             user_role=user_role,
+            source_file_path=project.source_file_path,
+            ontology_iri=project.ontology_iri,
+            label_preferences=label_prefs,
         )
 
     def _to_import_response(
