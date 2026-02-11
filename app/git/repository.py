@@ -28,13 +28,27 @@ class CommitInfo:
 
 
 @dataclass
+class FileChange:
+    """Information about a single file change."""
+
+    path: str
+    change_type: str
+    old_path: str | None = None
+    additions: int = 0
+    deletions: int = 0
+    patch: str | None = None
+
+
+@dataclass
 class DiffInfo:
     """Information about a diff between versions."""
 
     from_version: str
     to_version: str
     files_changed: int
-    changes: list[dict[str, str]]
+    changes: list[FileChange]
+    total_additions: int = 0
+    total_deletions: int = 0
 
 
 @dataclass
@@ -150,23 +164,56 @@ class OntologyRepository:
         return blob.data_stream.read().decode("utf-8")
 
     def diff_versions(self, from_version: str, to_version: str = "HEAD") -> DiffInfo:
-        """Get diff between two versions."""
+        """Get diff between two versions with patch content and line counts."""
         from_commit = self.repo.commit(from_version)
         to_commit = self.repo.commit(to_version)
 
-        diff = from_commit.diff(to_commit)
+        # Get diff with patch content
+        diff = from_commit.diff(to_commit, create_patch=True)
+
+        changes: list[FileChange] = []
+        total_additions = 0
+        total_deletions = 0
+
+        for d in diff:
+            # Get the patch content
+            patch = None
+            additions = 0
+            deletions = 0
+
+            if d.diff:
+                try:
+                    patch = d.diff.decode("utf-8", errors="replace")
+                    # Count additions and deletions from the patch
+                    for line in patch.split("\n"):
+                        if line.startswith("+") and not line.startswith("+++"):
+                            additions += 1
+                        elif line.startswith("-") and not line.startswith("---"):
+                            deletions += 1
+                except Exception:
+                    patch = None
+
+            total_additions += additions
+            total_deletions += deletions
+
+            changes.append(
+                FileChange(
+                    path=d.b_path or d.a_path or "",
+                    change_type=d.change_type,
+                    old_path=d.a_path if d.change_type == "R" else None,
+                    additions=additions,
+                    deletions=deletions,
+                    patch=patch,
+                )
+            )
 
         return DiffInfo(
             from_version=from_version,
             to_version=to_version,
             files_changed=len(diff),
-            changes=[
-                {
-                    "path": d.a_path or d.b_path or "",
-                    "change_type": d.change_type,
-                }
-                for d in diff
-            ],
+            changes=changes,
+            total_additions=total_additions,
+            total_deletions=total_deletions,
         )
 
     def list_files(self, version: str = "HEAD") -> list[str]:

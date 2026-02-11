@@ -353,6 +353,7 @@ class PRFileChange(BaseModel):
     old_path: str | None = None  # For renamed files
     additions: int = 0
     deletions: int = 0
+    patch: str | None = None  # The actual diff content
 
 
 class PRDiffResponse(BaseModel):

@@ -828,23 +828,24 @@ class PullRequestService:
         }
 
         files = []
-        total_additions = 0
-        total_deletions = 0
-
         for change in diff_info.changes:
-            change_type = change_type_map.get(change["change_type"], "modified")
+            change_type = change_type_map.get(change.change_type, "modified")
             files.append(
                 PRFileChange(
-                    path=change["path"],
+                    path=change.path,
                     change_type=change_type,  # type: ignore
+                    old_path=change.old_path,
+                    additions=change.additions,
+                    deletions=change.deletions,
+                    patch=change.patch,
                 )
             )
 
         return PRDiffResponse(
             files=files,
-            total_additions=total_additions,
-            total_deletions=total_deletions,
-            files_changed=len(files),
+            total_additions=diff_info.total_additions,
+            total_deletions=diff_info.total_deletions,
+            files_changed=diff_info.files_changed,
         )
 
     # GitHub Integration
