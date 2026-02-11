@@ -219,3 +219,24 @@ class BranchListResponse(BaseModel):
     items: list[BranchInfo]
     current_branch: str
     default_branch: str
+
+
+# Source Content Schemas
+
+
+class SourceContentSave(BaseModel):
+    """Schema for saving ontology source content."""
+
+    content: str = Field(..., description="The ontology source content (Turtle format)")
+    commit_message: str = Field(
+        ..., min_length=1, max_length=500, description="Commit message describing the changes"
+    )
+
+
+class SourceContentSaveResponse(BaseModel):
+    """Response after saving ontology source content."""
+
+    success: bool
+    commit_hash: str
+    commit_message: str
+    branch: str

@@ -28,6 +28,8 @@ from app.schemas.project import (
     RevisionDiffResponse,
     RevisionFileResponse,
     RevisionHistoryResponse,
+    SourceContentSave,
+    SourceContentSaveResponse,
 )
 from app.services.ontology import OntologyService, get_ontology_service
 from app.services.project_service import ProjectService, get_project_service
@@ -719,3 +721,111 @@ async def delete_branch(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Branch not found: {branch_name}",
         )
+
+
+# Source content endpoints
+
+
+@router.put("/{project_id}/source", response_model=SourceContentSaveResponse)
+async def save_source_content(
+    project_id: UUID,
+    data: SourceContentSave,
+    service: Annotated[ProjectService, Depends(get_service)],
+    storage: Annotated[StorageService, Depends(get_storage)],
+    ontology: Annotated[OntologyService, Depends(get_ontology)],
+    git: Annotated[GitRepositoryService, Depends(get_git)],
+    user: RequiredUser,
+) -> SourceContentSaveResponse:
+    """
+    Save ontology source content to storage and create a git commit.
+
+    Requires authentication and editor or higher role.
+    """
+    # Check project access
+    project = await service.get(project_id, user)
+
+    # Check if user has at least editor role
+    if project.user_role not in ("owner", "admin", "editor"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Must be an editor or higher to save changes",
+        )
+
+    if not project.source_file_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project does not have an ontology file",
+        )
+
+    # Validate the content is valid Turtle
+    try:
+        from rdflib import Graph
+        g = Graph()
+        g.parse(data=data.content, format="turtle")
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid Turtle syntax: {e}",
+        )
+
+    # Check if repository exists
+    if not git.repository_exists(project_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No repository found for this project",
+        )
+
+    # Get current branch
+    current_branch = git.get_current_branch(project_id)
+
+    # Extract filename from source_file_path
+    import os
+    filename = os.path.basename(project.source_file_path)
+
+    # Convert content to bytes
+    content_bytes = data.content.encode("utf-8")
+
+    # Save to storage
+    try:
+        await storage.upload_file(
+            project.source_file_path,
+            content_bytes,
+            "text/turtle"
+        )
+    except StorageError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to save to storage: {e}",
+        )
+
+    # Commit to git
+    try:
+        commit_info = git.commit_changes(
+            project_id=project_id,
+            ontology_content=content_bytes,
+            filename=filename,
+            message=data.commit_message,
+            author_name=user.name,
+            author_email=user.email,
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to commit changes: {e}",
+        )
+
+    # Reload the ontology in memory to reflect changes
+    try:
+        ontology.unload(project_id)
+        await ontology.load_from_storage(project_id, project.source_file_path)
+    except Exception as e:
+        # Log but don't fail - the commit succeeded
+        import logging
+        logging.warning(f"Failed to reload ontology after save: {e}")
+
+    return SourceContentSaveResponse(
+        success=True,
+        commit_hash=commit_info.hash,
+        commit_message=commit_info.message,
+        branch=current_branch,
+    )
