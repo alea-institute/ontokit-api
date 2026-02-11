@@ -331,6 +331,29 @@ class GitHubService:
             installation_id, owner, repo, pr_number, state="closed"
         )
 
+    async def reopen_pull_request(
+        self,
+        installation_id: int,
+        owner: str,
+        repo: str,
+        pr_number: int,
+    ) -> GitHubPR:
+        """
+        Reopen a closed pull request.
+
+        Args:
+            installation_id: GitHub App installation ID
+            owner: Repository owner
+            repo: Repository name
+            pr_number: PR number
+
+        Returns:
+            GitHubPR with updated PR details
+        """
+        return await self.update_pull_request(
+            installation_id, owner, repo, pr_number, state="open"
+        )
+
     async def list_pull_requests(
         self,
         installation_id: int,

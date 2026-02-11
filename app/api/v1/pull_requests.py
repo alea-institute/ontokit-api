@@ -143,6 +143,22 @@ async def close_pull_request(
     return await service.close_pull_request(project_id, pr_number, user)
 
 
+@router.post("/{project_id}/pull-requests/{pr_number}/reopen", response_model=PRResponse)
+async def reopen_pull_request(
+    project_id: UUID,
+    pr_number: int,
+    service: Annotated[PullRequestService, Depends(get_service)],
+    user: RequiredUser,
+) -> PRResponse:
+    """
+    Reopen a closed pull request.
+
+    - Only the author, admin, or owner can reopen
+    - Can only reopen closed PRs (not merged)
+    """
+    return await service.reopen_pull_request(project_id, pr_number, user)
+
+
 @router.post("/{project_id}/pull-requests/{pr_number}/merge", response_model=PRMergeResponse)
 async def merge_pull_request(
     project_id: UUID,

@@ -301,6 +301,47 @@ class PullRequestService:
 
         return await self._to_pr_response(pr, project_id)
 
+    async def reopen_pull_request(
+        self, project_id: UUID, pr_number: int, user: CurrentUser
+    ) -> PRResponse:
+        """Reopen a closed pull request."""
+        project = await self._get_project(project_id)
+        pr = await self._get_pr(project_id, pr_number)
+
+        # Only author, admin, or owner can reopen
+        user_role = self._get_user_role(project, user)
+        if user.id != pr.author_id and user_role not in ("owner", "admin"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the author or admins can reopen this pull request",
+            )
+
+        if pr.status != PRStatus.CLOSED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only closed pull requests can be reopened",
+            )
+
+        pr.status = PRStatus.OPEN.value
+
+        # Sync with GitHub if integration exists
+        github_integration = await self._get_github_integration(project_id)
+        if github_integration and github_integration.sync_enabled and pr.github_pr_number:
+            try:
+                await self.github_service.reopen_pull_request(
+                    installation_id=github_integration.installation_id,
+                    owner=github_integration.repo_owner,
+                    repo=github_integration.repo_name,
+                    pr_number=pr.github_pr_number,
+                )
+            except Exception as e:
+                logger.warning(f"Failed to reopen GitHub PR: {e}")
+
+        await self.db.commit()
+        await self.db.refresh(pr)
+
+        return await self._to_pr_response(pr, project_id)
+
     async def merge_pull_request(
         self,
         project_id: UUID,
