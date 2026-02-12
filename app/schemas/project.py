@@ -154,6 +154,7 @@ class RevisionCommit(BaseModel):
     timestamp: str
     is_merge: bool = False
     merged_branch: str | None = None
+    parent_hashes: list[str] = []
 
 
 class RevisionHistoryResponse(BaseModel):

@@ -27,6 +27,7 @@ class CommitInfo:
     timestamp: str
     is_merge: bool = False
     merged_branch: str | None = None
+    parent_hashes: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -137,15 +138,40 @@ class OntologyRepository:
             author_name=str(commit.author.name) if commit.author else "Unknown",
             author_email=str(commit.author.email) if commit.author else "",
             timestamp=commit.committed_datetime.isoformat(),
+            parent_hashes=[p.hexsha for p in commit.parents],
         )
 
-    def get_history(self, limit: int = 50) -> list[CommitInfo]:
-        """Get commit history."""
+    def get_history(self, limit: int = 50, all_branches: bool = True) -> list[CommitInfo]:
+        """
+        Get commit history.
+
+        Args:
+            limit: Maximum number of commits to return
+            all_branches: If True, include commits from all branches (not just current)
+        """
         import re
 
         commits = []
+        seen_hashes = set()
+
         try:
-            for commit in self.repo.iter_commits(max_count=limit):
+            if all_branches:
+                # Get commits from all branches, sorted by date
+                # This shows the full branch topology including unmerged branches
+                all_commits = []
+                for branch in self.repo.branches:
+                    for commit in self.repo.iter_commits(branch, max_count=limit):
+                        if commit.hexsha not in seen_hashes:
+                            seen_hashes.add(commit.hexsha)
+                            all_commits.append(commit)
+
+                # Sort by commit date (newest first)
+                all_commits.sort(key=lambda c: c.committed_datetime, reverse=True)
+                commit_iter = all_commits[:limit]
+            else:
+                commit_iter = self.repo.iter_commits(max_count=limit)
+
+            for commit in commit_iter:
                 # Detect merge commits (commits with multiple parents)
                 is_merge = len(commit.parents) > 1
                 merged_branch = None
@@ -168,6 +194,7 @@ class OntologyRepository:
                         timestamp=commit.committed_datetime.isoformat(),
                         is_merge=is_merge,
                         merged_branch=merged_branch,
+                        parent_hashes=[p.hexsha for p in commit.parents],
                     )
                 )
         except ValueError:
@@ -444,17 +471,8 @@ class OntologyRepository:
                     merge_commit_hash=target_branch.commit.hexsha,
                 )
 
-            # Check if fast-forward is possible
-            if merge_base and merge_base[0] == target_branch.commit:
-                # Fast-forward merge
-                target_branch.set_commit(source_branch.commit)
-                return MergeResult(
-                    success=True,
-                    message="Fast-forward merge",
-                    merge_commit_hash=source_branch.commit.hexsha,
-                )
-
-            # Regular merge
+            # Always use --no-ff to create a merge commit and preserve branch topology
+            # This ensures the git graph visualization shows the branch history
             merge_msg = message or f"Merge branch '{source}' into {target}"
 
             try:
@@ -507,9 +525,22 @@ class OntologyRepository:
         Returns:
             List of CommitInfo objects
         """
+        import re
+
         commits = []
         try:
             for commit in self.repo.iter_commits(f"{from_ref}..{to_ref}"):
+                # Detect merge commits (commits with multiple parents)
+                is_merge = len(commit.parents) > 1
+                merged_branch = None
+
+                if is_merge:
+                    # Try to extract branch name from merge commit message
+                    message = commit.message.strip()
+                    match = re.search(r"Merge branch '([^']+)'", message)
+                    if match:
+                        merged_branch = match.group(1)
+
                 commits.append(
                     CommitInfo(
                         hash=commit.hexsha,
@@ -518,6 +549,9 @@ class OntologyRepository:
                         author_name=str(commit.author.name) if commit.author else "Unknown",
                         author_email=str(commit.author.email) if commit.author else "",
                         timestamp=commit.committed_datetime.isoformat(),
+                        is_merge=is_merge,
+                        merged_branch=merged_branch,
+                        parent_hashes=[p.hexsha for p in commit.parents],
                     )
                 )
         except GitCommandError:
@@ -744,19 +778,22 @@ class GitRepositoryService:
             author_email=author_email,
         )
 
-    def get_history(self, project_id: UUID, limit: int = 50) -> list[CommitInfo]:
+    def get_history(
+        self, project_id: UUID, limit: int = 50, all_branches: bool = True
+    ) -> list[CommitInfo]:
         """
         Get commit history for a project.
 
         Args:
             project_id: The project's UUID
             limit: Maximum number of commits to return
+            all_branches: If True, include commits from all branches
 
         Returns:
             List of CommitInfo objects
         """
         repo = self.get_repository(project_id)
-        return repo.get_history(limit=limit)
+        return repo.get_history(limit=limit, all_branches=all_branches)
 
     def get_file_at_version(
         self, project_id: UUID, filename: str, version: str

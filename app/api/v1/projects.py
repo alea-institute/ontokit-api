@@ -424,6 +424,9 @@ async def get_revision_history(
                 author_name=c.author_name,
                 author_email=c.author_email,
                 timestamp=c.timestamp,
+                is_merge=c.is_merge,
+                merged_branch=c.merged_branch,
+                parent_hashes=c.parent_hashes,
             )
             for c in commits
         ],
