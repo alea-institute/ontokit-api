@@ -8,6 +8,7 @@
 #   ./setup-zitadel.sh --update-env       # Update .env files with credentials
 #   ./setup-zitadel.sh --docker-init      # Start Docker stack and configure
 #   ./setup-zitadel.sh --update-env --docker-init  # Full automated setup
+#   ./setup-zitadel.sh --force-secrets    # Regenerate client secrets (invalidates sessions)
 
 set -e
 
@@ -33,6 +34,7 @@ WEB_ENV_FILE="${SCRIPT_DIR}/../../axigraph-web/.env.local"
 # Parse command line arguments
 UPDATE_ENV="${UPDATE_ENV:-false}"
 DOCKER_INIT="${DOCKER_INIT:-false}"
+FORCE_SECRETS="${FORCE_SECRETS:-false}"
 for arg in "$@"; do
     case $arg in
         --update-env)
@@ -40,6 +42,9 @@ for arg in "$@"; do
             ;;
         --docker-init)
             DOCKER_INIT="true"
+            ;;
+        --force-secrets)
+            FORCE_SECRETS="true"
             ;;
     esac
 done
@@ -159,6 +164,30 @@ create_project() {
     fi
 }
 
+# Function to get existing client secret from .env file
+get_existing_client_secret() {
+    local client_id="$1"
+    local existing_secret=""
+
+    # Check API .env file first
+    if [ -f "$API_ENV_FILE" ]; then
+        local env_client_id=$(grep "^ZITADEL_CLIENT_ID=" "$API_ENV_FILE" 2>/dev/null | cut -d= -f2)
+        if [ "$env_client_id" = "$client_id" ]; then
+            existing_secret=$(grep "^ZITADEL_CLIENT_SECRET=" "$API_ENV_FILE" 2>/dev/null | cut -d= -f2)
+        fi
+    fi
+
+    # Fall back to web .env.local if not found
+    if [ -z "$existing_secret" ] && [ -f "$WEB_ENV_FILE" ]; then
+        local env_client_id=$(grep "^ZITADEL_CLIENT_ID=" "$WEB_ENV_FILE" 2>/dev/null | cut -d= -f2)
+        if [ "$env_client_id" = "$client_id" ]; then
+            existing_secret=$(grep "^ZITADEL_CLIENT_SECRET=" "$WEB_ENV_FILE" 2>/dev/null | cut -d= -f2)
+        fi
+    fi
+
+    echo "$existing_secret"
+}
+
 # Function to create OIDC application
 create_oidc_app() {
     local pat="$1"
@@ -181,12 +210,25 @@ create_oidc_app() {
         echo -e "${YELLOW}App already exists, getting client ID...${NC}" >&2
         client_id=$(echo "$existing" | jq -r --arg name "$app_name" '.result[] | select(.name == $name) | .oidcConfig.clientId // empty')
 
-        # Generate new client secret
-        secret_result=$(curl -s -X POST "${ZITADEL_URL}/management/v1/projects/${project_id}/apps/${existing_id}/oidc_config/_generate_client_secret" \
-            -H "Authorization: Bearer $pat" \
-            -H "Content-Type: application/json")
+        # Check if we have an existing secret that matches this client ID
+        existing_secret=$(get_existing_client_secret "$client_id")
 
-        client_secret=$(echo "$secret_result" | jq -r '.clientSecret // empty')
+        if [ -n "$existing_secret" ] && [ "$FORCE_SECRETS" != "true" ]; then
+            echo -e "${GREEN}Using existing client secret (sessions preserved)${NC}" >&2
+            client_secret="$existing_secret"
+        else
+            if [ "$FORCE_SECRETS" = "true" ]; then
+                echo -e "${YELLOW}Regenerating client secret (--force-secrets)...${NC}" >&2
+            else
+                echo -e "${YELLOW}No existing secret found, generating new one...${NC}" >&2
+            fi
+            # Generate new client secret
+            secret_result=$(curl -s -X POST "${ZITADEL_URL}/management/v1/projects/${project_id}/apps/${existing_id}/oidc_config/_generate_client_secret" \
+                -H "Authorization: Bearer $pat" \
+                -H "Content-Type: application/json")
+
+            client_secret=$(echo "$secret_result" | jq -r '.clientSecret // empty')
+        fi
 
         # Update config to ensure idTokenUserinfoAssertion is enabled
         curl -s -X PUT "${ZITADEL_URL}/management/v1/projects/${project_id}/apps/${existing_id}/oidc_config" \

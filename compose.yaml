@@ -14,6 +14,9 @@
 #   Full automated setup (starts Docker + configures + recreates containers):
 #     ./scripts/setup-zitadel.sh --update-env --docker-init
 #
+#   Force regenerate client secrets (invalidates existing sessions):
+#     ./scripts/setup-zitadel.sh --update-env --force-secrets
+#
 # After starting, access:
 #   - Axigraph API: http://localhost:8000
 #   - Zitadel Console: http://localhost:8080/ui/console
