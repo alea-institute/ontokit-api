@@ -2,6 +2,12 @@
 # Zitadel Setup Script for Axigraph
 # This script automates the creation of OIDC applications in Zitadel
 # Run this after a fresh `docker compose up -d` with clean volumes
+#
+# Usage:
+#   ./setup-zitadel.sh                    # Display credentials only
+#   ./setup-zitadel.sh --update-env       # Update .env files with credentials
+#   ./setup-zitadel.sh --docker-init      # Start Docker stack and configure
+#   ./setup-zitadel.sh --update-env --docker-init  # Full automated setup
 
 set -e
 
@@ -20,13 +26,68 @@ RETRY_INTERVAL=5
 
 # Output files
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-API_ENV_FILE="${SCRIPT_DIR}/../.env"
+API_DIR="${SCRIPT_DIR}/.."
+API_ENV_FILE="${API_DIR}/.env"
 WEB_ENV_FILE="${SCRIPT_DIR}/../../axigraph-web/.env.local"
+
+# Parse command line arguments
+UPDATE_ENV="${UPDATE_ENV:-false}"
+DOCKER_INIT="${DOCKER_INIT:-false}"
+for arg in "$@"; do
+    case $arg in
+        --update-env)
+            UPDATE_ENV="true"
+            ;;
+        --docker-init)
+            DOCKER_INIT="true"
+            ;;
+    esac
+done
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  Axigraph Zitadel Setup Script${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo
+
+# Function to check if API is running in Docker
+is_api_running_in_docker() {
+    docker compose ps --status running 2>/dev/null | grep -q "axigraph-api"
+}
+
+# Function to start Docker stack
+start_docker_stack() {
+    echo -e "${YELLOW}Starting Docker stack...${NC}" >&2
+    cd "$API_DIR"
+    docker compose up -d
+    echo -e "${GREEN}Docker stack started${NC}" >&2
+}
+
+# Function to recreate API container to pick up new env vars
+recreate_api_container() {
+    echo -e "${YELLOW}Recreating API container to pick up new credentials...${NC}" >&2
+    cd "$API_DIR"
+    docker compose up -d --force-recreate api worker
+    echo -e "${GREEN}API and worker containers recreated${NC}" >&2
+}
+
+# Function to prompt user for Docker action (interactive mode)
+prompt_docker_action() {
+    if is_api_running_in_docker; then
+        echo -e "${YELLOW}API is running in Docker with stale credentials.${NC}"
+        read -p "Recreate API container to pick up new credentials? (Y/n) " -n 1 -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            recreate_api_container
+        fi
+    else
+        echo -e "${YELLOW}Docker stack is not running.${NC}"
+        read -p "Start Docker stack now? (y/N) " -n 1 -r
+        echo
+        if [[ $REPLY =~ ^[Yy]$ ]]; then
+            start_docker_stack
+        fi
+    fi
+}
 
 # Function to wait for Zitadel to be ready
 wait_for_zitadel() {
@@ -228,6 +289,17 @@ update_env_file() {
 
 # Main execution
 main() {
+    # Handle --docker-init: start Docker stack if not running
+    if [[ "$DOCKER_INIT" == "true" ]]; then
+        cd "$API_DIR"
+        if ! docker compose ps --status running 2>/dev/null | grep -q "axigraph-zitadel"; then
+            echo -e "${YELLOW}Starting Docker stack...${NC}"
+            docker compose up -d
+            echo -e "${GREEN}Docker stack started${NC}"
+            echo
+        fi
+    fi
+
     # Wait for Zitadel
     wait_for_zitadel
 
@@ -292,7 +364,23 @@ main() {
 
         echo
         echo -e "${GREEN}Environment files updated!${NC}"
-        echo -e "${YELLOW}Remember to restart your services to pick up the new credentials.${NC}"
+
+        # Handle Docker container recreation
+        if [[ "$DOCKER_INIT" == "true" ]]; then
+            # Automatic mode: recreate containers without prompting
+            if is_api_running_in_docker; then
+                recreate_api_container
+            fi
+        elif [ -t 0 ]; then
+            # Interactive mode: prompt user
+            prompt_docker_action
+        else
+            # Non-interactive, non-docker-init: just remind user
+            echo -e "${YELLOW}Remember to restart your services to pick up the new credentials.${NC}"
+            if is_api_running_in_docker; then
+                echo -e "${YELLOW}Run: docker compose up -d --force-recreate api worker${NC}"
+            fi
+        fi
     else
         echo -e "${YELLOW}To automatically update .env files, run with --update-env flag${NC}"
         echo

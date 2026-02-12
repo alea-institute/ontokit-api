@@ -97,7 +97,12 @@ docker compose exec -T api alembic upgrade head
 
 echo
 echo -e "${BLUE}Step 7: Setting up Zitadel applications...${NC}"
-UPDATE_ENV=true "${SCRIPT_DIR}/setup-zitadel.sh"
+"${SCRIPT_DIR}/setup-zitadel.sh" --update-env
+
+echo
+echo -e "${BLUE}Step 8: Recreating API containers with new credentials...${NC}"
+docker compose up -d --force-recreate api worker
+echo -e "${GREEN}API and worker containers recreated${NC}"
 
 echo
 echo -e "${GREEN}========================================${NC}"

@@ -5,10 +5,14 @@
 # For production deployment, see compose.prod.yaml
 #
 # SETUP SCRIPTS:
-#   Fresh start from clean slate:
+#   Fresh start from clean slate (deletes all data):
 #     ./scripts/reset-dev-environment.sh
-#   Configure Zitadel OIDC (after docker compose up):
+#
+#   Configure Zitadel OIDC after docker compose up:
 #     ./scripts/setup-zitadel.sh --update-env
+#
+#   Full automated setup (starts Docker + configures + recreates containers):
+#     ./scripts/setup-zitadel.sh --update-env --docker-init
 #
 # After starting, access:
 #   - Axigraph API: http://localhost:8000
