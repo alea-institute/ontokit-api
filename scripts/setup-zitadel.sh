@@ -241,7 +241,7 @@ create_oidc_app() {
                 \"grantTypes\": [\"OIDC_GRANT_TYPE_AUTHORIZATION_CODE\", \"OIDC_GRANT_TYPE_REFRESH_TOKEN\"],
                 \"appType\": \"OIDC_APP_TYPE_WEB\",
                 \"authMethodType\": \"OIDC_AUTH_METHOD_TYPE_BASIC\",
-                \"accessTokenType\": \"OIDC_TOKEN_TYPE_BEARER\",
+                \"accessTokenType\": \"OIDC_TOKEN_TYPE_JWT\",
                 \"devMode\": true,
                 \"idTokenRoleAssertion\": true,
                 \"idTokenUserinfoAssertion\": true
@@ -263,7 +263,7 @@ create_oidc_app() {
             \"grantTypes\": [\"OIDC_GRANT_TYPE_AUTHORIZATION_CODE\", \"OIDC_GRANT_TYPE_REFRESH_TOKEN\"],
             \"appType\": \"OIDC_APP_TYPE_WEB\",
             \"authMethodType\": \"OIDC_AUTH_METHOD_TYPE_BASIC\",
-            \"accessTokenType\": \"OIDC_TOKEN_TYPE_BEARER\",
+            \"accessTokenType\": \"OIDC_TOKEN_TYPE_JWT\",
             \"devMode\": true,
             \"idTokenRoleAssertion\": true,
             \"idTokenUserinfoAssertion\": true
