@@ -170,6 +170,10 @@ class RevisionDiffChange(BaseModel):
 
     path: str
     change_type: str
+    old_path: str | None = None
+    additions: int = 0
+    deletions: int = 0
+    patch: str | None = None
 
 
 class RevisionDiffResponse(BaseModel):

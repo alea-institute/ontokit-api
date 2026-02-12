@@ -146,7 +146,7 @@ class BareOntologyRepository:
         # Try as partial hash
         try:
             for commit in self.repo.walk(self.repo.head.target, pygit2.GIT_SORT_TIME):
-                if commit.hex.startswith(ref):
+                if str(commit.id).startswith(ref):
                     return commit
         except Exception:
             pass
@@ -166,9 +166,10 @@ class BareOntologyRepository:
             if match:
                 merged_branch = match.group(1)
 
+        commit_hash = str(commit.id)
         return CommitInfo(
-            hash=commit.hex,
-            short_hash=commit.hex[:8],
+            hash=commit_hash,
+            short_hash=commit_hash[:8],
             message=commit.message.strip(),
             author_name=commit.author.name,
             author_email=commit.author.email,
@@ -177,7 +178,7 @@ class BareOntologyRepository:
             ).isoformat(),
             is_merge=is_merge,
             merged_branch=merged_branch,
-            parent_hashes=[p.hex for p in commit.parents],
+            parent_hashes=[str(p.id) for p in commit.parents],
         )
 
     def write_file(
@@ -349,8 +350,9 @@ class BareOntologyRepository:
                         for commit in self.repo.walk(
                             ref.target, pygit2.GIT_SORT_TIME
                         ):
-                            if commit.hex not in seen_hashes:
-                                seen_hashes.add(commit.hex)
+                            commit_hash = str(commit.id)
+                            if commit_hash not in seen_hashes:
+                                seen_hashes.add(commit_hash)
                                 all_commits.append(commit)
 
                 # Sort by commit time (newest first)
@@ -512,7 +514,7 @@ class BareOntologyRepository:
                     name=branch_name,
                     is_current=False,  # Bare repos don't have "current" branch
                     is_default=branch_name == default_branch,
-                    commit_hash=commit.hex,
+                    commit_hash=str(commit.id),
                     commit_message=commit.message.strip().split("\n")[0],
                     commit_date=datetime.fromtimestamp(
                         commit.commit_time, tz=timezone.utc
@@ -545,7 +547,7 @@ class BareOntologyRepository:
             name=name,
             is_current=False,
             is_default=False,
-            commit_hash=commit.hex,
+            commit_hash=str(commit.id),
             commit_message=commit.message.strip().split("\n")[0],
             commit_date=datetime.fromtimestamp(commit.commit_time, tz=timezone.utc),
         )
@@ -625,7 +627,7 @@ class BareOntologyRepository:
             return MergeResult(
                 success=True,
                 message="Already up to date",
-                merge_commit_hash=target_commit.hex,
+                merge_commit_hash=str(target_commit.id),
             )
 
         # Perform merge (index-based, no working directory needed)
@@ -688,10 +690,10 @@ class BareOntologyRepository:
             # Get commits reachable from to_ref but not from from_ref
             from_ancestors = set()
             for commit in self.repo.walk(from_commit.id, pygit2.GIT_SORT_TIME):
-                from_ancestors.add(commit.hex)
+                from_ancestors.add(str(commit.id))
 
             for commit in self.repo.walk(to_commit.id, pygit2.GIT_SORT_TIME):
-                if commit.hex in from_ancestors:
+                if str(commit.id) in from_ancestors:
                     break
                 commits.append(self._commit_to_info(commit))
 

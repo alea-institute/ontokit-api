@@ -521,7 +521,14 @@ async def get_revision_diff(
         to_version=diff.to_version,
         files_changed=diff.files_changed,
         changes=[
-            RevisionDiffChange(path=c.path, change_type=c.change_type)
+            RevisionDiffChange(
+                path=c.path,
+                change_type=c.change_type,
+                old_path=c.old_path,
+                additions=c.additions,
+                deletions=c.deletions,
+                patch=c.patch,
+            )
             for c in diff.changes
         ],
     )
