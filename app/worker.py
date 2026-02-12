@@ -1,8 +1,7 @@
 """ARQ worker for background task processing."""
 
-import asyncio
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -15,13 +14,15 @@ from app.core.config import settings
 from app.models.lint import LintIssue, LintRun, LintRunStatus
 from app.models.project import Project
 from app.services.linter import LintResult, get_linter
+from app.services.normalization_service import NormalizationService
 from app.services.ontology import get_ontology_service
 from app.services.storage import get_storage_service
 
 logger = logging.getLogger(__name__)
 
-# Redis pubsub channel for lint updates
+# Redis pubsub channels for updates
 LINT_UPDATES_CHANNEL = "lint:updates"
+NORMALIZATION_UPDATES_CHANNEL = "normalization:updates"
 
 
 async def run_lint_task(
@@ -103,7 +104,7 @@ async def run_lint_task(
 
         # Update run status
         run.status = LintRunStatus.COMPLETED.value
-        run.completed_at = datetime.now(timezone.utc)
+        run.completed_at = datetime.now(UTC)
         run.issues_found = len(lint_results)
 
         await db.commit()
@@ -132,7 +133,7 @@ async def run_lint_task(
         # Update run status to failed
         if run:
             run.status = LintRunStatus.FAILED.value
-            run.completed_at = datetime.now(timezone.utc)
+            run.completed_at = datetime.now(UTC)
             run.error_message = str(e)
             await db.commit()
 
@@ -143,6 +144,128 @@ async def run_lint_task(
                 f'"run_id": "{run.id}", "error": "{str(e)}"}}',
             )
 
+        raise
+
+
+async def check_normalization_status_task(
+    ctx: dict[str, Any],
+    project_id: str,
+) -> dict[str, Any]:
+    """
+    Background task to check if a project needs normalization.
+
+    Args:
+        ctx: ARQ context with db session and services
+        project_id: The project UUID to check
+
+    Returns:
+        Dict with needs_normalization status
+    """
+    db: AsyncSession = ctx["db"]
+    redis: ArqRedis = ctx["redis"]
+
+    project_uuid = UUID(project_id)
+
+    try:
+        # Verify project exists
+        result = await db.execute(
+            select(Project).where(Project.id == project_uuid)
+        )
+        project = result.scalar_one_or_none()
+
+        if not project:
+            logger.warning(f"Project {project_id} not found for normalization check")
+            return {"needs_normalization": False, "error": "Project not found"}
+
+        if not project.source_file_path:
+            return {"needs_normalization": False, "error": "No ontology file"}
+
+        # Check normalization status
+        storage = get_storage_service()
+        norm_service = NormalizationService(db, storage)
+
+        status = await norm_service.check_normalization_status(project)
+
+        # Publish status update via Redis
+        await redis.publish(
+            NORMALIZATION_UPDATES_CHANNEL,
+            f'{{"type": "normalization_status", "project_id": "{project_id}", '
+            f'"needs_normalization": {str(status["needs_normalization"]).lower()}}}',
+        )
+
+        logger.info(
+            f"Normalization check for project {project_id}: "
+            f"needs_normalization={status['needs_normalization']}"
+        )
+
+        return {
+            "project_id": project_id,
+            "needs_normalization": status["needs_normalization"],
+            "last_run": str(status["last_run"]) if status["last_run"] else None,
+            "error": status.get("error"),
+        }
+
+    except Exception as e:
+        logger.exception(f"Normalization check failed for project {project_id}: {e}")
+        return {
+            "project_id": project_id,
+            "needs_normalization": False,
+            "error": str(e),
+        }
+
+
+async def check_all_projects_normalization(ctx: dict[str, Any]) -> dict[str, Any]:
+    """
+    Cron task to check all projects for normalization needs.
+
+    This runs periodically and publishes updates for any projects
+    that need normalization.
+    """
+    db: AsyncSession = ctx["db"]
+    redis: ArqRedis = ctx["redis"]
+
+    try:
+        # Get all projects with ontology files
+        result = await db.execute(
+            select(Project).where(Project.source_file_path.isnot(None))
+        )
+        projects = result.scalars().all()
+
+        storage = get_storage_service()
+        norm_service = NormalizationService(db, storage)
+
+        projects_needing_normalization = []
+
+        for project in projects:
+            try:
+                status = await norm_service.check_normalization_status(project)
+                if status["needs_normalization"]:
+                    projects_needing_normalization.append(str(project.id))
+
+                    # Publish status update
+                    await redis.publish(
+                        NORMALIZATION_UPDATES_CHANNEL,
+                        f'{{"type": "normalization_status", "project_id": "{project.id}", '
+                        f'"needs_normalization": true}}',
+                    )
+            except Exception as e:
+                logger.warning(
+                    f"Failed to check normalization for project {project.id}: {e}"
+                )
+
+        logger.info(
+            f"Normalization check complete: {len(projects_needing_normalization)} of "
+            f"{len(projects)} projects need normalization"
+        )
+
+        return {
+            "total_projects": len(projects),
+            "projects_needing_normalization": len(projects_needing_normalization),
+            "project_ids": projects_needing_normalization,
+        }
+
+    except Exception as e:
+        logger.exception(f"All projects normalization check failed: {e}")
         raise
 
 
@@ -218,13 +341,26 @@ def get_redis_settings() -> RedisSettings:
 class WorkerSettings:
     """ARQ worker settings."""
 
-    functions = [run_lint_task]
+    functions = [
+        run_lint_task,
+        check_normalization_status_task,
+        check_all_projects_normalization,
+    ]
     redis_settings = get_redis_settings()
 
     on_startup = startup
     on_shutdown = shutdown
     on_job_start = on_job_start
     on_job_end = on_job_end
+
+    # Cron jobs - run normalization check every hour
+    cron_jobs = [
+        {
+            "coroutine": check_all_projects_normalization,
+            "hour": None,  # Every hour
+            "minute": 0,
+        },
+    ]
 
     # Job settings
     max_jobs = 10

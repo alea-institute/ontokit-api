@@ -6,7 +6,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-
 # Role type for project members
 ProjectRole = Literal["owner", "admin", "editor", "viewer"]
 
@@ -45,6 +44,22 @@ class ProjectOwner(BaseModel):
     email: str | None = None
 
 
+class NormalizationReportResponse(BaseModel):
+    """Report of changes made during ontology normalization on import."""
+
+    original_format: str
+    original_filename: str
+    original_size_bytes: int
+    normalized_size_bytes: int
+    triple_count: int
+    prefixes_before: list[str]
+    prefixes_after: list[str]
+    prefixes_removed: list[str]
+    prefixes_added: list[str]
+    format_converted: bool
+    notes: list[str]
+
+
 class ProjectResponse(ProjectBase):
     """Schema for project responses."""
 
@@ -61,6 +76,8 @@ class ProjectResponse(ProjectBase):
     ontology_iri: str | None = None
     # Label preferences for ontology display
     label_preferences: list[str] | None = None
+    # Normalization report from initial import
+    normalization_report: NormalizationReportResponse | None = None
 
     class Config:
         from_attributes = True

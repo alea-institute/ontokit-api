@@ -257,6 +257,8 @@ services:
     volumes:
       # Mount source code for hot reload in development
       - ./app:/home/axigraph/app/app:ro
+      # Mount alembic for migrations in development
+      - ./alembic:/home/axigraph/app/alembic:ro
       # Git repositories for version control
       - git_repos:/data/repos
     healthcheck:

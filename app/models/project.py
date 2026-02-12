@@ -2,14 +2,15 @@
 
 import uuid
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from app.models.pull_request import GitHubIntegration, PullRequest
     from app.models.lint import LintRun
+    from app.models.normalization import NormalizationRun
+    from app.models.pull_request import GitHubIntegration, PullRequest
 
 from app.core.database import Base
 
@@ -39,6 +40,10 @@ class Project(Base):
     # Format: ["rdfs:label@en", "rdfs:label@it", "rdfs:label", "skos:prefLabel@en"]
     label_preferences: Mapped[str | None] = mapped_column(String(2000), nullable=True)
 
+    # Normalization report from initial import (JSON object)
+    # Contains details about format conversion, prefix changes, etc.
+    normalization_report: Mapped[str | None] = mapped_column(Text, nullable=True)
+
     # PR workflow settings
     # 0 = no approval required, 1+ = minimum number of approvals before merge
     pr_approval_required: Mapped[int] = mapped_column(Integer, default=0)
@@ -54,6 +59,9 @@ class Project(Base):
         back_populates="project", cascade="all, delete-orphan", uselist=False
     )
     lint_runs: Mapped[list["LintRun"]] = relationship(
+        back_populates="project", cascade="all, delete-orphan"
+    )
+    normalization_runs: Mapped[list["NormalizationRun"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
 

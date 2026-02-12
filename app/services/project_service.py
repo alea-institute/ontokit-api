@@ -19,6 +19,7 @@ from app.schemas.project import (
     MemberResponse,
     MemberUpdate,
     MemberUser,
+    NormalizationReportResponse,
     ProjectCreate,
     ProjectImportResponse,
     ProjectListResponse,
@@ -29,6 +30,7 @@ from app.schemas.project import (
 )
 from app.services.ontology_extractor import (
     OntologyMetadataExtractor,
+    OntologyMetadataUpdater,
     OntologyParseError,
     UnsupportedFormatError,
 )
@@ -115,6 +117,19 @@ class ProjectService:
                 detail=str(e),
             ) from e
 
+        # Normalize to Turtle format for canonical representation
+        # This ensures consistent formatting and minimal diffs on subsequent edits
+        normalization_report_json: str | None = None
+        try:
+            normalized_content, normalization_report = extractor.normalize_to_turtle(
+                file_content, filename
+            )
+            normalization_report_json = json.dumps(normalization_report.to_dict())
+        except (UnsupportedFormatError, OntologyParseError) as e:
+            # Should not happen since extract_metadata already succeeded, but handle gracefully
+            logger.warning(f"Failed to normalize ontology to Turtle: {e}")
+            normalized_content = file_content
+
         # Determine project name (priority: override > extracted > filename)
         project_name = name_override
         if not project_name:
@@ -133,6 +148,7 @@ class ProjectService:
             is_public=is_public,
             owner_id=owner.id,
             ontology_iri=metadata.ontology_iri,
+            normalization_report=normalization_report_json,
         )
         self.db.add(db_project)
         await self.db.flush()
@@ -145,14 +161,13 @@ class ProjectService:
         )
         self.db.add(owner_member)
 
-        # Determine file extension and storage path
-        extension = Path(filename).suffix.lower()
-        object_name = f"projects/{db_project.id}/ontology{extension}"
-        content_type = extractor.get_content_type(extension)
+        # Always store as Turtle (.ttl) since we normalize to Turtle format
+        object_name = f"projects/{db_project.id}/ontology.ttl"
+        content_type = "text/turtle"
 
-        # Upload file to storage
+        # Upload normalized file to storage
         try:
-            file_path = await storage.upload_file(object_name, file_content, content_type)
+            file_path = await storage.upload_file(object_name, normalized_content, content_type)
         except StorageError as e:
             # Rollback the database transaction
             await self.db.rollback()
@@ -172,11 +187,10 @@ class ProjectService:
 
         # Initialize git repository for version control
         try:
-            git_filename = f"ontology{extension}"
             self.git_service.initialize_repository(
                 project_id=db_project.id,
-                ontology_content=file_content,
-                filename=git_filename,
+                ontology_content=normalized_content,
+                filename="ontology.ttl",
                 author_name=owner.name,
                 author_email=owner.email,
                 project_name=project_name,
@@ -265,9 +279,20 @@ class ProjectService:
         return self._to_response(project, user)
 
     async def update(
-        self, project_id: UUID, project_update: ProjectUpdate, user: CurrentUser
+        self,
+        project_id: UUID,
+        project_update: ProjectUpdate,
+        user: CurrentUser,
+        storage: StorageService | None = None,
     ) -> ProjectResponse:
-        """Update a project."""
+        """Update a project.
+
+        Args:
+            project_id: The project's UUID
+            project_update: The update data
+            user: The current user
+            storage: Optional storage service for syncing metadata to RDF
+        """
         project = await self._get_project(project_id)
         user_role = self._get_user_role(project, user)
 
@@ -276,6 +301,15 @@ class ProjectService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only owner or admin can update project settings",
             )
+
+        # Track if name or description changed for RDF sync
+        name_changed = (
+            project_update.name is not None and project_update.name != project.name
+        )
+        description_changed = (
+            project_update.description is not None
+            and project_update.description != project.description
+        )
 
         # Apply updates
         if project_update.name is not None:
@@ -291,7 +325,117 @@ class ProjectService:
         await self.db.commit()
         await self.db.refresh(project)
 
+        # Sync metadata to RDF if name or description changed
+        if (name_changed or description_changed) and storage is not None:
+            await self._sync_metadata_to_rdf(
+                project=project,
+                new_name=project_update.name if name_changed else None,
+                new_description=project_update.description if description_changed else None,
+                user=user,
+                storage=storage,
+            )
+
         return self._to_response(project, user)
+
+    async def _sync_metadata_to_rdf(
+        self,
+        project: Project,
+        new_name: str | None,
+        new_description: str | None,
+        user: CurrentUser,
+        storage: StorageService,
+    ) -> str | None:
+        """
+        Sync project metadata changes to the ontology RDF source.
+
+        This method:
+        1. Downloads the ontology content from storage
+        2. Updates the appropriate metadata properties (dc:title, dcterms:title, etc.)
+        3. Serializes back to Turtle
+        4. Uploads to storage and commits to git
+
+        Args:
+            project: The project being updated
+            new_name: New project name (None to skip)
+            new_description: New project description (None to skip)
+            user: The current user (for git commit author)
+            storage: Storage service for file operations
+
+        Returns:
+            Commit hash if changes were committed, None otherwise
+        """
+        # Skip if no source file
+        if not project.source_file_path:
+            logger.debug(f"Project {project.id} has no source file, skipping RDF sync")
+            return None
+
+        try:
+            # Extract object name from source_file_path (e.g., "projects/{id}/ontology.ttl")
+            # The source_file_path is stored as "bucket/object_name", extract just the object part
+            if "/" in project.source_file_path:
+                # Remove bucket prefix if present
+                parts = project.source_file_path.split("/", 1)
+                object_name = parts[1] if len(parts) > 1 else project.source_file_path
+            else:
+                object_name = project.source_file_path
+
+            # Download current ontology content
+            content = await storage.download_file(object_name)
+
+            # Get the filename from the path
+            filename = Path(object_name).name
+
+            # Update metadata in the RDF
+            updater = OntologyMetadataUpdater()
+            updated_content, changes = updater.update_metadata(
+                content=content,
+                filename=filename,
+                new_title=new_name,
+                new_description=new_description,
+            )
+
+            if not changes:
+                logger.debug(f"No RDF changes needed for project {project.id}")
+                return None
+
+            # Upload updated content to storage
+            await storage.upload_file(object_name, updated_content, "text/turtle")
+
+            # Commit to git
+            if self.git_service.repository_exists(project.id):
+                # Build commit message
+                change_lines = "\n".join(f"- {change}" for change in changes)
+                commit_message = f"Update ontology metadata\n\n{change_lines}\n\nAutomated sync from project settings."
+
+                commit_info = self.git_service.commit_changes(
+                    project_id=project.id,
+                    ontology_content=updated_content,
+                    filename=filename,
+                    message=commit_message,
+                    author_name=user.name,
+                    author_email=user.email,
+                )
+                logger.info(
+                    f"Synced metadata to RDF for project {project.id}, "
+                    f"commit {commit_info.short_hash}"
+                )
+                return commit_info.hash
+            else:
+                logger.debug(f"No git repository for project {project.id}, skipping commit")
+                return None
+
+        except StorageError as e:
+            logger.warning(
+                f"Failed to download ontology for project {project.id}: {e}. "
+                "Database update succeeded, but RDF sync failed."
+            )
+            return None
+        except Exception as e:
+            logger.warning(
+                f"Failed to sync metadata to RDF for project {project.id}: {e}. "
+                "Database update succeeded, but RDF sync failed."
+            )
+            return None
 
     async def delete(self, project_id: UUID, user: CurrentUser) -> None:
         """Delete a project (owner or superadmin only)."""
@@ -569,6 +713,15 @@ class ProjectService:
             except json.JSONDecodeError:
                 label_prefs = None
 
+        # Deserialize normalization_report from JSON string
+        norm_report = None
+        if project.normalization_report:
+            try:
+                report_data = json.loads(project.normalization_report)
+                norm_report = NormalizationReportResponse(**report_data)
+            except (json.JSONDecodeError, TypeError):
+                norm_report = None
+
         return ProjectResponse(
             id=project.id,
             name=project.name,
@@ -584,6 +737,7 @@ class ProjectService:
             source_file_path=project.source_file_path,
             ontology_iri=project.ontology_iri,
             label_preferences=label_prefs,
+            normalization_report=norm_report,
         )
 
     def _to_import_response(
