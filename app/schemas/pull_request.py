@@ -61,6 +61,9 @@ class PRResponse(PRBase):
     merged_by: str | None = None
     merged_by_user: PRUser | None = None
     merged_at: datetime | None = None
+    merge_commit_hash: str | None = None
+    base_commit_hash: str | None = None
+    head_commit_hash: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
     review_count: int = 0

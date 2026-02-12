@@ -69,6 +69,122 @@ class PullRequestService:
         self.git_service = git_service or get_git_service()
         self.github_service = github_service or get_github_service()
 
+    async def _sync_merge_commits_to_prs(self, project_id: UUID) -> None:
+        """Sync merge commits from git history to PR records.
+
+        This creates PR records for merge commits that were done directly
+        via git (bypassing the PR workflow), and also backfills commit hashes
+        for existing merged PRs that are missing them.
+        """
+        try:
+            # Get revision history with merge commits
+            history = self.git_service.get_history(project_id, limit=100)
+        except Exception as e:
+            logger.warning(f"Failed to get revision history for PR sync: {e}")
+            return
+
+        # Build a map of merge commits by source branch name
+        merge_commits_by_branch: dict[str, Any] = {}
+        for commit in history:
+            if commit.is_merge and commit.merged_branch:
+                # Only keep the most recent merge for each branch
+                if commit.merged_branch not in merge_commits_by_branch:
+                    merge_commits_by_branch[commit.merged_branch] = commit
+
+        # Get all existing merged PRs for this project
+        result = await self.db.execute(
+            select(PullRequest).where(
+                PullRequest.project_id == project_id,
+                PullRequest.status == PRStatus.MERGED.value,
+            )
+        )
+        existing_prs = {pr.source_branch: pr for pr in result.scalars().all()}
+
+        # Backfill commit hashes for existing PRs that are missing them
+        prs_updated = False
+        for source_branch, pr in existing_prs.items():
+            if pr.merge_commit_hash and pr.base_commit_hash and pr.head_commit_hash:
+                # Already has all commit hashes
+                continue
+
+            # Try to find matching merge commit
+            if source_branch in merge_commits_by_branch:
+                commit = merge_commits_by_branch[source_branch]
+
+                # Extract commit hashes from merge commit parents
+                base_commit_hash = commit.parent_hashes[0] if len(commit.parent_hashes) > 0 else None
+                head_commit_hash = commit.parent_hashes[1] if len(commit.parent_hashes) > 1 else None
+
+                # Update PR with commit hashes
+                if not pr.merge_commit_hash:
+                    pr.merge_commit_hash = commit.hash
+                if not pr.base_commit_hash and base_commit_hash:
+                    pr.base_commit_hash = base_commit_hash
+                if not pr.head_commit_hash and head_commit_hash:
+                    pr.head_commit_hash = head_commit_hash
+
+                prs_updated = True
+                logger.info(
+                    f"Backfilled commit hashes for PR #{pr.pr_number} "
+                    f"'{source_branch}' (merge commit {commit.short_hash})"
+                )
+
+        # Get max PR number for creating new PRs
+        max_number_result = await self.db.execute(
+            select(func.max(PullRequest.pr_number)).where(
+                PullRequest.project_id == project_id
+            )
+        )
+        next_pr_number = (max_number_result.scalar() or 0) + 1
+
+        # Create new PRs for merge commits that don't have corresponding PRs
+        new_prs_created = False
+        for merged_branch, commit in merge_commits_by_branch.items():
+            # Skip if we already have a PR for this branch
+            if merged_branch in existing_prs:
+                continue
+
+            # Parse the merge timestamp
+            try:
+                merged_at = datetime.fromisoformat(commit.timestamp.replace("Z", "+00:00"))
+            except (ValueError, AttributeError):
+                merged_at = datetime.now(timezone.utc)
+
+            # Extract commit hashes from merge commit parents
+            base_commit_hash = commit.parent_hashes[0] if len(commit.parent_hashes) > 0 else None
+            head_commit_hash = commit.parent_hashes[1] if len(commit.parent_hashes) > 1 else None
+
+            # Create a retroactive PR record
+            db_pr = PullRequest(
+                project_id=project_id,
+                pr_number=next_pr_number,
+                title=f"Merge branch '{merged_branch}'",
+                description=f"Retroactively created PR for direct git merge.\n\nOriginal commit: {commit.hash}\nMessage: {commit.message}",
+                source_branch=merged_branch,
+                target_branch="main",  # Assume main as target for direct merges
+                author_id=commit.author_email,  # Use email as author identifier
+                status=PRStatus.MERGED.value,
+                merged_by=commit.author_email,
+                merged_at=merged_at,
+                merge_commit_hash=commit.hash,
+                base_commit_hash=base_commit_hash,
+                head_commit_hash=head_commit_hash,
+            )
+            self.db.add(db_pr)
+
+            # Track this in existing_prs to avoid duplicates in this batch
+            existing_prs[merged_branch] = db_pr
+            next_pr_number += 1
+            new_prs_created = True
+
+            logger.info(
+                f"Created retroactive PR #{db_pr.pr_number} for merge of "
+                f"'{merged_branch}' (commit {commit.short_hash})"
+            )
+
+        if new_prs_created or prs_updated:
+            await self.db.commit()
+
     # Pull Request CRUD
 
     async def create_pull_request(
@@ -169,6 +285,9 @@ class PullRequestService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You don't have access to this project",
             )
+
+        # Sync merge commits from git history to PR records
+        await self._sync_merge_commits_to_prs(project_id)
 
         # Build query
         query = (
@@ -377,6 +496,17 @@ class PullRequestService:
                 detail=f"Pull request requires {project.pr_approval_required} approvals, but has {approval_count}",
             )
 
+        # Capture commit hashes before merge
+        branches = self.git_service.list_branches(project_id)
+        branch_map = {b.name: b for b in branches}
+
+        base_commit_hash = None
+        head_commit_hash = None
+        if pr.target_branch in branch_map:
+            base_commit_hash = branch_map[pr.target_branch].commit_hash
+        if pr.source_branch in branch_map:
+            head_commit_hash = branch_map[pr.source_branch].commit_hash
+
         # Perform merge in local git
         merge_message = merge_request.merge_message or f"Merge pull request #{pr_number}: {pr.title}"
         merge_result = self.git_service.merge_branch(
@@ -394,10 +524,13 @@ class PullRequestService:
                 detail=f"Merge failed: {merge_result.message}",
             )
 
-        # Update PR status
+        # Update PR status and store commit hashes
         pr.status = PRStatus.MERGED.value
         pr.merged_by = user.id
         pr.merged_at = datetime.now(timezone.utc)
+        pr.merge_commit_hash = merge_result.merge_commit_hash
+        pr.base_commit_hash = base_commit_hash
+        pr.head_commit_hash = head_commit_hash
 
         # Delete source branch if requested
         if merge_request.delete_source_branch:
@@ -824,10 +957,21 @@ class PullRequestService:
 
         pr = await self._get_pr(project_id, pr_number)
 
-        # Get commits between target and source branches
-        commits = self.git_service.get_commits_between(
-            project_id, pr.target_branch, pr.source_branch
-        )
+        # For merged PRs with stored commit hashes, use those
+        # Otherwise fall back to branch names (for open PRs)
+        if pr.status == PRStatus.MERGED.value and pr.base_commit_hash and pr.head_commit_hash:
+            from_ref = pr.base_commit_hash
+            to_ref = pr.head_commit_hash
+        else:
+            from_ref = pr.target_branch
+            to_ref = pr.source_branch
+
+        # Get commits between target and source
+        try:
+            commits = self.git_service.get_commits_between(project_id, from_ref, to_ref)
+        except ValueError:
+            # If we can't get commits (e.g., branch deleted, no stored hashes)
+            commits = []
 
         items = [
             PRCommit(
@@ -857,14 +1001,21 @@ class PullRequestService:
 
         pr = await self._get_pr(project_id, pr_number)
 
-        # Get diff between target and source branches
+        # For merged PRs with stored commit hashes, use those
+        # Otherwise fall back to branch names (for open PRs)
+        if pr.status == PRStatus.MERGED.value and pr.base_commit_hash and pr.head_commit_hash:
+            from_ref = pr.base_commit_hash
+            to_ref = pr.head_commit_hash
+        else:
+            from_ref = pr.target_branch
+            to_ref = pr.source_branch
+
+        # Get diff between target and source
         try:
-            diff_info = self.git_service.diff_versions(
-                project_id, pr.target_branch, pr.source_branch
-            )
+            diff_info = self.git_service.diff_versions(project_id, from_ref, to_ref)
         except ValueError as e:
-            # Branch may have been deleted after merge
-            if pr.status == "merged":
+            # Branch may have been deleted after merge without stored hashes
+            if pr.status == PRStatus.MERGED.value:
                 # Return empty diff for merged PRs with deleted branches
                 return PRDiffResponse(
                     files=[],

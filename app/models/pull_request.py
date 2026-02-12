@@ -59,6 +59,9 @@ class PullRequest(Base):
     # Merge info
     merged_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    merge_commit_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    base_commit_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    head_commit_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     # Timestamps
     created_at: Mapped[datetime] = mapped_column(
