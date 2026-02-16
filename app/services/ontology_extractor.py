@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from rdflib import Graph, Literal, Namespace, URIRef
+from rdflib.compare import to_canonical_graph
 from rdflib.namespace import DC, DCTERMS, OWL, RDF, RDFS
 
 
@@ -149,7 +150,7 @@ class OntologyMetadataExtractor:
         )
 
     def normalize_to_turtle(
-        self, content: bytes, filename: str
+        self, content: bytes, filename: str, use_canonical: bool = True
     ) -> tuple[bytes, NormalizationReport]:
         """
         Normalize an ontology file to canonical Turtle format.
@@ -203,8 +204,27 @@ class OntologyMetadataExtractor:
         # Count triples
         triple_count = len(graph)
 
+        # Optionally convert to canonical graph with deterministic bnode identifiers
+        # This is expensive for large graphs, so it can be disabled for imports
+        if use_canonical:
+            # to_canonical_graph() creates SHA-256 based bnode IDs for determinism
+            # This ensures consistent serialization regardless of parse order
+            # Note: to_canonical_graph() returns a ReadOnlyGraphAggregate in newer RDFLib,
+            # so we need to copy triples to a new writable Graph
+            canonical = to_canonical_graph(graph)
+            output_graph = Graph()
+            # Copy namespace bindings first
+            for prefix, namespace in graph.namespaces():
+                output_graph.bind(prefix, namespace)
+            # Copy all triples from the canonical graph
+            for triple in canonical:
+                output_graph.add(triple)
+        else:
+            # Use the original graph (faster but non-deterministic bnode ordering)
+            output_graph = graph
+
         # Serialize to Turtle (canonical format)
-        normalized = graph.serialize(format="turtle")
+        normalized = output_graph.serialize(format="turtle")
         if isinstance(normalized, str):
             normalized = normalized.encode("utf-8")
 
@@ -267,10 +287,15 @@ class OntologyMetadataExtractor:
         self, content: bytes, filename: str = "ontology.ttl"
     ) -> tuple[bool, NormalizationReport | None]:
         """
-        Check if normalization would change the content (dry run).
+        Check if normalization would change the content.
 
-        This is useful for periodic checks to see if the ontology
-        has drifted from canonical format.
+        This is a lightweight check that only examines:
+        1. File format (non-Turtle always needs normalization)
+        2. Byte comparison (if bytes match, no normalization needed)
+
+        Note: This may report "needs normalization" for files that only differ
+        in blank node ordering due to RDFLib's non-deterministic serialization.
+        This is acceptable as the check runs in a background job, not on page load.
 
         Args:
             content: The current ontology file content as bytes
@@ -279,12 +304,22 @@ class OntologyMetadataExtractor:
         Returns:
             Tuple of (needs_normalization, report_if_needed)
             - needs_normalization: True if content would change
-            - report_if_needed: The normalization report if changes would occur, None otherwise
+            - report_if_needed: The normalization report if changes would occur
         """
         try:
-            normalized, report = self.normalize_to_turtle(content, filename)
+            extension = Path(filename).suffix.lower()
+            rdf_format = self.get_format_for_extension(extension)
 
-            # Compare byte-by-byte to see if normalization changes anything
+            # Always needs normalization if not already Turtle
+            if rdf_format != "turtle":
+                # Skip canonical for status check (faster), just report format conversion needed
+                normalized, report = self.normalize_to_turtle(content, filename, use_canonical=False)
+                return True, report
+
+            # For Turtle files, just do a byte comparison
+            # Skip canonical for status check to avoid expensive computation
+            normalized, report = self.normalize_to_turtle(content, filename, use_canonical=False)
+
             if normalized == content:
                 return False, None
 

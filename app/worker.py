@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from arq import ArqRedis
+from arq import ArqRedis, cron
 from arq.connections import RedisSettings
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -214,6 +214,115 @@ async def check_normalization_status_task(
         }
 
 
+async def run_normalization_task(
+    ctx: dict[str, Any],
+    project_id: str,
+    user_id: str | None = None,
+    user_name: str | None = None,
+    user_email: str | None = None,
+    dry_run: bool = False,
+) -> dict[str, Any]:
+    """
+    Background task to run normalization with canonical bnode identifiers.
+
+    This is the expensive operation that creates deterministic bnode IDs
+    using SHA-256 hashing. It should be run as a background task for large
+    ontologies.
+
+    Args:
+        ctx: ARQ context with db session and services
+        project_id: The project UUID to normalize
+        user_id: ID of the user who triggered normalization
+        user_name: Name of the user (for commit author)
+        user_email: Email of the user (for commit author)
+        dry_run: If True, don't commit changes
+
+    Returns:
+        Dict with run_id and status
+    """
+    db: AsyncSession = ctx["db"]
+    redis: ArqRedis = ctx["redis"]
+
+    project_uuid = UUID(project_id)
+
+    try:
+        # Notify start
+        await redis.publish(
+            NORMALIZATION_UPDATES_CHANNEL,
+            f'{{"type": "normalization_started", "project_id": "{project_id}", '
+            f'"dry_run": {str(dry_run).lower()}}}',
+        )
+
+        # Get project
+        result = await db.execute(
+            select(Project).where(Project.id == project_uuid)
+        )
+        project = result.scalar_one_or_none()
+
+        if not project:
+            raise ValueError(f"Project {project_id} not found")
+
+        if not project.source_file_path:
+            raise ValueError(f"Project {project_id} has no ontology file")
+
+        # Create mock user for the service
+        class MockUser:
+            def __init__(self, uid: str | None, name: str | None, email: str | None):
+                self.id = uid
+                self.name = name or "Axigraph System"
+                self.email = email or "system@axigraph.local"
+
+        user = MockUser(user_id, user_name, user_email) if user_id else None
+
+        # Run normalization
+        storage = get_storage_service()
+        norm_service = NormalizationService(db, storage)
+
+        run, original_content, normalized_content = await norm_service.run_normalization(
+            project=project,
+            user=user,
+            trigger_type="manual",
+            dry_run=dry_run,
+        )
+
+        logger.info(
+            f"Normalization {'preview' if dry_run else 'run'} completed for project {project_id}, "
+            f"run_id={run.id}"
+        )
+
+        # Notify completion
+        await redis.publish(
+            NORMALIZATION_UPDATES_CHANNEL,
+            f'{{"type": "normalization_complete", "project_id": "{project_id}", '
+            f'"run_id": "{run.id}", "dry_run": {str(dry_run).lower()}, '
+            f'"commit_hash": "{run.commit_hash or ""}"}}',
+        )
+
+        return {
+            "project_id": project_id,
+            "run_id": str(run.id),
+            "dry_run": dry_run,
+            "commit_hash": run.commit_hash,
+            "status": "completed",
+        }
+
+    except Exception as e:
+        logger.exception(f"Normalization failed for project {project_id}: {e}")
+
+        # Notify failure
+        await redis.publish(
+            NORMALIZATION_UPDATES_CHANNEL,
+            f'{{"type": "normalization_failed", "project_id": "{project_id}", '
+            f'"error": "{str(e)}"}}',
+        )
+
+        return {
+            "project_id": project_id,
+            "error": str(e),
+            "status": "failed",
+        }
+
+
 async def check_all_projects_normalization(ctx: dict[str, Any]) -> dict[str, Any]:
     """
     Cron task to check all projects for normalization needs.
@@ -344,6 +453,7 @@ class WorkerSettings:
     functions = [
         run_lint_task,
         check_normalization_status_task,
+        run_normalization_task,
         check_all_projects_normalization,
     ]
     redis_settings = get_redis_settings()
@@ -355,11 +465,7 @@ class WorkerSettings:
 
     # Cron jobs - run normalization check every hour
     cron_jobs = [
-        {
-            "coroutine": check_all_projects_normalization,
-            "hour": None,  # Every hour
-            "minute": 0,
-        },
+        cron(check_all_projects_normalization, hour=None, minute=0),
     ]
 
     # Job settings

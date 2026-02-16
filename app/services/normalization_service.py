@@ -32,11 +32,90 @@ class NormalizationService:
         self.git_service = git_service or get_git_service()
         self.extractor = OntologyMetadataExtractor()
 
+    async def get_cached_status(self, project: Project) -> dict:
+        """
+        Get cached normalization status from database (fast, no expensive check).
+
+        This returns status based on the last normalization run without
+        re-checking the ontology file. Use this for page loads.
+
+        Returns a status dict with:
+        - needs_normalization: bool | None (None if never checked)
+        - last_run: datetime | None
+        - last_run_id: str | None
+        - preview_report: dict | None
+        - checking: bool (always False for cached)
+        """
+        if not project.source_file_path:
+            return {
+                "needs_normalization": False,
+                "last_run": None,
+                "last_run_id": None,
+                "preview_report": None,
+                "checking": False,
+                "error": "Project has no ontology file",
+            }
+
+        # Get last normalization run (actual run, not dry run)
+        result = await self.db.execute(
+            select(NormalizationRun)
+            .where(NormalizationRun.project_id == project.id)
+            .where(NormalizationRun.is_dry_run == False)  # noqa: E712
+            .order_by(NormalizationRun.created_at.desc())
+            .limit(1)
+        )
+        last_run = result.scalar_one_or_none()
+
+        # Get last status check (dry run) if any
+        result = await self.db.execute(
+            select(NormalizationRun)
+            .where(NormalizationRun.project_id == project.id)
+            .where(NormalizationRun.is_dry_run == True)  # noqa: E712
+            .order_by(NormalizationRun.created_at.desc())
+            .limit(1)
+        )
+        last_check = result.scalar_one_or_none()
+
+        # If we have a status check, use its report to determine if normalization is needed
+        # If the last actual run is more recent than the last check, status is unknown
+        if last_check and (not last_run or last_check.created_at > last_run.created_at):
+            report_data = json.loads(last_check.report_json) if last_check.report_json else None
+            # Check if there were any actual changes in the report
+            needs_normalization = (
+                last_check.format_converted
+                or last_check.prefixes_removed_count > 0
+                or last_check.prefixes_added_count > 0
+                or (last_check.original_size_bytes != last_check.normalized_size_bytes)
+            )
+            return {
+                "needs_normalization": needs_normalization,
+                "last_run": last_run.created_at if last_run else None,
+                "last_run_id": str(last_run.id) if last_run else None,
+                "last_check": last_check.created_at,
+                "preview_report": report_data,
+                "checking": False,
+                "error": None,
+            }
+
+        # No status check available, return unknown status
+        return {
+            "needs_normalization": None,  # Unknown - needs background check
+            "last_run": last_run.created_at if last_run else None,
+            "last_run_id": str(last_run.id) if last_run else None,
+            "last_check": None,
+            "preview_report": None,
+            "checking": False,
+            "error": None,
+        }
+
     async def check_normalization_status(
         self, project: Project
     ) -> dict:
         """
-        Check if a project's ontology needs normalization.
+        Check if a project's ontology needs normalization (expensive operation).
+
+        This downloads and parses the ontology to check if normalization would
+        change it. Should be run in a background job, not on page load.
 
         Returns a status dict with:
         - needs_normalization: bool
