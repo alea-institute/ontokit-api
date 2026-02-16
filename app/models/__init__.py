@@ -1,5 +1,12 @@
 """SQLAlchemy database models."""
 
+from app.models.branch_metadata import BranchMetadata
+from app.models.lint import (
+    LintIssue,
+    LintIssueType,
+    LintRun,
+    LintRunStatus,
+)
 from app.models.project import Project, ProjectMember
 from app.models.pull_request import (
     GitHubIntegration,
@@ -9,14 +16,9 @@ from app.models.pull_request import (
     PullRequestReview,
     ReviewStatus,
 )
-from app.models.lint import (
-    LintIssue,
-    LintIssueType,
-    LintRun,
-    LintRunStatus,
-)
 
 __all__ = [
+    "BranchMetadata",
     "Project",
     "ProjectMember",
     "PullRequest",

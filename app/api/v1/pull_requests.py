@@ -12,10 +12,8 @@ from app.core.auth import OptionalUser, RequiredUser
 from app.core.database import get_db
 from app.schemas.pull_request import (
     BranchCreate,
-    BranchDeleteRequest,
     BranchInfo,
     BranchListResponse,
-    BranchSwitchRequest,
     CommentCreate,
     CommentListResponse,
     CommentResponse,
@@ -392,27 +390,6 @@ async def switch_branch(
     - The working directory will be updated to reflect the branch contents
     """
     return await service.switch_branch(project_id, branch_name, user)
-
-
-@router.delete(
-    "/{project_id}/branches/{branch_name}",
-    status_code=status.HTTP_204_NO_CONTENT,
-)
-async def delete_branch(
-    project_id: UUID,
-    branch_name: str,
-    service: Annotated[PullRequestService, Depends(get_service)],
-    user: RequiredUser,
-    force: bool = Query(default=False, description="Force delete even with unmerged changes"),
-) -> None:
-    """
-    Delete a branch.
-
-    - Only admins and owners can delete branches
-    - Cannot delete the current or default branch
-    - Use force=true to delete branches with unmerged changes
-    """
-    await service.delete_branch(project_id, branch_name, force, user)
 
 
 # GitHub Integration Endpoints

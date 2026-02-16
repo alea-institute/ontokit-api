@@ -7,12 +7,14 @@ from typing import Any
 from uuid import UUID
 
 from fastapi import HTTPException, status
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.auth import CurrentUser
 from app.git import GitRepositoryService, get_git_service
+from app.models.branch_metadata import BranchMetadata
 from app.models.project import Project, ProjectMember
 from app.models.pull_request import (
     GitHubIntegration,
@@ -549,6 +551,13 @@ class PullRequestService:
         if merge_request.delete_source_branch:
             try:
                 self.git_service.delete_branch(project_id, pr.source_branch)
+                # Clean up branch metadata
+                await self.db.execute(
+                    sa_delete(BranchMetadata).where(
+                        BranchMetadata.project_id == project_id,
+                        BranchMetadata.branch_name == pr.source_branch,
+                    )
+                )
             except Exception as e:
                 logger.warning(f"Failed to delete source branch: {e}")
 
@@ -927,32 +936,6 @@ class PullRequestService:
             commits_ahead=branch_info.commits_ahead,
             commits_behind=branch_info.commits_behind,
         )
-
-    async def delete_branch(
-        self, project_id: UUID, branch_name: str, force: bool, user: CurrentUser
-    ) -> None:
-        """Delete a branch."""
-        project = await self._get_project(project_id)
-        user_role = self._get_user_role(project, user)
-
-        if user_role not in ("owner", "admin"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only admins and owners can delete branches",
-            )
-
-        try:
-            self.git_service.delete_branch(project_id, branch_name, force)
-        except ValueError as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(e),
-            ) from e
-        except Exception as e:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=str(e),
-            ) from e
 
     # PR Commits and Diff
 

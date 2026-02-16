@@ -4,12 +4,17 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile, status
+from sqlalchemy import delete as sa_delete
+from sqlalchemy import func as sa_func
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
 from app.core.database import get_db
-from app.schemas.owl_class import OWLClassResponse, OWLClassTreeNode, OWLClassTreeResponse
 from app.git import GitRepositoryService, get_git_service
+from app.models.branch_metadata import BranchMetadata
+from app.models.pull_request import PRStatus, PullRequest
+from app.schemas.owl_class import OWLClassResponse, OWLClassTreeResponse
 from app.schemas.project import (
     BranchCreate,
     BranchInfo,
@@ -33,7 +38,7 @@ from app.schemas.project import (
 )
 from app.services.ontology import OntologyService, get_ontology_service
 from app.services.project_service import ProjectService, get_project_service
-from app.services.storage import StorageService, StorageError, get_storage_service
+from app.services.storage import StorageError, StorageService, get_storage_service
 
 router = APIRouter()
 
@@ -489,13 +494,13 @@ async def get_revision_history(
     )
 
 
-@router.get("/{project_id}/revisions/{version}/file", response_model=RevisionFileResponse)
+@router.get("/{project_id}/revisions/file", response_model=RevisionFileResponse)
 async def get_file_at_revision(
     project_id: UUID,
-    version: str,
     service: Annotated[ProjectService, Depends(get_service)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
     user: OptionalUser,
+    version: str = Query(description="Branch name or commit hash"),
     filename: str = Query(default="ontology.ttl", description="Filename to retrieve"),
 ) -> RevisionFileResponse:
     """
@@ -598,6 +603,7 @@ async def list_branches(
     project_id: UUID,
     service: Annotated[ProjectService, Depends(get_service)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
+    db: Annotated[AsyncSession, Depends(get_db)],
     user: OptionalUser,
 ) -> BranchListResponse:
     """
@@ -605,9 +611,10 @@ async def list_branches(
 
     Returns a list of branches with their metadata including commits ahead/behind.
     Includes the user's preferred branch if authenticated.
+    Permission fields control delete button visibility/state in the UI.
     """
-    # Check project access
-    await service.get(project_id, user)
+    # Check project access — save role info for permission computation
+    project = await service.get(project_id, user)
 
     preferred = None
     if user:
@@ -624,8 +631,40 @@ async def list_branches(
 
     branches = git.list_branches(project_id)
 
-    return BranchListResponse(
-        items=[
+    # Build metadata map: branch_name → BranchMetadata
+    meta_result = await db.execute(
+        select(BranchMetadata).where(BranchMetadata.project_id == project_id)
+    )
+    meta_map = {m.branch_name: m for m in meta_result.scalars().all()}
+
+    # Build set of branch names that are source of an open PR
+    pr_result = await db.execute(
+        select(PullRequest.source_branch).where(
+            PullRequest.project_id == project_id,
+            PullRequest.status == PRStatus.OPEN,
+        )
+    )
+    open_pr_branches = {row[0] for row in pr_result.all()}
+
+    # Determine user's role for permission computation
+    user_role = project.user_role
+    is_superadmin = project.is_superadmin
+    is_privileged = is_superadmin or user_role in ("owner", "admin")
+
+    items = []
+    for b in branches:
+        meta = meta_map.get(b.name)
+        has_open_pr = b.name in open_pr_branches
+
+        # Permission logic
+        has_delete_permission = is_privileged or (
+            user_role == "editor" and user is not None and meta is not None
+            and meta.created_by_id == user.id
+        )
+
+        can_delete = has_delete_permission and not has_open_pr and not b.is_default
+
+        items.append(
             BranchInfo(
                 name=b.name,
                 is_current=b.is_current,
@@ -635,9 +674,16 @@ async def list_branches(
                 commit_date=b.commit_date,
                 commits_ahead=b.commits_ahead,
                 commits_behind=b.commits_behind,
+                created_by_id=meta.created_by_id if meta else None,
+                created_by_name=meta.created_by_name if meta else None,
+                has_open_pr=has_open_pr,
+                has_delete_permission=has_delete_permission,
+                can_delete=can_delete,
             )
-            for b in branches
-        ],
+        )
+
+    return BranchListResponse(
+        items=items,
         current_branch=git.get_default_branch(project_id),
         default_branch=git.get_default_branch(project_id),
         preferred_branch=preferred,
@@ -666,6 +712,7 @@ async def create_branch(
     branch: BranchCreate,
     service: Annotated[ProjectService, Depends(get_service)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
+    db: Annotated[AsyncSession, Depends(get_db)],
     user: RequiredUser,
 ) -> BranchInfo:
     """
@@ -697,7 +744,17 @@ async def create_branch(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Could not create branch: {e}",
-        )
+        ) from e
+
+    # Record branch metadata (who created this branch)
+    metadata = BranchMetadata(
+        project_id=project_id,
+        branch_name=result.name,
+        created_by_id=user.id,
+        created_by_name=user.name,
+    )
+    db.add(metadata)
+    await db.commit()
 
     return BranchInfo(
         name=result.name,
@@ -708,6 +765,11 @@ async def create_branch(
         commit_date=result.commit_date,
         commits_ahead=result.commits_ahead,
         commits_behind=result.commits_behind,
+        created_by_id=user.id,
+        created_by_name=user.name,
+        can_delete=True,
+        has_open_pr=False,
+        has_delete_permission=True,
     )
 
 
@@ -772,6 +834,7 @@ async def delete_branch(
     branch_name: str,
     service: Annotated[ProjectService, Depends(get_service)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
+    db: Annotated[AsyncSession, Depends(get_db)],
     user: RequiredUser,
     force: bool = Query(
         default=False, description="Force delete even if branch has unmerged changes"
@@ -781,7 +844,8 @@ async def delete_branch(
     Delete a branch.
 
     Cannot delete the current branch or the default branch.
-    Requires authentication and editor or higher role.
+    Owner/admin/superadmin can delete any branch; editors can only delete
+    branches they created. Branches with open pull requests cannot be deleted.
     """
     # Check project access
     project = await service.get(project_id, user)
@@ -800,18 +864,56 @@ async def delete_branch(
             detail="No repository found for this project",
         )
 
+    # Block deletion if branch has an open pull request
+    open_pr_count = await db.scalar(
+        select(sa_func.count()).where(
+            PullRequest.project_id == project_id,
+            PullRequest.source_branch == branch_name,
+            PullRequest.status == PRStatus.OPEN,
+        )
+    )
+    if open_pr_count and open_pr_count > 0:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Cannot delete branch: it has an open pull request",
+        )
+
+    # Author check for editors (non-admin/non-owner)
+    is_privileged = project.is_superadmin or project.user_role in ("owner", "admin")
+    if not is_privileged:
+        meta = await db.scalar(
+            select(BranchMetadata).where(
+                BranchMetadata.project_id == project_id,
+                BranchMetadata.branch_name == branch_name,
+            )
+        )
+        if not meta or meta.created_by_id != user.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You can only delete branches you created",
+            )
+
     try:
         git.delete_branch(project_id, branch_name, force=force)
     except ValueError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
-        )
-    except KeyError:
+        ) from e
+    except KeyError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Branch not found: {branch_name}",
+        ) from e
+
+    # Clean up branch metadata
+    await db.execute(
+        sa_delete(BranchMetadata).where(
+            BranchMetadata.project_id == project_id,
+            BranchMetadata.branch_name == branch_name,
         )
+    )
+    await db.commit()
 
 
 # Source content endpoints

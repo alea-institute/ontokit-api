@@ -226,6 +226,11 @@ class BranchInfo(BaseModel):
     commit_date: datetime | None = None
     commits_ahead: int = 0
     commits_behind: int = 0
+    created_by_id: str | None = None
+    created_by_name: str | None = None
+    can_delete: bool = False
+    has_open_pr: bool = False
+    has_delete_permission: bool = False
 
 
 class BranchCreate(BaseModel):
