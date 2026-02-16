@@ -126,7 +126,18 @@ class BareOntologyRepository:
     def _resolve_ref(self, ref: str) -> pygit2.Commit:
         """Resolve a reference (branch name, commit hash, HEAD) to a commit."""
         if ref == "HEAD":
-            return self.repo.head.peel(pygit2.Commit)
+            try:
+                return self.repo.head.peel(pygit2.Commit)
+            except (KeyError, ValueError):
+                # HEAD points to a non-existent branch; reset to default
+                default = self.get_default_branch()
+                branch_ref = f"refs/heads/{default}"
+                if branch_ref in self.repo.references:
+                    self.repo.set_head(branch_ref)
+                    return self.repo.references[branch_ref].peel(pygit2.Commit)
+                raise ValueError(
+                    f"HEAD is broken and default branch '{default}' not found"
+                ) from None
 
         # Try as branch name
         branch_ref = f"refs/heads/{ref}"
@@ -596,6 +607,14 @@ class BareOntologyRepository:
                 raise ValueError(
                     f"Branch '{name}' has {ahead} unmerged commits. Use force=True to delete."
                 )
+
+        # If HEAD points to the branch being deleted, reset to default
+        try:
+            if self.repo.head.name == ref_name:
+                default_ref = f"refs/heads/{self.get_default_branch()}"
+                self.repo.set_head(default_ref)
+        except Exception:
+            pass
 
         self.repo.references.delete(ref_name)
         return True
