@@ -114,9 +114,7 @@ class BareOntologyRepository:
         """Check if the repository has been initialized."""
         return self.repo_path.exists() and (self.repo_path / "HEAD").exists()
 
-    def _get_signature(
-        self, name: str | None = None, email: str | None = None
-    ) -> pygit2.Signature:
+    def _get_signature(self, name: str | None = None, email: str | None = None) -> pygit2.Signature:
         """Create a pygit2 signature for commits."""
         return pygit2.Signature(
             name=name or "Axigraph",
@@ -184,9 +182,7 @@ class BareOntologyRepository:
             message=commit.message.strip(),
             author_name=commit.author.name,
             author_email=commit.author.email,
-            timestamp=datetime.fromtimestamp(
-                commit.commit_time, tz=timezone.utc
-            ).isoformat(),
+            timestamp=datetime.fromtimestamp(commit.commit_time, tz=timezone.utc).isoformat(),
             is_merge=is_merge,
             merged_branch=merged_branch,
             parent_hashes=[str(p.id) for p in commit.parents],
@@ -232,7 +228,9 @@ class BareOntologyRepository:
             parent_tree = parent_commit.tree
 
         # Build new tree with the file
-        tree_builder = self.repo.TreeBuilder(parent_tree) if parent_tree else self.repo.TreeBuilder()
+        tree_builder = (
+            self.repo.TreeBuilder(parent_tree) if parent_tree else self.repo.TreeBuilder()
+        )
 
         # Handle nested paths by building intermediate trees
         parts = filepath.split("/")
@@ -291,9 +289,7 @@ class BareOntologyRepository:
 
         # Build subtree
         subtree_builder = (
-            self.repo.TreeBuilder(existing_subtree)
-            if existing_subtree
-            else self.repo.TreeBuilder()
+            self.repo.TreeBuilder(existing_subtree) if existing_subtree else self.repo.TreeBuilder()
         )
 
         # Recursively add to subtree
@@ -358,9 +354,7 @@ class BareOntologyRepository:
                 for ref_name in self.repo.references:
                     if ref_name.startswith("refs/heads/"):
                         ref = self.repo.references[ref_name]
-                        for commit in self.repo.walk(
-                            ref.target, pygit2.GIT_SORT_TIME
-                        ):
+                        for commit in self.repo.walk(ref.target, pygit2.GIT_SORT_TIME):
                             commit_hash = str(commit.id)
                             if commit_hash not in seen_hashes:
                                 seen_hashes.add(commit_hash)
@@ -527,9 +521,7 @@ class BareOntologyRepository:
             if branch_name != default_branch:
                 try:
                     default_ref = self.repo.references[f"refs/heads/{default_branch}"]
-                    ahead, behind = self.repo.ahead_behind(
-                        ref.target, default_ref.target
-                    )
+                    ahead, behind = self.repo.ahead_behind(ref.target, default_ref.target)
                     commits_ahead = ahead
                     commits_behind = behind
                 except Exception:
@@ -542,9 +534,7 @@ class BareOntologyRepository:
                     is_default=branch_name == default_branch,
                     commit_hash=str(commit.id),
                     commit_message=commit.message.strip().split("\n")[0],
-                    commit_date=datetime.fromtimestamp(
-                        commit.commit_time, tz=timezone.utc
-                    ),
+                    commit_date=datetime.fromtimestamp(commit.commit_time, tz=timezone.utc),
                     commits_ahead=commits_ahead,
                     commits_behind=commits_behind,
                 )
@@ -669,11 +659,13 @@ class BareOntologyRepository:
 
         if merge_index.conflicts:
             # Merge conflicts
-            conflict_paths = list(set(
-                entry[0].path if entry[0] else entry[1].path if entry[1] else entry[2].path
-                for entry in merge_index.conflicts
-                if any(entry)
-            ))
+            conflict_paths = list(
+                set(
+                    entry[0].path if entry[0] else entry[1].path if entry[1] else entry[2].path
+                    for entry in merge_index.conflicts
+                    if any(entry)
+                )
+            )
             return MergeResult(
                 success=False,
                 message="Merge failed due to conflicts",
@@ -702,9 +694,7 @@ class BareOntologyRepository:
             merge_commit_hash=str(commit_id),
         )
 
-    def get_commits_between(
-        self, from_ref: str, to_ref: str = "HEAD"
-    ) -> list[CommitInfo]:
+    def get_commits_between(self, from_ref: str, to_ref: str = "HEAD") -> list[CommitInfo]:
         """
         Get commits between two references.
 
@@ -760,32 +750,60 @@ class BareOntologyRepository:
 
     def list_remotes(self) -> list[dict[str, str]]:
         """List all remotes."""
-        return [
-            {"name": remote.name, "url": remote.url}
-            for remote in self.repo.remotes
-        ]
+        return [{"name": remote.name, "url": remote.url} for remote in self.repo.remotes]
 
     def push(
-        self, remote: str = "origin", branch: str | None = None, force: bool = False
+        self,
+        remote: str = "origin",
+        branch: str | None = None,
+        force: bool = False,
+        token: str | None = None,
     ) -> bool:
         """Push to a remote repository."""
         try:
             remote_obj = self.repo.remotes[remote]
             branch = branch or self.get_default_branch()
-            refspec = f"+refs/heads/{branch}:refs/heads/{branch}" if force else f"refs/heads/{branch}:refs/heads/{branch}"
-            remote_obj.push([refspec])
+            refspec = (
+                f"+refs/heads/{branch}:refs/heads/{branch}"
+                if force
+                else f"refs/heads/{branch}:refs/heads/{branch}"
+            )
+            callbacks = None
+            if token:
+                credentials = pygit2.UserPass("x-access-token", token)
+                callbacks = pygit2.RemoteCallbacks(credentials=credentials)
+            remote_obj.push([refspec], callbacks=callbacks)
             return True
         except Exception:
             return False
 
-    def fetch(self, remote: str = "origin") -> bool:
+    def fetch(self, remote: str = "origin", token: str | None = None) -> bool:
         """Fetch from a remote repository."""
         try:
             remote_obj = self.repo.remotes[remote]
-            remote_obj.fetch()
+            callbacks = None
+            if token:
+                credentials = pygit2.UserPass("x-access-token", token)
+                callbacks = pygit2.RemoteCallbacks(credentials=credentials)
+            remote_obj.fetch(callbacks=callbacks)
             return True
         except Exception:
             return False
+
+    @staticmethod
+    def clone_bare(
+        url: str, target_path: Path, token: str | None = None
+    ) -> "BareOntologyRepository":
+        """Clone a remote repo as bare with optional PAT auth."""
+        callbacks = None
+        if token:
+            credentials = pygit2.UserPass("x-access-token", token)
+            callbacks = pygit2.RemoteCallbacks(credentials=credentials)
+        pygit2.clone_repository(str(url), str(target_path), bare=True, callbacks=callbacks)
+        repo = BareOntologyRepository.__new__(BareOntologyRepository)
+        repo.repo_path = target_path
+        repo._repo = pygit2.Repository(str(target_path))
+        return repo
 
 
 class BareGitRepositoryService:
@@ -922,9 +940,7 @@ class BareGitRepositoryService:
         repo = self.get_repository(project_id)
         return repo.get_history(branch=branch, limit=limit, all_branches=all_branches)
 
-    def get_file_at_version(
-        self, project_id: UUID, filename: str, version: str
-    ) -> str:
+    def get_file_at_version(self, project_id: UUID, filename: str, version: str) -> str:
         """
         Get ontology file content at a specific version.
 
@@ -939,9 +955,7 @@ class BareGitRepositoryService:
         repo = self.get_repository(project_id)
         return repo.get_file_at_version(filename, version)
 
-    def get_file_from_branch(
-        self, project_id: UUID, branch: str, filename: str
-    ) -> bytes:
+    def get_file_from_branch(self, project_id: UUID, branch: str, filename: str) -> bytes:
         """
         Get ontology file content from a specific branch.
 
@@ -1055,9 +1069,7 @@ class BareGitRepositoryService:
         repo = self.get_repository(project_id)
         return repo.list_branches()
 
-    def create_branch(
-        self, project_id: UUID, name: str, from_ref: str = "HEAD"
-    ) -> BranchInfo:
+    def create_branch(self, project_id: UUID, name: str, from_ref: str = "HEAD") -> BranchInfo:
         """
         Create a new branch for a project.
 
@@ -1072,9 +1084,7 @@ class BareGitRepositoryService:
         repo = self.get_repository(project_id)
         return repo.create_branch(name, from_ref)
 
-    def delete_branch(
-        self, project_id: UUID, name: str, force: bool = False
-    ) -> bool:
+    def delete_branch(self, project_id: UUID, name: str, force: bool = False) -> bool:
         """
         Delete a branch for a project.
 
@@ -1134,9 +1144,7 @@ class BareGitRepositoryService:
 
     # Remote operations
 
-    def setup_remote(
-        self, project_id: UUID, remote_url: str, remote_name: str = "origin"
-    ) -> bool:
+    def setup_remote(self, project_id: UUID, remote_url: str, remote_name: str = "origin") -> bool:
         """
         Setup a remote for a project.
 
@@ -1157,6 +1165,7 @@ class BareGitRepositoryService:
         branch_name: str | None = None,
         remote: str = "origin",
         force: bool = False,
+        token: str | None = None,
     ) -> bool:
         """
         Push a branch to remote.
@@ -1166,26 +1175,51 @@ class BareGitRepositoryService:
             branch_name: Branch to push (defaults to default branch)
             remote: Name of the remote
             force: Force push
+            token: GitHub PAT for authentication
 
         Returns:
             True if push was successful
         """
         repo = self.get_repository(project_id)
-        return repo.push(remote, branch_name, force)
+        return repo.push(remote, branch_name, force, token=token)
 
-    def fetch_remote(self, project_id: UUID, remote: str = "origin") -> bool:
+    def fetch_remote(
+        self, project_id: UUID, remote: str = "origin", token: str | None = None
+    ) -> bool:
         """
         Fetch from remote.
 
         Args:
             project_id: The project's UUID
             remote: Name of the remote
+            token: GitHub PAT for authentication
 
         Returns:
             True if fetch was successful
         """
         repo = self.get_repository(project_id)
-        return repo.fetch(remote)
+        return repo.fetch(remote, token=token)
+
+    def clone_from_github(
+        self, project_id: UUID, repo_url: str, token: str | None = None
+    ) -> BareOntologyRepository:
+        """Clone a GitHub repo as bare. BLOCKING I/O — wrap in asyncio.to_thread().
+
+        Args:
+            project_id: The project's UUID
+            repo_url: Clone URL of the GitHub repository
+            token: GitHub PAT for authentication
+
+        Returns:
+            BareOntologyRepository for the cloned repo
+
+        Raises:
+            ValueError: If repository already exists for this project
+        """
+        repo_path = self._get_project_repo_path(project_id)
+        if repo_path.exists():
+            raise ValueError(f"Repository already exists for project {project_id}")
+        return BareOntologyRepository.clone_bare(repo_url, repo_path, token)
 
     def list_remotes(self, project_id: UUID) -> list[dict[str, str]]:
         """List all remotes for a project."""
@@ -1217,13 +1251,9 @@ def semantic_diff(old_graph: Graph, new_graph: Graph) -> dict[str, Any]:
     in_both, in_old, in_new = graph_diff(old_graph, new_graph)
 
     return {
-        "added": [
-            {"subject": str(s), "predicate": str(p), "object": str(o)}
-            for s, p, o in in_new
-        ],
+        "added": [{"subject": str(s), "predicate": str(p), "object": str(o)} for s, p, o in in_new],
         "removed": [
-            {"subject": str(s), "predicate": str(p), "object": str(o)}
-            for s, p, o in in_old
+            {"subject": str(s), "predicate": str(p), "object": str(o)} for s, p, o in in_old
         ],
         "added_count": len(in_new),
         "removed_count": len(in_old),

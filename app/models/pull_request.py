@@ -66,9 +66,7 @@ class PullRequest(Base):
     head_commit_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), onupdate=func.now()
     )
@@ -82,9 +80,7 @@ class PullRequest(Base):
         back_populates="pull_request", cascade="all, delete-orphan"
     )
 
-    __table_args__ = (
-        UniqueConstraint("project_id", "pr_number", name="uq_project_pr_number"),
-    )
+    __table_args__ = (UniqueConstraint("project_id", "pr_number", name="uq_project_pr_number"),)
 
     def __repr__(self) -> str:
         return f"<PullRequest(id={self.id}, project_id={self.project_id}, pr_number={self.pr_number}, title={self.title!r})>"
@@ -104,16 +100,16 @@ class PullRequestReview(Base):
     reviewer_id: Mapped[str] = mapped_column(String(255), nullable=False)
 
     # Review status
-    status: Mapped[str] = mapped_column(String(50), nullable=False)  # approved, changes_requested, commented
+    status: Mapped[str] = mapped_column(
+        String(50), nullable=False
+    )  # approved, changes_requested, commented
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # GitHub integration (optional)
     github_review_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Relationships
     pull_request: Mapped["PullRequest"] = relationship(back_populates="reviews")
@@ -149,9 +145,7 @@ class PullRequestComment(Base):
     github_comment_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), onupdate=func.now()
     )
@@ -198,14 +192,23 @@ class GitHubIntegration(Base):
     # Branch settings
     default_branch: Mapped[str] = mapped_column(String(255), default="main")
 
+    # Ontology file path within the repo (for GitHub-cloned projects)
+    ontology_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Turtle output file path within the repo (where normalized .ttl is written)
+    # When source is already .ttl, this matches ontology_file_path.
+    # When source is .owl/.rdf/etc., this points to the .ttl output location.
+    turtle_file_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
     # Sync status
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     sync_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    sync_status: Mapped[str] = mapped_column(String(50), default="idle")
+    # sync_status values: "idle", "syncing", "conflict", "error"
+    sync_error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Timestamps
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), onupdate=func.now()
     )

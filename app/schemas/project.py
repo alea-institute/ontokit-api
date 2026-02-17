@@ -73,6 +73,7 @@ class ProjectResponse(ProjectBase):
     is_superadmin: bool = False  # Whether the current user is a superadmin
     # Import-related fields (optional, only set when project was created via import)
     source_file_path: str | None = None
+    git_ontology_path: str | None = None
     ontology_iri: str | None = None
     # Label preferences for ontology display
     label_preferences: list[str] | None = None

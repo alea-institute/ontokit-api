@@ -151,6 +151,106 @@ class GitHubService:
             result = await self._request("GET", endpoint, token)
             return result if isinstance(result, list) else []
 
+    # Ontology file scanning
+
+    ONTOLOGY_EXTENSIONS = {".ttl", ".owl", ".owx", ".rdf", ".n3", ".jsonld"}
+
+    async def scan_ontology_files(
+        self,
+        token: str,
+        owner: str,
+        repo: str,
+        ref: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """Scan a GitHub repo for ontology files via the Git Trees API.
+
+        Args:
+            token: GitHub Personal Access Token
+            owner: Repository owner
+            repo: Repository name
+            ref: Git ref (branch/tag/sha). Defaults to repo's default branch.
+
+        Returns:
+            List of dicts with path, name, and size for each ontology file found.
+        """
+        if ref is None:
+            repo_info = await self._request("GET", f"/repos/{owner}/{repo}", token)
+            ref = repo_info["default_branch"] if isinstance(repo_info, dict) else "main"
+
+        data = await self._request(
+            "GET", f"/repos/{owner}/{repo}/git/trees/{ref}?recursive=1", token
+        )
+        files: list[dict[str, Any]] = []
+        if isinstance(data, dict):
+            for item in data.get("tree", []):
+                if item.get("type") != "blob":
+                    continue
+                path = item.get("path", "")
+                ext = ("." + path.rsplit(".", 1)[-1]).lower() if "." in path else ""
+                if ext in self.ONTOLOGY_EXTENSIONS:
+                    files.append(
+                        {
+                            "path": path,
+                            "name": path.rsplit("/", 1)[-1],
+                            "size": item.get("size", 0),
+                        }
+                    )
+        return files
+
+    async def get_file_content(
+        self,
+        token: str,
+        owner: str,
+        repo: str,
+        path: str,
+        ref: str | None = None,
+    ) -> bytes:
+        """Download raw file content from a GitHub repo.
+
+        Args:
+            token: GitHub Personal Access Token
+            owner: Repository owner
+            repo: Repository name
+            path: File path within the repository
+            ref: Git ref (branch/tag/sha). Defaults to repo's default branch.
+
+        Returns:
+            Raw file content as bytes.
+        """
+        endpoint = f"/repos/{owner}/{repo}/contents/{path}"
+        if ref:
+            endpoint += f"?ref={ref}"
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                f"{self.GITHUB_API_BASE}{endpoint}",
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Accept": "application/vnd.github.raw+json",
+                    "X-GitHub-Api-Version": "2022-11-28",
+                },
+            )
+            response.raise_for_status()
+            return response.content
+
+    async def get_repo_info(
+        self,
+        token: str,
+        owner: str,
+        repo: str,
+    ) -> dict[str, Any]:
+        """Get repository information including default branch.
+
+        Args:
+            token: GitHub Personal Access Token
+            owner: Repository owner
+            repo: Repository name
+
+        Returns:
+            Repository info dict from GitHub API.
+        """
+        data = await self._request("GET", f"/repos/{owner}/{repo}", token)
+        return data if isinstance(data, dict) else {}
+
     # Pull Request Operations
 
     async def create_pull_request(

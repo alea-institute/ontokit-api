@@ -69,6 +69,7 @@ class OntologyMetadataExtractor:
     # Map file extensions to RDFLib format strings
     FORMAT_MAP: dict[str, str] = {
         ".owl": "xml",
+        ".owx": "xml",
         ".rdf": "xml",
         ".ttl": "turtle",
         ".n3": "n3",
@@ -78,6 +79,7 @@ class OntologyMetadataExtractor:
     # Content type mapping for storage
     CONTENT_TYPE_MAP: dict[str, str] = {
         ".owl": "application/rdf+xml",
+        ".owx": "application/rdf+xml",
         ".rdf": "application/rdf+xml",
         ".ttl": "text/turtle",
         ".n3": "text/n3",

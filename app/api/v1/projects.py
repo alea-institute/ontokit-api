@@ -11,9 +11,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
 from app.core.database import get_db
+from app.core.encryption import decrypt_token
 from app.git import GitRepositoryService, get_git_service
 from app.models.branch_metadata import BranchMetadata
 from app.models.pull_request import PRStatus, PullRequest
+from app.models.user_github_token import UserGitHubToken
 from app.schemas.owl_class import OWLClassResponse, OWLClassTreeResponse
 from app.schemas.project import (
     BranchCreate,
@@ -36,6 +38,12 @@ from app.schemas.project import (
     SourceContentSave,
     SourceContentSaveResponse,
 )
+from app.schemas.pull_request import (
+    GitHubRepoFileInfo,
+    GitHubRepoFilesResponse,
+    ProjectCreateFromGitHub,
+)
+from app.services.github_service import get_github_service
 from app.services.ontology import OntologyService, get_ontology_service
 from app.services.project_service import ProjectService, get_project_service
 from app.services.storage import StorageError, StorageService, get_storage_service
@@ -140,6 +148,116 @@ async def import_project(
         storage=storage,
         name_override=name,
         description_override=description,
+    )
+
+
+async def _resolve_github_pat(db: AsyncSession, user_id: str) -> str:
+    """Resolve a user's GitHub PAT from the database.
+
+    Raises HTTPException if no token is stored.
+    """
+    result = await db.execute(select(UserGitHubToken).where(UserGitHubToken.user_id == user_id))
+    token_row = result.scalar_one_or_none()
+    if not token_row:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No GitHub token found. Connect your GitHub account in Settings first.",
+        )
+    return decrypt_token(token_row.encrypted_token)
+
+
+@router.get("/github/scan-files", response_model=GitHubRepoFilesResponse)
+async def scan_github_repo_files(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+    owner: str = Query(..., description="GitHub repository owner"),
+    repo: str = Query(..., description="GitHub repository name"),
+    ref: str | None = Query(None, description="Git ref (branch/tag). Defaults to repo default."),
+) -> GitHubRepoFilesResponse:
+    """
+    Scan a GitHub repository for ontology files.
+
+    Returns a list of files with extensions: .ttl, .owl, .owx, .rdf, .n3, .jsonld
+    """
+    pat = await _resolve_github_pat(db, user.id)
+    github = get_github_service()
+    files = await github.scan_ontology_files(pat, owner, repo, ref)
+    items = [GitHubRepoFileInfo(**f) for f in files]
+    return GitHubRepoFilesResponse(items=items, total=len(items))
+
+
+@router.post(
+    "/from-github",
+    response_model=ProjectImportResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def create_project_from_github(
+    data: ProjectCreateFromGitHub,
+    service: Annotated[ProjectService, Depends(get_service)],
+    storage: Annotated[StorageService, Depends(get_storage)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> ProjectImportResponse:
+    """
+    Create a project by cloning a GitHub repository.
+
+    The user selects a repository and an ontology file within it.
+    The file is downloaded, parsed, and the entire repo is cloned as a bare git repo.
+    """
+    pat = await _resolve_github_pat(db, user.id)
+    github = get_github_service()
+
+    # Auto-detect default branch if not provided
+    default_branch = data.default_branch
+    if not default_branch:
+        repo_info = await github.get_repo_info(pat, data.repo_owner, data.repo_name)
+        default_branch = repo_info.get("default_branch", "main")
+
+    # Download the ontology file from GitHub
+    try:
+        file_content = await github.get_file_content(
+            pat, data.repo_owner, data.repo_name, data.ontology_file_path, default_branch
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Failed to download ontology file from GitHub: {e}",
+        ) from e
+
+    filename = data.ontology_file_path.rsplit("/", 1)[-1]
+
+    # Resolve turtle_file_path:
+    # - If source is already .ttl, turtle output goes to the same file
+    # - If source is non-.ttl, the client must specify where to write .ttl output
+    if data.ontology_file_path.lower().endswith(".ttl"):
+        turtle_file_path = data.ontology_file_path
+    elif data.turtle_file_path:
+        if not data.turtle_file_path.lower().endswith(".ttl"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="turtle_file_path must end with .ttl",
+            )
+        turtle_file_path = data.turtle_file_path
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="turtle_file_path is required when source file is not .ttl",
+        )
+
+    return await service.create_from_github(
+        file_content=file_content,
+        filename=filename,
+        repo_owner=data.repo_owner,
+        repo_name=data.repo_name,
+        ontology_file_path=data.ontology_file_path,
+        default_branch=default_branch,
+        is_public=data.is_public,
+        owner=user,
+        storage=storage,
+        github_token=pat,
+        name_override=data.name,
+        description_override=data.description,
+        turtle_file_path=turtle_file_path,
     )
 
 
@@ -293,7 +411,7 @@ async def _ensure_ontology_loaded(
     if not ontology.is_loaded(project_id, branch):
         import os
 
-        filename = os.path.basename(project.source_file_path)
+        filename = project.git_ontology_path or os.path.basename(project.source_file_path)
 
         # Prefer loading from git if available
         if git is not None and git.repository_exists(project_id):
@@ -518,15 +636,9 @@ async def get_file_at_revision(
             detail="No revision history found for this project",
         )
 
-    # Try to determine the filename from the project's source_file_path
-    if project.source_file_path and filename == "ontology.ttl":
-        # Extract the actual filename
-        import os
-
-        actual_filename = os.path.basename(project.source_file_path)
-        # Use the stored filename pattern (e.g., ontology.ttl)
-        if actual_filename.startswith("ontology."):
-            filename = actual_filename
+    # Map the default filename to the actual path in the git repo
+    if project.git_ontology_path and filename == "ontology.ttl":
+        filename = project.git_ontology_path
 
     try:
         content = git.get_file_at_version(project_id, filename, version)
@@ -658,7 +770,9 @@ async def list_branches(
 
         # Permission logic
         has_delete_permission = is_privileged or (
-            user_role == "editor" and user is not None and meta is not None
+            user_role == "editor"
+            and user is not None
+            and meta is not None
             and meta.created_by_id == user.id
         )
 
@@ -973,10 +1087,10 @@ async def save_source_content(
     # Resolve branch from query param or default
     current_branch = branch or git.get_default_branch(project_id)
 
-    # Extract filename from source_file_path
+    # Extract filename from git_ontology_path or source_file_path
     import os
 
-    filename = os.path.basename(project.source_file_path)
+    filename = project.git_ontology_path or os.path.basename(project.source_file_path)
 
     # Convert content to bytes
     content_bytes = data.content.encode("utf-8")

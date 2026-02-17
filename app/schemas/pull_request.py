@@ -238,6 +238,8 @@ class GitHubIntegrationCreate(BaseModel):
     repo_name: str = Field(..., min_length=1, max_length=255)
     default_branch: str = Field(default="main", min_length=1, max_length=255)
     webhooks_enabled: bool = False
+    ontology_file_path: str | None = Field(None, max_length=500)
+    turtle_file_path: str | None = Field(None, max_length=500)
 
 
 class GitHubIntegrationUpdate(BaseModel):
@@ -246,6 +248,8 @@ class GitHubIntegrationUpdate(BaseModel):
     default_branch: str | None = Field(None, min_length=1, max_length=255)
     sync_enabled: bool | None = None
     webhooks_enabled: bool | None = None
+    ontology_file_path: str | None = Field(None, max_length=500)
+    turtle_file_path: str | None = Field(None, max_length=500)
 
 
 class GitHubIntegrationResponse(BaseModel):
@@ -259,7 +263,11 @@ class GitHubIntegrationResponse(BaseModel):
     connected_by_user_id: str | None = None
     webhooks_enabled: bool = False
     default_branch: str
+    ontology_file_path: str | None = None
+    turtle_file_path: str | None = None
     sync_enabled: bool
+    sync_status: str = "idle"
+    sync_error: str | None = None
     last_sync_at: datetime | None = None
     created_at: datetime
     updated_at: datetime | None = None
@@ -390,3 +398,34 @@ class SemanticDiffResponse(BaseModel):
     removed: list[TripleChange]
     total_added: int
     total_removed: int
+
+
+# GitHub project creation schemas
+
+
+class ProjectCreateFromGitHub(BaseModel):
+    """Schema for creating a project from a GitHub repository."""
+
+    repo_owner: str = Field(..., min_length=1, max_length=255)
+    repo_name: str = Field(..., min_length=1, max_length=255)
+    ontology_file_path: str = Field(..., min_length=1, max_length=500)
+    turtle_file_path: str | None = Field(None, max_length=500)
+    is_public: bool = False
+    name: str | None = Field(None, max_length=255)
+    description: str | None = None
+    default_branch: str | None = None
+
+
+class GitHubRepoFileInfo(BaseModel):
+    """Information about a file in a GitHub repository."""
+
+    path: str
+    name: str
+    size: int
+
+
+class GitHubRepoFilesResponse(BaseModel):
+    """Response containing ontology files found in a GitHub repository."""
+
+    items: list[GitHubRepoFileInfo]
+    total: int

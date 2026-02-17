@@ -33,6 +33,7 @@ from app.services.storage import StorageService, StorageError
 # Map file extensions to RDF formats
 FORMAT_MAP = {
     ".owl": "xml",
+    ".owx": "xml",
     ".rdf": "xml",
     ".xml": "xml",
     ".ttl": "turtle",

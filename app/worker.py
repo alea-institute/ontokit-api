@@ -11,8 +11,13 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.core.config import settings
+from app.core.encryption import decrypt_token
+from app.git.bare_repository import BareGitRepositoryService
 from app.models.lint import LintIssue, LintRun, LintRunStatus
 from app.models.project import Project
+from app.models.pull_request import GitHubIntegration
+from app.models.user_github_token import UserGitHubToken
+from app.services.github_sync import sync_github_project
 from app.services.linter import LintResult, get_linter
 from app.services.normalization_service import NormalizationService
 from app.services.ontology import get_ontology_service
@@ -47,9 +52,7 @@ async def run_lint_task(
 
     try:
         # Verify project exists and get its details
-        result = await db.execute(
-            select(Project).where(Project.id == project_uuid)
-        )
+        result = await db.execute(select(Project).where(Project.id == project_uuid))
         project = result.scalar_one_or_none()
 
         if not project:
@@ -168,9 +171,7 @@ async def check_normalization_status_task(
 
     try:
         # Verify project exists
-        result = await db.execute(
-            select(Project).where(Project.id == project_uuid)
-        )
+        result = await db.execute(select(Project).where(Project.id == project_uuid))
         project = result.scalar_one_or_none()
 
         if not project:
@@ -254,9 +255,7 @@ async def run_normalization_task(
         )
 
         # Get project
-        result = await db.execute(
-            select(Project).where(Project.id == project_uuid)
-        )
+        result = await db.execute(select(Project).where(Project.id == project_uuid))
         project = result.scalar_one_or_none()
 
         if not project:
@@ -335,9 +334,7 @@ async def check_all_projects_normalization(ctx: dict[str, Any]) -> dict[str, Any
 
     try:
         # Get all projects with ontology files
-        result = await db.execute(
-            select(Project).where(Project.source_file_path.isnot(None))
-        )
+        result = await db.execute(select(Project).where(Project.source_file_path.isnot(None)))
         projects = result.scalars().all()
 
         storage = get_storage_service()
@@ -358,9 +355,7 @@ async def check_all_projects_normalization(ctx: dict[str, Any]) -> dict[str, Any
                         f'"needs_normalization": true}}',
                     )
             except Exception as e:
-                logger.warning(
-                    f"Failed to check normalization for project {project.id}: {e}"
-                )
+                logger.warning(f"Failed to check normalization for project {project.id}: {e}")
 
         logger.info(
             f"Normalization check complete: {len(projects_needing_normalization)} of "
@@ -375,6 +370,76 @@ async def check_all_projects_normalization(ctx: dict[str, Any]) -> dict[str, Any
 
     except Exception as e:
         logger.exception(f"All projects normalization check failed: {e}")
+        raise
+
+
+async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Periodic task: pull from remote + push local commits for all GitHub-connected projects."""
+    db: AsyncSession = ctx["db"]
+
+    try:
+        # Get all integrations with sync_enabled=True and sync_status != "conflict"
+        result = await db.execute(
+            select(GitHubIntegration).where(
+                GitHubIntegration.sync_enabled == True,  # noqa: E712
+                GitHubIntegration.sync_status != "conflict",
+            )
+        )
+        integrations = result.scalars().all()
+
+        git_service = BareGitRepositoryService()
+        synced = 0
+        errors = 0
+
+        for integration in integrations:
+            # Resolve PAT from connected_by_user_id
+            if not integration.connected_by_user_id:
+                logger.debug(
+                    f"Skipping sync for project {integration.project_id}: no connected_by_user_id"
+                )
+                continue
+
+            token_result = await db.execute(
+                select(UserGitHubToken).where(
+                    UserGitHubToken.user_id == integration.connected_by_user_id
+                )
+            )
+            token_row = token_result.scalar_one_or_none()
+            if not token_row:
+                logger.warning(
+                    f"Skipping sync for project {integration.project_id}: "
+                    f"no GitHub token for user {integration.connected_by_user_id}"
+                )
+                continue
+
+            try:
+                pat = decrypt_token(token_row.encrypted_token)
+            except Exception:
+                logger.warning(
+                    f"Skipping sync for project {integration.project_id}: failed to decrypt token"
+                )
+                continue
+
+            try:
+                sync_result = await sync_github_project(integration, pat, git_service, db)
+                logger.info(f"Synced project {integration.project_id}: {sync_result}")
+                synced += 1
+            except Exception as e:
+                logger.exception(f"Failed to sync project {integration.project_id}: {e}")
+                errors += 1
+
+        logger.info(
+            f"GitHub sync complete: {synced} synced, {errors} errors, {len(integrations)} total"
+        )
+
+        return {
+            "total": len(integrations),
+            "synced": synced,
+            "errors": errors,
+        }
+
+    except Exception as e:
+        logger.exception(f"GitHub sync cron job failed: {e}")
         raise
 
 
@@ -455,6 +520,7 @@ class WorkerSettings:
         check_normalization_status_task,
         run_normalization_task,
         check_all_projects_normalization,
+        sync_github_projects,
     ]
     redis_settings = get_redis_settings()
 
@@ -463,9 +529,16 @@ class WorkerSettings:
     on_job_start = on_job_start
     on_job_end = on_job_end
 
-    # Cron jobs - run normalization check every hour
+    # Cron jobs
     cron_jobs = [
+        # Normalization check every hour
         cron(check_all_projects_normalization, hour=None, minute=0),
+        # GitHub sync every 5 minutes
+        cron(
+            sync_github_projects,
+            hour=None,
+            minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+        ),
     ]
 
     # Job settings

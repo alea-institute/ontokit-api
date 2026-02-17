@@ -1,5 +1,6 @@
 """Project service for managing projects and members."""
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -13,6 +14,7 @@ from sqlalchemy.orm import selectinload
 from app.core.auth import CurrentUser
 from app.git import GitRepositoryService, get_git_service
 from app.models.project import Project, ProjectMember
+from app.models.pull_request import GitHubIntegration
 from app.schemas.project import (
     MemberCreate,
     MemberListResponse,
@@ -198,6 +200,150 @@ class ProjectService:
         except Exception as e:
             # Log the error but don't fail the import - git is supplementary
             logger.warning(f"Failed to initialize git repository for project {db_project.id}: {e}")
+
+        return self._to_import_response(db_project, owner, file_path)
+
+    async def create_from_github(
+        self,
+        file_content: bytes,
+        filename: str,
+        repo_owner: str,
+        repo_name: str,
+        ontology_file_path: str,
+        default_branch: str,
+        is_public: bool,
+        owner: CurrentUser,
+        storage: StorageService,
+        github_token: str,
+        name_override: str | None = None,
+        description_override: str | None = None,
+        turtle_file_path: str | None = None,
+    ) -> ProjectImportResponse:
+        """
+        Create a project from a GitHub repository.
+
+        This method:
+        1. Parses the ontology file content fetched from GitHub
+        2. Normalizes to Turtle format
+        3. Creates DB records (Project, ProjectMember, GitHubIntegration)
+        4. Uploads to MinIO
+        5. Clones the entire repo as a bare git repo in background
+
+        Args:
+            file_content: Raw ontology file bytes from GitHub
+            filename: The ontology filename (basename from the path)
+            repo_owner: GitHub repo owner
+            repo_name: GitHub repo name
+            ontology_file_path: Path to ontology file within the repo
+            default_branch: Default branch of the GitHub repo
+            is_public: Whether the project should be public
+            owner: The user creating the project
+            storage: Storage service for file upload
+            github_token: GitHub PAT for cloning
+            name_override: Optional name override
+            description_override: Optional description override
+
+        Returns:
+            ProjectImportResponse with project info and file path
+        """
+        extractor = OntologyMetadataExtractor()
+
+        # Extract metadata
+        try:
+            metadata = extractor.extract_metadata(file_content, filename)
+        except UnsupportedFormatError as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=str(e),
+            ) from e
+        except OntologyParseError as e:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(e),
+            ) from e
+
+        # Normalize to Turtle
+        normalization_report_json: str | None = None
+        try:
+            normalized_content, normalization_report = extractor.normalize_to_turtle(
+                file_content, filename, use_canonical=False
+            )
+            normalization_report_json = json.dumps(normalization_report.to_dict())
+        except (UnsupportedFormatError, OntologyParseError) as e:
+            logger.warning(f"Failed to normalize ontology to Turtle: {e}")
+            normalized_content = file_content
+
+        # Determine project name
+        project_name = name_override or metadata.title or Path(filename).stem
+        project_description = description_override or metadata.description
+
+        # Create project in database
+        db_project = Project(
+            name=project_name,
+            description=project_description,
+            is_public=is_public,
+            owner_id=owner.id,
+            ontology_iri=metadata.ontology_iri,
+            normalization_report=normalization_report_json,
+        )
+        self.db.add(db_project)
+        await self.db.flush()
+
+        # Add owner as member
+        owner_member = ProjectMember(
+            project_id=db_project.id,
+            user_id=owner.id,
+            role="owner",
+        )
+        self.db.add(owner_member)
+
+        # Create GitHub integration
+        integration = GitHubIntegration(
+            project_id=db_project.id,
+            repo_owner=repo_owner,
+            repo_name=repo_name,
+            default_branch=default_branch,
+            ontology_file_path=ontology_file_path,
+            turtle_file_path=turtle_file_path,
+            sync_enabled=True,
+            sync_status="idle",
+            connected_by_user_id=owner.id,
+        )
+        self.db.add(integration)
+
+        # Upload to MinIO
+        object_name = f"projects/{db_project.id}/ontology.ttl"
+        content_type = "text/turtle"
+        try:
+            file_path = await storage.upload_file(object_name, normalized_content, content_type)
+        except StorageError as e:
+            await self.db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Failed to store file: {e}",
+            ) from e
+
+        db_project.source_file_path = file_path
+
+        await self.db.commit()
+        await self.db.refresh(db_project)
+        await self.db.refresh(db_project, ["members"])
+
+        # Clone the entire repo as bare git in a background thread
+        repo_url = f"https://github.com/{repo_owner}/{repo_name}.git"
+        try:
+            await asyncio.to_thread(
+                self.git_service.clone_from_github,
+                db_project.id,
+                repo_url,
+                github_token,
+            )
+            logger.info(f"Cloned GitHub repo {repo_owner}/{repo_name} for project {db_project.id}")
+        except Exception as e:
+            logger.warning(
+                f"Failed to clone GitHub repo for project {db_project.id}: {e}. "
+                "Project was created successfully with MinIO storage."
+            )
 
         return self._to_import_response(db_project, owner, file_path)
 
@@ -672,7 +818,9 @@ class ProjectService:
     async def _get_project(self, project_id: UUID) -> Project:
         """Get a project by ID or raise 404."""
         result = await self.db.execute(
-            select(Project).options(selectinload(Project.members)).where(Project.id == project_id)
+            select(Project)
+            .options(selectinload(Project.members), selectinload(Project.github_integration))
+            .where(Project.id == project_id)
         )
         project = result.scalar_one_or_none()
 
@@ -729,6 +877,18 @@ class ProjectService:
             except (json.JSONDecodeError, TypeError):
                 norm_report = None
 
+        # Compute git_ontology_path: the actual file path within the git repo
+        git_ontology_path: str | None = None
+        if project.github_integration:
+            git_ontology_path = (
+                project.github_integration.turtle_file_path
+                or project.github_integration.ontology_file_path
+            )
+        elif project.source_file_path:
+            import os
+
+            git_ontology_path = os.path.basename(project.source_file_path)
+
         return ProjectResponse(
             id=project.id,
             name=project.name,
@@ -742,6 +902,7 @@ class ProjectService:
             user_role=user_role,
             is_superadmin=user.is_superadmin if user else False,
             source_file_path=project.source_file_path,
+            git_ontology_path=git_ontology_path,
             ontology_iri=project.ontology_iri,
             label_preferences=label_prefs,
             normalization_report=norm_report,
