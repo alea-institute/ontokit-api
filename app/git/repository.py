@@ -1,5 +1,6 @@
 """Git repository operations for ontology versioning."""
 
+import contextlib
 import shutil
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -303,11 +304,9 @@ class OntologyRepository:
             # Calculate ahead/behind relative to default branch
             if branch.name != default_branch:
                 try:
-                    default_commit = self.repo.branches[default_branch].commit
+                    _ = self.repo.branches[default_branch].commit
                     # Commits ahead: commits in branch not in default
-                    ahead_commits = list(
-                        self.repo.iter_commits(f"{default_branch}..{branch.name}")
-                    )
+                    ahead_commits = list(self.repo.iter_commits(f"{default_branch}..{branch.name}"))
                     commits_ahead = len(ahead_commits)
                     # Commits behind: commits in default not in branch
                     behind_commits = list(
@@ -375,13 +374,9 @@ class OntologyRepository:
         commits_behind = 0
         if name != default_branch:
             try:
-                ahead_commits = list(
-                    self.repo.iter_commits(f"{default_branch}..{name}")
-                )
+                ahead_commits = list(self.repo.iter_commits(f"{default_branch}..{name}"))
                 commits_ahead = len(ahead_commits)
-                behind_commits = list(
-                    self.repo.iter_commits(f"{name}..{default_branch}")
-                )
+                behind_commits = list(self.repo.iter_commits(f"{name}..{default_branch}"))
                 commits_behind = len(behind_commits)
             except GitCommandError:
                 pass
@@ -483,7 +478,9 @@ class OntologyRepository:
 
                 # Update author if provided
                 if author:
-                    self.repo.git.commit(amend=True, author=f"{author.name} <{author.email}>", no_edit=True)
+                    self.repo.git.commit(
+                        amend=True, author=f"{author.name} <{author.email}>", no_edit=True
+                    )
                     merge_commit = self.repo.head.commit
 
                 return MergeResult(
@@ -492,7 +489,7 @@ class OntologyRepository:
                     merge_commit_hash=merge_commit.hexsha,
                 )
 
-            except GitCommandError as e:
+            except GitCommandError:
                 # Merge conflict
                 conflicts = self.repo.index.unmerged_blobs().keys()
                 # Abort the merge
@@ -507,14 +504,10 @@ class OntologyRepository:
         finally:
             # Restore original branch if different
             if self.get_current_branch() != original_branch:
-                try:
+                with contextlib.suppress(GitCommandError, KeyError):
                     self.repo.branches[original_branch].checkout()
-                except (GitCommandError, KeyError):
-                    pass
 
-    def get_commits_between(
-        self, from_ref: str, to_ref: str = "HEAD"
-    ) -> list[CommitInfo]:
+    def get_commits_between(self, from_ref: str, to_ref: str = "HEAD") -> list[CommitInfo]:
         """
         Get commits between two references.
 
@@ -603,9 +596,7 @@ class OntologyRepository:
             for remote in self.repo.remotes
         ]
 
-    def push(
-        self, remote: str = "origin", branch: str | None = None, force: bool = False
-    ) -> bool:
+    def push(self, remote: str = "origin", branch: str | None = None, force: bool = False) -> bool:
         """
         Push to a remote repository.
 
@@ -795,9 +786,7 @@ class GitRepositoryService:
         repo = self.get_repository(project_id)
         return repo.get_history(limit=limit, all_branches=all_branches)
 
-    def get_file_at_version(
-        self, project_id: UUID, filename: str, version: str
-    ) -> str:
+    def get_file_at_version(self, project_id: UUID, filename: str, version: str) -> str:
         """
         Get ontology file content at a specific version.
 
@@ -870,9 +859,7 @@ class GitRepositoryService:
         repo = self.get_repository(project_id)
         return repo.list_branches()
 
-    def create_branch(
-        self, project_id: UUID, name: str, from_ref: str = "HEAD"
-    ) -> BranchInfo:
+    def create_branch(self, project_id: UUID, name: str, from_ref: str = "HEAD") -> BranchInfo:
         """
         Create a new branch for a project.
 
@@ -901,9 +888,7 @@ class GitRepositoryService:
         repo = self.get_repository(project_id)
         return repo.switch_branch(name)
 
-    def delete_branch(
-        self, project_id: UUID, name: str, force: bool = False
-    ) -> bool:
+    def delete_branch(self, project_id: UUID, name: str, force: bool = False) -> bool:
         """
         Delete a branch for a project.
 
@@ -1009,16 +994,12 @@ class GitRepositoryService:
         finally:
             # Restore original branch if different
             if original_branch != branch_name:
-                try:
+                with contextlib.suppress(GitCommandError, KeyError):
                     repo.switch_branch(original_branch)
-                except (GitCommandError, KeyError):
-                    pass
 
     # Remote operations
 
-    def setup_remote(
-        self, project_id: UUID, remote_url: str, remote_name: str = "origin"
-    ) -> bool:
+    def setup_remote(self, project_id: UUID, remote_url: str, remote_name: str = "origin") -> bool:
         """
         Setup a remote for a project.
 
@@ -1119,13 +1100,9 @@ def semantic_diff(old_graph: Graph, new_graph: Graph) -> dict[str, Any]:
     in_both, in_old, in_new = graph_diff(old_graph, new_graph)
 
     return {
-        "added": [
-            {"subject": str(s), "predicate": str(p), "object": str(o)}
-            for s, p, o in in_new
-        ],
+        "added": [{"subject": str(s), "predicate": str(p), "object": str(o)} for s, p, o in in_new],
         "removed": [
-            {"subject": str(s), "predicate": str(p), "object": str(o)}
-            for s, p, o in in_old
+            {"subject": str(s), "predicate": str(p), "object": str(o)} for s, p, o in in_old
         ],
         "added_count": len(in_new),
         "removed_count": len(in_old),

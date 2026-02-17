@@ -7,7 +7,7 @@ without the limitations of working directory-based operations.
 
 import shutil
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -182,7 +182,7 @@ class BareOntologyRepository:
             message=commit.message.strip(),
             author_name=commit.author.name,
             author_email=commit.author.email,
-            timestamp=datetime.fromtimestamp(commit.commit_time, tz=timezone.utc).isoformat(),
+            timestamp=datetime.fromtimestamp(commit.commit_time, tz=UTC).isoformat(),
             is_merge=is_merge,
             merged_branch=merged_branch,
             parent_hashes=[str(p.id) for p in commit.parents],
@@ -372,11 +372,9 @@ class BareOntologyRepository:
                     target = self.repo.head.target
 
                 commit_iter = []
-                count = 0
-                for commit in self.repo.walk(target, pygit2.GIT_SORT_TIME):
+                for count, commit in enumerate(self.repo.walk(target, pygit2.GIT_SORT_TIME)):
                     commit_iter.append(commit)
-                    count += 1
-                    if count >= limit:
+                    if count + 1 >= limit:
                         break
 
             for commit in commit_iter:
@@ -534,7 +532,7 @@ class BareOntologyRepository:
                     is_default=branch_name == default_branch,
                     commit_hash=str(commit.id),
                     commit_message=commit.message.strip().split("\n")[0],
-                    commit_date=datetime.fromtimestamp(commit.commit_time, tz=timezone.utc),
+                    commit_date=datetime.fromtimestamp(commit.commit_time, tz=UTC),
                     commits_ahead=commits_ahead,
                     commits_behind=commits_behind,
                 )
@@ -565,7 +563,7 @@ class BareOntologyRepository:
             is_default=False,
             commit_hash=str(commit.id),
             commit_message=commit.message.strip().split("\n")[0],
-            commit_date=datetime.fromtimestamp(commit.commit_time, tz=timezone.utc),
+            commit_date=datetime.fromtimestamp(commit.commit_time, tz=UTC),
         )
 
     def delete_branch(self, name: str, force: bool = False) -> bool:
@@ -660,11 +658,11 @@ class BareOntologyRepository:
         if merge_index.conflicts:
             # Merge conflicts
             conflict_paths = list(
-                set(
+                {
                     entry[0].path if entry[0] else entry[1].path if entry[1] else entry[2].path
                     for entry in merge_index.conflicts
                     if any(entry)
-                )
+                }
             )
             return MergeResult(
                 success=False,

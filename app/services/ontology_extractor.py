@@ -233,9 +233,7 @@ class OntologyMetadataExtractor:
         # Parse the normalized output to get actual prefixes used
         normalized_graph = Graph()
         normalized_graph.parse(data=normalized, format="turtle")
-        prefixes_after = sorted(
-            [prefix for prefix, _ in normalized_graph.namespaces() if prefix]
-        )
+        prefixes_after = sorted([prefix for prefix, _ in normalized_graph.namespaces() if prefix])
 
         # Calculate prefix changes
         prefixes_before_set = set(prefixes_before)
@@ -251,14 +249,11 @@ class OntologyMetadataExtractor:
 
         if prefixes_removed:
             notes.append(
-                f"Removed {len(prefixes_removed)} unused prefix(es): "
-                f"{', '.join(prefixes_removed)}"
+                f"Removed {len(prefixes_removed)} unused prefix(es): {', '.join(prefixes_removed)}"
             )
 
         if prefixes_added:
-            notes.append(
-                f"Added {len(prefixes_added)} prefix(es): {', '.join(prefixes_added)}"
-            )
+            notes.append(f"Added {len(prefixes_added)} prefix(es): {', '.join(prefixes_added)}")
 
         size_diff = len(normalized) - len(content)
         if size_diff < 0:
@@ -315,7 +310,9 @@ class OntologyMetadataExtractor:
             # Always needs normalization if not already Turtle
             if rdf_format != "turtle":
                 # Skip canonical for status check (faster), just report format conversion needed
-                normalized, report = self.normalize_to_turtle(content, filename, use_canonical=False)
+                normalized, report = self.normalize_to_turtle(
+                    content, filename, use_canonical=False
+                )
                 return True, report
 
             # For Turtle files, just do a byte comparison
@@ -567,9 +564,7 @@ class OntologyMetadataUpdater:
         # Find ontology IRI
         ontology_iri = self._find_ontology_iri(graph)
         if ontology_iri is None:
-            raise OntologyParseError(
-                "Cannot update metadata: no owl:Ontology declaration found"
-            )
+            raise OntologyParseError("Cannot update metadata: no owl:Ontology declaration found")
 
         changes: list[str] = []
 
@@ -589,9 +584,7 @@ class OntologyMetadataUpdater:
                         )
                     )
                 else:
-                    graph.add(
-                        (ontology_iri, title_prop.property_uri, Literal(new_title))
-                    )
+                    graph.add((ontology_iri, title_prop.property_uri, Literal(new_title)))
                 old_val = title_prop.current_value or "(empty)"
                 changes.append(f'Title ({title_prop.property_curie}): "{old_val}" → "{new_title}"')
             else:
@@ -616,9 +609,7 @@ class OntologyMetadataUpdater:
                         )
                     )
                 else:
-                    graph.add(
-                        (ontology_iri, desc_prop.property_uri, Literal(new_description))
-                    )
+                    graph.add((ontology_iri, desc_prop.property_uri, Literal(new_description)))
                 old_val = desc_prop.current_value
                 if old_val and len(old_val) > 50:
                     old_val = old_val[:50] + "..."

@@ -2,7 +2,7 @@
 
 import logging
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -13,9 +13,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.core.auth import CurrentUser
+from app.core.encryption import decrypt_token
 from app.git import GitRepositoryService, get_git_service
 from app.models.branch_metadata import BranchMetadata
-from app.models.project import Project, ProjectMember
+from app.models.project import Project
 from app.models.pull_request import (
     GitHubIntegration,
     PRStatus,
@@ -24,6 +25,7 @@ from app.models.pull_request import (
     PullRequestReview,
     ReviewStatus,
 )
+from app.models.user_github_token import UserGitHubToken
 from app.schemas.project import ProjectRole
 from app.schemas.pull_request import (
     BranchCreate,
@@ -53,8 +55,6 @@ from app.schemas.pull_request import (
     ReviewListResponse,
     ReviewResponse,
 )
-from app.core.encryption import decrypt_token
-from app.models.user_github_token import UserGitHubToken
 from app.services.github_service import GitHubService, get_github_service
 from app.services.user_service import UserService, get_user_service
 
@@ -93,10 +93,13 @@ class PullRequestService:
         # Build a map of merge commits by source branch name
         merge_commits_by_branch: dict[str, Any] = {}
         for commit in history:
-            if commit.is_merge and commit.merged_branch:
+            if (
+                commit.is_merge
+                and commit.merged_branch
+                and commit.merged_branch not in merge_commits_by_branch
+            ):
                 # Only keep the most recent merge for each branch
-                if commit.merged_branch not in merge_commits_by_branch:
-                    merge_commits_by_branch[commit.merged_branch] = commit
+                merge_commits_by_branch[commit.merged_branch] = commit
 
         # Get all existing merged PRs for this project
         result = await self.db.execute(
@@ -119,8 +122,12 @@ class PullRequestService:
                 commit = merge_commits_by_branch[source_branch]
 
                 # Extract commit hashes from merge commit parents
-                base_commit_hash = commit.parent_hashes[0] if len(commit.parent_hashes) > 0 else None
-                head_commit_hash = commit.parent_hashes[1] if len(commit.parent_hashes) > 1 else None
+                base_commit_hash = (
+                    commit.parent_hashes[0] if len(commit.parent_hashes) > 0 else None
+                )
+                head_commit_hash = (
+                    commit.parent_hashes[1] if len(commit.parent_hashes) > 1 else None
+                )
 
                 # Update PR with commit hashes
                 if not pr.merge_commit_hash:
@@ -144,9 +151,7 @@ class PullRequestService:
 
         # Get max PR number for creating new PRs
         max_number_result = await self.db.execute(
-            select(func.max(PullRequest.pr_number)).where(
-                PullRequest.project_id == project_id
-            )
+            select(func.max(PullRequest.pr_number)).where(PullRequest.project_id == project_id)
         )
         next_pr_number = (max_number_result.scalar() or 0) + 1
 
@@ -161,7 +166,7 @@ class PullRequestService:
             try:
                 merged_at = datetime.fromisoformat(commit.timestamp.replace("Z", "+00:00"))
             except (ValueError, AttributeError):
-                merged_at = datetime.now(timezone.utc)
+                merged_at = datetime.now(UTC)
 
             # Extract commit hashes from merge commit parents
             base_commit_hash = commit.parent_hashes[0] if len(commit.parent_hashes) > 0 else None
@@ -239,9 +244,7 @@ class PullRequestService:
 
         # Get next PR number for this project
         max_number_result = await self.db.execute(
-            select(func.max(PullRequest.pr_number)).where(
-                PullRequest.project_id == project_id
-            )
+            select(func.max(PullRequest.pr_number)).where(PullRequest.project_id == project_id)
         )
         max_number = max_number_result.scalar() or 0
         pr_number = max_number + 1
@@ -511,9 +514,7 @@ class PullRequestService:
             )
 
         # Check approval requirements
-        approval_count = sum(
-            1 for r in pr.reviews if r.status == ReviewStatus.APPROVED.value
-        )
+        approval_count = sum(1 for r in pr.reviews if r.status == ReviewStatus.APPROVED.value)
         if approval_count < project.pr_approval_required:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -532,7 +533,9 @@ class PullRequestService:
             head_commit_hash = branch_map[pr.source_branch].commit_hash
 
         # Perform merge in local git
-        merge_message = merge_request.merge_message or f"Merge pull request #{pr_number}: {pr.title}"
+        merge_message = (
+            merge_request.merge_message or f"Merge pull request #{pr_number}: {pr.title}"
+        )
         merge_result = self.git_service.merge_branch(
             project_id=project_id,
             source=pr.source_branch,
@@ -551,7 +554,7 @@ class PullRequestService:
         # Update PR status and store commit hashes
         pr.status = PRStatus.MERGED.value
         pr.merged_by = user.id
-        pr.merged_at = datetime.now(timezone.utc)
+        pr.merged_at = datetime.now(UTC)
         pr.merge_commit_hash = merge_result.merge_commit_hash
         pr.base_commit_hash = base_commit_hash
         pr.head_commit_hash = head_commit_hash
@@ -606,12 +609,14 @@ class PullRequestService:
 
         # Only admin or owner can approve or request changes
         user_role = self._get_user_role(project, user)
-        if review_create.status in ("approved", "changes_requested"):
-            if user_role not in ("owner", "admin"):
-                raise HTTPException(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    detail="Only admins and owners can approve or request changes",
-                )
+        if review_create.status in ("approved", "changes_requested") and user_role not in (
+            "owner",
+            "admin",
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only admins and owners can approve or request changes",
+            )
 
         if pr.status != PRStatus.OPEN.value:
             raise HTTPException(
@@ -774,7 +779,7 @@ class PullRequestService:
         user: CurrentUser,
     ) -> CommentResponse:
         """Update a comment."""
-        project = await self._get_project(project_id)
+        await self._get_project(project_id)
         pr = await self._get_pr(project_id, pr_number)
 
         result = await self.db.execute(
@@ -840,9 +845,7 @@ class PullRequestService:
 
     # Branches
 
-    async def list_branches(
-        self, project_id: UUID, user: CurrentUser | None
-    ) -> BranchListResponse:
+    async def list_branches(self, project_id: UUID, user: CurrentUser | None) -> BranchListResponse:
         """List branches for a project."""
         project = await self._get_project(project_id)
 
@@ -889,9 +892,7 @@ class PullRequestService:
                 detail="Only editors and above can create branches",
             )
 
-        from_branch = branch_create.from_branch or self.git_service.get_current_branch(
-            project_id
-        )
+        from_branch = branch_create.from_branch or self.git_service.get_current_branch(project_id)
 
         try:
             branch_info = self.git_service.create_branch(
@@ -929,11 +930,11 @@ class PullRequestService:
 
         try:
             branch_info = self.git_service.switch_branch(project_id, branch_name)
-        except KeyError:
+        except KeyError as e:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"Branch '{branch_name}' not found",
-            )
+            ) from e
         except Exception as e:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -1036,7 +1037,7 @@ class PullRequestService:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Cannot compute diff: {e}",
-            )
+            ) from e
 
         # Map change types
         change_type_map = {
@@ -1112,9 +1113,7 @@ class PullRequestService:
             )
 
         # Generate webhook secret only if webhooks are enabled
-        webhook_secret = (
-            secrets.token_urlsafe(32) if integration_create.webhooks_enabled else None
-        )
+        webhook_secret = secrets.token_urlsafe(32) if integration_create.webhooks_enabled else None
 
         # Create integration
         db_integration = GitHubIntegration(
@@ -1130,7 +1129,9 @@ class PullRequestService:
         self.db.add(db_integration)
 
         # Setup remote in git repository
-        remote_url = f"https://github.com/{integration_create.repo_owner}/{integration_create.repo_name}.git"
+        remote_url = (
+            f"https://github.com/{integration_create.repo_owner}/{integration_create.repo_name}.git"
+        )
         self.git_service.setup_remote(project_id, remote_url)
 
         await self.db.commit()
@@ -1175,9 +1176,7 @@ class PullRequestService:
 
         return self._to_github_integration_response(integration)
 
-    async def delete_github_integration(
-        self, project_id: UUID, user: CurrentUser
-    ) -> None:
+    async def delete_github_integration(self, project_id: UUID, user: CurrentUser) -> None:
         """Delete GitHub integration for a project."""
         project = await self._get_project(project_id)
 
@@ -1199,9 +1198,7 @@ class PullRequestService:
 
     # PR Settings
 
-    async def get_pr_settings(
-        self, project_id: UUID, user: CurrentUser
-    ) -> PRSettingsResponse:
+    async def get_pr_settings(self, project_id: UUID, user: CurrentUser) -> PRSettingsResponse:
         """Get PR workflow settings for a project."""
         project = await self._get_project(project_id)
         user_role = self._get_user_role(project, user)
@@ -1213,9 +1210,7 @@ class PullRequestService:
             )
 
         integration = await self._get_github_integration(project_id)
-        github_resp = (
-            self._to_github_integration_response(integration) if integration else None
-        )
+        github_resp = self._to_github_integration_response(integration) if integration else None
 
         return PRSettingsResponse(
             pr_approval_required=project.pr_approval_required,
@@ -1243,9 +1238,7 @@ class PullRequestService:
         await self.db.refresh(project)
 
         integration = await self._get_github_integration(project_id)
-        github_resp = (
-            self._to_github_integration_response(integration) if integration else None
-        )
+        github_resp = self._to_github_integration_response(integration) if integration else None
 
         return PRSettingsResponse(
             pr_approval_required=project.pr_approval_required,
@@ -1277,7 +1270,7 @@ class PullRequestService:
             if pr:
                 if pr_data.get("merged"):
                     pr.status = PRStatus.MERGED.value
-                    pr.merged_at = datetime.now(timezone.utc)
+                    pr.merged_at = datetime.now(UTC)
                 else:
                     pr.status = PRStatus.CLOSED.value
                 await self.db.commit()
@@ -1287,11 +1280,10 @@ class PullRequestService:
                 pr.status = PRStatus.OPEN.value
                 await self.db.commit()
 
-        elif action == "edited":
-            if pr:
-                pr.title = pr_data["title"]
-                pr.description = pr_data.get("body")
-                await self.db.commit()
+        elif action == "edited" and pr:
+            pr.title = pr_data["title"]
+            pr.description = pr_data.get("body")
+            await self.db.commit()
 
     async def handle_github_review_webhook(
         self, project_id: UUID, action: str, review_data: dict[str, Any], pr_data: dict[str, Any]
@@ -1320,9 +1312,7 @@ class PullRequestService:
 
         # Check if review already exists
         existing = await self.db.execute(
-            select(PullRequestReview).where(
-                PullRequestReview.github_review_id == github_review_id
-            )
+            select(PullRequestReview).where(PullRequestReview.github_review_id == github_review_id)
         )
         if existing.scalar_one_or_none():
             return
@@ -1347,7 +1337,10 @@ class PullRequestService:
         await self.db.commit()
 
     async def handle_github_push_webhook(
-        self, project_id: UUID, ref: str, commits: list[dict[str, Any]]
+        self,
+        project_id: UUID,
+        ref: str,
+        commits: list[dict[str, Any]],  # noqa: ARG002
     ) -> None:
         """Handle GitHub push webhook events."""
         integration = await self._get_github_integration(project_id)
@@ -1360,10 +1353,8 @@ class PullRequestService:
 
         # Pull latest changes
         try:
-            self.git_service.pull_branch(
-                project_id, integration.default_branch, "origin"
-            )
-            integration.last_sync_at = datetime.now(timezone.utc)
+            self.git_service.pull_branch(project_id, integration.default_branch, "origin")
+            integration.last_sync_at = datetime.now(UTC)
             await self.db.commit()
         except Exception as e:
             logger.warning(f"Failed to pull from GitHub: {e}")
@@ -1373,9 +1364,7 @@ class PullRequestService:
     async def _get_project(self, project_id: UUID) -> Project:
         """Get a project by ID or raise 404."""
         result = await self.db.execute(
-            select(Project)
-            .options(selectinload(Project.members))
-            .where(Project.id == project_id)
+            select(Project).options(selectinload(Project.members)).where(Project.id == project_id)
         )
         project = result.scalar_one_or_none()
 
@@ -1408,18 +1397,14 @@ class PullRequestService:
 
         return pr
 
-    async def _get_github_integration(
-        self, project_id: UUID
-    ) -> GitHubIntegration | None:
+    async def _get_github_integration(self, project_id: UUID) -> GitHubIntegration | None:
         """Get GitHub integration for a project."""
         result = await self.db.execute(
             select(GitHubIntegration).where(GitHubIntegration.project_id == project_id)
         )
         return result.scalar_one_or_none()
 
-    async def _get_github_token(
-        self, project_id: UUID
-    ) -> tuple[GitHubIntegration, str] | None:
+    async def _get_github_token(self, project_id: UUID) -> tuple[GitHubIntegration, str] | None:
         """Resolve a PAT for GitHub API calls on this project.
 
         Looks up integration -> connected_by_user_id -> UserGitHubToken -> decrypt.
@@ -1441,7 +1426,9 @@ class PullRequestService:
         try:
             token = decrypt_token(token_row.encrypted_token)
         except Exception:
-            logger.warning("Failed to decrypt GitHub token for user %s", integration.connected_by_user_id)
+            logger.warning(
+                "Failed to decrypt GitHub token for user %s", integration.connected_by_user_id
+            )
             return None
         return integration, token
 
@@ -1466,9 +1453,7 @@ class PullRequestService:
         """Convert PullRequest model to response schema."""
         # Count reviews and approvals
         review_count = len(pr.reviews)
-        approval_count = sum(
-            1 for r in pr.reviews if r.status == ReviewStatus.APPROVED.value
-        )
+        approval_count = sum(1 for r in pr.reviews if r.status == ReviewStatus.APPROVED.value)
         comment_count = len(pr.comments)
 
         # Get commits ahead
@@ -1484,8 +1469,7 @@ class PullRequestService:
         # Check if can merge
         project = await self._get_project(project_id)
         can_merge = (
-            pr.status == PRStatus.OPEN.value
-            and approval_count >= project.pr_approval_required
+            pr.status == PRStatus.OPEN.value and approval_count >= project.pr_approval_required
         )
 
         # Look up author info from Zitadel if missing

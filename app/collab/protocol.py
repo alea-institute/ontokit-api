@@ -1,13 +1,13 @@
 """WebSocket collaboration protocol definitions."""
 
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 
-class MessageType(str, Enum):
+class MessageType(StrEnum):
     """Types of collaboration messages."""
 
     # Connection lifecycle
@@ -34,7 +34,7 @@ class MessageType(str, Enum):
     SYNC_RESPONSE = "sync_response"
 
 
-class OperationType(str, Enum):
+class OperationType(StrEnum):
     """Types of ontology operations."""
 
     # Class operations
@@ -102,6 +102,7 @@ class CollabMessage(BaseModel):
 
 
 # Message payload schemas
+
 
 class JoinPayload(BaseModel):
     """Payload for JOIN message."""

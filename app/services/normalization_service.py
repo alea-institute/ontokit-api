@@ -108,9 +108,7 @@ class NormalizationService:
             "error": None,
         }
 
-    async def check_normalization_status(
-        self, project: Project
-    ) -> dict:
+    async def check_normalization_status(self, project: Project) -> dict:
         """
         Check if a project's ontology needs normalization (expensive operation).
 
@@ -301,8 +299,6 @@ class NormalizationService:
         return source_file_path
 
 
-def get_normalization_service(
-    db: AsyncSession, storage: StorageService
-) -> NormalizationService:
+def get_normalization_service(db: AsyncSession, storage: StorageService) -> NormalizationService:
     """Factory function for dependency injection."""
     return NormalizationService(db, storage)

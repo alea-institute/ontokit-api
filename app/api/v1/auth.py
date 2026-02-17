@@ -1,7 +1,7 @@
 """Authentication endpoints including OAuth2 Device Flow."""
 
-from fastapi import APIRouter, HTTPException
 import httpx
+from fastapi import APIRouter, HTTPException
 
 from app.core.config import settings
 from app.schemas.auth import DeviceCodeRequest, DeviceCodeResponse, TokenRequest, TokenResponse
@@ -36,7 +36,9 @@ async def request_device_code(request: DeviceCodeRequest) -> DeviceCodeResponse:
                 interval=data.get("interval", 5),
             )
         except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail="Failed to get device code")
+            raise HTTPException(
+                status_code=e.response.status_code, detail="Failed to get device code"
+            ) from e
 
 
 @router.post("/device/token", response_model=TokenResponse)
@@ -79,7 +81,9 @@ async def poll_for_token(request: TokenRequest) -> TokenResponse:
                 id_token=data.get("id_token"),
             )
         except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail="Token request failed")
+            raise HTTPException(
+                status_code=e.response.status_code, detail="Token request failed"
+            ) from e
 
 
 @router.post("/token/refresh", response_model=TokenResponse)
@@ -105,4 +109,6 @@ async def refresh_token(refresh_token: str) -> TokenResponse:
                 id_token=data.get("id_token"),
             )
         except httpx.HTTPStatusError as e:
-            raise HTTPException(status_code=e.response.status_code, detail="Token refresh failed")
+            raise HTTPException(
+                status_code=e.response.status_code, detail="Token refresh failed"
+            ) from e

@@ -6,7 +6,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-
 # Status types
 PRStatusType = Literal["open", "merged", "closed"]
 ReviewStatusType = Literal["approved", "changes_requested", "commented"]

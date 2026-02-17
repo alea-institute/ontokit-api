@@ -6,7 +6,6 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-
 # Type definitions
 LintIssueTypeValue = Literal["error", "warning", "info"]
 LintRunStatusValue = Literal["pending", "running", "completed", "failed"]

@@ -34,9 +34,7 @@ class StorageService:
         except S3Error as e:
             raise StorageError(f"Failed to ensure bucket exists: {e}") from e
 
-    async def upload_file(
-        self, object_name: str, data: bytes, content_type: str
-    ) -> str:
+    async def upload_file(self, object_name: str, data: bytes, content_type: str) -> str:
         """
         Upload a file to MinIO storage.
 

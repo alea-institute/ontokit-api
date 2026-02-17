@@ -1,9 +1,10 @@
 """Lint API endpoints for ontology health checking."""
 
 import asyncio
+import contextlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -22,10 +23,10 @@ from app.schemas.lint import (
     LintIssueListResponse,
     LintIssueResponse,
     LintRuleInfo,
+    LintRulesResponse,
     LintRunDetailResponse,
     LintRunListResponse,
     LintRunResponse,
-    LintRulesResponse,
     LintSummaryResponse,
     LintTriggerResponse,
 )
@@ -167,7 +168,7 @@ async def trigger_lint(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to start lint: {e}",
-        )
+        ) from e
 
 
 @router.get("/{project_id}/lint/status", response_model=LintSummaryResponse)
@@ -296,9 +297,7 @@ async def get_lint_run(
 
     # Get the run
     result = await db.execute(
-        select(LintRun)
-        .where(LintRun.id == run_id)
-        .where(LintRun.project_id == project_id)
+        select(LintRun).where(LintRun.id == run_id).where(LintRun.project_id == project_id)
     )
     run = result.scalar_one_or_none()
 
@@ -355,9 +354,13 @@ async def get_lint_issues(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: OptionalUser,
-    issue_type: str | None = Query(default=None, description="Filter by issue type (error, warning, info)"),
+    issue_type: str | None = Query(
+        default=None, description="Filter by issue type (error, warning, info)"
+    ),
     rule_id: str | None = Query(default=None, description="Filter by rule ID"),
-    subject_iri: str | None = Query(default=None, description="Filter by subject IRI (the class/property the issue relates to)"),
+    subject_iri: str | None = Query(
+        default=None, description="Filter by subject IRI (the class/property the issue relates to)"
+    ),
     include_resolved: bool = Query(default=False, description="Include resolved issues"),
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=100, ge=1, le=500),
@@ -403,14 +406,18 @@ async def get_lint_issues(
     total = count_result.scalar() or 0
 
     # Get issues
-    query = query.order_by(
-        case(
-            (LintIssue.issue_type == "error", 0),
-            (LintIssue.issue_type == "warning", 1),
-            else_=2,
-        ),
-        LintIssue.rule_id,
-    ).offset(skip).limit(limit)
+    query = (
+        query.order_by(
+            case(
+                (LintIssue.issue_type == "error", 0),
+                (LintIssue.issue_type == "warning", 1),
+                else_=2,
+            ),
+            LintIssue.rule_id,
+        )
+        .offset(skip)
+        .limit(limit)
+    )
 
     result = await db.execute(query)
     issues = result.scalars().all()
@@ -459,9 +466,7 @@ async def dismiss_issue(
 
     # Get the issue
     result = await db.execute(
-        select(LintIssue)
-        .where(LintIssue.id == issue_id)
-        .where(LintIssue.project_id == project_id)
+        select(LintIssue).where(LintIssue.id == issue_id).where(LintIssue.project_id == project_id)
     )
     issue = result.scalar_one_or_none()
 
@@ -478,7 +483,7 @@ async def dismiss_issue(
         )
 
     # Mark as resolved
-    issue.resolved_at = datetime.now(timezone.utc)
+    issue.resolved_at = datetime.now(UTC)
     await db.commit()
 
 
@@ -597,7 +602,7 @@ async def lint_websocket(
             # Check for WebSocket messages with timeout (keepalive/close)
             try:
                 await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # No message received, continue loop
                 pass
             except WebSocketDisconnect:
@@ -610,7 +615,5 @@ async def lint_websocket(
     finally:
         manager.disconnect(websocket, project_id_str)
         if pubsub:
-            try:
+            with contextlib.suppress(Exception):
                 await pubsub.unsubscribe(LINT_UPDATES_CHANNEL)
-            except Exception:
-                pass

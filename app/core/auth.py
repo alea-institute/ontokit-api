@@ -88,7 +88,7 @@ async def get_jwks() -> dict:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail=f"Failed to fetch JWKS: {e}",
-            )
+            ) from e
 
 
 def clear_jwks_cache() -> None:
@@ -135,7 +135,7 @@ async def validate_token(token: str) -> TokenPayload:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Token validation failed: {e}",
-        )
+        ) from e
 
 
 async def fetch_userinfo(access_token: str) -> dict | None:
@@ -149,6 +149,7 @@ async def fetch_userinfo(access_token: str) -> dict | None:
     # If using internal URL, set Host header
     if settings.zitadel_internal_url:
         from urllib.parse import urlparse
+
         parsed = urlparse(settings.zitadel_issuer)
         headers["Host"] = parsed.netloc
 

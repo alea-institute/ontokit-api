@@ -8,8 +8,8 @@ from fastapi.responses import Response
 
 from app.schemas.ontology import (
     OntologyCreate,
-    OntologyResponse,
     OntologyListResponse,
+    OntologyResponse,
     OntologyUpdate,
 )
 from app.services.ontology import OntologyService

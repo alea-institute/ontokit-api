@@ -1,7 +1,6 @@
 """User presence tracking for collaboration sessions."""
 
 from datetime import datetime, timedelta
-from typing import Any
 
 from app.collab.protocol import User
 

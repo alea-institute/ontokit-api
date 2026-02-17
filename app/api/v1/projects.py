@@ -646,7 +646,7 @@ async def get_file_at_revision(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Could not retrieve file at revision: {e}",
-        )
+        ) from e
 
     return RevisionFileResponse(
         project_id=project_id,
@@ -686,7 +686,7 @@ async def get_revision_diff(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Could not compute diff: {e}",
-        )
+        ) from e
 
     return RevisionDiffResponse(
         project_id=project_id,
@@ -919,16 +919,16 @@ async def checkout_branch(
 
     try:
         result = git.switch_branch(project_id, branch_name)
-    except KeyError:
+    except KeyError as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Branch not found: {branch_name}",
-        )
+        ) from e
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Could not switch to branch: {e}",
-        )
+        ) from e
 
     return BranchInfo(
         name=result.name,
@@ -1075,7 +1075,7 @@ async def save_source_content(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"Invalid Turtle syntax: {e}",
-        )
+        ) from e
 
     # Check if repository exists
     if not git.repository_exists(project_id):
@@ -1102,7 +1102,7 @@ async def save_source_content(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=f"Failed to save to storage: {e}",
-        )
+        ) from e
 
     # Commit to git on the specified branch
     try:
@@ -1119,7 +1119,7 @@ async def save_source_content(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to commit changes: {e}",
-        )
+        ) from e
 
     # Reload the ontology in memory to reflect changes
     try:

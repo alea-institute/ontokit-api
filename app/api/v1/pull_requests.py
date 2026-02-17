@@ -68,8 +68,7 @@ async def list_pull_requests(
     - Use author_id filter to show PRs by a specific user
     """
     return await service.list_pull_requests(
-        project_id, user, status_filter=status_filter,
-        author_id=author_id, skip=skip, limit=limit
+        project_id, user, status_filter=status_filter, author_id=author_id, skip=skip, limit=limit
     )
 
 
@@ -164,7 +163,7 @@ async def merge_pull_request(
     pr_number: int,
     service: Annotated[PullRequestService, Depends(get_service)],
     user: RequiredUser,
-    merge_request: PRMergeRequest = Body(default=PRMergeRequest()),
+    merge_request: Annotated[PRMergeRequest, Body()] = PRMergeRequest(),  # noqa: B008
 ) -> PRMergeResponse:
     """
     Merge a pull request.
@@ -518,6 +517,7 @@ async def github_webhook(
 
     # Get integration to verify signature
     from sqlalchemy import select
+
     from app.models.pull_request import GitHubIntegration
 
     result = await service.db.execute(
@@ -544,11 +544,14 @@ async def github_webhook(
         )
 
     # Verify signature
-    expected_signature = "sha256=" + hmac.new(
-        integration.webhook_secret.encode("utf-8"),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
+    expected_signature = (
+        "sha256="
+        + hmac.new(
+            integration.webhook_secret.encode("utf-8"),
+            body,
+            hashlib.sha256,
+        ).hexdigest()
+    )
 
     if not hmac.compare_digest(x_hub_signature_256, expected_signature):
         raise HTTPException(
@@ -558,6 +561,7 @@ async def github_webhook(
 
     # Parse payload
     import json
+
     payload = json.loads(body)
 
     # Handle events

@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.schemas.owl_property import (
     OWLPropertyCreate,
+    OWLPropertyListResponse,
     OWLPropertyResponse,
     OWLPropertyUpdate,
-    OWLPropertyListResponse,
 )
 from app.services.ontology import OntologyService
 

@@ -1,34 +1,35 @@
 """Ontology service for managing OWL ontologies."""
 
 from dataclasses import dataclass
-from typing import Any, Literal as TypingLiteral
+from typing import Any
+from typing import Literal as TypingLiteral
 from uuid import UUID
 
-from rdflib import Graph, Literal as RDFLiteral, Namespace, URIRef
+from rdflib import Graph, URIRef
+from rdflib import Literal as RDFLiteral
 from rdflib.namespace import OWL, RDF, RDFS, SKOS
 
 from app.schemas.ontology import (
     OntologyCreate,
-    OntologyResponse,
     OntologyListResponse,
+    OntologyResponse,
     OntologyUpdate,
 )
 from app.schemas.owl_class import (
     AnnotationProperty,
     OWLClassCreate,
-    OWLClassResponse,
-    OWLClassUpdate,
     OWLClassListResponse,
+    OWLClassResponse,
     OWLClassTreeNode,
+    OWLClassUpdate,
 )
 from app.schemas.owl_property import (
     OWLPropertyCreate,
+    OWLPropertyListResponse,
     OWLPropertyResponse,
     OWLPropertyUpdate,
-    OWLPropertyListResponse,
 )
-from app.services.storage import StorageService, StorageError
-
+from app.services.storage import StorageService
 
 # Map file extensions to RDF formats
 FORMAT_MAP = {
@@ -112,6 +113,7 @@ ANNOTATION_PROPERTIES = {
 @dataclass
 class LabelPreference:
     """Parsed label preference."""
+
     property_uri: URIRef
     language: str | None  # None means any language or no language tag
 
@@ -219,7 +221,10 @@ class OntologyService:
         return graph.serialize(format=format)
 
     async def import_from_file(
-        self, ontology_id: UUID, content: bytes, filename: str
+        self,
+        ontology_id: UUID,  # noqa: ARG002
+        content: bytes,
+        filename: str,
     ) -> OntologyResponse:
         """Import ontology content from file."""
         # Detect format from filename
@@ -258,7 +263,7 @@ class OntologyService:
         self,
         ontology_id: UUID,
         parent_iri: str | None = None,
-        include_imported: bool = False,
+        include_imported: bool = False,  # noqa: ARG002
         branch: str = "main",
     ) -> OWLClassListResponse:
         """List classes in an ontology."""
@@ -361,20 +366,18 @@ class OntologyService:
 
             # Get all parents
             parents = [
-                p for p in graph.objects(class_uri, RDFS.subClassOf)
-                if isinstance(p, URIRef)
+                p for p in graph.objects(class_uri, RDFS.subClassOf) if isinstance(p, URIRef)
             ]
 
             # Check if this is a root class:
             # - No parents, or
             # - Only parent is owl:Thing
-            is_root = (
-                len(parents) == 0 or
-                (len(parents) == 1 and parents[0] == owl_thing)
-            )
+            is_root = len(parents) == 0 or (len(parents) == 1 and parents[0] == owl_thing)
 
             if is_root:
-                root_classes.append(await self._class_to_response(graph, class_uri, label_preferences))
+                root_classes.append(
+                    await self._class_to_response(graph, class_uri, label_preferences)
+                )
 
         # Sort by label (or IRI if no label)
         def sort_key(cls: OWLClassResponse) -> str:
@@ -419,7 +422,8 @@ class OntologyService:
         """Get total number of classes in the ontology."""
         graph = await self._get_graph(project_id, branch)
         return sum(
-            1 for s in graph.subjects(RDF.type, OWL.Class)
+            1
+            for s in graph.subjects(RDF.type, OWL.Class)
             if isinstance(s, URIRef) and s != OWL.Thing
         )
 
@@ -460,7 +464,8 @@ class OntologyService:
 
             # Get parents
             parents = [
-                p for p in graph.objects(current, RDFS.subClassOf)
+                p
+                for p in graph.objects(current, RDFS.subClassOf)
                 if isinstance(p, URIRef) and p != owl_thing
             ]
 
@@ -503,15 +508,13 @@ class OntologyService:
         branch: str = "main",
     ) -> list[OWLClassTreeNode]:
         """Get children of a class as tree nodes (optimized for tree view)."""
-        children = await self.get_class_children(
-            project_id, class_iri, label_preferences, branch
-        )
+        children = await self.get_class_children(project_id, class_iri, label_preferences, branch)
         return [self._class_to_tree_node(cls, label_preferences) for cls in children]
 
     def _class_to_tree_node(
         self,
         cls: OWLClassResponse,
-        label_preferences: list[str] | None = None,
+        label_preferences: list[str] | None = None,  # noqa: ARG002
     ) -> OWLClassTreeNode:
         """Convert an OWLClassResponse to a tree node."""
         # The preferred label should already be computed during _class_to_response
@@ -522,10 +525,7 @@ class OntologyService:
         else:
             # Extract local name from IRI (after # or last /)
             iri = str(cls.iri)
-            if "#" in iri:
-                label = iri.split("#")[-1]
-            else:
-                label = iri.rsplit("/", 1)[-1]
+            label = iri.split("#")[-1] if "#" in iri else iri.rsplit("/", 1)[-1]
 
         return OWLClassTreeNode(
             iri=str(cls.iri),
@@ -553,7 +553,9 @@ class OntologyService:
         # TODO: Implement property creation
         raise NotImplementedError("Property creation pending")
 
-    async def get_property(self, ontology_id: UUID, property_iri: str) -> OWLPropertyResponse | None:
+    async def get_property(
+        self, ontology_id: UUID, property_iri: str
+    ) -> OWLPropertyResponse | None:
         """Get a property by IRI."""
         # TODO: Implement property retrieval
         raise NotImplementedError("Property retrieval pending")
@@ -699,7 +701,9 @@ class OntologyService:
             if isinstance(comment, RDFLiteral)
         ]
 
-        parent_iris = [str(p) for p in graph.objects(class_uri, RDFS.subClassOf) if isinstance(p, URIRef)]
+        parent_iris = [
+            str(p) for p in graph.objects(class_uri, RDFS.subClassOf) if isinstance(p, URIRef)
+        ]
 
         # Resolve labels for parent classes
         parent_labels: dict[str, str] = {}
@@ -717,7 +721,8 @@ class OntologyService:
 
         # Count direct children (classes that have this class as a parent)
         child_count = sum(
-            1 for _ in graph.subjects(RDFS.subClassOf, class_uri)
+            1
+            for _ in graph.subjects(RDFS.subClassOf, class_uri)
             if isinstance(_, URIRef) and (_, RDF.type, OWL.Class) in graph
         )
 
@@ -730,8 +735,7 @@ class OntologyService:
 
         # Count instances (individuals of this class)
         instance_count = sum(
-            1 for _ in graph.subjects(RDF.type, class_uri)
-            if isinstance(_, URIRef)
+            1 for _ in graph.subjects(RDF.type, class_uri) if isinstance(_, URIRef)
         )
 
         # Extract additional annotation properties (DC, SKOS, etc.)
@@ -740,19 +744,16 @@ class OntologyService:
             values = []
             for obj in graph.objects(class_uri, prop_uri):
                 if isinstance(obj, RDFLiteral):
-                    values.append(LocalizedString(
-                        value=str(obj),
-                        lang=obj.language or ""
-                    ))
+                    values.append(LocalizedString(value=str(obj), lang=obj.language or ""))
                 elif isinstance(obj, URIRef):
                     # For URI values, store as string with empty lang
                     values.append(LocalizedString(value=str(obj), lang=""))
             if values:
-                annotations.append(AnnotationProperty(
-                    property_iri=str(prop_uri),
-                    property_label=prop_label,
-                    values=values
-                ))
+                annotations.append(
+                    AnnotationProperty(
+                        property_iri=str(prop_uri), property_label=prop_label, values=values
+                    )
+                )
 
         return OWLClassResponse(
             iri=str(class_uri),

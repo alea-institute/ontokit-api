@@ -1,11 +1,13 @@
 """Ontology linting service for checking ontology health."""
 
+import contextlib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
-from rdflib import Graph, Literal as RDFLiteral, Namespace, URIRef
+from rdflib import Graph, Namespace, URIRef
+from rdflib import Literal as RDFLiteral
 from rdflib.namespace import OWL, RDF, RDFS
 
 from app.models.lint import LintIssueType
@@ -146,7 +148,7 @@ class OntologyLinter:
         """Get list of enabled lint rules."""
         return [r for r in LINT_RULES if r.rule_id in self.enabled_rules]
 
-    async def lint(self, graph: Graph, project_id: UUID) -> list[LintResult]:
+    async def lint(self, graph: Graph, project_id: UUID) -> list[LintResult]:  # noqa: ARG002
         """
         Run all enabled lint rules on the ontology graph.
 
@@ -182,13 +184,15 @@ class OntologyLinter:
             # Check for any rdfs:label
             labels = list(graph.objects(class_uri, RDFS.label))
             if not labels:
-                issues.append(LintResult(
-                    issue_type=LintIssueType.WARNING.value,
-                    rule_id="missing-label",
-                    message=f"Class has no rdfs:label annotation",
-                    subject_iri=str(class_uri),
-                    details={"local_name": self._get_local_name(class_uri)},
-                ))
+                issues.append(
+                    LintResult(
+                        issue_type=LintIssueType.WARNING.value,
+                        rule_id="missing-label",
+                        message="Class has no rdfs:label annotation",
+                        subject_iri=str(class_uri),
+                        details={"local_name": self._get_local_name(class_uri)},
+                    )
+                )
 
         return issues
 
@@ -207,16 +211,18 @@ class OntologyLinter:
             if not comments:
                 # Get label for better context
                 label = self._get_label(graph, class_uri)
-                issues.append(LintResult(
-                    issue_type=LintIssueType.INFO.value,
-                    rule_id="missing-comment",
-                    message=f"Class has no rdfs:comment description",
-                    subject_iri=str(class_uri),
-                    details={
-                        "local_name": self._get_local_name(class_uri),
-                        "label": label,
-                    },
-                ))
+                issues.append(
+                    LintResult(
+                        issue_type=LintIssueType.INFO.value,
+                        rule_id="missing-comment",
+                        message="Class has no rdfs:comment description",
+                        subject_iri=str(class_uri),
+                        details={
+                            "local_name": self._get_local_name(class_uri),
+                            "label": label,
+                        },
+                    )
+                )
 
         return issues
 
@@ -234,7 +240,8 @@ class OntologyLinter:
 
             # Get parents (excluding owl:Thing)
             parents = [
-                p for p in graph.objects(class_uri, RDFS.subClassOf)
+                p
+                for p in graph.objects(class_uri, RDFS.subClassOf)
                 if isinstance(p, URIRef) and p != owl_thing
             ]
 
@@ -244,16 +251,18 @@ class OntologyLinter:
             # Orphan if no meaningful parents and no children
             if not parents and not children:
                 label = self._get_label(graph, class_uri)
-                issues.append(LintResult(
-                    issue_type=LintIssueType.WARNING.value,
-                    rule_id="orphan-class",
-                    message="Class has no parent classes and no children",
-                    subject_iri=str(class_uri),
-                    details={
-                        "local_name": self._get_local_name(class_uri),
-                        "label": label,
-                    },
-                ))
+                issues.append(
+                    LintResult(
+                        issue_type=LintIssueType.WARNING.value,
+                        rule_id="orphan-class",
+                        message="Class has no parent classes and no children",
+                        subject_iri=str(class_uri),
+                        details={
+                            "local_name": self._get_local_name(class_uri),
+                            "label": label,
+                        },
+                    )
+                )
 
         return issues
 
@@ -263,8 +272,7 @@ class OntologyLinter:
 
         # Build set of all defined classes
         defined_classes = {
-            str(c) for c in graph.subjects(RDF.type, OWL.Class)
-            if isinstance(c, URIRef)
+            str(c) for c in graph.subjects(RDF.type, OWL.Class) if isinstance(c, URIRef)
         }
         # Add owl:Thing as it's always implicitly defined
         defined_classes.add(str(OWL.Thing))
@@ -281,18 +289,20 @@ class OntologyLinter:
                 parent_str = str(parent_uri)
                 if parent_str not in defined_classes:
                     label = self._get_label(graph, class_uri)
-                    issues.append(LintResult(
-                        issue_type=LintIssueType.ERROR.value,
-                        rule_id="undefined-parent",
-                        message=f"References undefined parent class",
-                        subject_iri=str(class_uri),
-                        details={
-                            "local_name": self._get_local_name(class_uri),
-                            "label": label,
-                            "undefined_parent": parent_str,
-                            "undefined_parent_local": self._get_local_name(parent_uri),
-                        },
-                    ))
+                    issues.append(
+                        LintResult(
+                            issue_type=LintIssueType.ERROR.value,
+                            rule_id="undefined-parent",
+                            message="References undefined parent class",
+                            subject_iri=str(class_uri),
+                            details={
+                                "local_name": self._get_local_name(class_uri),
+                                "label": label,
+                                "undefined_parent": parent_str,
+                                "undefined_parent_local": self._get_local_name(parent_uri),
+                            },
+                        )
+                    )
 
         return issues
 
@@ -309,7 +319,9 @@ class OntologyLinter:
                     if isinstance(parent, URIRef) and parent != OWL.Thing:
                         subclass_of[str(class_uri)].append(str(parent))
 
-        def find_cycle(start: str, current: str, visited: set[str], path: list[str]) -> list[str] | None:
+        def find_cycle(
+            start: str, current: str, visited: set[str], path: list[str]
+        ) -> list[str] | None:
             """DFS to find cycle starting from 'start'."""
             if current in visited:
                 if current == start:
@@ -328,7 +340,7 @@ class OntologyLinter:
             return None
 
         # Check each class for cycles
-        for class_str in subclass_of.keys():
+        for class_str in subclass_of:
             cycle = find_cycle(class_str, class_str, set(), [])
             if cycle:
                 # Create a frozenset to avoid reporting the same cycle multiple times
@@ -340,16 +352,18 @@ class OntologyLinter:
                         self._get_label(graph, URIRef(c)) or self._get_local_name(URIRef(c))
                         for c in cycle
                     ]
-                    issues.append(LintResult(
-                        issue_type=LintIssueType.ERROR.value,
-                        rule_id="circular-hierarchy",
-                        message=f"Circular inheritance: {' → '.join(cycle_labels)} → {cycle_labels[0]}",
-                        subject_iri=cycle[0],
-                        details={
-                            "cycle_iris": cycle,
-                            "cycle_labels": cycle_labels,
-                        },
-                    ))
+                    issues.append(
+                        LintResult(
+                            issue_type=LintIssueType.ERROR.value,
+                            rule_id="circular-hierarchy",
+                            message=f"Circular inheritance: {' → '.join(cycle_labels)} → {cycle_labels[0]}",
+                            subject_iri=cycle[0],
+                            details={
+                                "cycle_iris": cycle,
+                                "cycle_labels": cycle_labels,
+                            },
+                        )
+                    )
 
         return issues
 
@@ -368,16 +382,18 @@ class OntologyLinter:
                 if isinstance(label, RDFLiteral):
                     label_str = str(label).strip()
                     if not label_str:
-                        issues.append(LintResult(
-                            issue_type=LintIssueType.WARNING.value,
-                            rule_id="empty-label",
-                            message="Class has an empty rdfs:label",
-                            subject_iri=str(class_uri),
-                            details={
-                                "local_name": self._get_local_name(class_uri),
-                                "language": label.language,
-                            },
-                        ))
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.WARNING.value,
+                                rule_id="empty-label",
+                                message="Class has an empty rdfs:label",
+                                subject_iri=str(class_uri),
+                                details={
+                                    "local_name": self._get_local_name(class_uri),
+                                    "language": label.language,
+                                },
+                            )
+                        )
 
         return issues
 
@@ -402,7 +418,7 @@ class OntologyLinter:
 
         # Report duplicates
         reported_iris: set[str] = set()
-        for label_str, class_iris in label_to_classes.items():
+        for _label_str, class_iris in label_to_classes.items():
             if len(class_iris) > 1:
                 for class_iri in class_iris:
                     if class_iri not in reported_iris:
@@ -410,18 +426,20 @@ class OntologyLinter:
                         # Get original (non-lowercased) label
                         original_label = self._get_label(graph, URIRef(class_iri))
                         other_classes = [c for c in class_iris if c != class_iri]
-                        issues.append(LintResult(
-                            issue_type=LintIssueType.WARNING.value,
-                            rule_id="duplicate-label",
-                            message=f"Label '{original_label}' is shared with {len(other_classes)} other class(es)",
-                            subject_iri=class_iri,
-                            details={
-                                "local_name": self._get_local_name(URIRef(class_iri)),
-                                "label": original_label,
-                                "duplicate_iris": other_classes[:5],  # Limit to 5
-                                "total_duplicates": len(other_classes),
-                            },
-                        ))
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.WARNING.value,
+                                rule_id="duplicate-label",
+                                message=f"Label '{original_label}' is shared with {len(other_classes)} other class(es)",
+                                subject_iri=class_iri,
+                                details={
+                                    "local_name": self._get_local_name(URIRef(class_iri)),
+                                    "label": original_label,
+                                    "duplicate_iris": other_classes[:5],  # Limit to 5
+                                    "total_duplicates": len(other_classes),
+                                },
+                            )
+                        )
 
         return issues
 
@@ -460,17 +478,19 @@ class OntologyLinter:
                 unique_values = list(set(label_values))
                 if len(unique_values) > 1:
                     lang_str = lang or "no language tag"
-                    issues.append(LintResult(
-                        issue_type=LintIssueType.ERROR.value,
-                        rule_id="label-per-language",
-                        message=f"Multiple different labels for language '{lang_str}'",
-                        subject_iri=str(class_uri),
-                        details={
-                            "local_name": self._get_local_name(class_uri),
-                            "language": lang_str,
-                            "labels": unique_values,
-                        },
-                    ))
+                    issues.append(
+                        LintResult(
+                            issue_type=LintIssueType.ERROR.value,
+                            rule_id="label-per-language",
+                            message=f"Multiple different labels for language '{lang_str}'",
+                            subject_iri=str(class_uri),
+                            details={
+                                "local_name": self._get_local_name(class_uri),
+                                "language": lang_str,
+                                "labels": unique_values,
+                            },
+                        )
+                    )
 
         return issues
 
@@ -484,7 +504,7 @@ class OntologyLinter:
 
         # Get all defined namespace prefixes
         defined_prefixes = dict(graph.namespaces())
-        defined_namespaces = set(str(ns) for ns in defined_prefixes.values())
+        defined_namespaces = {str(ns) for ns in defined_prefixes.values()}
 
         # Check all subjects, predicates, and objects
         checked_iris: set[str] = set()
@@ -498,23 +518,23 @@ class OntologyLinter:
                     checked_iris.add(iri)
 
                     # Check if IRI starts with any known namespace
-                    has_known_prefix = any(
-                        iri.startswith(ns) for ns in defined_namespaces
-                    )
+                    has_known_prefix = any(iri.startswith(ns) for ns in defined_namespaces)
 
                     # If it looks like a prefixed name but doesn't resolve
                     if not has_known_prefix and ":" in iri and not iri.startswith("http"):
                         prefix = iri.split(":")[0]
-                        issues.append(LintResult(
-                            issue_type=LintIssueType.ERROR.value,
-                            rule_id="undefined-prefix",
-                            message=f"Prefix '{prefix}' is not defined",
-                            subject_iri=iri,
-                            details={
-                                "prefix": prefix,
-                                "iri": iri,
-                            },
-                        ))
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.ERROR.value,
+                                rule_id="undefined-prefix",
+                                message=f"Prefix '{prefix}' is not defined",
+                                subject_iri=iri,
+                                details={
+                                    "prefix": prefix,
+                                    "iri": iri,
+                                },
+                            )
+                        )
 
         return issues
 
@@ -542,17 +562,19 @@ class OntologyLinter:
 
             for po, count in seen.items():
                 if count > 1:
-                    issues.append(LintResult(
-                        issue_type=LintIssueType.INFO.value,
-                        rule_id="duplicate-triple",
-                        message=f"Duplicate triple: predicate-object pair appears {count} times",
-                        subject_iri=subject_iri,
-                        details={
-                            "predicate": po[0],
-                            "object": po[1],
-                            "count": count,
-                        },
-                    ))
+                    issues.append(
+                        LintResult(
+                            issue_type=LintIssueType.INFO.value,
+                            rule_id="duplicate-triple",
+                            message=f"Duplicate triple: predicate-object pair appears {count} times",
+                            subject_iri=subject_iri,
+                            details={
+                                "predicate": po[0],
+                                "object": po[1],
+                                "count": count,
+                            },
+                        )
+                    )
 
         return issues
 
@@ -575,16 +597,15 @@ class OntologyLinter:
                         property_domains[str(prop)].add(str(domain))
 
         # Check property usage
-        for s, p, o in graph:
+        for s, p, _o in graph:
             prop_str = str(p)
             if prop_str in property_domains and isinstance(s, URIRef):
                 domains = property_domains[prop_str]
 
                 # Get types of subject
-                subject_types = set(
-                    str(t) for t in graph.objects(s, RDF.type)
-                    if isinstance(t, URIRef)
-                )
+                subject_types = {
+                    str(t) for t in graph.objects(s, RDF.type) if isinstance(t, URIRef)
+                }
 
                 # Check if any subject type is in domain (or subclass of domain)
                 valid_domain = False
@@ -593,7 +614,9 @@ class OntologyLinter:
                         valid_domain = True
                         break
                     # Check superclasses
-                    for superclass in graph.transitive_objects(URIRef(subject_type), RDFS.subClassOf):
+                    for superclass in graph.transitive_objects(
+                        URIRef(subject_type), RDFS.subClassOf
+                    ):
                         if str(superclass) in domains:
                             valid_domain = True
                             break
@@ -601,17 +624,19 @@ class OntologyLinter:
                         break
 
                 if not valid_domain and subject_types:
-                    issues.append(LintResult(
-                        issue_type=LintIssueType.WARNING.value,
-                        rule_id="domain-violation",
-                        message=f"Property used on subject not in declared domain",
-                        subject_iri=str(s),
-                        details={
-                            "property": prop_str,
-                            "expected_domains": list(domains),
-                            "actual_types": list(subject_types),
-                        },
-                    ))
+                    issues.append(
+                        LintResult(
+                            issue_type=LintIssueType.WARNING.value,
+                            rule_id="domain-violation",
+                            message="Property used on subject not in declared domain",
+                            subject_iri=str(s),
+                            details={
+                                "property": prop_str,
+                                "expected_domains": list(domains),
+                                "actual_types": list(subject_types),
+                            },
+                        )
+                    )
 
         return issues
 
@@ -634,10 +659,7 @@ class OntologyLinter:
                 ranges = property_ranges[prop_str]
 
                 # Get types of object
-                object_types = set(
-                    str(t) for t in graph.objects(o, RDF.type)
-                    if isinstance(t, URIRef)
-                )
+                object_types = {str(t) for t in graph.objects(o, RDF.type) if isinstance(t, URIRef)}
 
                 # Check if any object type is in range (or subclass of range)
                 valid_range = False
@@ -646,7 +668,9 @@ class OntologyLinter:
                         valid_range = True
                         break
                     # Check superclasses
-                    for superclass in graph.transitive_objects(URIRef(object_type), RDFS.subClassOf):
+                    for superclass in graph.transitive_objects(
+                        URIRef(object_type), RDFS.subClassOf
+                    ):
                         if str(superclass) in ranges:
                             valid_range = True
                             break
@@ -654,18 +678,20 @@ class OntologyLinter:
                         break
 
                 if not valid_range and object_types:
-                    issues.append(LintResult(
-                        issue_type=LintIssueType.WARNING.value,
-                        rule_id="range-violation",
-                        message=f"Property value not in declared range",
-                        subject_iri=str(s),
-                        details={
-                            "property": prop_str,
-                            "object": str(o),
-                            "expected_ranges": list(ranges),
-                            "actual_types": list(object_types),
-                        },
-                    ))
+                    issues.append(
+                        LintResult(
+                            issue_type=LintIssueType.WARNING.value,
+                            rule_id="range-violation",
+                            message="Property value not in declared range",
+                            subject_iri=str(s),
+                            details={
+                                "property": prop_str,
+                                "object": str(o),
+                                "expected_ranges": list(ranges),
+                                "actual_types": list(object_types),
+                            },
+                        )
+                    )
 
         return issues
 
@@ -685,22 +711,16 @@ class OntologyLinter:
                 break
 
             for val in graph.objects(restriction, OWL.maxCardinality):
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     max_cardinality = int(val)
-                except (ValueError, TypeError):
-                    pass
 
             for val in graph.objects(restriction, OWL.minCardinality):
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     min_cardinality = int(val)
-                except (ValueError, TypeError):
-                    pass
 
             for val in graph.objects(restriction, OWL.cardinality):
-                try:
+                with contextlib.suppress(ValueError, TypeError):
                     exact_cardinality = int(val)
-                except (ValueError, TypeError):
-                    pass
 
             if on_property is None:
                 continue
@@ -720,44 +740,50 @@ class OntologyLinter:
 
                     # Check constraints
                     if exact_cardinality is not None and value_count != exact_cardinality:
-                        issues.append(LintResult(
-                            issue_type=LintIssueType.ERROR.value,
-                            rule_id="cardinality-violation",
-                            message=f"Cardinality violation: expected exactly {exact_cardinality}, found {value_count}",
-                            subject_iri=str(instance),
-                            details={
-                                "property": str(on_property),
-                                "expected": exact_cardinality,
-                                "actual": value_count,
-                                "constraint_type": "exact",
-                            },
-                        ))
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.ERROR.value,
+                                rule_id="cardinality-violation",
+                                message=f"Cardinality violation: expected exactly {exact_cardinality}, found {value_count}",
+                                subject_iri=str(instance),
+                                details={
+                                    "property": str(on_property),
+                                    "expected": exact_cardinality,
+                                    "actual": value_count,
+                                    "constraint_type": "exact",
+                                },
+                            )
+                        )
                     elif max_cardinality is not None and value_count > max_cardinality:
-                        issues.append(LintResult(
-                            issue_type=LintIssueType.ERROR.value,
-                            rule_id="cardinality-violation",
-                            message=f"Cardinality violation: max {max_cardinality}, found {value_count}",
-                            subject_iri=str(instance),
-                            details={
-                                "property": str(on_property),
-                                "max": max_cardinality,
-                                "actual": value_count,
-                                "constraint_type": "max",
-                            },
-                        ))
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.ERROR.value,
+                                rule_id="cardinality-violation",
+                                message=f"Cardinality violation: max {max_cardinality}, found {value_count}",
+                                subject_iri=str(instance),
+                                details={
+                                    "property": str(on_property),
+                                    "max": max_cardinality,
+                                    "actual": value_count,
+                                    "constraint_type": "max",
+                                },
+                            )
+                        )
                     elif min_cardinality is not None and value_count < min_cardinality:
-                        issues.append(LintResult(
-                            issue_type=LintIssueType.ERROR.value,
-                            rule_id="cardinality-violation",
-                            message=f"Cardinality violation: min {min_cardinality}, found {value_count}",
-                            subject_iri=str(instance),
-                            details={
-                                "property": str(on_property),
-                                "min": min_cardinality,
-                                "actual": value_count,
-                                "constraint_type": "min",
-                            },
-                        ))
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.ERROR.value,
+                                rule_id="cardinality-violation",
+                                message=f"Cardinality violation: min {min_cardinality}, found {value_count}",
+                                subject_iri=str(instance),
+                                details={
+                                    "property": str(on_property),
+                                    "min": min_cardinality,
+                                    "actual": value_count,
+                                    "constraint_type": "min",
+                                },
+                            )
+                        )
 
         return issues
 
@@ -775,7 +801,7 @@ class OntologyLinter:
             for member_list in members:
                 classes = list(graph.items(member_list))
                 for i, c1 in enumerate(classes):
-                    for c2 in classes[i+1:]:
+                    for c2 in classes[i + 1 :]:
                         if isinstance(c1, URIRef) and isinstance(c2, URIRef):
                             disjoint_pairs.add(frozenset([str(c1), str(c2)]))
 
@@ -792,28 +818,27 @@ class OntologyLinter:
             if str(instance) in reported:
                 continue
 
-            types = [
-                str(t) for t in graph.objects(instance, RDF.type)
-                if isinstance(t, URIRef)
-            ]
+            types = [str(t) for t in graph.objects(instance, RDF.type) if isinstance(t, URIRef)]
 
             # Check all pairs of types
             for i, t1 in enumerate(types):
-                for t2 in types[i+1:]:
+                for t2 in types[i + 1 :]:
                     pair = frozenset([t1, t2])
                     if pair in disjoint_pairs:
                         reported.add(str(instance))
-                        issues.append(LintResult(
-                            issue_type=LintIssueType.ERROR.value,
-                            rule_id="disjoint-violation",
-                            message=f"Resource is typed with disjoint classes",
-                            subject_iri=str(instance),
-                            details={
-                                "class1": t1,
-                                "class2": t2,
-                                "all_types": types,
-                            },
-                        ))
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.ERROR.value,
+                                rule_id="disjoint-violation",
+                                message="Resource is typed with disjoint classes",
+                                subject_iri=str(instance),
+                                details={
+                                    "class1": t1,
+                                    "class2": t2,
+                                    "all_types": types,
+                                },
+                            )
+                        )
                         break
                 else:
                     continue
@@ -850,18 +875,20 @@ class OntologyLinter:
                     key = f"{s}|{p}|{o}"
                     if key not in reported:
                         reported.add(key)
-                        issues.append(LintResult(
-                            issue_type=LintIssueType.WARNING.value,
-                            rule_id="inverse-property-inconsistency",
-                            message=f"Missing inverse property assertion",
-                            subject_iri=str(s),
-                            details={
-                                "property": prop_str,
-                                "object": str(o),
-                                "inverse_property": inverse_prop,
-                                "expected_triple": f"{o} {inverse_prop} {s}",
-                            },
-                        ))
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.WARNING.value,
+                                rule_id="inverse-property-inconsistency",
+                                message="Missing inverse property assertion",
+                                subject_iri=str(s),
+                                details={
+                                    "property": prop_str,
+                                    "object": str(o),
+                                    "inverse_property": inverse_prop,
+                                    "expected_triple": f"{o} {inverse_prop} {s}",
+                                },
+                            )
+                        )
 
         return issues
 
@@ -898,19 +925,19 @@ class OntologyLinter:
 
             # Only warn if there are labels but none in English
             if all_labels and not has_english:
-                languages = list(set(
-                    label.language or "none" for label in all_labels
-                ))
-                issues.append(LintResult(
-                    issue_type=LintIssueType.WARNING.value,
-                    rule_id="missing-english-label",
-                    message=f"No English label defined (has labels in: {', '.join(languages)})",
-                    subject_iri=str(class_uri),
-                    details={
-                        "local_name": self._get_local_name(class_uri),
-                        "available_languages": languages,
-                    },
-                ))
+                languages = list({label.language or "none" for label in all_labels})
+                issues.append(
+                    LintResult(
+                        issue_type=LintIssueType.WARNING.value,
+                        rule_id="missing-english-label",
+                        message=f"No English label defined (has labels in: {', '.join(languages)})",
+                        subject_iri=str(class_uri),
+                        details={
+                            "local_name": self._get_local_name(class_uri),
+                            "available_languages": languages,
+                        },
+                    )
+                )
 
         return issues
 

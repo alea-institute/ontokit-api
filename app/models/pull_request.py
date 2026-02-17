@@ -2,16 +2,15 @@
 
 import uuid
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-
 from app.core.database import Base
 
 
-class PRStatus(str, Enum):
+class PRStatus(StrEnum):
     """Pull request status enum."""
 
     OPEN = "open"
@@ -19,7 +18,7 @@ class PRStatus(str, Enum):
     CLOSED = "closed"
 
 
-class ReviewStatus(str, Enum):
+class ReviewStatus(StrEnum):
     """Pull request review status enum."""
 
     APPROVED = "approved"
@@ -221,4 +220,4 @@ class GitHubIntegration(Base):
 
 
 # Import Project at runtime to avoid circular imports
-from app.models.project import Project
+from app.models.project import Project  # noqa: E402

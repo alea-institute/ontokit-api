@@ -45,9 +45,7 @@ def _is_delete(op: Operation) -> bool:
     )
 
 
-def transform_against_history(
-    op: Operation, history: list[Operation]
-) -> Operation | None:
+def transform_against_history(op: Operation, history: list[Operation]) -> Operation | None:
     """
     Transform an operation against a list of already-applied operations.
 

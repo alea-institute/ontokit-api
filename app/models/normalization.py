@@ -25,9 +25,7 @@ class NormalizationRun(Base):
     )
 
     # When this normalization was performed
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     # Who triggered it (null for automatic/system)
     triggered_by: Mapped[str | None] = mapped_column(String(255), nullable=True)

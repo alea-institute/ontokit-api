@@ -7,9 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from app.schemas.owl_class import (
     OWLClassCreate,
+    OWLClassListResponse,
     OWLClassResponse,
     OWLClassUpdate,
-    OWLClassListResponse,
 )
 from app.services.ontology import OntologyService
 

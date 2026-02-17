@@ -6,7 +6,6 @@ from pydantic import BaseModel, Field, HttpUrl
 
 from app.schemas.ontology import LocalizedString
 
-
 PropertyType = Literal["object", "data", "annotation"]
 
 

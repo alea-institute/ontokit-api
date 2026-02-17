@@ -21,13 +21,9 @@ class BranchMetadata(Base):
     branch_name: Mapped[str] = mapped_column(String(255), nullable=False)
     created_by_id: Mapped[str] = mapped_column(String(255), nullable=False)
     created_by_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    __table_args__ = (
-        UniqueConstraint("project_id", "branch_name", name="uq_branch_metadata"),
-    )
+    __table_args__ = (UniqueConstraint("project_id", "branch_name", name="uq_branch_metadata"),)
 
     def __repr__(self) -> str:
         return (

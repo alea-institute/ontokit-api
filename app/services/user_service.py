@@ -29,7 +29,7 @@ class UserService:
         """
         return settings.zitadel_service_token or None
 
-    async def get_user_info(self, user_id: str, access_token: str | None = None) -> UserInfo | None:
+    async def get_user_info(self, user_id: str, access_token: str | None = None) -> UserInfo | None:  # noqa: ARG002
         """
         Get user information from Zitadel.
 
@@ -65,6 +65,7 @@ class UserService:
         # If using internal URL, set Host header
         if settings.zitadel_internal_url:
             from urllib.parse import urlparse
+
             parsed = urlparse(settings.zitadel_issuer)
             headers["Host"] = parsed.netloc
 
@@ -103,7 +104,9 @@ class UserService:
             return None
 
     async def get_users_info(
-        self, user_ids: list[str], access_token: str | None = None
+        self,
+        user_ids: list[str],
+        access_token: str | None = None,  # noqa: ARG002
     ) -> dict[str, UserInfo]:
         """
         Get information for multiple users.
