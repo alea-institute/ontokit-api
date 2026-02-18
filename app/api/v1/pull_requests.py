@@ -21,6 +21,7 @@ from app.schemas.pull_request import (
     GitHubIntegrationCreate,
     GitHubIntegrationResponse,
     GitHubIntegrationUpdate,
+    OpenPRsSummary,
     PRCommitListResponse,
     PRCreate,
     PRDiffResponse,
@@ -43,6 +44,21 @@ router = APIRouter()
 def get_service(db: Annotated[AsyncSession, Depends(get_db)]) -> PullRequestService:
     """Dependency to get pull request service with database session."""
     return get_pull_request_service(db)
+
+
+# Global Endpoints (must be before /{project_id}/ routes)
+
+
+@router.get(
+    "/pull-requests/open-summary",
+    response_model=OpenPRsSummary,
+)
+async def get_open_pr_summary(
+    service: Annotated[PullRequestService, Depends(get_service)],
+    user: RequiredUser,
+) -> OpenPRsSummary:
+    """Get a summary of open pull requests across all projects the user manages."""
+    return await service.get_open_pr_summary(user)
 
 
 # Pull Request Endpoints

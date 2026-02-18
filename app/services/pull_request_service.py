@@ -16,7 +16,7 @@ from app.core.auth import CurrentUser
 from app.core.encryption import decrypt_token
 from app.git import GitRepositoryService, get_git_service
 from app.models.branch_metadata import BranchMetadata
-from app.models.project import Project
+from app.models.project import Project, ProjectMember
 from app.models.pull_request import (
     GitHubIntegration,
     PRStatus,
@@ -38,6 +38,7 @@ from app.schemas.pull_request import (
     GitHubIntegrationCreate,
     GitHubIntegrationResponse,
     GitHubIntegrationUpdate,
+    OpenPRsSummary,
     PRCommit,
     PRCommitListResponse,
     PRCreate,
@@ -46,6 +47,7 @@ from app.schemas.pull_request import (
     PRListResponse,
     PRMergeRequest,
     PRMergeResponse,
+    ProjectOpenPRCount,
     PRResponse,
     PRSettingsResponse,
     PRSettingsUpdate,
@@ -1358,6 +1360,55 @@ class PullRequestService:
             await self.db.commit()
         except Exception as e:
             logger.warning(f"Failed to pull from GitHub: {e}")
+
+    # Open PR Summary (for notification bell)
+
+    async def get_open_pr_summary(self, user: CurrentUser) -> OpenPRsSummary:
+        """Get a summary of open PRs across projects the user manages."""
+        if user.is_superadmin:
+            query = (
+                select(
+                    PullRequest.project_id,
+                    Project.name.label("project_name"),
+                    func.count().label("open_count"),
+                )
+                .join(Project, PullRequest.project_id == Project.id)
+                .where(PullRequest.status == PRStatus.OPEN.value)
+                .group_by(PullRequest.project_id, Project.name)
+            )
+        else:
+            query = (
+                select(
+                    PullRequest.project_id,
+                    Project.name.label("project_name"),
+                    func.count().label("open_count"),
+                )
+                .join(Project, PullRequest.project_id == Project.id)
+                .join(
+                    ProjectMember,
+                    (ProjectMember.project_id == PullRequest.project_id)
+                    & (ProjectMember.user_id == user.id)
+                    & (ProjectMember.role.in_(["owner", "admin"])),
+                )
+                .where(PullRequest.status == PRStatus.OPEN.value)
+                .group_by(PullRequest.project_id, Project.name)
+            )
+
+        result = await self.db.execute(query)
+        rows = result.all()
+
+        by_project = [
+            ProjectOpenPRCount(
+                project_id=row.project_id,
+                project_name=row.project_name,
+                open_count=row.open_count,
+            )
+            for row in rows
+        ]
+
+        total_open = sum(p.open_count for p in by_project)
+
+        return OpenPRsSummary(total_open=total_open, by_project=by_project)
 
     # Helper methods
 

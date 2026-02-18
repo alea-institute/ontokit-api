@@ -428,3 +428,21 @@ class GitHubRepoFilesResponse(BaseModel):
 
     items: list[GitHubRepoFileInfo]
     total: int
+
+
+# Open PR Summary Schemas (for notification bell)
+
+
+class ProjectOpenPRCount(BaseModel):
+    """Count of open PRs for a single project."""
+
+    project_id: UUID
+    project_name: str
+    open_count: int
+
+
+class OpenPRsSummary(BaseModel):
+    """Summary of open pull requests across projects the user manages."""
+
+    total_open: int
+    by_project: list[ProjectOpenPRCount]
