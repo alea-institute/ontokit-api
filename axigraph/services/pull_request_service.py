@@ -1127,6 +1127,8 @@ class PullRequestService:
             connected_by_user_id=user.id,
             webhooks_enabled=integration_create.webhooks_enabled,
             default_branch=integration_create.default_branch,
+            ontology_file_path=integration_create.ontology_file_path,
+            turtle_file_path=integration_create.turtle_file_path,
         )
         self.db.add(db_integration)
 
@@ -1615,6 +1617,8 @@ class PullRequestService:
             connected_by_user_id=integration.connected_by_user_id,
             webhooks_enabled=integration.webhooks_enabled,
             default_branch=integration.default_branch,
+            ontology_file_path=integration.ontology_file_path,
+            turtle_file_path=integration.turtle_file_path,
             sync_enabled=integration.sync_enabled,
             last_sync_at=integration.last_sync_at,
             created_at=integration.created_at,
