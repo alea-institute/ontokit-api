@@ -404,9 +404,7 @@ class ProjectService:
                     project_name=project_name,
                 )
                 commit_hash = init_commit.hash
-                logger.info(
-                    f"Initialized fallback git repository for project {db_project.id}"
-                )
+                logger.info(f"Initialized fallback git repository for project {db_project.id}")
             except Exception as init_err:
                 logger.warning(
                     f"Failed to initialize fallback git repo for project {db_project.id}: "
@@ -811,7 +809,20 @@ class ProjectService:
         await self.db.commit()
         await self.db.refresh(db_member)
 
-        return self._member_to_response(db_member)
+        # Fetch user info from Zitadel so the response includes name/email
+        user_info: MemberUser | None = None
+        from axigraph.services.user_service import get_user_service
+
+        user_service = get_user_service()
+        fetched = await user_service.get_user_info(member.user_id)
+        if fetched:
+            user_info = MemberUser(
+                id=fetched["id"],
+                name=fetched["name"],
+                email=fetched["email"],
+            )
+
+        return self._member_to_response(db_member, user_info)
 
     async def update_member(
         self,
