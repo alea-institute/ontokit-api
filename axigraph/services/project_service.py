@@ -763,7 +763,9 @@ class ProjectService:
                         email=info["email"],
                     )
 
-        items = [self._member_to_response(m, user_info_map.get(m.user_id)) for m in project.members]
+        role_order = {"owner": 0, "admin": 1, "editor": 2, "viewer": 3}
+        sorted_members = sorted(project.members, key=lambda m: role_order.get(m.role, 99))
+        items = [self._member_to_response(m, user_info_map.get(m.user_id)) for m in sorted_members]
 
         return MemberListResponse(items=items, total=len(items))
 
