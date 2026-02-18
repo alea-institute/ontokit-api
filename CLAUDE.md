@@ -4,15 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Axigraph API is a collaborative OWL ontology curation platform built with FastAPI (Python 3.11+). It provides a RESTful API for managing ontologies, semantic web knowledge graphs, and team collaboration with git-based version control. Distributed as the `axigraph` package on PyPI.
+OntoKit API is a collaborative OWL ontology curation platform built with FastAPI (Python 3.11+). It provides a RESTful API for managing ontologies, semantic web knowledge graphs, and team collaboration with git-based version control. Distributed as the `ontokit` package on PyPI.
 
 ## Commands
 
 ### Development Server
 ```bash
-uvicorn axigraph.main:app --reload
+uvicorn ontokit.main:app --reload
 # Or using the installed CLI:
-axigraph --reload
+ontokit --reload
 ```
 
 ### Docker Compose (Full Stack)
@@ -22,18 +22,18 @@ docker compose up -d
 
 ### Linting & Formatting
 ```bash
-ruff check axigraph/ --fix     # Lint with auto-fix
-ruff format axigraph/          # Format code
+ruff check ontokit/ --fix     # Lint with auto-fix
+ruff format ontokit/          # Format code
 ```
 
 ### Type Checking
 ```bash
-mypy axigraph/
+mypy ontokit/
 ```
 
 ### Testing
 ```bash
-pytest tests/ -v --cov=axigraph                    # Run all tests with coverage
+pytest tests/ -v --cov=ontokit                    # Run all tests with coverage
 pytest tests/unit/test_health.py -v                 # Run single test file
 pytest tests/ -k "test_name" -v                     # Run tests matching pattern
 ```
@@ -55,7 +55,7 @@ alembic revision --autogenerate -m "description"  # Create new migration
 ### Release Management
 ```bash
 python scripts/prepare-release.py        # Strip -dev suffix, commit
-git tag -s axigraph-X.Y.Z               # Tag the release
+git tag -s ontokit-X.Y.Z               # Tag the release
 git push --tags                          # Trigger CI/CD publish
 python scripts/set-version.py X.Y.Z     # Set next dev version (adds -dev)
 ```
@@ -64,7 +64,7 @@ python scripts/set-version.py X.Y.Z     # Set next dev version (adds -dev)
 
 ### Layer Structure
 ```
-axigraph/
+ontokit/
 ├── api/routes/       # REST endpoints (FastAPI routers)
 ├── services/         # Business logic layer
 ├── models/           # SQLAlchemy ORM models
@@ -86,7 +86,7 @@ The URL prefix `/api/v1/` is preserved in `main.py` router registration — the 
 - **github_service.py** - GitHub App integration for syncing
 - **project_service.py** - Project CRUD and member management
 
-### Git Module (`axigraph/git/`)
+### Git Module (`ontokit/git/`)
 The git module uses **pygit2 with bare repositories** for concurrent access:
 - **bare_repository.py** - Core implementation using pygit2
   - `BareOntologyRepository` - Direct git object manipulation without working directory

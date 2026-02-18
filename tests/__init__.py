@@ -1,1 +1,1 @@
-"""Axigraph API tests."""
+"""OntoKit API tests."""

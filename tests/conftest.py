@@ -3,7 +3,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from axigraph.main import app
+from ontokit.main import app
 
 
 @pytest.fixture

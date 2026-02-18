@@ -1,4 +1,4 @@
-# Axigraph API
+# OntoKit API
 
 Collaborative OWL ontology curation API built with FastAPI.
 
@@ -42,12 +42,12 @@ cp .env.example .env
 alembic upgrade head
 
 # Start server
-uvicorn app.main:app --reload
+uvicorn ontokit.main:app --reload
 ```
 
 ## Documentation
 
-See the [wiki](https://github.com/your-org/axigraph-api/wiki) for full documentation.
+See the [wiki](https://github.com/your-org/ontokit-api/wiki) for full documentation.
 
 ## Tech Stack
 

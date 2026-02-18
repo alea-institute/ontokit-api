@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Set the next development version for Axigraph.
+"""Set the next development version for OntoKit.
 
 Usage:
     python scripts/set-version.py 0.2.0
 
 This will:
-  1. Update axigraph/version.py to "0.2.0-dev"
+  1. Update ontokit/version.py to "0.2.0-dev"
   2. Create a git commit: "chore: setting version to 0.2.0-dev"
 """
 
@@ -14,7 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION_FILE = Path(__file__).resolve().parent.parent / "axigraph" / "version.py"
+VERSION_FILE = Path(__file__).resolve().parent.parent / "ontokit" / "version.py"
 
 
 def main() -> int:

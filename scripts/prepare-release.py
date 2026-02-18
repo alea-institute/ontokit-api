@@ -5,9 +5,9 @@ Usage:
     python scripts/prepare-release.py
 
 This will:
-  1. Read the current version from axigraph/version.py (e.g. "0.2.0-dev")
+  1. Read the current version from ontokit/version.py (e.g. "0.2.0-dev")
   2. Strip the -dev suffix → "0.2.0"
-  3. Update axigraph/version.py
+  3. Update ontokit/version.py
   4. Create a git commit: "chore: releasing 0.2.0"
 """
 
@@ -16,7 +16,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-VERSION_FILE = Path(__file__).resolve().parent.parent / "axigraph" / "version.py"
+VERSION_FILE = Path(__file__).resolve().parent.parent / "ontokit" / "version.py"
 
 
 def main() -> int:
@@ -45,7 +45,7 @@ def main() -> int:
     )
     print(f"Created commit: chore: releasing {release}")
     print(f"\nNext steps:")
-    print(f"  git tag -s axigraph-{release}")
+    print(f"  git tag -s ontokit-{release}")
     print(f"  git push --tags")
 
     return 0

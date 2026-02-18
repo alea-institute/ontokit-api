@@ -1,5 +1,5 @@
 #!/bin/bash
-# Zitadel Setup Script for Axigraph
+# Zitadel Setup Script for OntoKit
 # This script automates the creation of OIDC applications in Zitadel
 # Run this after a fresh `docker compose up -d` with clean volumes
 #
@@ -21,7 +21,7 @@ NC='\033[0m' # No Color
 
 # Configuration
 ZITADEL_URL="${ZITADEL_URL:-http://localhost:8080}"
-ZITADEL_DATA_VOLUME="${ZITADEL_DATA_VOLUME:-axigraph-api_zitadel_data}"
+ZITADEL_DATA_VOLUME="${ZITADEL_DATA_VOLUME:-ontokit-api_zitadel_data}"
 MAX_RETRIES=30
 RETRY_INTERVAL=5
 
@@ -29,7 +29,7 @@ RETRY_INTERVAL=5
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_DIR="${SCRIPT_DIR}/.."
 API_ENV_FILE="${API_DIR}/.env"
-WEB_ENV_FILE="${SCRIPT_DIR}/../../axigraph-web/.env.local"
+WEB_ENV_FILE="${SCRIPT_DIR}/../../ontokit-web/.env.local"
 
 # Parse command line arguments
 UPDATE_ENV="${UPDATE_ENV:-false}"
@@ -50,13 +50,13 @@ for arg in "$@"; do
 done
 
 echo -e "${BLUE}========================================${NC}"
-echo -e "${BLUE}  Axigraph Zitadel Setup Script${NC}"
+echo -e "${BLUE}  OntoKit Zitadel Setup Script${NC}"
 echo -e "${BLUE}========================================${NC}"
 echo
 
 # Function to check if API is running in Docker
 is_api_running_in_docker() {
-    docker compose ps --status running 2>/dev/null | grep -q "axigraph-api"
+    docker compose ps --status running 2>/dev/null | grep -q "ontokit-api"
 }
 
 # Function to start Docker stack
@@ -128,16 +128,16 @@ get_admin_pat() {
     exit 1
 }
 
-# Function to create Axigraph project
+# Function to create OntoKit project
 create_project() {
     local pat="$1"
-    echo -e "${YELLOW}Creating Axigraph project...${NC}" >&2
+    echo -e "${YELLOW}Creating OntoKit project...${NC}" >&2
 
     # Check if project already exists
     existing=$(curl -s -X POST "${ZITADEL_URL}/management/v1/projects/_search" \
         -H "Authorization: Bearer $pat" \
         -H "Content-Type: application/json" \
-        -d '{"queries": [{"nameQuery": {"name": "Axigraph", "method": "TEXT_QUERY_METHOD_EQUALS"}}]}')
+        -d '{"queries": [{"nameQuery": {"name": "OntoKit", "method": "TEXT_QUERY_METHOD_EQUALS"}}]}')
 
     existing_id=$(echo "$existing" | jq -r '.result[0].id // empty')
 
@@ -151,7 +151,7 @@ create_project() {
     result=$(curl -s -X POST "${ZITADEL_URL}/management/v1/projects" \
         -H "Authorization: Bearer $pat" \
         -H "Content-Type: application/json" \
-        -d '{"name": "Axigraph"}')
+        -d '{"name": "OntoKit"}')
 
     project_id=$(echo "$result" | jq -r '.id // empty')
 
@@ -291,7 +291,7 @@ get_admin_user_id() {
     result=$(curl -s -X POST "${ZITADEL_URL}/management/v1/users/_search" \
         -H "Authorization: Bearer $pat" \
         -H "Content-Type: application/json" \
-        -d '{"queries": [{"userNameQuery": {"userName": "admin@axigraph.localhost", "method": "TEXT_QUERY_METHOD_EQUALS"}}]}')
+        -d '{"queries": [{"userNameQuery": {"userName": "admin@ontokit.localhost", "method": "TEXT_QUERY_METHOD_EQUALS"}}]}')
 
     admin_id=$(echo "$result" | jq -r '.result[0].id // empty')
 
@@ -334,7 +334,7 @@ main() {
     # Handle --docker-init: start Docker stack if not running
     if [[ "$DOCKER_INIT" == "true" ]]; then
         cd "$API_DIR"
-        if ! docker compose ps --status running 2>/dev/null | grep -q "axigraph-zitadel"; then
+        if ! docker compose ps --status running 2>/dev/null | grep -q "ontokit-zitadel"; then
             echo -e "${YELLOW}Starting Docker stack...${NC}"
             docker compose up -d
             echo -e "${GREEN}Docker stack started${NC}"
@@ -351,9 +351,9 @@ main() {
     # Create project
     PROJECT_ID=$(create_project "$PAT")
 
-    # Create Axigraph Web app
+    # Create OntoKit Web app
     echo
-    WEB_CREDS=$(create_oidc_app "$PAT" "$PROJECT_ID" "Axigraph Web" \
+    WEB_CREDS=$(create_oidc_app "$PAT" "$PROJECT_ID" "OntoKit Web" \
         "http://localhost:3000/api/auth/callback/zitadel" \
         "http://localhost:3000")
     WEB_CLIENT_ID=$(echo "$WEB_CREDS" | cut -d: -f1)
@@ -427,7 +427,7 @@ main() {
         echo -e "${YELLOW}To automatically update .env files, run with --update-env flag${NC}"
         echo
         echo -e "Manual configuration:"
-        echo -e "  1. Add these to axigraph-api/.env:"
+        echo -e "  1. Add these to ontokit-api/.env:"
         echo -e "     ZITADEL_CLIENT_ID=${WEB_CLIENT_ID}"
         echo -e "     ZITADEL_CLIENT_SECRET=${WEB_CLIENT_SECRET}"
         echo -e "     ZITADEL_SERVICE_TOKEN=${PAT}"
@@ -435,7 +435,7 @@ main() {
             echo -e "     SUPERADMIN_USER_IDS=${ADMIN_USER_ID}"
         fi
         echo
-        echo -e "  2. Add these to axigraph-web/.env.local:"
+        echo -e "  2. Add these to ontokit-web/.env.local:"
         echo -e "     ZITADEL_CLIENT_ID=${WEB_CLIENT_ID}"
         echo -e "     NEXT_PUBLIC_ZITADEL_CLIENT_ID=${WEB_CLIENT_ID}"
         echo -e "     ZITADEL_CLIENT_SECRET=${WEB_CLIENT_SECRET}"
@@ -444,7 +444,7 @@ main() {
     echo
     echo -e "${GREEN}Zitadel Admin Login:${NC}"
     echo -e "  URL:      ${ZITADEL_URL}/ui/console"
-    echo -e "  Username: admin@axigraph.localhost"
+    echo -e "  Username: admin@ontokit.localhost"
     echo -e "  Password: Admin123!"
     echo
     echo -e "${GREEN}Mailpit (Email Testing):${NC}"

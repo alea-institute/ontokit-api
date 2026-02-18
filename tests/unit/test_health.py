@@ -15,6 +15,6 @@ def test_root_endpoint(client: TestClient) -> None:
     response = client.get("/")
     assert response.status_code == 200
     data = response.json()
-    assert data["name"] == "Axigraph API"
+    assert data["name"] == "OntoKit API"
     assert "version" in data
     assert "docs" in data

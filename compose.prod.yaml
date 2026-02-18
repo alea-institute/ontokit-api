@@ -1,4 +1,4 @@
-# Axigraph Production Infrastructure Stack
+# OntoKit Production Infrastructure Stack
 # Run with: docker compose -f compose.prod.yaml up -d
 #
 # This configuration runs ONLY infrastructure services in Docker.
@@ -11,11 +11,11 @@
 
 services:
   # ============================================================================
-  # PostgreSQL Database (shared by Zitadel and Axigraph API)
+  # PostgreSQL Database (shared by Zitadel and OntoKit API)
   # ============================================================================
   postgres:
     image: postgres:17-alpine
-    container_name: axigraph-postgres
+    container_name: ontokit-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
@@ -28,19 +28,19 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -d zitadel -U postgres && pg_isready -d axigraph -U axigraph"]
+      test: ["CMD-SHELL", "pg_isready -d zitadel -U postgres && pg_isready -d ontokit -U ontokit"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - axigraph
+      - ontokit
 
   # ============================================================================
   # Redis for caching and pub/sub
   # ============================================================================
   redis:
     image: redis:7-alpine
-    container_name: axigraph-redis
+    container_name: ontokit-redis
     restart: unless-stopped
     command: redis-server --appendonly yes ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
     ports:
@@ -53,14 +53,14 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - axigraph
+      - ontokit
 
   # ============================================================================
   # MinIO for object storage
   # ============================================================================
   minio:
     image: minio/minio:latest
-    container_name: axigraph-minio
+    container_name: ontokit-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -77,14 +77,14 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - axigraph
+      - ontokit
 
   # ============================================================================
   # Zitadel Identity Provider
   # ============================================================================
   zitadel:
     image: ghcr.io/zitadel/zitadel:latest
-    container_name: axigraph-zitadel
+    container_name: ontokit-zitadel
     restart: unless-stopped
     command: 'start-from-init --masterkey "${ZITADEL_MASTERKEY:-MasterkeyNeedsToHave32Characters}"'
     environment:
@@ -124,7 +124,7 @@ services:
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: '2030-01-01T00:00:00Z'
 
       # Human admin user
-      ZITADEL_FIRSTINSTANCE_ORG_NAME: ${ZITADEL_ORG_NAME:-Axigraph}
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: ${ZITADEL_ORG_NAME:-OntoKit}
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: ${ZITADEL_ADMIN_USER:-admin}
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${ZITADEL_ADMIN_PASSWORD:-Admin123!}
 
@@ -145,7 +145,7 @@ services:
       - "${ZITADEL_PORT:-8080}:8080"
       - "${ZITADEL_LOGIN_PORT:-8081}:3000"
     networks:
-      - axigraph
+      - ontokit
     depends_on:
       postgres:
         condition: service_healthy
@@ -153,7 +153,7 @@ services:
   # Login V2 - Next.js based login UI
   login:
     image: ghcr.io/zitadel/zitadel-login:latest
-    container_name: axigraph-zitadel-login
+    container_name: ontokit-zitadel-login
     restart: unless-stopped
     environment:
       ZITADEL_API_URL: ${ZITADEL_URL:-http://localhost:8080}
@@ -180,7 +180,7 @@ services:
         restart: false
 
 networks:
-  axigraph:
+  ontokit:
     driver: bridge
 
 volumes:

@@ -1,15 +1,15 @@
 # Development, Release & Deploy Lifecycle
 
-This document describes the full lifecycle of the Axigraph API from local development through release and deployment.
+This document describes the full lifecycle of the OntoKit API from local development through release and deployment.
 
 ## Version Management
 
-Version is managed in a single source of truth: `axigraph/version.py`.
+Version is managed in a single source of truth: `ontokit/version.py`.
 
 ```python
 VERSION = "0.2.0-dev"          # current working version
 VERSION_BASE = "0.2.0"         # stripped for PyPI / __version__
-TAG_NAME = "axigraph-0.2.0"    # corresponding git tag
+TAG_NAME = "ontokit-0.2.0"    # corresponding git tag
 ```
 
 - During development the version carries a `-dev` suffix (e.g. `0.2.0-dev`).
@@ -21,7 +21,7 @@ TAG_NAME = "axigraph-0.2.0"    # corresponding git tag
 ### Local setup
 
 ```bash
-cd axigraph-api
+cd ontokit-api
 uv sync --dev              # install all dependencies into .venv
 source .venv/bin/activate
 ```
@@ -30,10 +30,10 @@ source .venv/bin/activate
 
 ```bash
 # Either:
-uvicorn axigraph.main:app --reload
+uvicorn ontokit.main:app --reload
 
 # Or via the installed CLI entry point:
-axigraph --reload
+ontokit --reload
 ```
 
 ### Running with Docker Compose
@@ -48,10 +48,10 @@ The development `Dockerfile` mounts source code as a read-only volume and enable
 ### Code quality
 
 ```bash
-ruff check axigraph/ --fix     # lint with auto-fix
-ruff format axigraph/          # format code
-mypy axigraph/                 # type checking (strict mode)
-pytest tests/ -v --cov=axigraph  # run tests with coverage
+ruff check ontokit/ --fix     # lint with auto-fix
+ruff format ontokit/          # format code
+mypy ontokit/                 # type checking (strict mode)
+pytest tests/ -v --cov=ontokit  # run tests with coverage
 ```
 
 ### Database migrations
@@ -64,7 +64,7 @@ alembic revision --autogenerate -m "description"  # generate a new migration
 
 ## Continuous Integration
 
-The GitHub Actions workflow (`.github/workflows/release.yml`) runs on every push and on pull requests that touch `axigraph-api/`.
+The GitHub Actions workflow (`.github/workflows/release.yml`) runs on every push and on pull requests that touch `ontokit-api/`.
 
 | Job | What it does |
 |-----|--------------|
@@ -76,7 +76,7 @@ These three jobs run on all pushes (except `renovate/**` branches) and on PRs. T
 
 ## Releasing
 
-Releases follow a Weblate-inspired workflow. All commands below are run from the `axigraph-api/` directory.
+Releases follow a Weblate-inspired workflow. All commands below are run from the `ontokit-api/` directory.
 
 ### 1. Prepare the release
 
@@ -85,18 +85,18 @@ python scripts/prepare-release.py
 ```
 
 This script:
-1. Reads the current version from `axigraph/version.py` (e.g. `0.2.0-dev`).
+1. Reads the current version from `ontokit/version.py` (e.g. `0.2.0-dev`).
 2. Strips the `-dev` suffix to produce the release version (`0.2.0`).
-3. Writes the updated version back to `axigraph/version.py`.
+3. Writes the updated version back to `ontokit/version.py`.
 4. Creates a git commit: `chore: releasing 0.2.0`.
 
 ### 2. Tag the release
 
 ```bash
-git tag -s axigraph-0.2.0
+git tag -s ontokit-0.2.0
 ```
 
-Tags must match the pattern `axigraph-*` to trigger the publish pipeline.
+Tags must match the pattern `ontokit-*` to trigger the publish pipeline.
 
 ### 3. Push
 
@@ -110,10 +110,10 @@ When the tag reaches GitHub, the CI workflow runs the lint/test/build jobs and t
 
 - **publish_pypi** &mdash; Uploads the wheel and sdist to PyPI using trusted publishing (`uv publish --trusted-publishing always`). Requires `id-token: write` permission for OIDC-based authentication.
 - **publish_github** &mdash; Creates a GitHub Release with auto-generated release notes and attaches the build artifacts.
-- **publish_docker** &mdash; Builds the production Docker image (`Dockerfile.prod`) and pushes it to the GitHub Container Registry. The image is tagged with the release version, the major.minor version, and `latest`. For example, the tag `axigraph-0.2.0` produces:
-  - `ghcr.io/<owner>/axigraph:0.2.0`
-  - `ghcr.io/<owner>/axigraph:0.2`
-  - `ghcr.io/<owner>/axigraph:latest`
+- **publish_docker** &mdash; Builds the production Docker image (`Dockerfile.prod`) and pushes it to the GitHub Container Registry. The image is tagged with the release version, the major.minor version, and `latest`. For example, the tag `ontokit-0.2.0` produces:
+  - `ghcr.io/<owner>/ontokit:0.2.0`
+  - `ghcr.io/<owner>/ontokit:0.2`
+  - `ghcr.io/<owner>/ontokit:latest`
 
 ### 5. Set the next development version
 
@@ -122,7 +122,7 @@ python scripts/set-version.py 0.3.0
 ```
 
 This script:
-1. Updates `axigraph/version.py` to `0.3.0-dev`.
+1. Updates `ontokit/version.py` to `0.3.0-dev`.
 2. Creates a git commit: `chore: setting version to 0.3.0-dev`.
 
 Push the commit to start the next development cycle.
@@ -141,15 +141,15 @@ Push the commit to start the next development cycle.
 
 ## Deployment
 
-There are three ways to deploy the Axigraph API, depending on your needs.
+There are three ways to deploy the OntoKit API, depending on your needs.
 
 ### From PyPI
 
 Install the published package and run via the CLI entry point:
 
 ```bash
-pip install axigraph        # or: uv pip install axigraph
-axigraph                    # starts uvicorn on 0.0.0.0:8000
+pip install ontokit        # or: uv pip install ontokit
+ontokit                    # starts uvicorn on 0.0.0.0:8000
 ```
 
 ### From GHCR (Docker image)
@@ -158,21 +158,21 @@ Pull the pre-built production image published by CI:
 
 ```bash
 # latest release
-docker pull ghcr.io/<owner>/axigraph:latest
+docker pull ghcr.io/<owner>/ontokit:latest
 
 # specific version
-docker pull ghcr.io/<owner>/axigraph:0.2.0
+docker pull ghcr.io/<owner>/ontokit:0.2.0
 ```
 
 Run it directly:
 
 ```bash
 docker run -d \
-  --name axigraph-api \
+  --name ontokit-api \
   -p 8000:8000 \
   -e DATABASE_URL=postgresql+asyncpg://... \
   -e REDIS_URL=redis://redis:6379/0 \
-  ghcr.io/<owner>/axigraph:0.2.0
+  ghcr.io/<owner>/ontokit:0.2.0
 ```
 
 Or reference it in a compose file instead of building locally:
@@ -180,7 +180,7 @@ Or reference it in a compose file instead of building locally:
 ```yaml
 services:
   api:
-    image: ghcr.io/<owner>/axigraph:0.2.0
+    image: ghcr.io/<owner>/ontokit:0.2.0
     # ...
 ```
 

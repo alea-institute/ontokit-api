@@ -1,5 +1,5 @@
 #!/bin/bash
-# Axigraph Development Environment Reset Script
+# OntoKit Development Environment Reset Script
 # This script completely resets the development environment to a clean state
 # WARNING: This will delete all data including databases, users, and projects!
 
@@ -16,11 +16,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_DIR="${SCRIPT_DIR}/.."
 
 echo -e "${RED}========================================${NC}"
-echo -e "${RED}  Axigraph Development Environment Reset${NC}"
+echo -e "${RED}  OntoKit Development Environment Reset${NC}"
 echo -e "${RED}========================================${NC}"
 echo
 echo -e "${YELLOW}WARNING: This will delete ALL data including:${NC}"
-echo -e "  - PostgreSQL databases (axigraph and zitadel)"
+echo -e "  - PostgreSQL databases (ontokit and zitadel)"
 echo -e "  - Redis cache"
 echo -e "  - MinIO object storage"
 echo -e "  - Zitadel users and applications"
@@ -51,7 +51,7 @@ PROJECT_NAME=$(basename "$(pwd)" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]
 # Remove volumes (try both naming conventions)
 for volume in postgres_data redis_data minio_data zitadel_data git_repos; do
     docker volume rm "${PROJECT_NAME}_${volume}" 2>/dev/null && echo "  Removed ${PROJECT_NAME}_${volume}" || true
-    docker volume rm "axigraph-api_${volume}" 2>/dev/null && echo "  Removed axigraph-api_${volume}" || true
+    docker volume rm "ontokit-api_${volume}" 2>/dev/null && echo "  Removed ontokit-api_${volume}" || true
 done
 
 echo
@@ -110,7 +110,7 @@ echo -e "${GREEN}  Reset Complete!${NC}"
 echo -e "${GREEN}========================================${NC}"
 echo
 echo -e "Next steps:"
-echo -e "  1. Restart axigraph-web to pick up new credentials"
-echo -e "  2. Sign in with admin@axigraph.localhost / Admin123!"
+echo -e "  1. Restart ontokit-web to pick up new credentials"
+echo -e "  2. Sign in with admin@ontokit.localhost / Admin123!"
 echo -e "  3. Create your user account through the login flow"
 echo

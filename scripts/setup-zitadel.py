@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Setup script for Zitadel - creates project and applications for Axigraph.
+Setup script for Zitadel - creates project and applications for OntoKit.
 
 Run this after Zitadel is up and running:
     python scripts/setup-zitadel.py
@@ -54,7 +54,7 @@ def get_admin_token() -> str:
 
     try:
         result = subprocess.run(
-            ["docker", "cp", "axigraph-zitadel:/zitadel-data/admin.pat", "/tmp/admin.pat"],
+            ["docker", "cp", "ontokit-zitadel:/zitadel-data/admin.pat", "/tmp/admin.pat"],
             capture_output=True,
             text=True,
         )
@@ -82,13 +82,13 @@ def get_admin_token() -> str:
 
 
 def create_project(client: httpx.Client, token: str) -> str:
-    """Create the Axigraph project."""
-    print("Creating Axigraph project...")
+    """Create the OntoKit project."""
+    print("Creating OntoKit project...")
 
     resp = client.post(
         "/management/v1/projects",
         json={
-            "name": "Axigraph",
+            "name": "OntoKit",
             "projectRoleAssertion": False,  # Don't require role assertion in tokens
             "projectRoleCheck": False,  # Don't check user grants on login (simpler for dev)
         },
@@ -100,7 +100,7 @@ def create_project(client: httpx.Client, token: str) -> str:
         # List projects to find it
         list_resp = client.post(
             "/management/v1/projects/_search",
-            json={"queries": [{"nameQuery": {"name": "Axigraph", "method": "TEXT_QUERY_METHOD_EQUALS"}}]},
+            json={"queries": [{"nameQuery": {"name": "OntoKit", "method": "TEXT_QUERY_METHOD_EQUALS"}}]},
             headers={"Authorization": f"Bearer {token}"},
         )
         projects = list_resp.json().get("result", [])
@@ -121,7 +121,7 @@ def create_web_application(client: httpx.Client, token: str, project_id: str) ->
     resp = client.post(
         f"/management/v1/projects/{project_id}/apps/oidc",
         json={
-            "name": "Axigraph Web",
+            "name": "OntoKit Web",
             "redirectUris": WEB_REDIRECT_URIS,
             "postLogoutRedirectUris": WEB_LOGOUT_URIS,
             "responseTypes": ["OIDC_RESPONSE_TYPE_CODE"],
@@ -145,7 +145,7 @@ def create_web_application(client: httpx.Client, token: str, project_id: str) ->
         )
         apps = list_resp.json().get("result", [])
         for app in apps:
-            if app.get("name") == "Axigraph Web":
+            if app.get("name") == "OntoKit Web":
                 return {"clientId": app.get("oidcConfig", {}).get("clientId")}
         return {}
 
@@ -162,7 +162,7 @@ def create_native_application(client: httpx.Client, token: str, project_id: str)
     resp = client.post(
         f"/management/v1/projects/{project_id}/apps/oidc",
         json={
-            "name": "Axigraph Desktop",
+            "name": "OntoKit Desktop",
             "redirectUris": ["http://localhost:8400/callback"],  # Local callback for desktop
             "responseTypes": ["OIDC_RESPONSE_TYPE_CODE"],
             "grantTypes": [
@@ -186,7 +186,7 @@ def create_native_application(client: httpx.Client, token: str, project_id: str)
         )
         apps = list_resp.json().get("result", [])
         for app in apps:
-            if app.get("name") == "Axigraph Desktop":
+            if app.get("name") == "OntoKit Desktop":
                 return {"clientId": app.get("oidcConfig", {}).get("clientId")}
         return {}
 
@@ -203,7 +203,7 @@ def create_api_application(client: httpx.Client, token: str, project_id: str) ->
     resp = client.post(
         f"/management/v1/projects/{project_id}/apps/api",
         json={
-            "name": "Axigraph API",
+            "name": "OntoKit API",
             "authMethodType": "API_AUTH_METHOD_TYPE_PRIVATE_KEY_JWT",
         },
         headers={"Authorization": f"Bearer {token}"},
@@ -222,7 +222,7 @@ def create_api_application(client: httpx.Client, token: str, project_id: str) ->
 def main():
     """Main setup function."""
     print("=" * 60)
-    print("Axigraph Zitadel Setup")
+    print("OntoKit Zitadel Setup")
     print("=" * 60)
 
     # Wait for Zitadel
@@ -238,7 +238,7 @@ def main():
         print("\nPlease set up Zitadel manually:")
         print(f"1. Open {ZITADEL_URL} in your browser")
         print(f"2. Login with: {ADMIN_USERNAME} / {ADMIN_PASSWORD}")
-        print("3. Create a new project called 'Axigraph'")
+        print("3. Create a new project called 'OntoKit'")
         print("4. Create applications as described in the documentation")
         sys.exit(1)
 
@@ -257,13 +257,13 @@ def main():
     print("=" * 60)
     print("\nAdd these to your .env files:\n")
 
-    print("# axigraph-api/.env")
+    print("# ontokit-api/.env")
     print(f"ZITADEL_ISSUER={ZITADEL_URL}")
     if native_app.get("clientId"):
         print(f"ZITADEL_CLIENT_ID={native_app['clientId']}")
     print()
 
-    print("# axigraph-web/.env.local")
+    print("# ontokit-web/.env.local")
     print(f"ZITADEL_ISSUER={ZITADEL_URL}")
     if web_app.get("clientId"):
         print(f"ZITADEL_CLIENT_ID={web_app['clientId']}")

@@ -23,7 +23,7 @@ Database:
 
 FirstInstance:
   Org:
-    Name: "Axigraph"
+    Name: "OntoKit"
     Human:
       UserName: "admin"
       FirstName: "Admin"

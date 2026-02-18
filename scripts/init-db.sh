@@ -1,5 +1,5 @@
 #!/bin/bash
-# Initialize PostgreSQL with multiple databases for Axigraph stack
+# Initialize PostgreSQL with multiple databases for OntoKit stack
 # This script runs as the postgres superuser during container startup
 
 set -e
@@ -11,10 +11,10 @@ psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname "$POSTGRES_DB" <<-E
     CREATE DATABASE zitadel OWNER zitadel;
     GRANT ALL PRIVILEGES ON DATABASE zitadel TO zitadel;
 
-    -- Create Axigraph user and database
-    CREATE USER axigraph WITH PASSWORD 'axigraph';
-    CREATE DATABASE axigraph OWNER axigraph;
-    GRANT ALL PRIVILEGES ON DATABASE axigraph TO axigraph;
+    -- Create OntoKit user and database
+    CREATE USER ontokit WITH PASSWORD 'ontokit';
+    CREATE DATABASE ontokit OWNER ontokit;
+    GRANT ALL PRIVILEGES ON DATABASE ontokit TO ontokit;
 EOSQL
 
-echo "Databases initialized: zitadel, axigraph"
+echo "Databases initialized: zitadel, ontokit"

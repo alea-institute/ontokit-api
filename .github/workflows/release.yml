@@ -3,7 +3,7 @@ name: Distribution
 on:
   push:
     branches-ignore: [renovate/**]
-    tags: [axigraph-*]
+    tags: [ontokit-*]
   pull_request:
 
 jobs:
@@ -13,9 +13,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - run: uv sync --dev
-      - run: uv run ruff check axigraph/
-      - run: uv run ruff format --check axigraph/
-      - run: uv run mypy axigraph/
+      - run: uv run ruff check ontokit/
+      - run: uv run ruff format --check ontokit/
+      - run: uv run mypy ontokit/
 
   test:
     runs-on: ubuntu-latest
@@ -23,7 +23,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - run: uv sync --dev
-      - run: uv run pytest tests/ -v --cov=axigraph
+      - run: uv run pytest tests/ -v --cov=ontokit
 
   build:
     runs-on: ubuntu-latest
@@ -38,7 +38,7 @@ jobs:
           path: dist/
 
   publish_pypi:
-    if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/axigraph-')
+    if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/ontokit-')
     needs: [lint, test, build]
     runs-on: ubuntu-latest
     permissions:
@@ -53,7 +53,7 @@ jobs:
         working-directory: dist
 
   publish_github:
-    if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/axigraph-')
+    if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/ontokit-')
     needs: [lint, test, build]
     runs-on: ubuntu-latest
     permissions:
@@ -69,7 +69,7 @@ jobs:
           generateReleaseNotes: true
 
   publish_docker:
-    if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/axigraph-')
+    if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/ontokit-')
     needs: [lint, test]
     runs-on: ubuntu-latest
     permissions:
@@ -86,7 +86,7 @@ jobs:
       - id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ghcr.io/${{ github.repository_owner }}/axigraph
+          images: ghcr.io/${{ github.repository_owner }}/ontokit
           tags: |
             type=semver,pattern={{version}},value=${{ github.ref_name }},prefix=
             type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }},prefix=

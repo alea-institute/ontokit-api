@@ -208,7 +208,7 @@ def main() -> int:
     else:
         # Try to load from settings
         try:
-            from axigraph.core.config import settings
+            from ontokit.core.config import settings
             base_path = Path(settings.git_repos_base_path)
         except ImportError:
             # Default fallback

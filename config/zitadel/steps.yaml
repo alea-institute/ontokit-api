@@ -1,8 +1,8 @@
 FirstInstance:
-  InstanceName: "Axigraph"
+  InstanceName: "OntoKit"
   DefaultLanguage: "en"
   Org:
-    Name: "Axigraph"
+    Name: "OntoKit"
     Human:
       UserName: "admin"
       FirstName: "Admin"

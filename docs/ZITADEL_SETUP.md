@@ -1,6 +1,6 @@
 # Zitadel Setup Guide
 
-This guide walks you through setting up Zitadel authentication for Axigraph development.
+This guide walks you through setting up Zitadel authentication for OntoKit development.
 
 ## Quick Start
 
@@ -9,7 +9,7 @@ The Docker Compose stack automatically sets up Zitadel with Login V2 and creates
 ### 1. Start the Docker Stack
 
 ```bash
-cd axigraph-api
+cd ontokit-api
 docker compose up -d
 ```
 
@@ -23,7 +23,7 @@ docker compose ps
 
 1. Open: **http://localhost:8080/ui/console**
 2. Login with:
-   - **Username:** `admin@Axigraph.localhost`
+   - **Username:** `admin@OntoKit.localhost`
    - **Password:** `Admin123!`
 
 ### 3. Create OIDC Application (Automated)
@@ -32,21 +32,21 @@ The setup script can automatically create the OIDC application:
 
 ```bash
 # Get the admin PAT token
-docker cp axigraph-zitadel:/zitadel-data/admin.pat /tmp/admin.pat
+docker cp ontokit-zitadel:/zitadel-data/admin.pat /tmp/admin.pat
 PAT=$(cat /tmp/admin.pat)
 
 # Create project
 PROJECT_ID=$(curl -s -X POST "http://localhost:8080/management/v1/projects" \
   -H "Authorization: Bearer $PAT" \
   -H "Content-Type: application/json" \
-  -d '{"name": "Axigraph"}' | jq -r '.id')
+  -d '{"name": "OntoKit"}' | jq -r '.id')
 
 # Create OIDC application
 curl -s -X POST "http://localhost:8080/management/v1/projects/${PROJECT_ID}/apps/oidc" \
   -H "Authorization: Bearer $PAT" \
   -H "Content-Type: application/json" \
   -d '{
-    "name": "Axigraph Web",
+    "name": "OntoKit Web",
     "redirectUris": ["http://localhost:3000/api/auth/callback/zitadel"],
     "postLogoutRedirectUris": ["http://localhost:3000"],
     "responseTypes": ["OIDC_RESPONSE_TYPE_CODE"],
@@ -66,25 +66,25 @@ Copy the `clientId` and `clientSecret` from the response to your `.env.local` fi
 ## Step 1: Access Zitadel Console
 
 1. Open your browser and navigate to: **http://localhost:8080/ui/console**
-2. Login with `admin@Axigraph.localhost` / `Admin123!`
+2. Login with `admin@OntoKit.localhost` / `Admin123!`
 3. Login with the admin credentials:
    - **Username:** `admin`
    - **Password:** `Admin123!`
 4. You will be prompted to change the password on first login - set a new password you'll remember
 
-## Step 2: Create the Axigraph Project
+## Step 2: Create the OntoKit Project
 
 1. In the Zitadel console, click **"Projects"** in the left sidebar
 2. Click **"Create New Project"**
-3. Set the project name to: **`Axigraph`**
+3. Set the project name to: **`OntoKit`**
 4. Click **"Continue"**
 
 ## Step 3: Create the Web Application (for Next.js frontend)
 
-1. Inside the Axigraph project, click **"New"** button
+1. Inside the OntoKit project, click **"New"** button
 2. Select **"Web"** application type
 3. Configure the application:
-   - **Name:** `Axigraph Web`
+   - **Name:** `OntoKit Web`
    - **Authentication Method:** `CODE` (Authorization Code with PKCE)
 4. Click **"Continue"**
 5. Configure redirect URIs:
@@ -97,10 +97,10 @@ Copy the `clientId` and `clientSecret` from the response to your `.env.local` fi
 
 ## Step 4: Create the Native Application (for Desktop clients)
 
-1. Inside the Axigraph project, click **"New"** button
+1. Inside the OntoKit project, click **"New"** button
 2. Select **"Native"** application type
 3. Configure the application:
-   - **Name:** `Axigraph Desktop`
+   - **Name:** `OntoKit Desktop`
    - **Authentication Method:** `PKCE` (no secret, public client)
 4. Click **"Continue"**
 5. Configure redirect URIs:
@@ -112,7 +112,7 @@ Copy the `clientId` and `clientSecret` from the response to your `.env.local` fi
 
 ## Step 5: Configure Environment Variables
 
-### axigraph-web/.env.local
+### ontokit-web/.env.local
 
 Create or update the `.env.local` file in the web project:
 
@@ -132,7 +132,7 @@ Generate a secret with:
 openssl rand -base64 32
 ```
 
-### axigraph-api/.env
+### ontokit-api/.env
 
 Update the `.env` file in the API project:
 
@@ -146,10 +146,10 @@ ZITADEL_ISSUER=http://localhost:8080
 After updating the environment variables, restart both applications:
 
 ```bash
-# Restart the API (in axigraph-api directory)
+# Restart the API (in ontokit-api directory)
 # If using uvicorn directly, stop and start it again
 
-# Restart the web app (in axigraph-web directory)
+# Restart the web app (in ontokit-web directory)
 npm run dev
 ```
 
@@ -179,7 +179,7 @@ For development, you can create additional test users in Zitadel:
 1. Go to **Users** in the left sidebar
 2. Click **"New"**
 3. Fill in the user details
-4. The user can then login to Axigraph
+4. The user can then login to OntoKit
 
 ## Security Notes
 

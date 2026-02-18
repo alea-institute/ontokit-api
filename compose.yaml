@@ -1,4 +1,4 @@
-# Axigraph Development Stack
+# OntoKit Development Stack
 # Run with: docker compose up -d
 #
 # This configuration runs ALL services in Docker containers (development mode).
@@ -18,20 +18,20 @@
 #     ./scripts/setup-zitadel.sh --update-env --force-secrets
 #
 # After starting, access:
-#   - Axigraph API: http://localhost:8000
+#   - OntoKit API: http://localhost:8000
 #   - Zitadel Console: http://localhost:8080/ui/console
 #   - MinIO Console: http://localhost:9001
 #   - Mailpit (email testing): http://localhost:8025
 #
-# Default Zitadel admin: admin@axigraph.localhost / Admin123!
+# Default Zitadel admin: admin@ontokit.localhost / Admin123!
 
 services:
   # ============================================================================
-  # PostgreSQL Database (shared by Zitadel and Axigraph API)
+  # PostgreSQL Database (shared by Zitadel and OntoKit API)
   # ============================================================================
   postgres:
     image: postgres:17-alpine
-    container_name: axigraph-postgres
+    container_name: ontokit-postgres
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
@@ -44,19 +44,19 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -d zitadel -U postgres && pg_isready -d axigraph -U axigraph"]
+      test: ["CMD-SHELL", "pg_isready -d zitadel -U postgres && pg_isready -d ontokit -U ontokit"]
       interval: 10s
       timeout: 5s
       retries: 5
     networks:
-      - axigraph
+      - ontokit
 
   # ============================================================================
   # Redis for caching and pub/sub
   # ============================================================================
   redis:
     image: redis:7-alpine
-    container_name: axigraph-redis
+    container_name: ontokit-redis
     restart: unless-stopped
     ports:
       - "6379:6379"
@@ -68,14 +68,14 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - axigraph
+      - ontokit
 
   # ============================================================================
   # MinIO for object storage (ontology files, exports, etc.)
   # ============================================================================
   minio:
     image: minio/minio:latest
-    container_name: axigraph-minio
+    container_name: ontokit-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
@@ -92,26 +92,26 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - axigraph
+      - ontokit
 
   # ============================================================================
   # Mailpit (local email testing - catches all outgoing emails)
   # ============================================================================
   mailpit:
     image: axllent/mailpit:latest
-    container_name: axigraph-mailpit
+    container_name: ontokit-mailpit
     restart: unless-stopped
     ports:
       - "8025:8025"  # Web UI
     networks:
-      - axigraph
+      - ontokit
 
   # ============================================================================
   # Zitadel Identity Provider
   # ============================================================================
   zitadel:
     image: ghcr.io/zitadel/zitadel:latest
-    container_name: axigraph-zitadel
+    container_name: ontokit-zitadel
     restart: unless-stopped
     command: 'start-from-init --masterkey "MasterkeyNeedsToHave32Characters"'
     environment:
@@ -151,15 +151,15 @@ services:
       ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: '2030-01-01T00:00:00Z'
 
       # Human admin user
-      ZITADEL_FIRSTINSTANCE_ORG_NAME: "Axigraph"
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: "OntoKit"
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: admin
       ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: Admin123!
 
       # SMTP configuration (using Mailpit for local development)
       ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_SMTP_HOST: mailpit:1025
       ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_SMTP_TLS: "false"
-      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROM: noreply@axigraph.localhost
-      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROMNAME: Axigraph
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROM: noreply@ontokit.localhost
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROMNAME: OntoKit
 
       # Debug logging
       ZITADEL_LOG_LEVEL: debug
@@ -178,7 +178,7 @@ services:
       - "8080:8080"
       - "8081:3000"
     networks:
-      - axigraph
+      - ontokit
     depends_on:
       postgres:
         condition: service_healthy
@@ -188,7 +188,7 @@ services:
   # Login V2 - Next.js based login UI
   login:
     image: ghcr.io/zitadel/zitadel-login:latest
-    container_name: axigraph-zitadel-login
+    container_name: ontokit-zitadel-login
     restart: unless-stopped
     environment:
       ZITADEL_API_URL: http://localhost:8080
@@ -215,14 +215,14 @@ services:
         restart: false
 
   # ============================================================================
-  # Axigraph API (FastAPI backend)
+  # OntoKit API (FastAPI backend)
   # ============================================================================
   api:
     build:
       context: .
       dockerfile: Dockerfile
-    image: axigraph/api:latest
-    container_name: axigraph-api
+    image: ontokit/api:latest
+    container_name: ontokit-api
     restart: unless-stopped
     environment:
       APP_ENV: development
@@ -231,14 +231,14 @@ services:
       HOST: 0.0.0.0
       PORT: 8000
       # Database - connects to shared postgres container
-      DATABASE_URL: postgresql+asyncpg://axigraph:axigraph@postgres:5432/axigraph
+      DATABASE_URL: postgresql+asyncpg://ontokit:ontokit@postgres:5432/ontokit
       # Redis
       REDIS_URL: redis://redis:6379/0
       # MinIO
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: minio
       MINIO_SECRET_KEY: minio123
-      MINIO_BUCKET: axigraph
+      MINIO_BUCKET: ontokit
       MINIO_SECURE: "false"
       # Zitadel
       ZITADEL_ISSUER: http://localhost:8080
@@ -258,9 +258,9 @@ services:
       - "8000:8000"
     volumes:
       # Mount source code for hot reload in development
-      - ./axigraph:/home/axigraph/app/axigraph:ro
+      - ./ontokit:/home/ontokit/app/ontokit:ro
       # Mount alembic for migrations in development
-      - ./alembic:/home/axigraph/app/alembic:ro
+      - ./alembic:/home/ontokit/app/alembic:ro
       # Git repositories for version control
       - git_repos:/data/repos
     healthcheck:
@@ -270,7 +270,7 @@ services:
       start_period: 5s
       retries: 3
     networks:
-      - axigraph
+      - ontokit
     depends_on:
       postgres:
         condition: service_healthy
@@ -284,22 +284,22 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: axigraph/api:latest
-    container_name: axigraph-worker
+    image: ontokit/api:latest
+    container_name: ontokit-worker
     restart: unless-stopped
-    command: ["arq", "axigraph.worker.WorkerSettings"]
+    command: ["arq", "ontokit.worker.WorkerSettings"]
     environment:
       APP_ENV: development
       DEBUG: "true"
       # Database - connects to shared postgres container
-      DATABASE_URL: postgresql+asyncpg://axigraph:axigraph@postgres:5432/axigraph
+      DATABASE_URL: postgresql+asyncpg://ontokit:ontokit@postgres:5432/ontokit
       # Redis
       REDIS_URL: redis://redis:6379/0
       # MinIO
       MINIO_ENDPOINT: minio:9000
       MINIO_ACCESS_KEY: minio
       MINIO_SECRET_KEY: minio123
-      MINIO_BUCKET: axigraph
+      MINIO_BUCKET: ontokit
       MINIO_SECURE: "false"
       # Git Repository Storage
       GIT_REPOS_BASE_PATH: /data/repos
@@ -307,11 +307,11 @@ services:
       GITHUB_TOKEN_ENCRYPTION_KEY: ${GITHUB_TOKEN_ENCRYPTION_KEY:-}
     volumes:
       # Mount source code for hot reload in development
-      - ./axigraph:/home/axigraph/app/axigraph:ro
+      - ./ontokit:/home/ontokit/app/ontokit:ro
       # Git repositories (shared with API)
       - git_repos:/data/repos
     networks:
-      - axigraph
+      - ontokit
     depends_on:
       postgres:
         condition: service_healthy
@@ -321,7 +321,7 @@ services:
         condition: service_healthy
 
 networks:
-  axigraph:
+  ontokit:
     driver: bridge
 
 volumes:

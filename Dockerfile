@@ -1,4 +1,4 @@
-# Axigraph API Dockerfile
+# OntoKit API Dockerfile
 FROM python:3.12-slim
 
 # Set environment variables
@@ -15,26 +15,26 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user and git repos directory
-RUN useradd --create-home --shell /bin/bash axigraph && \
+RUN useradd --create-home --shell /bin/bash ontokit && \
     mkdir -p /data/repos && \
-    chown -R axigraph:axigraph /data/repos
-WORKDIR /home/axigraph/app
+    chown -R ontokit:ontokit /data/repos
+WORKDIR /home/ontokit/app
 
 # Install Python dependencies
 COPY pyproject.toml README.md ./
-COPY axigraph/version.py ./axigraph/version.py
+COPY ontokit/version.py ./ontokit/version.py
 RUN pip install --upgrade pip && \
     pip install .
 
 # Copy application code
-COPY --chown=axigraph:axigraph axigraph/ ./axigraph/
+COPY --chown=ontokit:ontokit ontokit/ ./ontokit/
 
 # Copy alembic configuration for migrations
-COPY --chown=axigraph:axigraph alembic.ini ./
-COPY --chown=axigraph:axigraph alembic/ ./alembic/
+COPY --chown=ontokit:ontokit alembic.ini ./
+COPY --chown=ontokit:ontokit alembic/ ./alembic/
 
 # Switch to non-root user
-USER axigraph
+USER ontokit
 
 # Expose port
 EXPOSE 8000
@@ -44,4 +44,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD curl -f http://localhost:8000/health || exit 1
 
 # Run the application with hot reload (for development)
-CMD ["uvicorn", "axigraph.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "ontokit.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
