@@ -127,6 +127,125 @@ class UserService:
 
         return result
 
+    async def search_users(
+        self,
+        query: str,
+        limit: int = 10,
+    ) -> tuple[list[dict[str, str | None]], int]:
+        """
+        Search Zitadel users by username, email, or display name.
+
+        Uses the Zitadel v2 user search API with an OR query combining
+        username, email, and display name filters.
+
+        Args:
+            query: The search string (matched as contains, case-insensitive)
+            limit: Maximum number of results to return
+
+        Returns:
+            Tuple of (list of matching UserInfo dicts, total result count)
+        """
+        service_token = self._get_service_token()
+        if not service_token:
+            return [], 0
+
+        base_url = settings.zitadel_internal_url or settings.zitadel_issuer
+        url = f"{base_url}/v2/users"
+
+        headers = {
+            "Authorization": f"Bearer {service_token}",
+            "Content-Type": "application/json",
+        }
+
+        if settings.zitadel_internal_url:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(settings.zitadel_issuer)
+            headers["Host"] = parsed.netloc
+
+        body = {
+            "query": {
+                "offset": 0,
+                "limit": limit,
+                "asc": True,
+            },
+            "queries": [
+                {
+                    "or_query": {
+                        "queries": [
+                            {
+                                "user_name_query": {
+                                    "user_name": query,
+                                    "method": "TEXT_QUERY_METHOD_CONTAINS_IGNORE_CASE",
+                                },
+                            },
+                            {
+                                "email_query": {
+                                    "email_address": query,
+                                    "method": "TEXT_QUERY_METHOD_CONTAINS_IGNORE_CASE",
+                                },
+                            },
+                            {
+                                "display_name_query": {
+                                    "display_name": query,
+                                    "method": "TEXT_QUERY_METHOD_CONTAINS_IGNORE_CASE",
+                                },
+                            },
+                        ],
+                    },
+                },
+            ],
+        }
+
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.post(url, headers=headers, json=body, timeout=10.0)
+
+                if response.status_code == 200:
+                    data = response.json()
+                    total = int(data.get("details", {}).get("totalResult", 0))
+                    results: list[dict[str, str | None]] = []
+
+                    for user_data in data.get("result", []):
+                        user_id = user_data.get("userId", "")
+                        human = user_data.get("human", {})
+                        profile = human.get("profile", {})
+                        email_data = human.get("email", {})
+
+                        display_name = profile.get("displayName")
+                        if not display_name:
+                            first = profile.get("givenName", "")
+                            last = profile.get("familyName", "")
+                            display_name = f"{first} {last}".strip() or None
+
+                        username = user_data.get("preferredLoginName") or user_data.get(
+                            "userName", ""
+                        )
+                        email = email_data.get("email")
+
+                        # Opportunistically populate cache
+                        self._cache[user_id] = {
+                            "id": user_id,
+                            "name": display_name,
+                            "email": email,
+                        }
+
+                        results.append(
+                            {
+                                "id": user_id,
+                                "username": username,
+                                "display_name": display_name,
+                                "email": email,
+                            }
+                        )
+
+                    return results, total
+
+                return [], 0
+
+        except httpx.HTTPError:
+            return [], 0
+
     def clear_cache(self) -> None:
         """Clear the user info cache."""
         self._cache.clear()

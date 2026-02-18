@@ -45,3 +45,19 @@ class GitHubRepoListResponse(BaseModel):
 
     items: list[GitHubRepoInfo]
     total: int
+
+
+class UserSearchResult(BaseModel):
+    """A single user returned by the user search endpoint."""
+
+    id: str
+    username: str
+    display_name: str | None = None
+    email: str | None = None
+
+
+class UserSearchResponse(BaseModel):
+    """Paginated list of user search results."""
+
+    items: list[UserSearchResult]
+    total: int

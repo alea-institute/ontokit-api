@@ -17,8 +17,11 @@ from axigraph.schemas.user_settings import (
     GitHubTokenCreate,
     GitHubTokenResponse,
     GitHubTokenStatus,
+    UserSearchResponse,
+    UserSearchResult,
 )
 from axigraph.services.github_service import GitHubService, get_github_service
+from axigraph.services.user_service import UserService, get_user_service
 
 logger = logging.getLogger(__name__)
 
@@ -179,3 +182,29 @@ async def list_github_repos(
     ]
 
     return GitHubRepoListResponse(items=items, total=len(items))
+
+
+@router.get("/search", response_model=UserSearchResponse)
+async def search_users(
+    user: RequiredUser,  # noqa: ARG001
+    user_service: Annotated[UserService, Depends(get_user_service)],
+    q: str = Query(..., min_length=2, description="Search query for username, email, or name"),
+    limit: int = Query(default=10, ge=1, le=50),
+) -> UserSearchResponse:
+    """Search Zitadel users by username, email, or display name.
+
+    Requires authentication. Returns matching users for the add-member autocomplete.
+    """
+    results, total = await user_service.search_users(query=q, limit=limit)
+
+    items = [
+        UserSearchResult(
+            id=r.get("id", ""),
+            username=r.get("username", ""),
+            display_name=r.get("display_name"),
+            email=r.get("email"),
+        )
+        for r in results
+    ]
+
+    return UserSearchResponse(items=items, total=total)
