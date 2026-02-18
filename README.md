@@ -18,8 +18,14 @@ Collaborative OWL ontology curation API built with FastAPI.
 # Start all services
 docker compose up -d
 
-# Run migrations
+# Run database migrations
 docker compose exec api alembic upgrade head
+
+# Set up Zitadel authentication (creates OIDC apps, updates .env files)
+./scripts/setup-zitadel.sh --update-env
+
+# Recreate API/worker containers to pick up the new credentials
+docker compose up -d --force-recreate api worker
 ```
 
 ### Hybrid Mode (API on host)
@@ -38,7 +44,10 @@ pip install -e ".[dev]"
 # Configure
 cp .env.example .env
 
-# Run migrations
+# Set up Zitadel authentication (creates OIDC apps, updates .env files)
+./scripts/setup-zitadel.sh --update-env
+
+# Run database migrations
 alembic upgrade head
 
 # Start server
@@ -47,7 +56,7 @@ uvicorn ontokit.main:app --reload
 
 ## Documentation
 
-See the [wiki](https://github.com/your-org/ontokit-api/wiki) for full documentation.
+See the [wiki](https://github.com/JohnRDOrazio/ontokit-api/wiki) for full documentation.
 
 ## Tech Stack
 
