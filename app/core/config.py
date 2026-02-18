@@ -65,6 +65,10 @@ class Settings(BaseSettings):
     github_app_private_key: str = ""
     github_token_encryption_key: str = ""
 
+    # Frontend / Sitemap Revalidation
+    frontend_url: str = ""  # e.g. http://localhost:3000
+    revalidation_secret: str = ""  # shared secret for sitemap revalidation
+
     # Superadmin - comma-separated list of user IDs with full system access
     superadmin_user_ids: str = ""
 

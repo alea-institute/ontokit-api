@@ -3,7 +3,16 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, UploadFile, status
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    Form,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func as sa_func
 from sqlalchemy import select
@@ -46,6 +55,7 @@ from app.schemas.pull_request import (
 from app.services.github_service import get_github_service
 from app.services.ontology import OntologyService, get_ontology_service
 from app.services.project_service import ProjectService, get_project_service
+from app.services.sitemap_notifier import notify_sitemap_add, notify_sitemap_remove
 from app.services.storage import StorageError, StorageService, get_storage_service
 
 router = APIRouter()
@@ -102,9 +112,13 @@ async def create_project(
     project: ProjectCreate,
     service: Annotated[ProjectService, Depends(get_service)],
     user: RequiredUser,
+    background_tasks: BackgroundTasks,
 ) -> ProjectResponse:
     """Create a new project. Requires authentication."""
-    return await service.create(project, user)
+    result = await service.create(project, user)
+    if result.is_public:
+        background_tasks.add_task(notify_sitemap_add, result.id, result.updated_at)
+    return result
 
 
 @router.post("/import", response_model=ProjectImportResponse, status_code=status.HTTP_201_CREATED)
@@ -114,6 +128,7 @@ async def import_project(
     service: Annotated[ProjectService, Depends(get_service)],
     storage: Annotated[StorageService, Depends(get_storage)],
     user: RequiredUser,
+    background_tasks: BackgroundTasks,
     name: Annotated[str | None, Form()] = None,
     description: Annotated[str | None, Form()] = None,
 ) -> ProjectImportResponse:
@@ -140,7 +155,7 @@ async def import_project(
     # Get filename
     filename = file.filename or "ontology.owl"
 
-    return await service.create_from_import(
+    result = await service.create_from_import(
         file_content=content,
         filename=filename,
         is_public=is_public,
@@ -149,6 +164,9 @@ async def import_project(
         name_override=name,
         description_override=description,
     )
+    if is_public:
+        background_tasks.add_task(notify_sitemap_add, result.id, result.updated_at)
+    return result
 
 
 async def _resolve_github_pat(db: AsyncSession, user_id: str) -> str:
@@ -197,6 +215,7 @@ async def create_project_from_github(
     storage: Annotated[StorageService, Depends(get_storage)],
     db: Annotated[AsyncSession, Depends(get_db)],
     user: RequiredUser,
+    background_tasks: BackgroundTasks,
 ) -> ProjectImportResponse:
     """
     Create a project by cloning a GitHub repository.
@@ -244,7 +263,7 @@ async def create_project_from_github(
             detail="turtle_file_path is required when source file is not .ttl",
         )
 
-    return await service.create_from_github(
+    result = await service.create_from_github(
         file_content=file_content,
         filename=filename,
         repo_owner=data.repo_owner,
@@ -259,6 +278,9 @@ async def create_project_from_github(
         description_override=data.description,
         turtle_file_path=turtle_file_path,
     )
+    if data.is_public:
+        background_tasks.add_task(notify_sitemap_add, result.id, result.updated_at)
+    return result
 
 
 @router.get("/{project_id}", response_model=ProjectResponse)
@@ -282,6 +304,7 @@ async def update_project(
     service: Annotated[ProjectService, Depends(get_service)],
     storage: Annotated[StorageService, Depends(get_storage)],
     user: RequiredUser,
+    background_tasks: BackgroundTasks,
 ) -> ProjectResponse:
     """
     Update project settings.
@@ -291,7 +314,24 @@ async def update_project(
     When name or description is updated, the corresponding metadata properties
     in the ontology RDF source are also updated and committed to git.
     """
-    return await service.update(project_id, project, user, storage=storage)
+    # Fetch old state to detect is_public changes
+    old_project = await service.get(project_id, user)
+    was_public = old_project.is_public
+
+    result = await service.update(project_id, project, user, storage=storage)
+
+    # Determine sitemap action based on visibility change
+    if result.is_public and not was_public:
+        # Became public — add to sitemap
+        background_tasks.add_task(notify_sitemap_add, result.id, result.updated_at)
+    elif not result.is_public and was_public:
+        # Became private — remove from sitemap
+        background_tasks.add_task(notify_sitemap_remove, result.id)
+    elif result.is_public and was_public:
+        # Still public but name may have changed — update entry
+        background_tasks.add_task(notify_sitemap_add, result.id, result.updated_at)
+
+    return result
 
 
 @router.delete("/{project_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -299,13 +339,21 @@ async def delete_project(
     project_id: UUID,
     service: Annotated[ProjectService, Depends(get_service)],
     user: RequiredUser,
+    background_tasks: BackgroundTasks,
 ) -> None:
     """
     Delete a project.
 
     Only the owner can delete a project.
     """
+    # Check if project was public before deleting
+    project = await service.get(project_id, user)
+    was_public = project.is_public
+
     await service.delete(project_id, user)
+
+    if was_public:
+        background_tasks.add_task(notify_sitemap_remove, project_id)
 
 
 # Member management endpoints
