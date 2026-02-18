@@ -18,6 +18,7 @@ WORKDIR /home/axigraph/app
 
 # Install Python dependencies
 COPY pyproject.toml README.md ./
+COPY axigraph/version.py ./axigraph/version.py
 RUN pip install --upgrade pip && \
     pip install .
 
