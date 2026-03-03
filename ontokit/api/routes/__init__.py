@@ -13,6 +13,7 @@ from ontokit.api.routes import (
     properties,
     pull_requests,
     search,
+    suggestions,
     user_settings,
 )
 
@@ -27,5 +28,6 @@ router.include_router(normalization.router, prefix="/projects", tags=["Normaliza
 router.include_router(ontologies.router, prefix="/ontologies", tags=["Ontologies"])
 router.include_router(classes.router, tags=["Classes"])
 router.include_router(properties.router, tags=["Properties"])
+router.include_router(suggestions.router, prefix="/projects", tags=["Suggestions"])
 router.include_router(search.router, prefix="/search", tags=["Search"])
 router.include_router(user_settings.router, prefix="/users", tags=["User Settings"])

@@ -8,7 +8,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, field_validator
 
 # Role type for project members
-ProjectRole = Literal["owner", "admin", "editor", "viewer"]
+ProjectRole = Literal["owner", "admin", "editor", "suggester", "viewer"]
 
 _IRI_PATTERN = re.compile(r"^(https?://|urn:)\S+$")
 

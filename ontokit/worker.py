@@ -373,6 +373,24 @@ async def check_all_projects_normalization(ctx: dict[str, Any]) -> dict[str, Any
         raise
 
 
+async def auto_submit_stale_suggestions(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Auto-create PRs for abandoned suggestion sessions (inactive 30+ min)."""
+    db: AsyncSession = ctx["db"]
+
+    try:
+        from ontokit.services.suggestion_service import SuggestionService
+
+        service = SuggestionService(db)
+        count = await service.auto_submit_stale_sessions()
+
+        logger.info(f"Auto-submit complete: {count} stale suggestion sessions submitted")
+        return {"auto_submitted": count}
+
+    except Exception as e:
+        logger.exception(f"Auto-submit stale suggestions failed: {e}")
+        raise
+
+
 async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
     """Periodic task: pull from remote + push local commits for all GitHub-connected projects."""
     db: AsyncSession = ctx["db"]
@@ -521,6 +539,7 @@ class WorkerSettings:
         run_normalization_task,
         check_all_projects_normalization,
         sync_github_projects,
+        auto_submit_stale_suggestions,
     ]
     redis_settings = get_redis_settings()
 
@@ -538,6 +557,12 @@ class WorkerSettings:
             sync_github_projects,
             hour=None,
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
+        ),
+        # Auto-submit stale suggestion sessions every 10 minutes
+        cron(
+            auto_submit_stale_suggestions,
+            hour=None,
+            minute={5, 15, 25, 35, 45, 55},
         ),
     ]
 

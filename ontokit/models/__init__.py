@@ -17,6 +17,7 @@ from ontokit.models.pull_request import (
     PullRequestReview,
     ReviewStatus,
 )
+from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.models.user_github_token import UserGitHubToken
 
 __all__ = [
@@ -35,5 +36,7 @@ __all__ = [
     "LintRunStatus",
     "LintIssue",
     "LintIssueType",
+    "SuggestionSession",
+    "SuggestionSessionStatus",
     "UserGitHubToken",
 ]
