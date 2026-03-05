@@ -391,6 +391,52 @@ async def auto_submit_stale_suggestions(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
 
 
+async def run_embedding_generation_task(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """Background task to generate embeddings for an entire project."""
+    db: AsyncSession = ctx["db"]
+
+    try:
+        from ontokit.services.embedding_service import EmbeddingService
+
+        service = EmbeddingService(db)
+        await service.embed_project(UUID(project_id), branch, UUID(job_id))
+
+        logger.info(f"Embedding generation completed for project {project_id} branch {branch}")
+        return {"project_id": project_id, "branch": branch, "job_id": job_id, "status": "completed"}
+
+    except Exception as e:
+        logger.exception(f"Embedding generation failed for project {project_id}: {e}")
+        raise
+
+
+async def run_single_entity_embed_task(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str,
+    entity_iri: str,
+) -> dict[str, Any]:
+    """Background task to re-embed a single entity."""
+    db: AsyncSession = ctx["db"]
+
+    try:
+        from ontokit.services.embedding_service import EmbeddingService
+
+        service = EmbeddingService(db)
+        await service.embed_single_entity(UUID(project_id), branch, entity_iri)
+
+        logger.info(f"Re-embedded entity {entity_iri} for project {project_id}")
+        return {"project_id": project_id, "entity_iri": entity_iri, "status": "completed"}
+
+    except Exception as e:
+        logger.exception(f"Single entity embed failed for {entity_iri}: {e}")
+        raise
+
+
 async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
     """Periodic task: pull from remote + push local commits for all GitHub-connected projects."""
     db: AsyncSession = ctx["db"]
@@ -540,6 +586,8 @@ class WorkerSettings:
         check_all_projects_normalization,
         sync_github_projects,
         auto_submit_stale_suggestions,
+        run_embedding_generation_task,
+        run_single_entity_embed_task,
     ]
     redis_settings = get_redis_settings()
 

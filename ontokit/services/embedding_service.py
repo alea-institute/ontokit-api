@@ -1,0 +1,573 @@
+"""Embedding service — manage embeddings, semantic search, similarity."""
+
+import logging
+from datetime import UTC, datetime
+from uuid import UUID
+
+from rdflib import Graph, URIRef
+from rdflib import Literal as RDFLiteral
+from rdflib.namespace import OWL, RDF, RDFS
+from sqlalchemy import delete, func, select, text
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ontokit.models.embedding import EmbeddingJob, EntityEmbedding, ProjectEmbeddingConfig
+from ontokit.schemas.embeddings import (
+    EmbeddingConfig,
+    EmbeddingConfigUpdate,
+    EmbeddingStatus,
+    RankedCandidate,
+    RankSuggestionRequest,
+    SemanticSearchResponse,
+    SemanticSearchResult,
+    SimilarEntity,
+)
+from ontokit.services.embedding_providers import get_embedding_provider
+from ontokit.services.embedding_text_builder import build_embedding_text
+
+logger = logging.getLogger(__name__)
+
+_TYPE_CHECKS: list[tuple[URIRef, str]] = [
+    (OWL.Class, "class"),
+    (OWL.ObjectProperty, "property"),
+    (OWL.DatatypeProperty, "property"),
+    (OWL.AnnotationProperty, "property"),
+    (OWL.NamedIndividual, "individual"),
+]
+
+
+def _get_entity_type(graph: Graph, uri: URIRef) -> str:
+    for rdf_type, label in _TYPE_CHECKS:
+        if (uri, RDF.type, rdf_type) in graph:
+            return label
+    return "unknown"
+
+
+def _is_deprecated(graph: Graph, uri: URIRef) -> bool:
+    for obj in graph.objects(uri, OWL.deprecated):
+        if str(obj).lower() in ("true", "1"):
+            return True
+    return False
+
+
+class EmbeddingService:
+    def __init__(self, db: AsyncSession):
+        self._db = db
+
+    async def get_config(self, project_id: UUID) -> EmbeddingConfig | None:
+        result = await self._db.execute(
+            select(ProjectEmbeddingConfig).where(
+                ProjectEmbeddingConfig.project_id == project_id
+            )
+        )
+        config = result.scalar_one_or_none()
+        if not config:
+            return None
+        return EmbeddingConfig(
+            provider=config.provider,
+            model_name=config.model_name,
+            api_key_set=config.api_key_encrypted is not None,
+            dimensions=config.dimensions,
+            auto_embed_on_save=config.auto_embed_on_save,
+            last_full_embed_at=config.last_full_embed_at.isoformat() if config.last_full_embed_at else None,
+        )
+
+    async def update_config(
+        self, project_id: UUID, update: EmbeddingConfigUpdate
+    ) -> EmbeddingConfig:
+        result = await self._db.execute(
+            select(ProjectEmbeddingConfig).where(
+                ProjectEmbeddingConfig.project_id == project_id
+            )
+        )
+        config = result.scalar_one_or_none()
+
+        if not config:
+            config = ProjectEmbeddingConfig(project_id=project_id)
+            self._db.add(config)
+
+        if update.provider is not None:
+            config.provider = update.provider
+        if update.model_name is not None:
+            config.model_name = update.model_name
+            # Update dimensions based on provider
+            provider = get_embedding_provider(
+                config.provider, config.model_name, None
+            )
+            config.dimensions = provider.dimensions
+        if update.api_key is not None:
+            # Store encrypted (simple base64 for now — should use proper encryption)
+            import base64
+
+            config.api_key_encrypted = base64.b64encode(update.api_key.encode()).decode()
+        if update.auto_embed_on_save is not None:
+            config.auto_embed_on_save = update.auto_embed_on_save
+
+        await self._db.commit()
+        await self._db.refresh(config)
+
+        return EmbeddingConfig(
+            provider=config.provider,
+            model_name=config.model_name,
+            api_key_set=config.api_key_encrypted is not None,
+            dimensions=config.dimensions,
+            auto_embed_on_save=config.auto_embed_on_save,
+            last_full_embed_at=config.last_full_embed_at.isoformat() if config.last_full_embed_at else None,
+        )
+
+    async def get_status(self, project_id: UUID, branch: str) -> EmbeddingStatus:
+        config = await self._db.execute(
+            select(ProjectEmbeddingConfig).where(
+                ProjectEmbeddingConfig.project_id == project_id
+            )
+        )
+        cfg = config.scalar_one_or_none()
+
+        # Count embedded entities
+        embedded_q = (
+            select(func.count())
+            .select_from(EntityEmbedding)
+            .where(
+                EntityEmbedding.project_id == project_id,
+                EntityEmbedding.branch == branch,
+            )
+        )
+        embedded_count = (await self._db.execute(embedded_q)).scalar() or 0
+
+        # Total entities estimate (from embeddings + any existing data)
+        total_entities = embedded_count  # Will be updated when we have graph access
+
+        # Check for active job
+        job_q = (
+            select(EmbeddingJob)
+            .where(
+                EmbeddingJob.project_id == project_id,
+                EmbeddingJob.branch == branch,
+                EmbeddingJob.status.in_(["pending", "running"]),
+            )
+            .order_by(EmbeddingJob.started_at.desc())
+            .limit(1)
+        )
+        job_result = await self._db.execute(job_q)
+        active_job = job_result.scalar_one_or_none()
+
+        job_in_progress = active_job is not None
+        job_progress = None
+        if active_job and active_job.total_entities > 0:
+            job_progress = round(
+                active_job.embedded_entities / active_job.total_entities * 100, 1
+            )
+            total_entities = max(total_entities, active_job.total_entities)
+
+        coverage = round(embedded_count / total_entities * 100, 1) if total_entities > 0 else 0.0
+
+        return EmbeddingStatus(
+            total_entities=total_entities,
+            embedded_entities=embedded_count,
+            coverage_percent=coverage,
+            provider=cfg.provider if cfg else "local",
+            model_name=cfg.model_name if cfg else "all-MiniLM-L6-v2",
+            job_in_progress=job_in_progress,
+            job_progress_percent=job_progress,
+            last_full_embed_at=cfg.last_full_embed_at.isoformat() if cfg and cfg.last_full_embed_at else None,
+        )
+
+    async def clear_embeddings(self, project_id: UUID) -> None:
+        await self._db.execute(
+            delete(EntityEmbedding).where(EntityEmbedding.project_id == project_id)
+        )
+        await self._db.execute(
+            delete(EmbeddingJob).where(EmbeddingJob.project_id == project_id)
+        )
+        # Reset last_full_embed_at
+        result = await self._db.execute(
+            select(ProjectEmbeddingConfig).where(
+                ProjectEmbeddingConfig.project_id == project_id
+            )
+        )
+        cfg = result.scalar_one_or_none()
+        if cfg:
+            cfg.last_full_embed_at = None
+        await self._db.commit()
+
+    async def _get_provider(self, project_id: UUID):
+        """Get the embedding provider for a project."""
+        import base64
+
+        result = await self._db.execute(
+            select(ProjectEmbeddingConfig).where(
+                ProjectEmbeddingConfig.project_id == project_id
+            )
+        )
+        cfg = result.scalar_one_or_none()
+
+        provider_name = cfg.provider if cfg else "local"
+        model_name = cfg.model_name if cfg else "all-MiniLM-L6-v2"
+        api_key = None
+        if cfg and cfg.api_key_encrypted:
+            api_key = base64.b64decode(cfg.api_key_encrypted).decode()
+
+        return get_embedding_provider(provider_name, model_name, api_key)
+
+    async def embed_project(
+        self, project_id: UUID, branch: str, job_id: UUID
+    ) -> None:
+        """Full project embedding (called from ARQ worker)."""
+        # Get or create job
+        result = await self._db.execute(
+            select(EmbeddingJob).where(EmbeddingJob.id == job_id)
+        )
+        job = result.scalar_one_or_none()
+        if not job:
+            job = EmbeddingJob(
+                id=job_id,
+                project_id=project_id,
+                branch=branch,
+                status="running",
+            )
+            self._db.add(job)
+        else:
+            job.status = "running"
+        await self._db.commit()
+
+        try:
+            # Load graph
+            from ontokit.git.bare_repository import BareGitRepositoryService
+            from ontokit.models.project import Project
+            from ontokit.services.ontology import get_ontology_service
+            from ontokit.services.storage import get_storage_service
+
+            proj_result = await self._db.execute(
+                select(Project).where(Project.id == project_id)
+            )
+            project = proj_result.scalar_one_or_none()
+            if not project or not project.source_file_path:
+                raise ValueError("Project not found or has no ontology file")
+
+            storage = get_storage_service()
+            ontology = get_ontology_service(storage)
+            git = BareGitRepositoryService()
+
+            import os
+
+            filename = getattr(project, "git_ontology_path", None) or os.path.basename(
+                project.source_file_path
+            )
+            try:
+                graph = await ontology.load_from_git(project_id, branch, filename, git)
+            except Exception:
+                graph = await ontology.load_from_storage(
+                    project_id, project.source_file_path, branch
+                )
+
+            # Extract entities
+            entities: list[tuple[URIRef, str, str]] = []  # (uri, type, text)
+            for s in graph.subjects(RDF.type, None):
+                if not isinstance(s, URIRef) or s == OWL.Thing:
+                    continue
+                etype = _get_entity_type(graph, s)
+                if etype == "unknown":
+                    continue
+                embed_text = build_embedding_text(graph, s, etype)
+                entities.append((s, etype, embed_text))
+
+            job.total_entities = len(entities)
+            await self._db.commit()
+
+            # Get provider
+            provider = await self._get_provider(project_id)
+
+            # Batch embed
+            batch_size = 64
+            for i in range(0, len(entities), batch_size):
+                batch = entities[i : i + batch_size]
+                texts = [t[2] for t in batch]
+                embeddings = await provider.embed_batch(texts)
+
+                for (uri, etype, embed_text), embedding in zip(batch, embeddings):
+                    iri = str(uri)
+                    label = next(
+                        (str(o) for o in graph.objects(uri, RDFS.label) if isinstance(o, RDFLiteral)),
+                        None,
+                    )
+                    deprecated = _is_deprecated(graph, uri)
+
+                    # Upsert
+                    existing_q = select(EntityEmbedding).where(
+                        EntityEmbedding.project_id == project_id,
+                        EntityEmbedding.branch == branch,
+                        EntityEmbedding.entity_iri == iri,
+                    )
+                    existing = (await self._db.execute(existing_q)).scalar_one_or_none()
+
+                    if existing:
+                        existing.embedding = embedding
+                        existing.embedding_text = embed_text
+                        existing.label = label
+                        existing.entity_type = etype
+                        existing.deprecated = deprecated
+                        existing.provider = provider.provider_name
+                        existing.model_name = provider.model_id
+                    else:
+                        self._db.add(EntityEmbedding(
+                            project_id=project_id,
+                            branch=branch,
+                            entity_iri=iri,
+                            entity_type=etype,
+                            label=label,
+                            embedding_text=embed_text,
+                            embedding=embedding,
+                            provider=provider.provider_name,
+                            model_name=provider.model_id,
+                            deprecated=deprecated,
+                        ))
+
+                job.embedded_entities = min(i + batch_size, len(entities))
+                await self._db.commit()
+
+            # Update job and config
+            job.status = "completed"
+            job.completed_at = datetime.now(UTC)
+            await self._db.commit()
+
+            # Update last_full_embed_at
+            cfg_result = await self._db.execute(
+                select(ProjectEmbeddingConfig).where(
+                    ProjectEmbeddingConfig.project_id == project_id
+                )
+            )
+            cfg = cfg_result.scalar_one_or_none()
+            if cfg:
+                cfg.last_full_embed_at = datetime.now(UTC)
+                await self._db.commit()
+
+        except Exception as e:
+            job.status = "failed"
+            job.error_message = str(e)
+            job.completed_at = datetime.now(UTC)
+            await self._db.commit()
+            raise
+
+    async def embed_single_entity(
+        self, project_id: UUID, branch: str, entity_iri: str
+    ) -> None:
+        """Re-embed one entity (for auto_embed_on_save)."""
+        from ontokit.services.ontology import get_ontology_service
+
+        ontology = get_ontology_service()
+        if not ontology.is_loaded(project_id, branch):
+            return
+
+        graph = await ontology._get_graph(project_id, branch)
+        uri = URIRef(entity_iri)
+
+        etype = _get_entity_type(graph, uri)
+        if etype == "unknown":
+            return
+
+        embed_text = build_embedding_text(graph, uri, etype)
+        provider = await self._get_provider(project_id)
+        embedding = await provider.embed_text(embed_text)
+
+        label = next(
+            (str(o) for o in graph.objects(uri, RDFS.label) if isinstance(o, RDFLiteral)),
+            None,
+        )
+        deprecated = _is_deprecated(graph, uri)
+
+        # Upsert
+        existing_q = select(EntityEmbedding).where(
+            EntityEmbedding.project_id == project_id,
+            EntityEmbedding.branch == branch,
+            EntityEmbedding.entity_iri == entity_iri,
+        )
+        existing = (await self._db.execute(existing_q)).scalar_one_or_none()
+
+        if existing:
+            existing.embedding = embedding
+            existing.embedding_text = embed_text
+            existing.label = label
+            existing.entity_type = etype
+            existing.deprecated = deprecated
+            existing.provider = provider.provider_name
+            existing.model_name = provider.model_id
+        else:
+            self._db.add(EntityEmbedding(
+                project_id=project_id,
+                branch=branch,
+                entity_iri=entity_iri,
+                entity_type=etype,
+                label=label,
+                embedding_text=embed_text,
+                embedding=embedding,
+                provider=provider.provider_name,
+                model_name=provider.model_id,
+                deprecated=deprecated,
+            ))
+
+        await self._db.commit()
+
+    async def semantic_search(
+        self,
+        project_id: UUID,
+        branch: str,
+        query: str,
+        limit: int = 20,
+        threshold: float = 0.3,
+    ) -> SemanticSearchResponse:
+        """Semantic search using cosine similarity."""
+        # Check if embeddings exist
+        count_q = (
+            select(func.count())
+            .select_from(EntityEmbedding)
+            .where(
+                EntityEmbedding.project_id == project_id,
+                EntityEmbedding.branch == branch,
+            )
+        )
+        count = (await self._db.execute(count_q)).scalar() or 0
+
+        if count == 0:
+            return SemanticSearchResponse(results=[], search_mode="text_fallback")
+
+        # Embed query
+        provider = await self._get_provider(project_id)
+        query_vec = await provider.embed_text(query)
+
+        # pgvector cosine distance: <=> returns distance (0=identical), score = 1 - distance
+        query_str = text("""
+            SELECT entity_iri, label, entity_type, deprecated,
+                   1 - (embedding <=> :query_vec::vector) AS score
+            FROM entity_embeddings
+            WHERE project_id = :pid AND branch = :br
+            ORDER BY embedding <=> :query_vec::vector
+            LIMIT :lim
+        """)
+
+        result = await self._db.execute(
+            query_str,
+            {
+                "query_vec": str(query_vec),
+                "pid": str(project_id),
+                "br": branch,
+                "lim": limit,
+            },
+        )
+
+        results = []
+        for row in result:
+            if row.score >= threshold:
+                results.append(SemanticSearchResult(
+                    iri=row.entity_iri,
+                    label=row.label or "",
+                    entity_type=row.entity_type,
+                    score=round(row.score, 4),
+                    deprecated=row.deprecated,
+                ))
+
+        return SemanticSearchResponse(results=results, search_mode="semantic")
+
+    async def find_similar(
+        self,
+        project_id: UUID,
+        branch: str,
+        entity_iri: str,
+        limit: int = 10,
+        threshold: float = 0.5,
+    ) -> list[SimilarEntity]:
+        """Find entities similar to a given entity."""
+        # Get entity's embedding
+        emb_q = select(EntityEmbedding).where(
+            EntityEmbedding.project_id == project_id,
+            EntityEmbedding.branch == branch,
+            EntityEmbedding.entity_iri == entity_iri,
+        )
+        emb = (await self._db.execute(emb_q)).scalar_one_or_none()
+        if not emb:
+            return []
+
+        # kNN search excluding self
+        query_str = text("""
+            SELECT entity_iri, label, entity_type, deprecated,
+                   1 - (embedding <=> :query_vec::vector) AS score
+            FROM entity_embeddings
+            WHERE project_id = :pid AND branch = :br AND entity_iri != :self_iri
+            ORDER BY embedding <=> :query_vec::vector
+            LIMIT :lim
+        """)
+
+        result = await self._db.execute(
+            query_str,
+            {
+                "query_vec": str(list(emb.embedding)),
+                "pid": str(project_id),
+                "br": branch,
+                "self_iri": entity_iri,
+                "lim": limit,
+            },
+        )
+
+        results = []
+        for row in result:
+            if row.score >= threshold:
+                results.append(SimilarEntity(
+                    iri=row.entity_iri,
+                    label=row.label or "",
+                    entity_type=row.entity_type,
+                    score=round(row.score, 4),
+                    deprecated=row.deprecated,
+                ))
+
+        return results
+
+    async def rank_suggestions(
+        self,
+        project_id: UUID,
+        body: RankSuggestionRequest,
+    ) -> list[RankedCandidate]:
+        """Rank candidate entities by similarity to context entity."""
+        if not body.candidates:
+            return []
+
+        # Get context embedding
+        emb_q = select(EntityEmbedding).where(
+            EntityEmbedding.project_id == project_id,
+            EntityEmbedding.entity_iri == body.context_iri,
+        )
+        ctx_emb = (await self._db.execute(emb_q)).scalar_one_or_none()
+        if not ctx_emb:
+            return []
+
+        # Get candidate embeddings
+        candidates_q = (
+            select(EntityEmbedding)
+            .where(
+                EntityEmbedding.project_id == project_id,
+                EntityEmbedding.entity_iri.in_(body.candidates),
+            )
+        )
+        cand_result = await self._db.execute(candidates_q)
+        candidates = cand_result.scalars().all()
+
+        # Compute cosine similarity using numpy
+        import numpy as np
+
+        ctx_vec = np.array(ctx_emb.embedding)
+        ctx_norm = np.linalg.norm(ctx_vec)
+        if ctx_norm == 0:
+            return []
+
+        ranked = []
+        for cand in candidates:
+            cand_vec = np.array(cand.embedding)
+            cand_norm = np.linalg.norm(cand_vec)
+            if cand_norm == 0:
+                continue
+            sim = float(np.dot(ctx_vec, cand_vec) / (ctx_norm * cand_norm))
+            ranked.append(RankedCandidate(
+                iri=cand.entity_iri,
+                label=cand.label or "",
+                score=round(sim, 4),
+            ))
+
+        ranked.sort(key=lambda x: x.score, reverse=True)
+        return ranked

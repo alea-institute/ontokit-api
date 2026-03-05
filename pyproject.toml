@@ -42,6 +42,9 @@ dependencies = [
     "minio>=7.2.0",
     "websockets>=14.0",
     "slowapi>=0.1.9",
+    "sentence-transformers>=3.0.0",
+    "pgvector>=0.3.0",
+    "numpy>=1.26.0",
 ]
 
 [project.optional-dependencies]

@@ -1,6 +1,8 @@
 """SQLAlchemy database models."""
 
 from ontokit.models.branch_metadata import BranchMetadata
+from ontokit.models.change_event import ChangeEventType, EntityChangeEvent
+from ontokit.models.embedding import EmbeddingJob, EntityEmbedding, ProjectEmbeddingConfig
 from ontokit.models.join_request import JoinRequest, JoinRequestStatus
 from ontokit.models.lint import (
     LintIssue,
@@ -22,20 +24,25 @@ from ontokit.models.user_github_token import UserGitHubToken
 
 __all__ = [
     "BranchMetadata",
+    "ChangeEventType",
+    "EmbeddingJob",
+    "EntityChangeEvent",
+    "EntityEmbedding",
+    "GitHubIntegration",
     "JoinRequest",
     "JoinRequestStatus",
-    "Project",
-    "ProjectMember",
-    "PullRequest",
-    "PullRequestReview",
-    "PullRequestComment",
-    "GitHubIntegration",
-    "PRStatus",
-    "ReviewStatus",
-    "LintRun",
-    "LintRunStatus",
     "LintIssue",
     "LintIssueType",
+    "LintRun",
+    "LintRunStatus",
+    "PRStatus",
+    "Project",
+    "ProjectEmbeddingConfig",
+    "ProjectMember",
+    "PullRequest",
+    "PullRequestComment",
+    "PullRequestReview",
+    "ReviewStatus",
     "SuggestionSession",
     "SuggestionSessionStatus",
     "UserGitHubToken",

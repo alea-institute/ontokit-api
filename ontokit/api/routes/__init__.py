@@ -3,8 +3,10 @@
 from fastapi import APIRouter
 
 from ontokit.api.routes import (
+    analytics,
     auth,
     classes,
+    embeddings,
     join_requests,
     lint,
     normalization,
@@ -12,7 +14,9 @@ from ontokit.api.routes import (
     projects,
     properties,
     pull_requests,
+    quality,
     search,
+    semantic_search,
     suggestions,
     user_settings,
 )
@@ -25,6 +29,10 @@ router.include_router(pull_requests.router, prefix="/projects", tags=["Pull Requ
 router.include_router(join_requests.router, prefix="/projects", tags=["Join Requests"])
 router.include_router(lint.router, prefix="/projects", tags=["Lint"])
 router.include_router(normalization.router, prefix="/projects", tags=["Normalization"])
+router.include_router(quality.router, prefix="/projects", tags=["Quality"])
+router.include_router(analytics.router, prefix="/projects", tags=["Analytics"])
+router.include_router(embeddings.router, prefix="/projects", tags=["Embeddings"])
+router.include_router(semantic_search.router, prefix="/projects", tags=["Semantic Search"])
 router.include_router(ontologies.router, prefix="/ontologies", tags=["Ontologies"])
 router.include_router(classes.router, tags=["Classes"])
 router.include_router(properties.router, tags=["Properties"])

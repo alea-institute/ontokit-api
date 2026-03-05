@@ -1168,6 +1168,7 @@ async def save_source_content(
     storage: Annotated[StorageService, Depends(get_storage)],
     ontology: Annotated[OntologyService, Depends(get_ontology)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
+    db: Annotated[AsyncSession, Depends(get_db)],
     user: RequiredUser,
     branch: str | None = Query(default=None, description="Branch to commit to"),
 ) -> SourceContentSaveResponse:
@@ -1248,6 +1249,14 @@ async def save_source_content(
             detail=f"Failed to commit changes: {e}",
         ) from e
 
+    # Capture old graph for change event diffing
+    old_graph = None
+    if ontology.is_loaded(project_id, current_branch):
+        try:
+            old_graph = await ontology._get_graph(project_id, current_branch)
+        except ValueError:
+            pass
+
     # Reload the ontology in memory to reflect changes
     try:
         ontology.unload(project_id, current_branch)
@@ -1257,6 +1266,44 @@ async def save_source_content(
         import logging
 
         logging.warning(f"Failed to reload ontology after save: {e}")
+
+    # Record change events (analytics)
+    change_events = []
+    try:
+        new_graph = await ontology._get_graph(project_id, current_branch)
+        from ontokit.services.change_event_service import ChangeEventService
+
+        change_service = ChangeEventService(db)
+        change_events = await change_service.record_events_from_diff(
+            project_id, current_branch, old_graph, new_graph,
+            user.id, user.name, commit_info.hash,
+        )
+    except Exception:
+        import logging
+
+        logging.warning("Failed to record change events", exc_info=True)
+
+    # Auto-embed changed entities if configured
+    if change_events:
+        try:
+            from ontokit.models.change_event import ChangeEventType
+            from ontokit.services.embedding_service import EmbeddingService
+
+            embed_config = await EmbeddingService(db).get_config(project_id)
+            if embed_config and embed_config.auto_embed_on_save:
+                from ontokit.api.routes.lint import get_arq_pool as get_lint_arq_pool
+
+                pool = await get_lint_arq_pool()
+                for event in change_events:
+                    if event.event_type != ChangeEventType.DELETE:
+                        await pool.enqueue_job(
+                            "run_single_entity_embed_task",
+                            str(project_id), current_branch, event.entity_iri,
+                        )
+        except Exception:
+            import logging
+
+            logging.warning("Failed to queue auto-embed", exc_info=True)
 
     return SourceContentSaveResponse(
         success=True,

@@ -1,0 +1,184 @@
+"""Quality API endpoints — cross-references, consistency checks, duplicate detection."""
+
+import json
+import logging
+import uuid
+from typing import Annotated
+from urllib.parse import unquote
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ontokit.core.auth import OptionalUser, RequiredUser
+from ontokit.core.config import settings
+from ontokit.core.database import get_db
+from ontokit.schemas.quality import (
+    ConsistencyCheckResult,
+    ConsistencyCheckTriggerResponse,
+    CrossReferencesResponse,
+    DuplicateDetectionResult,
+)
+from ontokit.services.cross_reference_service import get_cross_references
+from ontokit.services.consistency_service import run_consistency_check
+from ontokit.services.duplicate_detection_service import find_duplicates
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter()
+
+
+async def _get_redis():
+    """Get a Redis connection for caching."""
+    import redis.asyncio as aioredis
+
+    return aioredis.from_url(str(settings.redis_url), decode_responses=True)
+
+
+async def _load_graph(project_id: UUID, branch: str, db: AsyncSession):
+    """Load the ontology graph for a project, ensuring it's in memory."""
+    from sqlalchemy import select
+
+    from ontokit.git.bare_repository import BareGitRepositoryService
+    from ontokit.models.project import Project
+    from ontokit.services.ontology import get_ontology_service
+    from ontokit.services.storage import get_storage_service
+
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    if not project.source_file_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project does not have an ontology file",
+        )
+
+    storage = get_storage_service()
+    ontology = get_ontology_service(storage)
+
+    if not ontology.is_loaded(project_id, branch):
+        git = BareGitRepositoryService()
+        import os
+
+        filename = getattr(project, "git_ontology_path", None) or os.path.basename(
+            project.source_file_path
+        )
+        try:
+            await ontology.load_from_git(project_id, branch, filename, git)
+        except Exception:
+            # Fall back to storage
+            await ontology.load_from_storage(project_id, project.source_file_path, branch)
+
+    return await ontology._get_graph(project_id, branch)
+
+
+async def _verify_access(project_id: UUID, db: AsyncSession, user):
+    """Verify project access using the lint module's pattern."""
+    from ontokit.services.project_service import get_project_service
+
+    service = get_project_service(db)
+    try:
+        await service.get(project_id, user)
+    except HTTPException:
+        raise
+
+
+@router.get(
+    "/{project_id}/entities/{iri:path}/references",
+    response_model=CrossReferencesResponse,
+)
+async def get_entity_references(
+    project_id: UUID,
+    iri: str,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: OptionalUser,
+    branch: str = Query(default="main", description="Branch name"),
+) -> CrossReferencesResponse:
+    """Get all cross-references to a specific entity."""
+    await _verify_access(project_id, db, user)
+    decoded_iri = unquote(iri)
+    graph = await _load_graph(project_id, branch, db)
+    return get_cross_references(graph, decoded_iri)
+
+
+@router.post(
+    "/{project_id}/quality/check",
+    response_model=ConsistencyCheckTriggerResponse,
+)
+async def trigger_consistency_check(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+    branch: str = Query(default="main", description="Branch name"),
+) -> ConsistencyCheckTriggerResponse:
+    """Run consistency checks and cache the result."""
+    await _verify_access(project_id, db, user)
+    graph = await _load_graph(project_id, branch, db)
+
+    result = run_consistency_check(graph, str(project_id), branch)
+
+    # Cache in Redis with 10-min TTL
+    job_id = str(uuid.uuid4())
+    try:
+        redis = await _get_redis()
+        cache_key = f"quality:{project_id}:{branch}"
+        await redis.set(cache_key, result.model_dump_json(), ex=600)
+        await redis.aclose()
+    except Exception:
+        logger.warning("Failed to cache consistency result in Redis", exc_info=True)
+
+    return ConsistencyCheckTriggerResponse(job_id=job_id)
+
+
+@router.get(
+    "/{project_id}/quality/issues",
+    response_model=ConsistencyCheckResult,
+)
+async def get_consistency_issues(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: OptionalUser,
+    branch: str = Query(default="main", description="Branch name"),
+) -> ConsistencyCheckResult:
+    """Get cached consistency check results."""
+    await _verify_access(project_id, db, user)
+
+    try:
+        redis = await _get_redis()
+        cache_key = f"quality:{project_id}:{branch}"
+        cached = await redis.get(cache_key)
+        await redis.aclose()
+        if cached:
+            return ConsistencyCheckResult.model_validate_json(cached)
+    except Exception:
+        logger.warning("Failed to read consistency cache from Redis", exc_info=True)
+
+    # No cached result — return empty
+    from datetime import UTC, datetime
+
+    return ConsistencyCheckResult(
+        project_id=str(project_id),
+        branch=branch,
+        issues=[],
+        checked_at=datetime.now(UTC).isoformat(),
+        duration_ms=0,
+    )
+
+
+@router.post(
+    "/{project_id}/quality/duplicates",
+    response_model=DuplicateDetectionResult,
+)
+async def detect_duplicates(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+    branch: str = Query(default="main", description="Branch name"),
+    threshold: float = Query(default=0.85, ge=0.5, le=1.0),
+) -> DuplicateDetectionResult:
+    """Detect duplicate entities based on label similarity."""
+    await _verify_access(project_id, db, user)
+    graph = await _load_graph(project_id, branch, db)
+    return find_duplicates(graph, threshold)
