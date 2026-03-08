@@ -8,12 +8,14 @@ from uuid import UUID
 from arq import ArqRedis, create_pool
 from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.auth import RequiredUser
 from ontokit.core.config import settings
 from ontokit.core.database import get_db
 from ontokit.git import get_git_service
+from ontokit.models.embedding import EmbeddingJob
 from ontokit.schemas.embeddings import (
     EmbeddingConfig,
     EmbeddingConfigUpdate,
@@ -100,6 +102,24 @@ async def generate_embeddings(
 
     git = get_git_service()
     resolved_branch = branch or git.get_default_branch(project_id)
+
+    # Check for an existing in-progress job for this project/branch
+    active_q = (
+        select(EmbeddingJob)
+        .where(
+            EmbeddingJob.project_id == project_id,
+            EmbeddingJob.branch == resolved_branch,
+            EmbeddingJob.status.in_(["pending", "running"]),
+        )
+        .limit(1)
+    )
+    active_result = await db.execute(active_q)
+    active_job = active_result.scalar_one_or_none()
+    if active_job:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Embedding generation already in progress (job {active_job.id})",
+        )
 
     job_id = uuid.uuid4()
     pool = await get_arq_pool()
