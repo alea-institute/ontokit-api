@@ -77,9 +77,9 @@ def find_duplicates(graph: Graph, threshold: float = 0.85) -> DuplicateDetection
                 iri_b, label_b = etype_entities[j]
                 norm_b = label_b.lower().strip()
                 sim = difflib.SequenceMatcher(None, norm_a, norm_b).ratio()
+                pair_sim[(iri_a, iri_b)] = sim
                 if sim >= threshold:
                     union(iri_a, iri_b)
-                    pair_sim[(iri_a, iri_b)] = sim
 
     # Build clusters
     clusters_map: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
