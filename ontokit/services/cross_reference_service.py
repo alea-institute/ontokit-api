@@ -92,8 +92,10 @@ def get_cross_references(graph: Graph, target_iri: str) -> CrossReferencesRespon
         # Determine context from predicate
         context = _PREDICATE_CONTEXT.get(p)
         if context is None:
-            # Check if it's an annotation property with a URI value
-            if isinstance(p, URIRef):
+            # Only classify as annotation_value if the predicate is declared
+            # as an owl:AnnotationProperty in the graph; skip other unknown
+            # structural predicates to avoid misclassification.
+            if isinstance(p, URIRef) and (p, RDF.type, OWL.AnnotationProperty) in graph:
                 context = "annotation_value"
             else:
                 continue
