@@ -6,9 +6,11 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+EmbeddingProvider = Literal["local", "openai", "voyage"]
+
 
 class EmbeddingConfig(BaseModel):
-    provider: str  # "local" | "openai" | "voyage"
+    provider: EmbeddingProvider
     model_name: str
     api_key_set: bool
     dimensions: int
@@ -17,7 +19,7 @@ class EmbeddingConfig(BaseModel):
 
 
 class EmbeddingConfigUpdate(BaseModel):
-    provider: str | None = None
+    provider: EmbeddingProvider | None = None
     model_name: str | None = None
     api_key: str | None = None  # write-only
     auto_embed_on_save: bool | None = None
