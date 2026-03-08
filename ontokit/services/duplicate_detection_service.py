@@ -68,7 +68,7 @@ def find_duplicates(graph: Graph, threshold: float = 0.85) -> DuplicateDetection
     # Track pairwise similarities
     pair_sim: dict[tuple[str, str], float] = {}
 
-    for etype, etype_entities in by_type.items():
+    for _etype, etype_entities in by_type.items():
         n = len(etype_entities)
         for i in range(n):
             iri_a, label_a = etype_entities[i]
