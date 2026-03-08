@@ -63,6 +63,7 @@ class RankSuggestionRequest(BaseModel):
     context_iri: str
     candidates: list[str]
     relationship: Literal["parent", "equivalent", "domain", "range"]
+    branch: str = "main"
 
 
 class RankedCandidate(BaseModel):

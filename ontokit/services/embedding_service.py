@@ -575,6 +575,7 @@ class EmbeddingService:
         # Get context embedding
         emb_q = select(EntityEmbedding).where(
             EntityEmbedding.project_id == project_id,
+            EntityEmbedding.branch == body.branch,
             EntityEmbedding.entity_iri == body.context_iri,
         )
         ctx_emb = (await self._db.execute(emb_q)).scalar_one_or_none()
@@ -586,6 +587,7 @@ class EmbeddingService:
             select(EntityEmbedding)
             .where(
                 EntityEmbedding.project_id == project_id,
+                EntityEmbedding.branch == body.branch,
                 EntityEmbedding.entity_iri.in_(body.candidates),
             )
         )
