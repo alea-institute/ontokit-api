@@ -67,4 +67,7 @@ async def execute_sparql(
             detail="UPDATE queries are not allowed. Use the REST API for modifications.",
         )
 
-    return await service.execute_sparql(query)
+    try:
+        return await service.execute_sparql(query)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

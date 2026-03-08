@@ -5,6 +5,7 @@ import re
 import time
 
 from rdflib import BNode, Graph, Literal, URIRef
+from rdflib.plugins.sparql.parser import parseQuery
 from rdflib.plugins.sparql.processor import SPARQLResult
 from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -189,21 +190,21 @@ class SearchService:
             graph = Graph()
 
         query_text = query.query.strip()
-        query_upper = query_text.upper().lstrip()
 
-        # Determine the query type from the query string so we know how
-        # to interpret RDFLib's result object.
-        if query_upper.startswith("SELECT"):
-            query_type = "SELECT"
-        elif query_upper.startswith("ASK"):
-            query_type = "ASK"
-        elif query_upper.startswith("CONSTRUCT"):
-            query_type = "CONSTRUCT"
-        elif query_upper.startswith("DESCRIBE"):
-            # RDFLib treats DESCRIBE similarly to CONSTRUCT.
-            query_type = "CONSTRUCT"
-        else:
-            query_type = "SELECT"
+        # Parse the query up front to determine the operation type and
+        # validate syntax before execution.
+        _SPARQL_TYPE_MAP = {
+            "SelectQuery": "SELECT",
+            "AskQuery": "ASK",
+            "ConstructQuery": "CONSTRUCT",
+            "DescribeQuery": "CONSTRUCT",  # RDFLib treats DESCRIBE like CONSTRUCT
+        }
+        try:
+            parsed = parseQuery(query_text)
+            query_type = _SPARQL_TYPE_MAP.get(parsed[1].name, "SELECT")
+        except Exception as exc:
+            logger.warning("SPARQL query parse failed: %s", exc)
+            raise ValueError(f"Invalid SPARQL query: {exc}") from exc
 
         try:
             result: SPARQLResult = graph.query(query_text)
