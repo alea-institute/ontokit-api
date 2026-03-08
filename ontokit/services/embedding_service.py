@@ -335,6 +335,25 @@ class EmbeddingService:
                 job.embedded_entities = min(i + batch_size, len(entities))
                 await self._db.commit()
 
+            # Prune embeddings for entities no longer in the ontology
+            current_iris = {str(uri) for uri, _, _ in entities}
+            if current_iris:
+                await self._db.execute(
+                    delete(EntityEmbedding).where(
+                        EntityEmbedding.project_id == project_id,
+                        EntityEmbedding.branch == branch,
+                        ~EntityEmbedding.entity_iri.in_(current_iris),
+                    )
+                )
+            else:
+                # No entities at all — clear everything for this branch
+                await self._db.execute(
+                    delete(EntityEmbedding).where(
+                        EntityEmbedding.project_id == project_id,
+                        EntityEmbedding.branch == branch,
+                    )
+                )
+
             # Update job and config
             job.status = "completed"
             job.completed_at = datetime.now(UTC)
