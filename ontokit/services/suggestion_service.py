@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, update
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -16,7 +16,7 @@ from sqlalchemy.orm import selectinload
 from ontokit.core.auth import CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
 from ontokit.git import GitRepositoryService, get_git_service
-from ontokit.models.project import Project, ProjectMember
+from ontokit.models.project import Project
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.pull_request import PRCreate
 from ontokit.schemas.suggestion import (
@@ -29,7 +29,7 @@ from ontokit.schemas.suggestion import (
     SuggestionSubmitRequest,
     SuggestionSubmitResponse,
 )
-from ontokit.services.pull_request_service import PullRequestService, get_pull_request_service
+from ontokit.services.pull_request_service import get_pull_request_service
 
 logger = logging.getLogger(__name__)
 
@@ -171,7 +171,7 @@ class SuggestionService:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to create suggestion branch",
-            )
+            ) from e
 
         # Create the database record
         db_session = SuggestionSession(
@@ -231,7 +231,7 @@ class SuggestionService:
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to save suggestion to branch",
-            )
+            ) from e
 
         # Update session metadata
         session.changes_count += 1
