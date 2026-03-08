@@ -65,10 +65,7 @@ def _get_entity_type(graph: Graph, uri: URIRef) -> str:
 
 
 def _is_deprecated(graph: Graph, uri: URIRef) -> bool:
-    for obj in graph.objects(uri, OWL.deprecated):
-        if str(obj).lower() in ("true", "1"):
-            return True
-    return False
+    return any(str(obj).lower() in ("true", "1") for obj in graph.objects(uri, OWL.deprecated))
 
 
 class EmbeddingService:
@@ -311,7 +308,7 @@ class EmbeddingService:
                 texts = [t[2] for t in batch]
                 embeddings = await provider.embed_batch(texts)
 
-                for (uri, etype, embed_text), embedding in zip(batch, embeddings):
+                for (uri, etype, embed_text), embedding in zip(batch, embeddings, strict=True):
                     iri = str(uri)
                     label = next(
                         (str(o) for o in graph.objects(uri, RDFS.label) if isinstance(o, RDFLiteral)),
