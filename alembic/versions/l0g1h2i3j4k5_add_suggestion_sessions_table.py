@@ -35,6 +35,10 @@ def upgrade() -> None:
         sa.Column("session_id", sa.String(100), nullable=False),
         sa.Column("branch", sa.String(255), nullable=False),
         sa.Column("status", sa.String(50), nullable=False, server_default="active"),
+        sa.CheckConstraint(
+            "status IN ('active', 'submitted', 'auto-submitted', 'discarded')",
+            name="ck_suggestion_session_status",
+        ),
         sa.Column("changes_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("entities_modified", sa.Text(), nullable=True),
         sa.Column("beacon_token", sa.String(500), nullable=False),
