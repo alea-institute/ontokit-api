@@ -286,9 +286,11 @@ class EmbeddingService:
 
             # Extract entities
             entities: list[tuple[URIRef, str, str]] = []  # (uri, type, text)
+            seen: set[URIRef] = set()
             for s in graph.subjects(RDF.type, None):
-                if not isinstance(s, URIRef) or s == OWL.Thing:
+                if not isinstance(s, URIRef) or s == OWL.Thing or s in seen:
                     continue
+                seen.add(s)
                 etype = _get_entity_type(graph, s)
                 if etype == "unknown":
                     continue
