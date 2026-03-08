@@ -1,5 +1,6 @@
 """Authentication and authorization utilities."""
 
+import asyncio
 import time
 from typing import Annotated
 
@@ -69,13 +70,15 @@ class CurrentUser(BaseModel):
 # Cache for JWKS (JSON Web Key Set) with TTL
 _jwks_cache: dict | None = None
 _jwks_cache_time: float = 0.0
+_jwks_lock = asyncio.Lock()
 
 
 async def get_jwks() -> dict:
     """Fetch and cache the JWKS from Zitadel.
 
     The cache expires after 1 hour (controlled by _JWKS_CACHE_TTL) to handle
-    key rotation while avoiding excessive network requests.
+    key rotation while avoiding excessive network requests. Uses double-checked
+    locking to prevent cache stampede from concurrent requests.
     """
     global _jwks_cache, _jwks_cache_time
 
@@ -83,41 +86,43 @@ async def get_jwks() -> dict:
     if _jwks_cache is not None and (now - _jwks_cache_time) < _JWKS_CACHE_TTL:
         return _jwks_cache
 
-    # Build headers - if using internal URL, set Host header to match external domain
-    # This is needed because Zitadel validates the Host header against its external domain
-    headers = {}
-    if settings.zitadel_internal_url:
-        # Extract host from issuer URL (e.g., "localhost:8080" from "http://localhost:8080")
-        from urllib.parse import urlparse
-
-        parsed = urlparse(settings.zitadel_issuer)
-        headers["Host"] = parsed.netloc
-
-    async with httpx.AsyncClient() as client:
-        # Fetch OpenID configuration
-        # Use internal URL for Docker-to-Docker communication
-        base_url = settings.zitadel_jwks_base_url
-        oidc_config_url = f"{base_url}/.well-known/openid-configuration"
-        try:
-            resp = await client.get(oidc_config_url, headers=headers)
-            resp.raise_for_status()
-            oidc_config = resp.json()
-
-            # Fetch JWKS - replace issuer URL with internal URL if needed
-            jwks_uri = oidc_config["jwks_uri"]
-            if settings.zitadel_internal_url:
-                # Replace the external issuer URL with internal URL in jwks_uri
-                jwks_uri = jwks_uri.replace(settings.zitadel_issuer, settings.zitadel_internal_url)
-            resp = await client.get(jwks_uri, headers=headers)
-            resp.raise_for_status()
-            _jwks_cache = resp.json()
-            _jwks_cache_time = time.monotonic()
+    async with _jwks_lock:
+        # Re-check after acquiring lock — another coroutine may have refreshed
+        now = time.monotonic()
+        if _jwks_cache is not None and (now - _jwks_cache_time) < _JWKS_CACHE_TTL:
             return _jwks_cache
-        except httpx.HTTPError as e:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail=f"Failed to fetch JWKS: {e}",
-            ) from e
+
+        # Build headers - if using internal URL, set Host header to match external domain
+        headers = {}
+        if settings.zitadel_internal_url:
+            from urllib.parse import urlparse
+
+            parsed = urlparse(settings.zitadel_issuer)
+            headers["Host"] = parsed.netloc
+
+        async with httpx.AsyncClient() as client:
+            base_url = settings.zitadel_jwks_base_url
+            oidc_config_url = f"{base_url}/.well-known/openid-configuration"
+            try:
+                resp = await client.get(oidc_config_url, headers=headers)
+                resp.raise_for_status()
+                oidc_config = resp.json()
+
+                jwks_uri = oidc_config["jwks_uri"]
+                if settings.zitadel_internal_url:
+                    jwks_uri = jwks_uri.replace(
+                        settings.zitadel_issuer, settings.zitadel_internal_url
+                    )
+                resp = await client.get(jwks_uri, headers=headers)
+                resp.raise_for_status()
+                _jwks_cache = resp.json()
+                _jwks_cache_time = time.monotonic()
+                return _jwks_cache
+            except httpx.HTTPError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail=f"Failed to fetch JWKS: {e}",
+                ) from e
 
 
 def clear_jwks_cache() -> None:
