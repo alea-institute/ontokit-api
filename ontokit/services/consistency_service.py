@@ -72,9 +72,11 @@ def _check_cycle_detect(graph: Graph) -> list[ConsistencyIssue]:
     for cls in graph.subjects(RDF.type, OWL.Class):
         if not isinstance(cls, URIRef):
             continue
+        # DFS over all subClassOf edges to detect cycles through any parent
         visited: set[URIRef] = set()
-        current = cls
-        while True:
+        stack = [cls]
+        while stack:
+            current = stack.pop()
             if current in visited:
                 iri = str(cls)
                 if iri not in reported:
@@ -88,10 +90,9 @@ def _check_cycle_detect(graph: Graph) -> list[ConsistencyIssue]:
                     reported.add(iri)
                 break
             visited.add(current)
-            parents = [p for p in graph.objects(current, RDFS.subClassOf) if isinstance(p, URIRef)]
-            if not parents:
-                break
-            current = parents[0]
+            for parent in graph.objects(current, RDFS.subClassOf):
+                if isinstance(parent, URIRef):
+                    stack.append(parent)
     return issues
 
 
