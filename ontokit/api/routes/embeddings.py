@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.core.auth import RequiredUser
 from ontokit.core.config import settings
 from ontokit.core.database import get_db
+from ontokit.git import get_git_service
 from ontokit.schemas.embeddings import (
     EmbeddingConfig,
     EmbeddingConfigUpdate,
@@ -100,17 +101,20 @@ async def generate_embeddings(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: RequiredUser,
-    branch: str = Query(default="main"),
+    branch: str | None = Query(default=None),
 ) -> EmbeddingGenerateResponse:
     """Trigger full project embedding generation (background job)."""
     await _verify_write_access(project_id, db, user)
+
+    git = get_git_service()
+    resolved_branch = branch or git.get_default_branch(project_id)
 
     job_id = uuid.uuid4()
     pool = await get_arq_pool()
     await pool.enqueue_job(
         "run_embedding_generation_task",
         str(project_id),
-        branch,
+        resolved_branch,
         str(job_id),
     )
     return EmbeddingGenerateResponse(job_id=str(job_id))
@@ -121,14 +125,17 @@ async def get_embedding_status(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: RequiredUser,
-    branch: str = Query(default="main"),
+    branch: str | None = Query(default=None),
 ) -> EmbeddingStatus:
     """Get embedding status and coverage."""
     service = get_project_service(db)
     await service.get(project_id, user)
 
+    git = get_git_service()
+    resolved_branch = branch or git.get_default_branch(project_id)
+
     embed_service = EmbeddingService(db)
-    return await embed_service.get_status(project_id, branch)
+    return await embed_service.get_status(project_id, resolved_branch)
 
 
 @router.delete(
