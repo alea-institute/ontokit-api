@@ -33,15 +33,7 @@ _arq_pool: ArqRedis | None = None
 async def get_arq_pool() -> ArqRedis:
     global _arq_pool
     if _arq_pool is None:
-        from urllib.parse import urlparse
-
-        redis_url = str(settings.redis_url)
-        parsed = urlparse(redis_url)
-        redis_settings = RedisSettings(
-            host=parsed.hostname or "localhost",
-            port=parsed.port or 6379,
-            database=int(parsed.path.lstrip("/") or "0"),
-        )
+        redis_settings = RedisSettings.from_dsn(str(settings.redis_url))
         _arq_pool = await create_pool(redis_settings)
     return _arq_pool
 
