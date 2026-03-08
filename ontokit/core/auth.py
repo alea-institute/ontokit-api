@@ -160,8 +160,25 @@ async def validate_token(token: str) -> TokenPayload:
             rsa_key,
             algorithms=["RS256"],
             issuer=settings.zitadel_issuer,
-            options={"verify_aud": False},  # We'll verify audience manually if needed
+            options={"verify_aud": False},  # Audience verified manually below (aud/azp)
         )
+
+        # Verify audience: token must be intended for our client
+        aud = payload.get("aud")
+        azp = payload.get("azp")
+        client_id = settings.zitadel_client_id
+
+        aud_valid = False
+        if isinstance(aud, list):
+            aud_valid = client_id in aud
+        elif isinstance(aud, str):
+            aud_valid = aud == client_id
+
+        if not aud_valid and azp != client_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid audience",
+            )
 
         # Extract roles from the Zitadel claim before constructing TokenPayload
         roles = _extract_roles(payload)
