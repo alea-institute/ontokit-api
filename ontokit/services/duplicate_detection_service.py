@@ -86,8 +86,7 @@ def find_duplicates(graph: Graph, threshold: float = 0.85) -> DuplicateDetection
     entity_lookup = {iri: (label, etype) for iri, label, etype in entities}
     for iri, (label, etype) in entity_lookup.items():
         root = find(iri)
-        if root in parent or iri in parent:
-            clusters_map[find(iri)].append((iri, label, etype))
+        clusters_map[root].append((iri, label, etype))
 
     # Build response clusters
     clusters = []
