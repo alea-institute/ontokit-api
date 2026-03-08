@@ -68,6 +68,11 @@ def _is_deprecated(graph: Graph, uri: URIRef) -> bool:
     return any(str(obj).lower() in ("true", "1") for obj in graph.objects(uri, OWL.deprecated))
 
 
+def _vec_to_str(vec) -> str:
+    """Convert an embedding vector to a pgvector-compatible string."""
+    return str(list(vec))
+
+
 class EmbeddingService:
     def __init__(self, db: AsyncSession):
         self._db = db
@@ -481,7 +486,7 @@ class EmbeddingService:
         result = await self._db.execute(
             query_str,
             {
-                "query_vec": str(query_vec),
+                "query_vec": _vec_to_str(query_vec),
                 "pid": str(project_id),
                 "br": branch,
                 "lim": limit,
@@ -535,7 +540,7 @@ class EmbeddingService:
         result = await self._db.execute(
             query_str,
             {
-                "query_vec": str(list(emb.embedding)),
+                "query_vec": _vec_to_str(emb.embedding),
                 "pid": str(project_id),
                 "br": branch,
                 "self_iri": entity_iri,
