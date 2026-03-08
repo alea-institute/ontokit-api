@@ -1,6 +1,7 @@
 """Project management endpoints."""
 
 import contextlib
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -59,6 +60,8 @@ from ontokit.services.ontology import OntologyService, get_ontology_service
 from ontokit.services.project_service import ProjectService, get_project_service
 from ontokit.services.sitemap_notifier import notify_sitemap_add, notify_sitemap_remove
 from ontokit.services.storage import StorageError, StorageService, get_storage_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -1262,9 +1265,7 @@ async def save_source_content(
         await ontology.load_from_git(project_id, current_branch, filename, git)
     except Exception as e:
         # Log but don't fail - the commit succeeded
-        import logging
-
-        logging.warning(f"Failed to reload ontology after save: {e}")
+        logger.warning("Failed to reload ontology after save: %s", e)
 
     # Record change events (analytics)
     change_events = []
@@ -1283,9 +1284,7 @@ async def save_source_content(
             commit_info.hash,
         )
     except Exception:
-        import logging
-
-        logging.warning("Failed to record change events", exc_info=True)
+        logger.warning("Failed to record change events", exc_info=True)
 
     # Auto-embed changed entities if configured
     if change_events:
@@ -1298,18 +1297,22 @@ async def save_source_content(
                 from ontokit.api.routes.lint import get_arq_pool as get_lint_arq_pool
 
                 pool = await get_lint_arq_pool()
-                for event in change_events:
-                    if event.event_type != ChangeEventType.DELETE:
-                        await pool.enqueue_job(
-                            "run_single_entity_embed_task",
-                            str(project_id),
-                            current_branch,
-                            event.entity_iri,
-                        )
+                if pool is None:
+                    logger.warning(
+                        "Cannot auto-embed for project %s: ARQ/Redis pool unavailable",
+                        project_id,
+                    )
+                else:
+                    for event in change_events:
+                        if event.event_type != ChangeEventType.DELETE:
+                            await pool.enqueue_job(
+                                "run_single_entity_embed_task",
+                                str(project_id),
+                                current_branch,
+                                event.entity_iri,
+                            )
         except Exception:
-            import logging
-
-            logging.warning("Failed to queue auto-embed", exc_info=True)
+            logger.warning("Failed to queue auto-embed", exc_info=True)
 
     return SourceContentSaveResponse(
         success=True,
