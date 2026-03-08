@@ -434,6 +434,7 @@ class SuggestionService:
         """Discard a suggestion session and delete its branch."""
         session = await self._get_session(project_id, session_id)
         self._verify_ownership(session, user)
+        await self._verify_project_access(project_id, user)
 
         if session.status != SuggestionSessionStatus.ACTIVE.value:
             raise HTTPException(
