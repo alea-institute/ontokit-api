@@ -10,7 +10,6 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.auth import OptionalUser, RequiredUser
-from ontokit.core.config import settings
 from ontokit.core.database import get_db
 from ontokit.schemas.quality import (
     ConsistencyCheckResult,
@@ -27,11 +26,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-async def _get_redis():
-    """Get a Redis connection for caching."""
-    import redis.asyncio as aioredis
+def _get_redis():
+    """Get the shared Redis connection pool from the application lifespan."""
+    from ontokit.main import redis_pool
 
-    return aioredis.from_url(str(settings.redis_url), decode_responses=True)
+    if redis_pool is None:
+        raise RuntimeError("Redis pool is not available")
+    return redis_pool
 
 
 async def _load_graph(project_id: UUID, branch: str, db: AsyncSession):
@@ -118,10 +119,9 @@ async def trigger_consistency_check(
     # Cache in Redis with 10-min TTL
     job_id = str(uuid.uuid4())
     try:
-        redis = await _get_redis()
+        redis = _get_redis()
         cache_key = f"quality:{project_id}:{branch}"
         await redis.set(cache_key, result.model_dump_json(), ex=600)
-        await redis.aclose()
     except Exception:
         logger.warning("Failed to cache consistency result in Redis", exc_info=True)
 
@@ -142,10 +142,9 @@ async def get_consistency_issues(
     await _verify_access(project_id, db, user)
 
     try:
-        redis = await _get_redis()
+        redis = _get_redis()
         cache_key = f"quality:{project_id}:{branch}"
         cached = await redis.get(cache_key)
-        await redis.aclose()
         if cached:
             return ConsistencyCheckResult.model_validate_json(cached)
     except Exception:
