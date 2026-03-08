@@ -53,5 +53,15 @@ class VoyageEmbeddingProvider(EmbeddingProvider):
                 )
                 resp.raise_for_status()
                 data = resp.json()
-                all_embeddings.extend([item["embedding"] for item in data["data"]])
+                items = data["data"]
+                if len(items) != len(batch):
+                    raise ValueError(
+                        f"Voyage API returned {len(items)} embeddings "
+                        f"for {len(batch)} inputs"
+                    )
+                # Use index field to preserve input ordering
+                batch_result: list[list[float]] = [[] for _ in batch]
+                for item in items:
+                    batch_result[item["index"]] = item["embedding"]
+                all_embeddings.extend(batch_result)
             return all_embeddings
