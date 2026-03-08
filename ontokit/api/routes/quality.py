@@ -78,10 +78,7 @@ async def _verify_access(project_id: UUID, db: AsyncSession, user):
     from ontokit.services.project_service import get_project_service
 
     service = get_project_service(db)
-    try:
-        await service.get(project_id, user)
-    except HTTPException:
-        raise
+    await service.get(project_id, user)
 
 
 @router.get(
