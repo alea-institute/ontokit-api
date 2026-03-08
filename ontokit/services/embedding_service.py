@@ -10,7 +10,7 @@ from cryptography.fernet import Fernet
 from rdflib import Graph, URIRef
 from rdflib import Literal as RDFLiteral
 from rdflib.namespace import OWL, RDF, RDFS
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.models.embedding import EmbeddingJob, EntityEmbedding, ProjectEmbeddingConfig
@@ -381,9 +381,17 @@ class EmbeddingService:
 
         except Exception as e:
             await self._db.rollback()
-            job.status = "failed"
-            job.error_message = str(e)
-            job.completed_at = datetime.now(UTC)
+            # Use a raw UPDATE to persist failure status — the ORM instance
+            # may be expired/detached after rollback.
+            await self._db.execute(
+                update(EmbeddingJob)
+                .where(EmbeddingJob.id == job.id)
+                .values(
+                    status="failed",
+                    error_message=str(e),
+                    completed_at=datetime.now(UTC),
+                )
+            )
             await self._db.commit()
             raise
 
