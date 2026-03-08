@@ -17,16 +17,6 @@ from ontokit.schemas.lint import (
 from ontokit.schemas.ontology import OntologyCreate, OntologyResponse, OntologyUpdate
 from ontokit.schemas.owl_class import OWLClassCreate, OWLClassResponse, OWLClassUpdate
 from ontokit.schemas.owl_property import OWLPropertyCreate, OWLPropertyResponse, OWLPropertyUpdate
-from ontokit.schemas.suggestion import (
-    SuggestionBeaconRequest,
-    SuggestionSaveRequest,
-    SuggestionSaveResponse,
-    SuggestionSessionListResponse,
-    SuggestionSessionResponse,
-    SuggestionSessionSummary,
-    SuggestionSubmitRequest,
-    SuggestionSubmitResponse,
-)
 from ontokit.schemas.pull_request import (
     BranchCreate,
     BranchDeleteRequest,
@@ -58,6 +48,16 @@ from ontokit.schemas.pull_request import (
     ReviewResponse,
     SemanticDiffResponse,
     TripleChange,
+)
+from ontokit.schemas.suggestion import (
+    SuggestionBeaconRequest,
+    SuggestionSaveRequest,
+    SuggestionSaveResponse,
+    SuggestionSessionListResponse,
+    SuggestionSessionResponse,
+    SuggestionSessionSummary,
+    SuggestionSubmitRequest,
+    SuggestionSubmitResponse,
 )
 
 __all__ = [

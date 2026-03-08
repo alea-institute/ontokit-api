@@ -1,6 +1,5 @@
 """Quality API endpoints — cross-references, consistency checks, duplicate detection."""
 
-import json
 import logging
 import uuid
 from typing import Annotated
@@ -19,8 +18,8 @@ from ontokit.schemas.quality import (
     CrossReferencesResponse,
     DuplicateDetectionResult,
 )
-from ontokit.services.cross_reference_service import get_cross_references
 from ontokit.services.consistency_service import run_consistency_check
+from ontokit.services.cross_reference_service import get_cross_references
 from ontokit.services.duplicate_detection_service import find_duplicates
 
 logger = logging.getLogger(__name__)

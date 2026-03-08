@@ -1,5 +1,6 @@
 """Project management endpoints."""
 
+import contextlib
 from typing import Annotated
 from uuid import UUID
 
@@ -1252,10 +1253,8 @@ async def save_source_content(
     # Capture old graph for change event diffing
     old_graph = None
     if ontology.is_loaded(project_id, current_branch):
-        try:
+        with contextlib.suppress(ValueError):
             old_graph = await ontology._get_graph(project_id, current_branch)
-        except ValueError:
-            pass
 
     # Reload the ontology in memory to reflect changes
     try:

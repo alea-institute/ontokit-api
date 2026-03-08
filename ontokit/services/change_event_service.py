@@ -7,7 +7,7 @@ from uuid import UUID
 from rdflib import Graph, URIRef
 from rdflib import Literal as RDFLiteral
 from rdflib.namespace import OWL, RDF, RDFS
-from sqlalchemy import case, func, select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.models.change_event import ChangeEventType, EntityChangeEvent
@@ -48,10 +48,7 @@ def _get_parents(graph: Graph, uri: URIRef) -> list[str]:
 
 
 def _is_deprecated(graph: Graph, uri: URIRef) -> bool:
-    for obj in graph.objects(uri, OWL.deprecated):
-        if str(obj).lower() in ("true", "1"):
-            return True
-    return False
+    return any(str(obj).lower() in ("true", "1") for obj in graph.objects(uri, OWL.deprecated))
 
 
 def _get_declared_entities(graph: Graph) -> dict[str, str]:

@@ -38,7 +38,7 @@ def build_embedding_text(graph: Graph, entity_uri: URIRef, entity_type: str) -> 
 
     # Alternative labels
     alt_labels = [str(o) for o in graph.objects(entity_uri, SKOS.altLabel) if isinstance(o, RDFLiteral)]
-    extra_labels = [l for l in labels[1:] if l != primary_label]
+    extra_labels = [lbl for lbl in labels[1:] if lbl != primary_label]
     all_alt = alt_labels + extra_labels
     if all_alt:
         parts.append(f"Also known as: {', '.join(all_alt)}")
