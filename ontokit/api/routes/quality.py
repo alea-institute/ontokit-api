@@ -37,8 +37,11 @@ def _get_redis() -> aioredis.Redis:
     return redis_pool
 
 
-async def _load_graph(project_id: UUID, branch: str | None, db: AsyncSession) -> Graph:
-    """Load the ontology graph for a project, ensuring it's in memory."""
+async def _load_graph(project_id: UUID, branch: str | None, db: AsyncSession) -> tuple[Graph, str]:
+    """Load the ontology graph for a project, ensuring it's in memory.
+
+    Returns (graph, resolved_branch) where resolved_branch is the actual branch used.
+    """
     from sqlalchemy import select
 
     from ontokit.git.bare_repository import BareGitRepositoryService
@@ -62,22 +65,22 @@ async def _load_graph(project_id: UUID, branch: str | None, db: AsyncSession) ->
     git = BareGitRepositoryService()
 
     # Resolve branch from repo default when not specified
-    if not branch:
-        branch = git.get_default_branch(project_id)
+    resolved_branch = branch or git.get_default_branch(project_id)
 
-    if not ontology.is_loaded(project_id, branch):
+    if not ontology.is_loaded(project_id, resolved_branch):
         import os
 
         filename = getattr(project, "git_ontology_path", None) or os.path.basename(
             project.source_file_path
         )
         try:
-            await ontology.load_from_git(project_id, branch, filename, git)
+            await ontology.load_from_git(project_id, resolved_branch, filename, git)
         except (FileNotFoundError, KeyError, ValueError):
             # Branch or file not in git — fall back to storage snapshot
-            await ontology.load_from_storage(project_id, project.source_file_path, branch)
+            await ontology.load_from_storage(project_id, project.source_file_path, resolved_branch)
 
-    return await ontology._get_graph(project_id, branch)
+    graph = await ontology._get_graph(project_id, resolved_branch)
+    return graph, resolved_branch
 
 
 async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser | None) -> None:
@@ -102,7 +105,7 @@ async def get_entity_references(
     """Get all cross-references to a specific entity."""
     await _verify_access(project_id, db, user)
     decoded_iri = unquote(iri)
-    graph = await _load_graph(project_id, branch, db)
+    graph, _ = await _load_graph(project_id, branch, db)
     return get_cross_references(graph, decoded_iri)
 
 
@@ -118,16 +121,16 @@ async def trigger_consistency_check(
 ) -> ConsistencyCheckTriggerResponse:
     """Run consistency checks and cache the result."""
     await _verify_access(project_id, db, user)
-    graph = await _load_graph(project_id, branch, db)
+    graph, resolved_branch = await _load_graph(project_id, branch, db)
 
-    result = run_consistency_check(graph, str(project_id), branch or "main")
+    result = run_consistency_check(graph, str(project_id), resolved_branch)
 
     # Cache in Redis with 10-min TTL
     job_id = str(uuid.uuid4())
     try:
         redis = _get_redis()
         result_json = result.model_dump_json()
-        cache_key = f"quality:{project_id}:{branch}"
+        cache_key = f"quality:{project_id}:{resolved_branch}"
         job_key = f"quality_job:{project_id}:{job_id}"
         await redis.set(cache_key, result_json, ex=600)
         await redis.set(job_key, result_json, ex=600)
@@ -177,9 +180,14 @@ async def get_consistency_issues(
     """Get cached consistency check results."""
     await _verify_access(project_id, db, user)
 
+    # Resolve the branch so cache keys match what trigger_consistency_check stored
+    from ontokit.git.bare_repository import BareGitRepositoryService
+
+    resolved_branch = branch or BareGitRepositoryService().get_default_branch(project_id)
+
     try:
         redis = _get_redis()
-        cache_key = f"quality:{project_id}:{branch}"
+        cache_key = f"quality:{project_id}:{resolved_branch}"
         cached = await redis.get(cache_key)
         if cached:
             return ConsistencyCheckResult.model_validate_json(cached)
@@ -191,7 +199,7 @@ async def get_consistency_issues(
 
     return ConsistencyCheckResult(
         project_id=str(project_id),
-        branch=branch or "main",
+        branch=resolved_branch,
         issues=[],
         checked_at=datetime.now(UTC).isoformat(),
         duration_ms=0,
@@ -211,5 +219,5 @@ async def detect_duplicates(
 ) -> DuplicateDetectionResult:
     """Detect duplicate entities based on label similarity."""
     await _verify_access(project_id, db, user)
-    graph = await _load_graph(project_id, branch, db)
+    graph, _ = await _load_graph(project_id, branch, db)
     return find_duplicates(graph, threshold)
