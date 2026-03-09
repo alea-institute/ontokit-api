@@ -126,7 +126,7 @@ async def trigger_consistency_check(
         redis = _get_redis()
         result_json = result.model_dump_json()
         cache_key = f"quality:{project_id}:{branch}"
-        job_key = f"quality_job:{job_id}"
+        job_key = f"quality_job:{project_id}:{job_id}"
         await redis.set(cache_key, result_json, ex=600)
         await redis.set(job_key, result_json, ex=600)
     except Exception:
@@ -150,7 +150,7 @@ async def get_quality_job_result(
 
     try:
         redis = _get_redis()
-        cached = await redis.get(f"quality_job:{job_id}")
+        cached = await redis.get(f"quality_job:{project_id}:{job_id}")
         if cached:
             return ConsistencyCheckResult.model_validate_json(cached)
     except Exception:
