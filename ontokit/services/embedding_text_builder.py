@@ -28,9 +28,10 @@ def build_embedding_text(graph: Graph, entity_uri: URIRef, entity_type: str) -> 
     if desc:
         parts.append(desc[0])
 
-    # Parents
+    # Parents (use subPropertyOf for properties, subClassOf for classes)
+    parent_pred = RDFS.subPropertyOf if entity_type == "property" else RDFS.subClassOf
     parent_labels = []
-    for p in graph.objects(entity_uri, RDFS.subClassOf):
+    for p in graph.objects(entity_uri, parent_pred):
         if isinstance(p, URIRef) and p != OWL.Thing:
             plabel = next(
                 (str(o) for o in graph.objects(p, RDFS.label) if isinstance(o, RDFLiteral)),
