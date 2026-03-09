@@ -191,6 +191,33 @@ class SuggestionService:
             self.db.add(db_session)
             await self.db.commit()
             await self.db.refresh(db_session)
+        except IntegrityError:
+            # Race: another request created an active session concurrently
+            await self.db.rollback()
+            try:
+                self.git_service.delete_branch(project_id, branch, force=True)
+            except Exception:
+                logger.warning(f"Failed to clean up orphaned branch {branch}")
+            # Return the existing session
+            result2 = await self.db.execute(
+                select(SuggestionSession).where(
+                    SuggestionSession.project_id == project_id,
+                    SuggestionSession.user_id == user.id,
+                    SuggestionSession.status == SuggestionSessionStatus.ACTIVE.value,
+                )
+            )
+            existing = result2.scalar_one_or_none()
+            if existing:
+                return SuggestionSessionResponse(
+                    session_id=existing.session_id,
+                    branch=existing.branch,
+                    created_at=existing.created_at,
+                    beacon_token=existing.beacon_token,
+                )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to create suggestion session",
+            ) from None
         except Exception:
             await self.db.rollback()
             try:

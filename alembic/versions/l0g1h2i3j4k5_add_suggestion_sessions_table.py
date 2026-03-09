@@ -69,18 +69,21 @@ def upgrade() -> None:
     )
 
     # Indexes for common queries
+    op.create_index("ix_suggestion_sessions_project_id", "suggestion_sessions", ["project_id"])
+    op.create_index("ix_suggestion_sessions_user_id", "suggestion_sessions", ["user_id"])
+    op.create_index("ix_suggestion_sessions_status", "suggestion_sessions", ["status"])
+    # Partial unique index: at most one ACTIVE session per user per project
     op.create_index(
-        "ix_suggestion_sessions_project_id", "suggestion_sessions", ["project_id"]
-    )
-    op.create_index(
-        "ix_suggestion_sessions_user_id", "suggestion_sessions", ["user_id"]
-    )
-    op.create_index(
-        "ix_suggestion_sessions_status", "suggestion_sessions", ["status"]
+        "uq_one_active_session_per_user",
+        "suggestion_sessions",
+        ["project_id", "user_id"],
+        unique=True,
+        postgresql_where=sa.text("status = 'active'"),
     )
 
 
 def downgrade() -> None:
+    op.drop_index("uq_one_active_session_per_user", table_name="suggestion_sessions")
     op.drop_index("ix_suggestion_sessions_status", table_name="suggestion_sessions")
     op.drop_index("ix_suggestion_sessions_user_id", table_name="suggestion_sessions")
     op.drop_index("ix_suggestion_sessions_project_id", table_name="suggestion_sessions")
