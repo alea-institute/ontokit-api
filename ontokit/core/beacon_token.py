@@ -38,6 +38,8 @@ def create_beacon_token(session_id: str, ttl: int = 7200) -> str:
         Base64url-encoded token string.
     """
     _check_secret_key()
+    if ttl <= 0:
+        raise ValueError("ttl must be a positive number of seconds")
     payload = json.dumps({"sid": session_id, "exp": int(time.time()) + ttl})
     sig = hmac.new(settings.secret_key.encode(), payload.encode(), hashlib.sha256).hexdigest()
     return base64.urlsafe_b64encode(f"{payload}|{sig}".encode()).decode()
