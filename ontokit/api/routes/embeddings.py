@@ -7,6 +7,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
@@ -109,7 +110,25 @@ async def generate_embeddings(
             detail=f"Embedding generation already in progress (job {active_job.id})",
         )
 
+    # Claim the work by inserting a pending job row before enqueuing,
+    # so concurrent requests cannot both pass the SELECT check above.
     job_id = uuid.uuid4()
+    pending_job = EmbeddingJob(
+        id=job_id,
+        project_id=project_id,
+        branch=resolved_branch,
+        status="pending",
+    )
+    try:
+        db.add(pending_job)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Embedding generation already in progress",
+        ) from None
+
     pool = await get_arq_pool()
     await pool.enqueue_job(
         "run_embedding_generation_task",
