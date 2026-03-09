@@ -62,8 +62,14 @@ def verify_beacon_token(token: str) -> str | None:
         if not hmac.compare_digest(sig, expected):
             return None
         payload = json.loads(payload_str)
-        if time.time() > payload["exp"]:
+        if not isinstance(payload, dict):
             return None
-        return payload["sid"]
+        exp = payload.get("exp")
+        sid = payload.get("sid")
+        if not isinstance(exp, (int, float)) or not isinstance(sid, str):
+            return None
+        if time.time() > exp:
+            return None
+        return sid
     except Exception:
         return None
