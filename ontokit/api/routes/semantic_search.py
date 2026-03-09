@@ -85,5 +85,9 @@ async def rank_suggestions(
 ) -> list[RankedCandidate]:
     """Rank candidate entities by similarity to a context entity."""
     await _verify_access(project_id, db, user)
+    if not body.branch:
+        from ontokit.git import get_git_service
+
+        body.branch = get_git_service().get_default_branch(project_id)
     service = EmbeddingService(db)
     return await service.rank_suggestions(project_id, body)
