@@ -35,7 +35,7 @@ def _get_redis():
     return redis_pool
 
 
-async def _load_graph(project_id: UUID, branch: str, db: AsyncSession):
+async def _load_graph(project_id: UUID, branch: str | None, db: AsyncSession):
     """Load the ontology graph for a project, ensuring it's in memory."""
     from sqlalchemy import select
 
@@ -57,9 +57,13 @@ async def _load_graph(project_id: UUID, branch: str, db: AsyncSession):
 
     storage = get_storage_service()
     ontology = get_ontology_service(storage)
+    git = BareGitRepositoryService()
+
+    # Resolve branch from repo default when not specified
+    if not branch:
+        branch = git.get_default_branch(project_id)
 
     if not ontology.is_loaded(project_id, branch):
-        git = BareGitRepositoryService()
         import os
 
         filename = getattr(project, "git_ontology_path", None) or os.path.basename(
@@ -91,7 +95,7 @@ async def get_entity_references(
     iri: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: OptionalUser,
-    branch: str = Query(default="main", description="Branch name"),
+    branch: str | None = Query(default=None, description="Branch name"),
 ) -> CrossReferencesResponse:
     """Get all cross-references to a specific entity."""
     await _verify_access(project_id, db, user)
@@ -108,7 +112,7 @@ async def trigger_consistency_check(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: RequiredUser,
-    branch: str = Query(default="main", description="Branch name"),
+    branch: str | None = Query(default=None, description="Branch name"),
 ) -> ConsistencyCheckTriggerResponse:
     """Run consistency checks and cache the result."""
     await _verify_access(project_id, db, user)
@@ -166,7 +170,7 @@ async def get_consistency_issues(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: OptionalUser,
-    branch: str = Query(default="main", description="Branch name"),
+    branch: str | None = Query(default=None, description="Branch name"),
 ) -> ConsistencyCheckResult:
     """Get cached consistency check results."""
     await _verify_access(project_id, db, user)
@@ -200,7 +204,7 @@ async def detect_duplicates(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: RequiredUser,
-    branch: str = Query(default="main", description="Branch name"),
+    branch: str | None = Query(default=None, description="Branch name"),
     threshold: float = Query(default=0.85, ge=0.5, le=1.0),
 ) -> DuplicateDetectionResult:
     """Detect duplicate entities based on label similarity."""
