@@ -15,3 +15,11 @@ async def get_arq_pool() -> ArqRedis:
         redis_settings = RedisSettings.from_dsn(str(settings.redis_url))
         _arq_pool = await create_pool(redis_settings)
     return _arq_pool
+
+
+async def close_arq_pool() -> None:
+    """Close the cached ARQ Redis pool."""
+    global _arq_pool
+    if _arq_pool is not None:
+        await _arq_pool.aclose()
+        _arq_pool = None

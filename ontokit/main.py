@@ -85,6 +85,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         except Exception:
             logger.exception("Error closing Redis connection")
 
+    # Close ARQ Redis pool
+    try:
+        from ontokit.api.utils.redis import close_arq_pool
+
+        await close_arq_pool()
+    except Exception:
+        logger.exception("Error closing ARQ Redis pool")
+
     # Dispose of the async SQLAlchemy engine (closes the connection pool)
     try:
         await engine.dispose()
