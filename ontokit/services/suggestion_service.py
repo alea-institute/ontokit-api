@@ -313,6 +313,30 @@ class SuggestionService:
         body_parts.append(f"\n*Submitted by {session.user_name or session.user_id}*")
         description = "\n".join(body_parts)
 
+        # Check for an existing PR on this branch (idempotency on retry)
+        from ontokit.models.pull_request import PullRequest
+
+        existing_pr_result = await self.db.execute(
+            select(PullRequest).where(
+                PullRequest.project_id == project_id,
+                PullRequest.source_branch == session.branch,
+            )
+        )
+        existing_pr = existing_pr_result.scalar_one_or_none()
+        if existing_pr:
+            # PR already created (previous attempt failed after PR but before session update)
+            session.status = new_status
+            session.pr_number = existing_pr.pr_number
+            session.pr_id = existing_pr.id
+            session.last_activity = datetime.now(UTC)
+            await self.db.commit()
+
+            return SuggestionSubmitResponse(
+                pr_number=existing_pr.pr_number,
+                pr_url=existing_pr.github_pr_url,
+                status=new_status,
+            )
+
         # Get default branch
         default_branch = self.git_service.get_default_branch(project_id)
 
