@@ -440,6 +440,9 @@ def run_consistency_check(graph: Graph, project_id: str, branch: str) -> Consist
 
     duration_ms = (time.monotonic() - start) * 1000
 
+    # Sort for deterministic output (graph iteration order is not guaranteed)
+    issues.sort(key=lambda i: (i.rule_id, i.entity_iri, i.message))
+
     return ConsistencyCheckResult(
         project_id=project_id,
         branch=branch,
