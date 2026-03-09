@@ -1,7 +1,7 @@
 """Change event service — track entity modifications from graph diffs."""
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from rdflib import Graph, URIRef
@@ -291,7 +291,6 @@ class ChangeEventService:
         )
 
     async def get_activity(self, project_id: UUID, days: int = 30) -> ProjectActivity:
-        from datetime import timedelta
 
         cutoff = datetime.now(UTC) - timedelta(days=days)
 
@@ -352,7 +351,6 @@ class ChangeEventService:
         )
 
     async def get_hot_entities(self, project_id: UUID, limit: int = 20) -> list[HotEntity]:
-        from datetime import timedelta
 
         cutoff = datetime.now(UTC) - timedelta(days=30)
 
@@ -387,7 +385,6 @@ class ChangeEventService:
         ]
 
     async def get_contributors(self, project_id: UUID, days: int = 30) -> list[ContributorStats]:
-        from datetime import timedelta
 
         cutoff = datetime.now(UTC) - timedelta(days=days)
 
