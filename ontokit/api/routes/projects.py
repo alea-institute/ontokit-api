@@ -1294,9 +1294,9 @@ async def save_source_content(
 
             embed_config = await EmbeddingService(db).get_config(project_id)
             if embed_config and embed_config.auto_embed_on_save:
-                from ontokit.api.routes.lint import get_arq_pool as get_lint_arq_pool
+                from ontokit.api.utils.redis import get_arq_pool
 
-                pool = await get_lint_arq_pool()
+                pool = await get_arq_pool()
                 if pool is None:
                     logger.warning(
                         "Cannot auto-embed for project %s: ARQ/Redis pool unavailable",

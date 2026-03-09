@@ -8,14 +8,12 @@ from datetime import UTC, datetime
 from typing import Annotated
 from uuid import UUID
 
-from arq import ArqRedis, create_pool
-from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser
-from ontokit.core.config import settings
 from ontokit.core.database import async_session_maker, get_db
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.project import Project
@@ -37,27 +35,6 @@ from ontokit.worker import LINT_UPDATES_CHANNEL
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-
-# ARQ Redis pool (lazy initialized)
-_arq_pool: ArqRedis | None = None
-
-
-async def get_arq_pool() -> ArqRedis:
-    """Get or create the ARQ Redis connection pool."""
-    global _arq_pool
-    if _arq_pool is None:
-        from urllib.parse import urlparse
-
-        redis_url = str(settings.redis_url)
-        parsed = urlparse(redis_url)
-        redis_settings = RedisSettings(
-            host=parsed.hostname or "localhost",
-            port=parsed.port or 6379,
-            database=int(parsed.path.lstrip("/") or "0"),
-        )
-        _arq_pool = await create_pool(redis_settings)
-    return _arq_pool
 
 
 async def verify_project_access(

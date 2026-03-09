@@ -5,14 +5,12 @@ import uuid
 from typing import Annotated
 from uuid import UUID
 
-from arq import ArqRedis, create_pool
-from arq.connections import RedisSettings
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import RequiredUser
-from ontokit.core.config import settings
 from ontokit.core.database import get_db
 from ontokit.git import get_git_service
 from ontokit.models.embedding import EmbeddingJob
@@ -28,16 +26,6 @@ from ontokit.services.project_service import get_project_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
-
-_arq_pool: ArqRedis | None = None
-
-
-async def get_arq_pool() -> ArqRedis:
-    global _arq_pool
-    if _arq_pool is None:
-        redis_settings = RedisSettings.from_dsn(str(settings.redis_url))
-        _arq_pool = await create_pool(redis_settings)
-    return _arq_pool
 
 
 async def _verify_write_access(project_id: UUID, db: AsyncSession, user):
