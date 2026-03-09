@@ -13,6 +13,19 @@ import time
 
 from ontokit.core.config import settings
 
+_INSECURE_DEFAULTS = {"change-me-in-production", ""}
+_MIN_SECRET_LENGTH = 16
+
+
+def _check_secret_key() -> None:
+    """Raise if secret_key is an insecure placeholder or too short."""
+    key = settings.secret_key
+    if key in _INSECURE_DEFAULTS or len(key) < _MIN_SECRET_LENGTH:
+        raise RuntimeError(
+            "SECRET_KEY is not configured securely. "
+            "Set a strong, random SECRET_KEY (>= 16 characters) before using beacon tokens."
+        )
+
 
 def create_beacon_token(session_id: str, ttl: int = 7200) -> str:
     """Create an HMAC-signed beacon token.
@@ -24,6 +37,7 @@ def create_beacon_token(session_id: str, ttl: int = 7200) -> str:
     Returns:
         Base64url-encoded token string.
     """
+    _check_secret_key()
     payload = json.dumps({"sid": session_id, "exp": int(time.time()) + ttl})
     sig = hmac.new(settings.secret_key.encode(), payload.encode(), hashlib.sha256).hexdigest()
     return base64.urlsafe_b64encode(f"{payload}|{sig}".encode()).decode()
@@ -38,6 +52,7 @@ def verify_beacon_token(token: str) -> str | None:
     Returns:
         The session_id if the token is valid and not expired, None otherwise.
     """
+    _check_secret_key()
     try:
         decoded = base64.urlsafe_b64decode(token.encode()).decode()
         payload_str, sig = decoded.rsplit("|", 1)
