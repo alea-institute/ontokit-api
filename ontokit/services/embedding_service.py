@@ -141,9 +141,6 @@ class EmbeddingService:
         )
         embedded_count = (await self._db.execute(embedded_q)).scalar() or 0
 
-        # Total entities estimate (from embeddings + any existing data)
-        total_entities = embedded_count  # Will be updated when we have graph access
-
         # Check for active job
         job_q = (
             select(EmbeddingJob)
@@ -160,9 +157,27 @@ class EmbeddingService:
 
         job_in_progress = active_job is not None
         job_progress = None
+        total_entities = embedded_count
+
         if active_job and active_job.total_entities > 0:
             job_progress = round(active_job.embedded_entities / active_job.total_entities * 100, 1)
             total_entities = max(total_entities, active_job.total_entities)
+        else:
+            # Use last completed job's total as denominator for accurate coverage
+            last_job_q = (
+                select(EmbeddingJob.total_entities)
+                .where(
+                    EmbeddingJob.project_id == project_id,
+                    EmbeddingJob.branch == branch,
+                    EmbeddingJob.status == "complete",
+                    EmbeddingJob.total_entities > 0,
+                )
+                .order_by(EmbeddingJob.completed_at.desc())
+                .limit(1)
+            )
+            last_total = (await self._db.execute(last_job_q)).scalar()
+            if last_total:
+                total_entities = max(total_entities, last_total)
 
         coverage = round(embedded_count / total_entities * 100, 1) if total_entities > 0 else 0.0
 
