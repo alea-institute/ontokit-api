@@ -23,6 +23,9 @@ from ontokit.services.normalization_service import NormalizationService
 from ontokit.services.ontology import get_ontology_service
 from ontokit.services.storage import get_storage_service
 
+# Redis pubsub channels for upstream sync updates
+UPSTREAM_SYNC_UPDATES_CHANNEL = "upstream_sync:updates"
+
 logger = logging.getLogger(__name__)
 
 # Redis pubsub channels for updates
@@ -535,6 +538,178 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
 
 
+async def run_upstream_check_task(
+    ctx: dict[str, Any],
+    project_id: str,
+) -> dict[str, Any]:
+    """
+    Background task to check an upstream GitHub repository for changes.
+
+    Compares the upstream file content with the current project ontology
+    and records a SyncEvent with the outcome.
+    """
+    db: AsyncSession = ctx["db"]
+    redis: ArqRedis = ctx["redis"]
+
+    project_uuid = UUID(project_id)
+
+    try:
+        from ontokit.models.upstream_sync import SyncEvent, UpstreamSyncConfig
+        from ontokit.services.github_service import get_github_service
+
+        # Get sync config
+        config_result = await db.execute(
+            select(UpstreamSyncConfig).where(UpstreamSyncConfig.project_id == project_uuid)
+        )
+        config = config_result.scalar_one_or_none()
+
+        if not config:
+            return {"status": "failed", "error": "Upstream sync not configured"}
+
+        # Get project
+        project_result = await db.execute(select(Project).where(Project.id == project_uuid))
+        project = project_result.scalar_one_or_none()
+
+        if not project:
+            return {"status": "failed", "error": "Project not found"}
+
+        # Notify start
+        await redis.publish(
+            UPSTREAM_SYNC_UPDATES_CHANNEL,
+            f'{{"type": "upstream_check_started", "project_id": "{project_id}"}}',
+        )
+
+        # Get a GitHub token — try the project's connected user first
+        token: str | None = None
+        integration_result = await db.execute(
+            select(GitHubIntegration).where(GitHubIntegration.project_id == project_uuid)
+        )
+        integration = integration_result.scalar_one_or_none()
+
+        if integration and integration.connected_by_user_id:
+            token_result = await db.execute(
+                select(UserGitHubToken).where(
+                    UserGitHubToken.user_id == integration.connected_by_user_id
+                )
+            )
+            token_row = token_result.scalar_one_or_none()
+            if token_row:
+                token = decrypt_token(token_row.encrypted_token)
+
+        if not token:
+            config.status = "error"
+            config.error_message = "No GitHub token available for upstream check"
+            event = SyncEvent(
+                project_id=project_uuid,
+                config_id=config.id,
+                event_type="error",
+                error_message="No GitHub token available",
+            )
+            db.add(event)
+            await db.commit()
+            return {"status": "failed", "error": "No GitHub token available"}
+
+        # Fetch upstream file content
+        github_service = get_github_service()
+        upstream_content = await github_service.get_file_content(
+            token=token,
+            owner=config.repo_owner,
+            repo=config.repo_name,
+            path=config.file_path,
+            ref=config.branch,
+        )
+
+        # Load current project ontology content for comparison
+        storage = get_storage_service()
+        current_content: bytes | None = None
+        if project.source_file_path:
+            try:
+                # Strip bucket prefix if present
+                parts = project.source_file_path.split("/", 1)
+                if len(parts) == 2 and parts[0] == storage.bucket:
+                    object_name = parts[1]
+                else:
+                    object_name = project.source_file_path
+                current_content = await storage.download_file(object_name)
+            except Exception:
+                logger.warning(f"Could not load current ontology for project {project_id}")
+
+        # Compare contents
+        has_changes = current_content is None or upstream_content != current_content
+
+        if has_changes:
+            event_type = "update_found"
+            config.status = "update_available"
+            changes_summary = "Upstream file differs from local ontology"
+        else:
+            event_type = "check_no_changes"
+            config.status = "up_to_date"
+            changes_summary = None
+
+        config.last_check_at = datetime.now(UTC)
+        config.error_message = None
+
+        event = SyncEvent(
+            project_id=project_uuid,
+            config_id=config.id,
+            event_type=event_type,
+            changes_summary=changes_summary,
+        )
+        db.add(event)
+        await db.commit()
+
+        logger.info(
+            f"Upstream check for project {project_id}: "
+            f"{'changes found' if has_changes else 'up to date'}"
+        )
+
+        # Notify completion
+        await redis.publish(
+            UPSTREAM_SYNC_UPDATES_CHANNEL,
+            f'{{"type": "upstream_check_complete", "project_id": "{project_id}", '
+            f'"has_changes": {str(has_changes).lower()}}}',
+        )
+
+        return {
+            "project_id": project_id,
+            "status": "completed",
+            "has_changes": has_changes,
+            "event_type": event_type,
+        }
+
+    except Exception as e:
+        logger.exception(f"Upstream check failed for project {project_id}: {e}")
+
+        # Record error event
+        try:
+            err_result = await db.execute(
+                select(UpstreamSyncConfig).where(UpstreamSyncConfig.project_id == project_uuid)
+            )
+            config = err_result.scalar_one_or_none()
+            if config:
+                config.status = "error"
+                config.error_message = str(e)
+                event = SyncEvent(
+                    project_id=project_uuid,
+                    config_id=config.id,
+                    event_type="error",
+                    error_message=str(e),
+                )
+                db.add(event)
+                await db.commit()
+        except Exception:
+            logger.exception("Failed to record upstream check error event")
+
+        # Notify failure
+        await redis.publish(
+            UPSTREAM_SYNC_UPDATES_CHANNEL,
+            f'{{"type": "upstream_check_failed", "project_id": "{project_id}", '
+            f'"error": "{str(e)}"}}',
+        )
+
+        raise
+
+
 async def startup(ctx: dict[str, Any]) -> None:
     """Initialize worker context on startup."""
     logger.info("Starting ARQ worker...")
@@ -617,6 +792,7 @@ class WorkerSettings:
         run_embedding_generation_task,
         run_single_entity_embed_task,
         run_batch_entity_embed_task,
+        run_upstream_check_task,
     ]
     redis_settings = get_redis_settings()
 
