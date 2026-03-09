@@ -9,21 +9,7 @@ from rdflib import Literal as RDFLiteral
 from rdflib.namespace import OWL, RDF, RDFS
 
 from ontokit.schemas.quality import DuplicateCluster, DuplicateDetectionResult, DuplicateEntity
-
-_TYPE_CHECKS: list[tuple[URIRef, str]] = [
-    (OWL.Class, "class"),
-    (OWL.ObjectProperty, "property"),
-    (OWL.DatatypeProperty, "property"),
-    (OWL.AnnotationProperty, "property"),
-    (OWL.NamedIndividual, "individual"),
-]
-
-
-def _get_entity_type(graph: Graph, uri: URIRef) -> str:
-    for rdf_type, label in _TYPE_CHECKS:
-        if (uri, RDF.type, rdf_type) in graph:
-            return label
-    return "unknown"
+from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
 
 
 def _extract_entities(graph: Graph) -> list[tuple[str, str, str]]:

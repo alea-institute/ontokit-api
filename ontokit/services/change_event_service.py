@@ -20,23 +20,10 @@ from ontokit.schemas.analytics import (
     ProjectActivity,
     TopEditor,
 )
+from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
+from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
 
 logger = logging.getLogger(__name__)
-
-_TYPE_CHECKS: list[tuple[URIRef, str]] = [
-    (OWL.Class, "class"),
-    (OWL.ObjectProperty, "property"),
-    (OWL.DatatypeProperty, "property"),
-    (OWL.AnnotationProperty, "property"),
-    (OWL.NamedIndividual, "individual"),
-]
-
-
-def _get_entity_type(graph: Graph, uri: URIRef) -> str:
-    for rdf_type, label in _TYPE_CHECKS:
-        if (uri, RDF.type, rdf_type) in graph:
-            return label
-    return "unknown"
 
 
 def _get_labels(graph: Graph, uri: URIRef) -> list[str]:
@@ -45,10 +32,6 @@ def _get_labels(graph: Graph, uri: URIRef) -> list[str]:
 
 def _get_parents(graph: Graph, uri: URIRef) -> list[str]:
     return [str(p) for p in graph.objects(uri, RDFS.subClassOf) if isinstance(p, URIRef)]
-
-
-def _is_deprecated(graph: Graph, uri: URIRef) -> bool:
-    return any(str(obj).lower() in ("true", "1") for obj in graph.objects(uri, OWL.deprecated))
 
 
 def _get_declared_entities(graph: Graph) -> dict[str, str]:

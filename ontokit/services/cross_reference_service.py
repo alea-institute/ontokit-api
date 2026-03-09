@@ -11,6 +11,7 @@ from ontokit.schemas.quality import (
     CrossReferencesResponse,
     ReferenceContext,
 )
+from ontokit.services.rdf_utils import get_entity_type as _resolve_entity_type
 
 # Map predicates to reference contexts
 _PREDICATE_CONTEXT: dict[URIRef, ReferenceContext] = {
@@ -24,23 +25,6 @@ _PREDICATE_CONTEXT: dict[URIRef, ReferenceContext] = {
     RDFS.seeAlso: "see_also",
     OWL.inverseOf: "inverse_of",
 }
-
-# Entity type detection in order of precedence
-_TYPE_CHECKS: list[tuple[URIRef, str]] = [
-    (OWL.Class, "class"),
-    (OWL.ObjectProperty, "property"),
-    (OWL.DatatypeProperty, "property"),
-    (OWL.AnnotationProperty, "property"),
-    (OWL.NamedIndividual, "individual"),
-]
-
-
-def _resolve_entity_type(graph: Graph, subject: URIRef) -> str:
-    """Determine the entity type of a subject."""
-    for rdf_type, label in _TYPE_CHECKS:
-        if (subject, RDF.type, rdf_type) in graph:
-            return label
-    return "unknown"
 
 
 def _resolve_label(graph: Graph, subject: URIRef) -> str | None:

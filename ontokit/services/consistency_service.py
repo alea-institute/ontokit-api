@@ -8,22 +8,10 @@ from rdflib import Literal as RDFLiteral
 from rdflib.namespace import DCTERMS, OWL, RDF, RDFS, SKOS, XSD
 
 from ontokit.schemas.quality import ConsistencyCheckResult, ConsistencyIssue
+from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
+from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
 
-# Entity type detection helpers
-_CLASS_TYPES = {OWL.Class}
 _PROPERTY_TYPES = {OWL.ObjectProperty, OWL.DatatypeProperty, OWL.AnnotationProperty}
-_INDIVIDUAL_TYPES = {OWL.NamedIndividual}
-
-
-def _get_entity_type(graph: Graph, uri: URIRef) -> str:
-    for t in graph.objects(uri, RDF.type):
-        if t in _CLASS_TYPES:
-            return "class"
-        if t in _PROPERTY_TYPES:
-            return "property"
-        if t in _INDIVIDUAL_TYPES:
-            return "individual"
-    return "unknown"
 
 
 def _has_label(graph: Graph, uri: URIRef) -> bool:
@@ -37,10 +25,6 @@ def _has_comment(graph: Graph, uri: URIRef) -> bool:
 def _all_declared_uris(graph: Graph) -> set[URIRef]:
     """Get all URIs that appear as subjects of rdf:type triples."""
     return {s for s in graph.subjects(RDF.type, None) if isinstance(s, URIRef)}
-
-
-def _is_deprecated(graph: Graph, uri: URIRef) -> bool:
-    return any(str(obj).lower() in ("true", "1") for obj in graph.objects(uri, OWL.deprecated))
 
 
 def _check_orphan_class(graph: Graph) -> list[ConsistencyIssue]:

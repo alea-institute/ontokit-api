@@ -7,8 +7,8 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from cryptography.fernet import Fernet
-from rdflib import Graph, URIRef
 from rdflib import Literal as RDFLiteral
+from rdflib import URIRef
 from rdflib.namespace import OWL, RDF, RDFS
 from sqlalchemy import delete, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -26,6 +26,8 @@ from ontokit.schemas.embeddings import (
 )
 from ontokit.services.embedding_providers import get_embedding_provider
 from ontokit.services.embedding_text_builder import build_embedding_text
+from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
+from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
 
 logger = logging.getLogger(__name__)
 
@@ -46,26 +48,6 @@ def _encrypt_secret(plaintext: str) -> str:
 def _decrypt_secret(ciphertext: str) -> str:
     """Decrypt a Fernet-encrypted secret string."""
     return _get_fernet().decrypt(ciphertext.encode()).decode()
-
-
-_TYPE_CHECKS: list[tuple[URIRef, str]] = [
-    (OWL.Class, "class"),
-    (OWL.ObjectProperty, "property"),
-    (OWL.DatatypeProperty, "property"),
-    (OWL.AnnotationProperty, "property"),
-    (OWL.NamedIndividual, "individual"),
-]
-
-
-def _get_entity_type(graph: Graph, uri: URIRef) -> str:
-    for rdf_type, label in _TYPE_CHECKS:
-        if (uri, RDF.type, rdf_type) in graph:
-            return label
-    return "unknown"
-
-
-def _is_deprecated(graph: Graph, uri: URIRef) -> bool:
-    return any(str(obj).lower() in ("true", "1") for obj in graph.objects(uri, OWL.deprecated))
 
 
 def _vec_to_str(vec) -> str:
