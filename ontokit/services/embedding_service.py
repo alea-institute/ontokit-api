@@ -609,10 +609,17 @@ class EmbeddingService:
         if not body.candidates:
             return []
 
+        # Resolve branch — caller should have done this, but guard defensively
+        resolved_branch = body.branch
+        if not resolved_branch:
+            from ontokit.git import get_git_service
+
+            resolved_branch = get_git_service().get_default_branch(project_id)
+
         # Get context embedding
         emb_q = select(EntityEmbedding).where(
             EntityEmbedding.project_id == project_id,
-            EntityEmbedding.branch == body.branch,
+            EntityEmbedding.branch == resolved_branch,
             EntityEmbedding.entity_iri == body.context_iri,
         )
         ctx_emb = (await self._db.execute(emb_q)).scalar_one_or_none()
@@ -622,7 +629,7 @@ class EmbeddingService:
         # Get candidate embeddings
         candidates_q = select(EntityEmbedding).where(
             EntityEmbedding.project_id == project_id,
-            EntityEmbedding.branch == body.branch,
+            EntityEmbedding.branch == resolved_branch,
             EntityEmbedding.entity_iri.in_(body.candidates),
         )
         cand_result = await self._db.execute(candidates_q)
