@@ -11,7 +11,18 @@ from ontokit.schemas.quality import ConsistencyCheckResult, ConsistencyIssue
 from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
 from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
 
-_PROPERTY_TYPES = {OWL.ObjectProperty, OWL.DatatypeProperty, OWL.AnnotationProperty}
+_CLASS_TYPES = {OWL.Class, RDFS.Class}
+_PROPERTY_TYPES = {OWL.ObjectProperty, OWL.DatatypeProperty, OWL.AnnotationProperty, RDF.Property}
+
+
+def _iter_classes(graph: Graph):
+    """Yield all URIRef subjects declared as any class type."""
+    seen: set[URIRef] = set()
+    for cls_type in _CLASS_TYPES:
+        for s in graph.subjects(RDF.type, cls_type):
+            if isinstance(s, URIRef) and s not in seen:
+                seen.add(s)
+                yield s
 
 
 def _has_label(graph: Graph, uri: URIRef) -> bool:
@@ -31,8 +42,8 @@ def _check_orphan_class(graph: Graph) -> list[ConsistencyIssue]:
     """Class with no parent (except owl:Thing), no children, no instances."""
     issues = []
     owl_thing = OWL.Thing
-    for cls in graph.subjects(RDF.type, OWL.Class):
-        if not isinstance(cls, URIRef) or cls == owl_thing:
+    for cls in _iter_classes(graph):
+        if cls == owl_thing:
             continue
         parents = [
             p
@@ -59,10 +70,7 @@ def _check_cycle_detect(graph: Graph) -> list[ConsistencyIssue]:
     issues = []
     reported: set[str] = set()
 
-    for cls in graph.subjects(RDF.type, OWL.Class):
-        if not isinstance(cls, URIRef):
-            continue
-
+    for cls in _iter_classes(graph):
         # DFS with path tracking: only flag a node as a cycle if it appears
         # on the current ancestor path, not just because it was visited from
         # a different branch (shared ancestors are not cycles).
@@ -176,7 +184,7 @@ def _check_missing_comment(graph: Graph) -> list[ConsistencyIssue]:
 def _check_orphan_individual(graph: Graph) -> list[ConsistencyIssue]:
     """Individual whose rdf:type class is not declared as owl:Class."""
     issues = []
-    declared_classes = {s for s in graph.subjects(RDF.type, OWL.Class) if isinstance(s, URIRef)}
+    declared_classes = set(_iter_classes(graph))
     for ind in graph.subjects(RDF.type, OWL.NamedIndividual):
         if not isinstance(ind, URIRef):
             continue
@@ -285,9 +293,7 @@ def _check_duplicate_label(graph: Graph) -> list[ConsistencyIssue]:
 def _check_deprecated_parent(graph: Graph) -> list[ConsistencyIssue]:
     """Class whose rdfs:subClassOf target has owl:deprecated=true."""
     issues = []
-    for cls in graph.subjects(RDF.type, OWL.Class):
-        if not isinstance(cls, URIRef):
-            continue
+    for cls in _iter_classes(graph):
         for parent in graph.objects(cls, RDFS.subClassOf):
             if isinstance(parent, URIRef) and _is_deprecated(graph, parent):
                 issues.append(
@@ -372,8 +378,8 @@ def _check_multi_root(graph: Graph) -> list[ConsistencyIssue]:
     """More than 5 root classes (classes with no parent except owl:Thing)."""
     owl_thing = OWL.Thing
     root_iris: list[str] = []
-    for cls in graph.subjects(RDF.type, OWL.Class):
-        if not isinstance(cls, URIRef) or cls == owl_thing:
+    for cls in _iter_classes(graph):
+        if cls == owl_thing:
             continue
         parents = [
             p
