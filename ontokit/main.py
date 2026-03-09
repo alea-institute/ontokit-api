@@ -104,13 +104,164 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Shutdown complete")
 
 
+openapi_tags: list[dict[str, str]] = [
+    {
+        "name": "Authentication",
+        "description": (
+            "OAuth2 Device Authorization Grant for desktop/CLI clients and token refresh. "
+            "Web clients authenticate via Zitadel OIDC directly."
+        ),
+    },
+    {
+        "name": "Projects",
+        "description": (
+            "Create, manage, and configure ontology projects. Each project wraps a bare Git "
+            "repository with team membership, branch management, and role-based access control. "
+            "Supports importing from file upload or GitHub."
+        ),
+    },
+    {
+        "name": "Ontologies",
+        "description": (
+            "CRUD operations on standalone ontology resources. Create, read, update, delete "
+            "ontologies, and manage their classes, properties, import/export, diff, and history."
+        ),
+    },
+    {
+        "name": "Classes",
+        "description": (
+            "OWL class operations within an ontology: list, create, read, update, delete, "
+            "and query the class hierarchy."
+        ),
+    },
+    {
+        "name": "Properties",
+        "description": (
+            "OWL property operations within an ontology: list, create, read, update, and "
+            "delete object, datatype, and annotation properties."
+        ),
+    },
+    {
+        "name": "Pull Requests",
+        "description": (
+            "Git-based pull request workflow for collaborative ontology editing. Create "
+            "branches, propose changes via PRs with semantic diffs, review with comments, "
+            "and merge. Includes GitHub integration for two-way sync."
+        ),
+    },
+    {
+        "name": "Suggestions",
+        "description": (
+            "Suggestion sessions allow non-editor contributors (suggesters) to propose "
+            "ontology changes without direct write access. Each session creates a dedicated "
+            "branch, auto-saves edits, and can be submitted for editor review. Includes a "
+            "sendBeacon endpoint for saving on tab close."
+        ),
+    },
+    {
+        "name": "Join Requests",
+        "description": (
+            "Request and manage project membership. Users can request to join a project; "
+            "project admins/owners can approve or decline. Includes pending summary for "
+            "notification badges."
+        ),
+    },
+    {
+        "name": "Lint",
+        "description": (
+            "Ontology health checking with 20+ semantic validation rules. Trigger lint runs, "
+            "view issues, dismiss false positives, and query available rule definitions."
+        ),
+    },
+    {
+        "name": "Normalization",
+        "description": (
+            "Convert ontology files to canonical Turtle format for consistent formatting and "
+            "meaningful diffs. Supports queuing background normalization jobs with status "
+            "tracking and run history."
+        ),
+    },
+    {
+        "name": "Quality",
+        "description": (
+            "Ontology quality analysis: consistency checking (cycle detection, hierarchy "
+            "validation, deprecated entity tracking), duplicate detection using label "
+            "similarity with union-find clustering, and cross-reference validation."
+        ),
+    },
+    {
+        "name": "Analytics",
+        "description": (
+            "Project and entity-level analytics: activity timelines, contributor statistics, "
+            "hot entities (most frequently edited), and per-entity change history."
+        ),
+    },
+    {
+        "name": "Embeddings",
+        "description": (
+            "Vector embedding management for semantic intelligence features. Configure "
+            "embedding providers (local sentence-transformers, OpenAI, or Voyage), trigger "
+            "background generation jobs, monitor status, and clear embeddings."
+        ),
+    },
+    {
+        "name": "Semantic Search",
+        "description": (
+            "Search and discover ontology entities using vector similarity. Find entities "
+            "by natural language query, discover similar entities to a given IRI, and rank "
+            "candidate entities by contextual relevance. Requires generated embeddings."
+        ),
+    },
+    {
+        "name": "Search",
+        "description": (
+            "Full-text search across ontologies using PostgreSQL tsvector/tsquery with "
+            "ranking. Also provides a read-only SPARQL endpoint supporting SELECT, ASK, "
+            "and CONSTRUCT queries."
+        ),
+    },
+    {
+        "name": "User Settings",
+        "description": (
+            "User profile and integration settings. Manage GitHub personal access tokens "
+            "for repository access, list connected GitHub repos, and search users."
+        ),
+    },
+]
+
 app = FastAPI(
     title="OntoKit API",
-    description="Collaborative OWL Ontology Curation Platform",
+    description=(
+        "**OntoKit** is a collaborative OWL ontology curation platform with Git-based "
+        "version control, real-time collaboration, and semantic intelligence.\n\n"
+        "## Key capabilities\n\n"
+        "- **Ontology editing** — Create and manage OWL 2 ontologies with classes, "
+        "properties, and individuals\n"
+        "- **Git version control** — Branch-based workflow with pull requests and "
+        "semantic diffs\n"
+        "- **Suggestions** — Non-editors can propose changes via suggestion sessions "
+        "with editor review\n"
+        "- **Quality analysis** — Linting (20+ rules), consistency checking, and "
+        "duplicate detection\n"
+        "- **Semantic search** — Vector similarity search with pluggable embedding "
+        "providers\n"
+        "- **Analytics** — Activity timelines, contributor stats, and entity change "
+        "history\n"
+        "- **SPARQL** — Read-only SPARQL endpoint for SELECT, ASK, and CONSTRUCT queries\n"
+        "- **GitHub integration** — Two-way sync with GitHub repositories\n\n"
+        "## Authentication\n\n"
+        "Most endpoints require a Bearer token obtained via Zitadel OIDC. "
+        "Desktop/CLI clients can use the Device Authorization Grant flow. "
+        "Public project data is accessible without authentication.\n\n"
+        "## Rate limiting\n\n"
+        "Default rate limit is **100 requests per minute** per IP address. "
+        "Rate-limited responses include `Retry-After` and `X-RateLimit-Limit` headers."
+    ),
     version=__version__,
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    openapi_tags=openapi_tags,
     lifespan=lifespan,
 )
 
