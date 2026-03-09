@@ -622,11 +622,17 @@ class SuggestionService:
                     f"for project {session.project_id}"
                 )
             except Exception as e:
+                logger.error(f"Failed to auto-submit session {session.session_id}: {e}")
                 # Rollback any failed transaction state before reverting the claim
                 await self.db.rollback()
-                session.status = SuggestionSessionStatus.ACTIVE.value
-                await self.db.commit()
-                logger.error(f"Failed to auto-submit session {session.session_id}: {e}")
+                try:
+                    session.status = SuggestionSessionStatus.ACTIVE.value
+                    await self.db.commit()
+                except Exception as revert_err:
+                    logger.error(
+                        f"Failed to revert session {session.session_id} to ACTIVE: "
+                        f"{revert_err}"
+                    )
 
         return count
 
