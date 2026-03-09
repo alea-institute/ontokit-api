@@ -47,6 +47,14 @@ class SuggestionSubmitResponse(BaseModel):
     status: str
 
 
+class SuggestionUser(BaseModel):
+    """User info embedded in session summaries."""
+
+    id: str
+    name: str | None = None
+    email: str | None = None
+
+
 class SuggestionSessionSummary(BaseModel):
     """Summary of a suggestion session for list endpoint."""
 
@@ -58,6 +66,13 @@ class SuggestionSessionSummary(BaseModel):
     status: str
     pr_number: int | None = None
     pr_url: str | None = None
+    github_pr_url: str | None = None
+    submitter: SuggestionUser | None = None
+    reviewer: SuggestionUser | None = None
+    reviewer_feedback: str | None = None
+    reviewed_at: datetime | None = None
+    revision: int | None = None
+    summary: str | None = None
 
     class Config:
         from_attributes = True
@@ -74,3 +89,24 @@ class SuggestionBeaconRequest(BaseModel):
 
     session_id: str
     content: str
+
+
+# --- Review request schemas ---
+
+
+class SuggestionRejectRequest(BaseModel):
+    """Request body for rejecting a suggestion session."""
+
+    reason: str = Field(..., min_length=1, description="Reason for rejection")
+
+
+class SuggestionRequestChangesRequest(BaseModel):
+    """Request body for requesting changes on a suggestion session."""
+
+    feedback: str = Field(..., min_length=1, description="Feedback for the suggester")
+
+
+class SuggestionResubmitRequest(BaseModel):
+    """Request body for resubmitting a suggestion session."""
+
+    summary: str | None = Field(default=None, description="Updated summary")

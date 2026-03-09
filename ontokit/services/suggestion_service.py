@@ -27,6 +27,9 @@ from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessi
 from ontokit.schemas.pull_request import PRCreate
 from ontokit.schemas.suggestion import (
     SuggestionBeaconRequest,
+    SuggestionRejectRequest,
+    SuggestionRequestChangesRequest,
+    SuggestionResubmitRequest,
     SuggestionSaveRequest,
     SuggestionSaveResponse,
     SuggestionSessionListResponse,
@@ -34,6 +37,7 @@ from ontokit.schemas.suggestion import (
     SuggestionSessionSummary,
     SuggestionSubmitRequest,
     SuggestionSubmitResponse,
+    SuggestionUser,
 )
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
@@ -513,6 +517,60 @@ class SuggestionService:
         # Unreachable, but satisfies type checker
         raise RuntimeError("Failed to allocate PR number")
 
+    async def _build_summary(self, s: SuggestionSession) -> SuggestionSessionSummary:
+        """Build a SuggestionSessionSummary from a session model."""
+        pr_url = None
+        github_pr_url = None
+        if s.pr_id:
+            from ontokit.models.pull_request import PullRequest
+
+            pr_result = await self.db.execute(select(PullRequest).where(PullRequest.id == s.pr_id))
+            pr = pr_result.scalar_one_or_none()
+            if pr:
+                pr_url = pr.github_pr_url if hasattr(pr, "github_pr_url") else None
+                github_pr_url = pr_url
+
+        submitter = SuggestionUser(id=s.user_id, name=s.user_name, email=s.user_email)
+        reviewer = None
+        if s.reviewer_id:
+            reviewer = SuggestionUser(
+                id=s.reviewer_id, name=s.reviewer_name, email=s.reviewer_email
+            )
+
+        return SuggestionSessionSummary(
+            session_id=s.session_id,
+            branch=s.branch,
+            changes_count=s.changes_count,
+            last_activity=s.last_activity,
+            entities_modified=self._parse_entities_modified(s),
+            status=s.status,
+            pr_number=s.pr_number,
+            pr_url=pr_url,
+            github_pr_url=github_pr_url,
+            submitter=submitter,
+            reviewer=reviewer,
+            reviewer_feedback=s.reviewer_feedback,
+            reviewed_at=s.reviewed_at,
+            revision=s.revision,
+            summary=s.summary,
+        )
+
+    def _can_review(self, role: str | None, user: CurrentUser) -> bool:
+        """Check if the user's role allows reviewing suggestions."""
+        if user.is_superadmin:
+            return True
+        return role in ("owner", "admin", "editor")
+
+    async def _verify_reviewer_access(self, project_id: UUID, user: CurrentUser) -> None:
+        """Verify the user has editor/admin/owner role (can review)."""
+        project = await self._get_project(project_id)
+        role = self._get_user_role(project, user)
+        if not self._can_review(role, user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Editor access or above required to review suggestions",
+            )
+
     async def list_sessions(
         self, project_id: UUID, user: CurrentUser
     ) -> SuggestionSessionListResponse:
@@ -527,34 +585,154 @@ class SuggestionService:
         )
         sessions = result.scalars().all()
 
-        items = []
-        for s in sessions:
-            # Resolve PR URL from pull_request relationship if available
-            pr_url = None
-            if s.pr_id:
-                from ontokit.models.pull_request import PullRequest
+        items = [await self._build_summary(s) for s in sessions]
+        return SuggestionSessionListResponse(items=items)
 
-                pr_result = await self.db.execute(
-                    select(PullRequest).where(PullRequest.id == s.pr_id)
-                )
-                pr = pr_result.scalar_one_or_none()
-                if pr:
-                    pr_url = pr.github_pr_url if hasattr(pr, "github_pr_url") else None
+    async def list_pending(
+        self, project_id: UUID, user: CurrentUser
+    ) -> SuggestionSessionListResponse:
+        """List pending suggestion sessions for review (editors/admins)."""
+        await self._verify_reviewer_access(project_id, user)
 
-            items.append(
-                SuggestionSessionSummary(
-                    session_id=s.session_id,
-                    branch=s.branch,
-                    changes_count=s.changes_count,
-                    last_activity=s.last_activity,
-                    entities_modified=self._parse_entities_modified(s),
-                    status=s.status,
-                    pr_number=s.pr_number,
-                    pr_url=pr_url,
-                )
+        result = await self.db.execute(
+            select(SuggestionSession)
+            .where(
+                SuggestionSession.project_id == project_id,
+                SuggestionSession.status.in_(
+                    [
+                        SuggestionSessionStatus.SUBMITTED.value,
+                        SuggestionSessionStatus.AUTO_SUBMITTED.value,
+                    ]
+                ),
+            )
+            .order_by(SuggestionSession.last_activity.desc())
+        )
+        sessions = result.scalars().all()
+
+        items = [await self._build_summary(s) for s in sessions]
+        return SuggestionSessionListResponse(items=items)
+
+    async def approve(self, project_id: UUID, session_id: str, user: CurrentUser) -> None:
+        """Approve a suggestion session — merges the PR."""
+        await self._verify_reviewer_access(project_id, user)
+        session = await self._get_session(project_id, session_id)
+
+        if session.status not in (
+            SuggestionSessionStatus.SUBMITTED.value,
+            SuggestionSessionStatus.AUTO_SUBMITTED.value,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Session is {session.status}, cannot approve",
             )
 
-        return SuggestionSessionListResponse(items=items)
+        # Merge the PR if it exists
+        if session.pr_number:
+            from ontokit.schemas.pull_request import PRMergeRequest
+
+            pr_service = get_pull_request_service(self.db)
+            try:
+                merge_req = PRMergeRequest(
+                    merge_message=f"Merge suggestion: {session_id}",
+                    delete_source_branch=True,
+                )
+                await pr_service.merge_pull_request(project_id, session.pr_number, merge_req, user)
+            except HTTPException:
+                logger.warning(f"PR merge failed for session {session_id}, marking merged anyway")
+
+        session.status = SuggestionSessionStatus.MERGED.value
+        session.reviewer_id = user.id
+        session.reviewer_name = user.name
+        session.reviewer_email = user.email
+        session.reviewed_at = datetime.now(UTC)
+        session.last_activity = datetime.now(UTC)
+        await self.db.commit()
+
+    async def reject(
+        self, project_id: UUID, session_id: str, data: SuggestionRejectRequest, user: CurrentUser
+    ) -> None:
+        """Reject a suggestion session with a reason."""
+        await self._verify_reviewer_access(project_id, user)
+        session = await self._get_session(project_id, session_id)
+
+        if session.status not in (
+            SuggestionSessionStatus.SUBMITTED.value,
+            SuggestionSessionStatus.AUTO_SUBMITTED.value,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Session is {session.status}, cannot reject",
+            )
+
+        session.status = SuggestionSessionStatus.REJECTED.value
+        session.reviewer_id = user.id
+        session.reviewer_name = user.name
+        session.reviewer_email = user.email
+        session.reviewer_feedback = data.reason
+        session.reviewed_at = datetime.now(UTC)
+        session.last_activity = datetime.now(UTC)
+        await self.db.commit()
+
+    async def request_changes(
+        self,
+        project_id: UUID,
+        session_id: str,
+        data: SuggestionRequestChangesRequest,
+        user: CurrentUser,
+    ) -> None:
+        """Request changes on a suggestion session with feedback."""
+        await self._verify_reviewer_access(project_id, user)
+        session = await self._get_session(project_id, session_id)
+
+        if session.status not in (
+            SuggestionSessionStatus.SUBMITTED.value,
+            SuggestionSessionStatus.AUTO_SUBMITTED.value,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Session is {session.status}, cannot request changes",
+            )
+
+        session.status = SuggestionSessionStatus.CHANGES_REQUESTED.value
+        session.reviewer_id = user.id
+        session.reviewer_name = user.name
+        session.reviewer_email = user.email
+        session.reviewer_feedback = data.feedback
+        session.reviewed_at = datetime.now(UTC)
+        session.last_activity = datetime.now(UTC)
+        await self.db.commit()
+
+    async def resubmit(
+        self,
+        project_id: UUID,
+        session_id: str,
+        data: SuggestionResubmitRequest,
+        user: CurrentUser,
+    ) -> SuggestionSubmitResponse:
+        """Resubmit a suggestion session after addressing requested changes."""
+        session = await self._get_session(project_id, session_id)
+        self._verify_ownership(session, user)
+        await self._verify_project_access(project_id, user)
+
+        if session.status != SuggestionSessionStatus.CHANGES_REQUESTED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Session is {session.status}, cannot resubmit",
+            )
+
+        session.status = SuggestionSessionStatus.SUBMITTED.value
+        session.revision = (session.revision or 1) + 1
+        session.summary = data.summary
+        session.reviewer_feedback = None
+        session.reviewed_at = None
+        session.last_activity = datetime.now(UTC)
+        await self.db.commit()
+
+        return SuggestionSubmitResponse(
+            pr_number=session.pr_number or 0,
+            pr_url=None,
+            status="submitted",
+        )
 
     async def discard(self, project_id: UUID, session_id: str, user: CurrentUser) -> None:
         """Discard a suggestion session and delete its branch."""

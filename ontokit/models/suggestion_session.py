@@ -22,6 +22,9 @@ class SuggestionSessionStatus(StrEnum):
     SUBMITTED = "submitted"
     AUTO_SUBMITTED = "auto-submitted"
     DISCARDED = "discarded"
+    MERGED = "merged"
+    REJECTED = "rejected"
+    CHANGES_REQUESTED = "changes-requested"
 
 
 class SuggestionSession(Base):
@@ -56,6 +59,15 @@ class SuggestionSession(Base):
     pr_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("pull_requests.id", ondelete="SET NULL"), nullable=True
     )
+
+    # Review fields
+    reviewer_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reviewer_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reviewer_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    reviewer_feedback: Mapped[str | None] = mapped_column(Text, nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, default=1)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # Timestamps
     last_activity: Mapped[datetime] = mapped_column(

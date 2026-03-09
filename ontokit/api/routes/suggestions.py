@@ -10,6 +10,9 @@ from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
 from ontokit.schemas.suggestion import (
     SuggestionBeaconRequest,
+    SuggestionRejectRequest,
+    SuggestionRequestChangesRequest,
+    SuggestionResubmitRequest,
     SuggestionSaveRequest,
     SuggestionSaveResponse,
     SuggestionSessionListResponse,
@@ -114,3 +117,75 @@ async def beacon_save(
     Authentication is via the short-lived beacon token query parameter.
     """
     await service.beacon_save(project_id, data, token)
+
+
+@router.get(
+    "/{project_id}/suggestions/pending",
+    response_model=SuggestionSessionListResponse,
+)
+async def list_pending(
+    project_id: UUID,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: RequiredUser,
+) -> SuggestionSessionListResponse:
+    """List pending suggestion sessions for review (editors/admins only)."""
+    return await service.list_pending(project_id, user)
+
+
+@router.post(
+    "/{project_id}/suggestions/sessions/{session_id}/approve",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def approve_session(
+    project_id: UUID,
+    session_id: str,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: RequiredUser,
+) -> None:
+    """Approve a suggestion session — merges the PR."""
+    await service.approve(project_id, session_id, user)
+
+
+@router.post(
+    "/{project_id}/suggestions/sessions/{session_id}/reject",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def reject_session(
+    project_id: UUID,
+    session_id: str,
+    data: SuggestionRejectRequest,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: RequiredUser,
+) -> None:
+    """Reject a suggestion session with a reason."""
+    await service.reject(project_id, session_id, data, user)
+
+
+@router.post(
+    "/{project_id}/suggestions/sessions/{session_id}/request-changes",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def request_changes(
+    project_id: UUID,
+    session_id: str,
+    data: SuggestionRequestChangesRequest,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: RequiredUser,
+) -> None:
+    """Request changes on a suggestion session with feedback."""
+    await service.request_changes(project_id, session_id, data, user)
+
+
+@router.post(
+    "/{project_id}/suggestions/sessions/{session_id}/resubmit",
+    response_model=SuggestionSubmitResponse,
+)
+async def resubmit_session(
+    project_id: UUID,
+    session_id: str,
+    data: SuggestionResubmitRequest,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: RequiredUser,
+) -> SuggestionSubmitResponse:
+    """Resubmit a suggestion session after addressing requested changes."""
+    return await service.resubmit(project_id, session_id, data, user)
