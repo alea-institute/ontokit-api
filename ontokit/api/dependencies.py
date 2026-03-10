@@ -52,7 +52,7 @@ async def load_project_graph(
         except (FileNotFoundError, KeyError, ValueError):
             await ontology.load_from_storage(project_id, project.source_file_path, resolved_branch)
 
-    graph = await ontology._get_graph(project_id, resolved_branch)
+    graph = await ontology.get_graph(project_id, resolved_branch)
     return graph, resolved_branch
 
 
