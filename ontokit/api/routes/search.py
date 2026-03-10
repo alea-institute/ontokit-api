@@ -1,7 +1,6 @@
 """Search endpoints for ontology content."""
 
 from typing import Annotated
-from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from rdflib.plugins.sparql.parser import parseQuery, parseUpdate
@@ -67,10 +66,8 @@ async def execute_sparql(
     UPDATE queries are not allowed.
     Requires `ontology_id` in the request body to identify the project.
     """
-    project_id = UUID(query.ontology_id)
-
     # Verify access (public projects allow unauthenticated queries)
-    await verify_project_access(project_id, db, user)
+    await verify_project_access(query.ontology_id, db, user)
 
     # Parse the query to determine its type and block updates
     query_text = query.query.strip()
@@ -92,7 +89,7 @@ async def execute_sparql(
         ) from None
 
     # Load the project's ontology graph
-    graph, _ = await load_project_graph(project_id, branch, db)
+    graph, _ = await load_project_graph(query.ontology_id, branch, db)
 
     try:
         return await service.execute_sparql(query, graph=graph)

@@ -1,6 +1,7 @@
 """Search-related schemas."""
 
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field
 
@@ -40,7 +41,7 @@ class SPARQLQuery(BaseModel):
     """SPARQL query request."""
 
     query: str = Field(..., min_length=1)
-    ontology_id: str = Field(..., description="Project ID to query against")
+    ontology_id: UUID = Field(..., description="Project ID to query against")
     default_graph: str | None = None
     timeout: int = Field(default=30, ge=1, le=300)
 
