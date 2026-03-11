@@ -15,6 +15,9 @@ from ontokit.models.project import Project
 
 logger = logging.getLogger(__name__)
 
+# Per-(project, branch) locks to prevent concurrent duplicate graph loads.
+_graph_load_locks: dict[tuple[UUID, str], asyncio.Lock] = {}
+
 
 async def load_project_graph(
     project_id: UUID, branch: str | None, db: AsyncSession
@@ -46,18 +49,25 @@ async def load_project_graph(
 
     resolved_branch = await resolve_branch(project_id, branch)
 
-    if not ontology.is_loaded(project_id, resolved_branch):
-        filename = os.path.basename(project.source_file_path)
-        try:
-            await ontology.load_from_git(project_id, resolved_branch, filename, git)
-        except (FileNotFoundError, KeyError, ValueError):
-            logger.debug(
-                "Git loading failed for project %s branch %s, falling back to storage",
-                project_id,
-                resolved_branch,
-                exc_info=True,
-            )
-            await ontology.load_from_storage(project_id, project.source_file_path, resolved_branch)
+    key = (project_id, resolved_branch)
+    if key not in _graph_load_locks:
+        _graph_load_locks[key] = asyncio.Lock()
+
+    async with _graph_load_locks[key]:
+        if not ontology.is_loaded(project_id, resolved_branch):
+            filename = os.path.basename(project.source_file_path)
+            try:
+                await ontology.load_from_git(project_id, resolved_branch, filename, git)
+            except (FileNotFoundError, KeyError, ValueError):
+                logger.debug(
+                    "Git loading failed for project %s branch %s, falling back to storage",
+                    project_id,
+                    resolved_branch,
+                    exc_info=True,
+                )
+                await ontology.load_from_storage(
+                    project_id, project.source_file_path, resolved_branch
+                )
 
     graph = await ontology.get_graph(project_id, resolved_branch)
     return graph, resolved_branch
