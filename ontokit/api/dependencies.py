@@ -53,7 +53,8 @@ async def load_project_graph(
     if key not in _graph_load_locks:
         _graph_load_locks[key] = asyncio.Lock()
 
-    async with _graph_load_locks[key]:
+    lock = _graph_load_locks[key]
+    async with lock:
         if not ontology.is_loaded(project_id, resolved_branch):
             filename = os.path.basename(project.source_file_path)
             try:
@@ -68,6 +69,9 @@ async def load_project_graph(
                 await ontology.load_from_storage(
                     project_id, project.source_file_path, resolved_branch
                 )
+        # Remove the lock once the graph is loaded and no other task is waiting on it.
+        if not lock.locked():
+            _graph_load_locks.pop(key, None)
 
     graph = await ontology.get_graph(project_id, resolved_branch)
     return graph, resolved_branch
