@@ -151,6 +151,8 @@ class TestSearchRoute:
         """POST /api/v1/search/sparql with empty query returns 422."""
         response = client.post(
             "/api/v1/search/sparql",
-            json={"query": ""},
+            json={"query": "", "ontology_id": "00000000-0000-0000-0000-000000000000"},
         )
         assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert any(err["loc"] == ["body", "query"] for err in detail)
