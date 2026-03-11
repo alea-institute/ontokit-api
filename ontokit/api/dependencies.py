@@ -74,9 +74,10 @@ async def load_project_graph(
                 await ontology.load_from_storage(
                     project_id, project.source_file_path, resolved_branch
                 )
-        # Remove the lock once the graph is loaded and no other task is waiting on it.
-        if not lock.locked():
-            _graph_load_locks.pop(key, None)
+
+    # Remove the lock once the graph is loaded and no other task is waiting on it.
+    if not lock.locked() and _graph_load_locks.get(key) is lock:
+        _graph_load_locks.pop(key, None)
 
     graph = await ontology.get_graph(project_id, resolved_branch)
     return graph, resolved_branch
