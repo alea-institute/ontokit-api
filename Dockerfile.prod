@@ -7,20 +7,28 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# Install system dependencies
+# Install system dependencies (git + libgit2-dev required by pygit2/gitpython)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    git \
+    libgit2-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
 RUN useradd --create-home --shell /bin/bash ontokit
 WORKDIR /home/ontokit/app
 
+# Create git repo storage directory
+RUN mkdir -p /data/repos && chown ontokit:ontokit /data/repos
+
 # Install Python dependencies
 COPY pyproject.toml README.md ./
 COPY ontokit/version.py ./ontokit/version.py
 RUN pip install --upgrade pip && \
     pip install .
+
+# Pre-download sentence-transformers model to avoid first-request latency
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 # Copy application code
 COPY --chown=ontokit:ontokit ontokit/ ./ontokit/
