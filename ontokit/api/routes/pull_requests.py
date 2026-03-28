@@ -2,6 +2,7 @@
 
 import hashlib
 import hmac
+import logging
 from typing import Annotated
 from uuid import UUID
 
@@ -37,6 +38,8 @@ from ontokit.schemas.pull_request import (
     ReviewResponse,
 )
 from ontokit.services.pull_request_service import PullRequestService, get_pull_request_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -197,8 +200,6 @@ async def merge_pull_request(
     # Trigger ontology index rebuild for the target branch after merge
     if result.success:
         try:
-            import logging
-
             from ontokit.api.utils.redis import get_arq_pool
 
             pool = await get_arq_pool()
@@ -210,9 +211,7 @@ async def merge_pull_request(
                     result.merge_commit_hash,
                 )
         except Exception:
-            logging.getLogger(__name__).warning(
-                "Failed to queue ontology re-index after PR merge", exc_info=True
-            )
+            logger.warning("Failed to queue ontology re-index after PR merge", exc_info=True)
 
     return result
 
