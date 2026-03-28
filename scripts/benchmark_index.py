@@ -363,110 +363,117 @@ async def benchmark_postgres(num_classes: int, iterations: int = 3) -> list[Benc
     engine = create_async_engine(str(settings.database_url), echo=False)
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
-    async with session_factory() as db:
-        # Create a temporary project row to satisfy FK constraints
-        from sqlalchemy import text as sa_text
+    from sqlalchemy import text as sa_text
 
-        await db.execute(
-            sa_text(
-                "INSERT INTO projects (id, name, owner_id, is_public) "
-                "VALUES (:id, :name, :owner, true)"
-            ),
-            {"id": str(project_id), "name": f"benchmark-{num_classes}", "owner": "benchmark"},
-        )
-        await db.commit()
+    service: OntologyIndexService | None = None
+    try:
+        async with session_factory() as db:
+            # Create a temporary project row to satisfy FK constraints
+            await db.execute(
+                sa_text(
+                    "INSERT INTO projects (id, name, owner_id, is_public) "
+                    "VALUES (:id, :name, :owner, true)"
+                ),
+                {"id": str(project_id), "name": f"benchmark-{num_classes}", "owner": "benchmark"},
+            )
+            await db.commit()
 
-        service = OntologyIndexService(db)
+            service = OntologyIndexService(db)
 
-        # 1. Full reindex time
-        gc.collect()
-        reindex_times = []
-        for i in range(iterations):
-            start = time.perf_counter()
-            await service.full_reindex(project_id, branch, graph, f"bench_{i:03d}")
-            reindex_times.append((time.perf_counter() - start) * 1000)
+            # 1. Full reindex time
+            gc.collect()
+            reindex_times = []
+            for i in range(iterations):
+                start = time.perf_counter()
+                await service.full_reindex(project_id, branch, graph, f"bench_{i:03d}")
+                reindex_times.append((time.perf_counter() - start) * 1000)
 
-        results.append(BenchmarkResult("full_reindex", "postgres", num_classes, reindex_times))
+            results.append(BenchmarkResult("full_reindex", "postgres", num_classes, reindex_times))
 
-        # 2. Root classes
-        times, rss = await measure_async(
-            service.get_root_classes,
-            project_id,
-            branch,
-            label_prefs,
-            iterations=iterations,
-        )
-        results.append(BenchmarkResult("root_classes", "postgres", num_classes, times, rss))
-
-        # 3. Children
-        roots = await service.get_root_classes(project_id, branch, label_prefs)
-        if roots:
-            first_root_iri = roots[0]["iri"]
+            # 2. Root classes
             times, rss = await measure_async(
-                service.get_class_children,
+                service.get_root_classes,
                 project_id,
                 branch,
-                first_root_iri,
                 label_prefs,
                 iterations=iterations,
             )
-            results.append(BenchmarkResult("children", "postgres", num_classes, times, rss))
+            results.append(BenchmarkResult("root_classes", "postgres", num_classes, times, rss))
 
-        # 4. Class detail
-        if roots:
+            # 3. Children
+            roots = await service.get_root_classes(project_id, branch, label_prefs)
+            if roots:
+                first_root_iri = roots[0]["iri"]
+                times, rss = await measure_async(
+                    service.get_class_children,
+                    project_id,
+                    branch,
+                    first_root_iri,
+                    label_prefs,
+                    iterations=iterations,
+                )
+                results.append(BenchmarkResult("children", "postgres", num_classes, times, rss))
+
+            # 4. Class detail
+            if roots:
+                times, rss = await measure_async(
+                    service.get_class_detail,
+                    project_id,
+                    branch,
+                    first_root_iri,
+                    label_prefs,
+                    iterations=iterations,
+                )
+                results.append(BenchmarkResult("class_detail", "postgres", num_classes, times, rss))
+
+            # 5. Search
             times, rss = await measure_async(
-                service.get_class_detail,
+                service.search_entities,
                 project_id,
                 branch,
-                first_root_iri,
+                "Class 1",
+                None,
+                label_prefs,
+                50,
+                iterations=iterations,
+            )
+            results.append(BenchmarkResult("search", "postgres", num_classes, times, rss))
+
+            # 6. Ancestor path
+            deep_class_iri = f"http://example.org/ontology#Class_{num_classes - 1:06d}"
+            times, rss = await measure_async(
+                service.get_ancestor_path,
+                project_id,
+                branch,
+                deep_class_iri,
                 label_prefs,
                 iterations=iterations,
             )
-            results.append(BenchmarkResult("class_detail", "postgres", num_classes, times, rss))
+            results.append(BenchmarkResult("ancestor_path", "postgres", num_classes, times, rss))
 
-        # 5. Search
-        times, rss = await measure_async(
-            service.search_entities,
-            project_id,
-            branch,
-            "Class 1",
-            None,
-            label_prefs,
-            50,
-            iterations=iterations,
-        )
-        results.append(BenchmarkResult("search", "postgres", num_classes, times, rss))
+            # 7. Class count
+            times, rss = await measure_async(
+                service.get_class_count,
+                project_id,
+                branch,
+                iterations=iterations,
+            )
+            results.append(BenchmarkResult("class_count", "postgres", num_classes, times, rss))
 
-        # 6. Ancestor path
-        deep_class_iri = f"http://example.org/ontology#Class_{num_classes - 1:06d}"
-        times, rss = await measure_async(
-            service.get_ancestor_path,
-            project_id,
-            branch,
-            deep_class_iri,
-            label_prefs,
-            iterations=iterations,
-        )
-        results.append(BenchmarkResult("ancestor_path", "postgres", num_classes, times, rss))
-
-        # 7. Class count
-        times, rss = await measure_async(
-            service.get_class_count,
-            project_id,
-            branch,
-            iterations=iterations,
-        )
-        results.append(BenchmarkResult("class_count", "postgres", num_classes, times, rss))
-
-        # Cleanup: delete benchmark data and temporary project
-        await service.delete_branch_index(project_id, branch)
-        await db.execute(
-            sa_text("DELETE FROM projects WHERE id = :id"),
-            {"id": str(project_id)},
-        )
-        await db.commit()
-
-    await engine.dispose()
+    finally:
+        # Always clean up benchmark data and dispose engine
+        try:
+            async with session_factory() as db:
+                cleanup_service = OntologyIndexService(db)
+                await cleanup_service.delete_branch_index(project_id, branch)
+                await db.execute(
+                    sa_text("DELETE FROM projects WHERE id = :id"),
+                    {"id": str(project_id)},
+                )
+                await db.commit()
+        except Exception:
+            pass  # Best-effort cleanup
+        await engine.dispose()
     return results
 
 
