@@ -19,6 +19,7 @@ from sqlalchemy import func as sa_func
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
 from ontokit.core.database import get_db
 from ontokit.core.encryption import decrypt_token
@@ -183,8 +184,6 @@ async def import_project(
 
     # Trigger ontology index build for newly imported project
     try:
-        from ontokit.api.utils.redis import get_arq_pool
-
         pool = await get_arq_pool()
         if pool is not None:
             await pool.enqueue_job(
@@ -312,8 +311,6 @@ async def create_project_from_github(
 
     # Trigger ontology index build for GitHub-imported project
     try:
-        from ontokit.api.utils.redis import get_arq_pool
-
         pool = await get_arq_pool()
         if pool is not None:
             await pool.enqueue_job(
@@ -1353,8 +1350,6 @@ async def save_source_content(
 
             embed_config = await EmbeddingService(db).get_config(project_id)
             if embed_config and embed_config.auto_embed_on_save:
-                from ontokit.api.utils.redis import get_arq_pool
-
                 pool = await get_arq_pool()
                 if pool is None:
                     logger.warning(
@@ -1379,9 +1374,7 @@ async def save_source_content(
 
     # Trigger ontology index rebuild
     try:
-        from ontokit.api.utils.redis import get_arq_pool as _get_arq_pool
-
-        pool = await _get_arq_pool()
+        pool = await get_arq_pool()
         if pool is not None:
             await pool.enqueue_job(
                 "run_ontology_index_task",
@@ -1423,8 +1416,6 @@ async def trigger_ontology_reindex(
         )
 
     resolved_branch = branch or git.get_default_branch(project_id)
-
-    from ontokit.api.utils.redis import get_arq_pool
 
     pool = await get_arq_pool()
     if pool is None:
