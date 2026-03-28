@@ -856,23 +856,25 @@ class OntologyIndexService:
         if not ancestor_iris:
             return []
 
-        # Build parent->child map from hierarchy for the ancestors
         ancestor_set = set(ancestor_iris)
-        parent_map: dict[str, str | None] = dict.fromkeys(ancestor_iris)
 
+        # Build child -> [parents in ancestor_set] map with a single query.
+        # Include target_iri so we can walk upward from it.
+        all_children = list(ancestor_set | {target_iri})
         result = await self.db.execute(
             select(IndexedHierarchy.child_iri, IndexedHierarchy.parent_iri).where(
                 IndexedHierarchy.project_id == project_id,
                 IndexedHierarchy.branch == branch,
-                IndexedHierarchy.child_iri.in_(ancestor_iris),
+                IndexedHierarchy.child_iri.in_(all_children),
                 IndexedHierarchy.parent_iri != owl_thing_iri,
             )
         )
+        parents_by_child: dict[str, list[str]] = {}
         for row in result.all():
             if row[1] in ancestor_set:
-                parent_map[row[0]] = row[1]
+                parents_by_child.setdefault(row[0], []).append(row[1])
 
-        # Walk from target upward, collecting the path
+        # Walk from target upward using the in-memory map
         path: list[str] = []
         visited: set[str] = set()
         current = target_iri
@@ -882,18 +884,7 @@ class OntologyIndexService:
                 break
             visited.add(current)
 
-            # Find the parent of current that's in our ancestor set
-            parent_result = await self.db.execute(
-                select(IndexedHierarchy.parent_iri).where(
-                    IndexedHierarchy.project_id == project_id,
-                    IndexedHierarchy.branch == branch,
-                    IndexedHierarchy.child_iri == current,
-                    IndexedHierarchy.parent_iri != owl_thing_iri,
-                )
-            )
-            parents = [r[0] for r in parent_result.all()]
-            ancestor_parents = [p for p in parents if p in ancestor_set]
-
+            ancestor_parents = parents_by_child.get(current, [])
             if not ancestor_parents:
                 break
 
