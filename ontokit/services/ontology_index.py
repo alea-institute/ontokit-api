@@ -1129,38 +1129,3 @@ class OntologyIndexService:
             else:
                 result[iri] = self._pick_preferred_label(labels_by_entity.get(entity_id, []), prefs)
         return result
-
-    async def _resolve_preferred_label(
-        self,
-        project_id: UUID,
-        branch: str,
-        iri: str,
-        preferences: list[str] | None = None,
-    ) -> str | None:
-        """
-        Resolve the preferred label for a single entity using SQL.
-
-        Fetches labels from the DB and delegates to _pick_preferred_label
-        for preference matching.
-        """
-        prefs = preferences or DEFAULT_LABEL_PREFERENCES
-
-        # Get entity_id
-        entity_result = await self.db.execute(
-            select(IndexedEntity.id).where(
-                IndexedEntity.project_id == project_id,
-                IndexedEntity.branch == branch,
-                IndexedEntity.iri == iri,
-            )
-        )
-        entity_id = entity_result.scalar_one_or_none()
-        if entity_id is None:
-            return None
-
-        # Get all labels for this entity
-        labels_result = await self.db.execute(
-            select(IndexedLabel).where(IndexedLabel.entity_id == entity_id)
-        )
-        labels = list(labels_result.scalars().all())
-
-        return self._pick_preferred_label(labels, prefs)
