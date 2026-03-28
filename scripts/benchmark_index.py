@@ -156,7 +156,19 @@ class BenchmarkResult:
 
 
 def get_rss_kb() -> int:
-    """Get current RSS in KB."""
+    """Get current resident set size in KB.
+
+    Uses /proc/self/status on Linux for accurate current RSS
+    (not lifetime peak). Falls back to ru_maxrss if unavailable.
+    """
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1])  # already in KB
+    except (OSError, ValueError, IndexError):
+        pass
+    # Fallback: ru_maxrss (lifetime peak, KB on Linux, bytes on macOS)
     return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
 
 
