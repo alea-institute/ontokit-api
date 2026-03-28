@@ -101,7 +101,8 @@ class IndexedOntologyService:
                     exc_info=True,
                 )
 
-        # Fallback to RDFLib
+        # Fallback to RDFLib — enqueue reindex for next time
+        await self._enqueue_reindex_if_stale(project_id, branch)
         return await self.ontology.get_root_tree_nodes(project_id, label_preferences, branch)
 
     async def get_children_tree_nodes(
@@ -132,6 +133,7 @@ class IndexedOntologyService:
                     exc_info=True,
                 )
 
+        await self._enqueue_reindex_if_stale(project_id, branch)
         return await self.ontology.get_children_tree_nodes(
             project_id, class_iri, label_preferences, branch
         )
@@ -147,6 +149,7 @@ class IndexedOntologyService:
                     exc_info=True,
                 )
 
+        await self._enqueue_reindex_if_stale(project_id, branch)
         return await self.ontology.get_class_count(project_id, branch)
 
     async def get_class(
@@ -198,6 +201,7 @@ class IndexedOntologyService:
                     exc_info=True,
                 )
 
+        await self._enqueue_reindex_if_stale(project_id, branch)
         return await self.ontology.get_class(project_id, class_iri, label_preferences, branch)
 
     async def get_ancestor_path(
@@ -228,6 +232,7 @@ class IndexedOntologyService:
                     exc_info=True,
                 )
 
+        await self._enqueue_reindex_if_stale(project_id, branch)
         return await self.ontology.get_ancestor_path(
             project_id, class_iri, label_preferences, branch
         )
@@ -265,6 +270,7 @@ class IndexedOntologyService:
                     exc_info=True,
                 )
 
+        await self._enqueue_reindex_if_stale(project_id, branch)
         return await self.ontology.search_entities(
             project_id, query, entity_types, label_preferences, limit, branch
         )
