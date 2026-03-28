@@ -197,6 +197,11 @@ class OntologyIndexService:
         Upsert the index status row. Returns None if already indexing
         (to prevent concurrent indexing).
         """
+        # Allow reclaiming stale INDEXING locks older than 10 minutes
+        from datetime import timedelta
+
+        stale_threshold = datetime.now(UTC) - timedelta(minutes=10)
+
         insert_stmt = pg_insert(OntologyIndexStatus).values(
             id=uuid.uuid4(),
             project_id=project_id,
@@ -209,7 +214,11 @@ class OntologyIndexService:
                 "status": new_status.value,
                 "updated_at": datetime.now(UTC),
             },
-            where=OntologyIndexStatus.status != IndexingStatus.INDEXING.value,
+            where=(
+                (OntologyIndexStatus.status != IndexingStatus.INDEXING.value)
+                | (OntologyIndexStatus.updated_at < stale_threshold)
+                | (OntologyIndexStatus.updated_at.is_(None))
+            ),
         )
         result = await self.db.execute(upsert_stmt)
         await self.db.commit()
