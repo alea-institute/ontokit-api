@@ -329,6 +329,22 @@ class OntologyIndexService:
                                 }
                             )
 
+                # Extract rdfs:comment as annotation (handled separately from
+                # ANNOTATION_PROPERTIES in ontology.py, but we index it here
+                # so get_class_detail can retrieve comments)
+                for obj in graph.objects(subject, RDFS.comment):
+                    if isinstance(obj, RDFLiteral):
+                        annotation_rows.append(
+                            {
+                                "id": uuid.uuid4(),
+                                "entity_id": entity_id,
+                                "property_iri": str(RDFS.comment),
+                                "value": str(obj),
+                                "lang": obj.language,
+                                "is_uri": False,
+                            }
+                        )
+
                 # Extract annotations (beyond labels)
                 for _prop_label, prop_uri in ANNOTATION_PROPERTIES.items():
                     for obj in graph.objects(subject, prop_uri):
@@ -629,11 +645,14 @@ class OntologyIndexService:
         # The RDFLib fallback handles accurate instance counts.
         instance_count = 0
 
-        # Get annotations (excluding rdfs:label and rdfs:comment)
+        # Get annotations (excluding rdfs:comment and label properties
+        # which are already returned via IndexedLabel)
+        label_property_iris = {str(uri) for _, uri in LABEL_PROPERTIES}
+        excluded_iris = label_property_iris | {rdfs_comment_iri}
         annotations_result = await self.db.execute(
             select(IndexedAnnotation).where(
                 IndexedAnnotation.entity_id == entity.id,
-                IndexedAnnotation.property_iri != rdfs_comment_iri,
+                IndexedAnnotation.property_iri.notin_(excluded_iris),
             )
         )
         annotations_by_prop: dict[str, list[dict[str, str]]] = {}
