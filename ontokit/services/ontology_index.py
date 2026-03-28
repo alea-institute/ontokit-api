@@ -629,13 +629,13 @@ class OntologyIndexService:
         )
         parent_iris = [row[0] for row in parents_result.all()]
 
-        # Resolve parent labels
-        parent_labels: dict[str, str] = {}
-        for parent_iri in parent_iris:
-            label = await self._resolve_preferred_label(
-                project_id, branch, parent_iri, label_preferences
-            )
-            parent_labels[parent_iri] = label or _extract_local_name(parent_iri)
+        # Resolve parent labels in bulk
+        parent_label_map = await self._resolve_labels_bulk(
+            project_id, branch, parent_iris, label_preferences
+        )
+        parent_labels: dict[str, str] = {
+            iri: parent_label_map.get(iri) or _extract_local_name(iri) for iri in parent_iris
+        }
 
         # Count children
         child_count_result = await self.db.execute(
