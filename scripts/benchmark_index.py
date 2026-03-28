@@ -227,7 +227,7 @@ async def benchmark_rdflib(num_classes: int, iterations: int = 3) -> list[Benchm
     turtle_bytes = len(turtle_data.encode("utf-8"))
 
     service = OntologyService()
-    service._graphs[(project_id, branch)] = graph
+    service.set_graph(project_id, branch, graph)
 
     # 1. Parse time
     gc.collect()
