@@ -1,5 +1,6 @@
 """ARQ worker for background task processing."""
 
+import json
 import logging
 from datetime import UTC, datetime
 from typing import Any
@@ -75,7 +76,7 @@ async def run_ontology_index_task(
         # Notify start
         await redis.publish(
             ONTOLOGY_INDEX_UPDATES_CHANNEL,
-            f'{{"type": "index_started", "project_id": "{project_id}", "branch": "{branch}"}}',
+            json.dumps({"type": "index_started", "project_id": project_id, "branch": branch}),
         )
 
         # Load ontology from git or storage
@@ -116,8 +117,14 @@ async def run_ontology_index_task(
         # Notify completion
         await redis.publish(
             ONTOLOGY_INDEX_UPDATES_CHANNEL,
-            f'{{"type": "index_complete", "project_id": "{project_id}", '
-            f'"branch": "{branch}", "entity_count": {entity_count}}}',
+            json.dumps(
+                {
+                    "type": "index_complete",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "entity_count": entity_count,
+                }
+            ),
         )
 
         return {
@@ -137,8 +144,14 @@ async def run_ontology_index_task(
         # Notify failure
         await redis.publish(
             ONTOLOGY_INDEX_UPDATES_CHANNEL,
-            f'{{"type": "index_failed", "project_id": "{project_id}", '
-            f'"branch": "{branch}", "error": "{str(e)}"}}',
+            json.dumps(
+                {
+                    "type": "index_failed",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "error": str(e),
+                }
+            ),
         )
 
         raise
