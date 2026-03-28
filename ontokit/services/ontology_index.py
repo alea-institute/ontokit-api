@@ -7,7 +7,7 @@ via background re-indexing triggered on commits.
 
 import logging
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
@@ -198,8 +198,6 @@ class OntologyIndexService:
         (to prevent concurrent indexing).
         """
         # Allow reclaiming stale INDEXING locks older than 10 minutes
-        from datetime import timedelta
-
         stale_threshold = datetime.now(UTC) - timedelta(minutes=10)
 
         insert_stmt = pg_insert(OntologyIndexStatus).values(
