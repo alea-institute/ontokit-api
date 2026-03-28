@@ -371,14 +371,18 @@ class OntologyIndexService:
                                 }
                             )
 
-                # Flush buffers incrementally to avoid unbounded memory growth
-                if len(entity_rows) >= BATCH_SIZE:
+                # Flush buffers incrementally to avoid unbounded memory growth.
+                # Always flush entities first (labels/annotations have FK to entities).
+                needs_flush = (
+                    len(entity_rows) >= BATCH_SIZE
+                    or len(label_rows) >= BATCH_SIZE
+                    or len(hierarchy_rows) >= BATCH_SIZE
+                    or len(annotation_rows) >= BATCH_SIZE
+                )
+                if needs_flush:
                     await self._flush_buffer(IndexedEntity, entity_rows)
-                if len(label_rows) >= BATCH_SIZE:
                     await self._flush_buffer(IndexedLabel, label_rows)
-                if len(hierarchy_rows) >= BATCH_SIZE:
                     await self._flush_buffer(IndexedHierarchy, hierarchy_rows)
-                if len(annotation_rows) >= BATCH_SIZE:
                     await self._flush_buffer(IndexedAnnotation, annotation_rows)
 
         # Flush remaining rows

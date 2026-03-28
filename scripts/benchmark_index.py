@@ -332,6 +332,9 @@ async def benchmark_postgres(num_classes: int, iterations: int = 3) -> list[Benc
     """Benchmark PostgreSQL index-based ontology operations."""
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+    # Import all models to ensure mappers initialize (Project references NormalizationRun)
+    import ontokit.models  # noqa: F401
+    import ontokit.models.normalization  # noqa: F401
     from ontokit.core.config import settings
     from ontokit.services.ontology_index import OntologyIndexService
 
@@ -349,6 +352,18 @@ async def benchmark_postgres(num_classes: int, iterations: int = 3) -> list[Benc
     session_factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
     async with session_factory() as db:
+        # Create a temporary project row to satisfy FK constraints
+        from sqlalchemy import text as sa_text
+
+        await db.execute(
+            sa_text(
+                "INSERT INTO projects (id, name, owner_id, is_public) "
+                "VALUES (:id, :name, :owner, true)"
+            ),
+            {"id": str(project_id), "name": f"benchmark-{num_classes}", "owner": "benchmark"},
+        )
+        await db.commit()
+
         service = OntologyIndexService(db)
 
         # 1. Full reindex time
@@ -431,8 +446,13 @@ async def benchmark_postgres(num_classes: int, iterations: int = 3) -> list[Benc
         )
         results.append(BenchmarkResult("class_count", "postgres", num_classes, times, rss))
 
-        # Cleanup: delete benchmark data
+        # Cleanup: delete benchmark data and temporary project
         await service.delete_branch_index(project_id, branch)
+        await db.execute(
+            sa_text("DELETE FROM projects WHERE id = :id"),
+            {"id": str(project_id)},
+        )
+        await db.commit()
 
     await engine.dispose()
     return results
