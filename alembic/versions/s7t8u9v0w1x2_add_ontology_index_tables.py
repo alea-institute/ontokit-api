@@ -26,7 +26,7 @@ def upgrade() -> None:
     # ontology_index_status
     op.create_table(
         "ontology_index_status",
-        sa.Column("id", sa.Uuid(), nullable=False, default=sa.text("gen_random_uuid()")),
+        sa.Column("id", sa.Uuid(), nullable=False, server_default=sa.text("gen_random_uuid()")),
         sa.Column("project_id", sa.Uuid(), nullable=False),
         sa.Column("branch", sa.String(255), nullable=False),
         sa.Column("commit_hash", sa.String(40), nullable=True),
@@ -49,7 +49,7 @@ def upgrade() -> None:
     # indexed_entities
     op.create_table(
         "indexed_entities",
-        sa.Column("id", sa.Uuid(), nullable=False, default=sa.text("gen_random_uuid()")),
+        sa.Column("id", sa.Uuid(), nullable=False, server_default=sa.text("gen_random_uuid()")),
         sa.Column("project_id", sa.Uuid(), nullable=False),
         sa.Column("branch", sa.String(255), nullable=False),
         sa.Column("iri", sa.String(2000), nullable=False),
@@ -83,7 +83,7 @@ def upgrade() -> None:
     # indexed_labels
     op.create_table(
         "indexed_labels",
-        sa.Column("id", sa.Uuid(), nullable=False, default=sa.text("gen_random_uuid()")),
+        sa.Column("id", sa.Uuid(), nullable=False, server_default=sa.text("gen_random_uuid()")),
         sa.Column("entity_id", sa.Uuid(), nullable=False),
         sa.Column("property_iri", sa.String(2000), nullable=False),
         sa.Column("value", sa.Text(), nullable=False),
@@ -103,7 +103,7 @@ def upgrade() -> None:
     # indexed_hierarchy
     op.create_table(
         "indexed_hierarchy",
-        sa.Column("id", sa.Uuid(), nullable=False, default=sa.text("gen_random_uuid()")),
+        sa.Column("id", sa.Uuid(), nullable=False, server_default=sa.text("gen_random_uuid()")),
         sa.Column("project_id", sa.Uuid(), nullable=False),
         sa.Column("branch", sa.String(255), nullable=False),
         sa.Column("child_iri", sa.String(2000), nullable=False),
@@ -132,7 +132,7 @@ def upgrade() -> None:
     # indexed_annotations
     op.create_table(
         "indexed_annotations",
-        sa.Column("id", sa.Uuid(), nullable=False, default=sa.text("gen_random_uuid()")),
+        sa.Column("id", sa.Uuid(), nullable=False, server_default=sa.text("gen_random_uuid()")),
         sa.Column("entity_id", sa.Uuid(), nullable=False),
         sa.Column("property_iri", sa.String(2000), nullable=False),
         sa.Column("value", sa.Text(), nullable=False),
