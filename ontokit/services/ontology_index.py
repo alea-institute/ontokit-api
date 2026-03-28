@@ -889,6 +889,8 @@ class OntologyIndexService:
     ) -> dict[str, Any]:
         """
         Search for entities using trigram matching on local_name, iri, and labels.
+
+        Paging is pushed into SQL and labels are resolved in bulk to avoid N+1.
         """
         # Map frontend entity types to index entity types
         type_mapping: dict[str, list[str]] = {
@@ -908,27 +910,18 @@ class OntologyIndexService:
                 index_types.extend(type_mapping[t])
 
         owl_thing_iri = str(OWL.Thing)
-        query_pattern = f"%{query}%"
 
-        if query == "*":
-            # Match everything
-            stmt = (
-                select(
-                    IndexedEntity.iri,
-                    IndexedEntity.local_name,
-                    IndexedEntity.entity_type,
-                    IndexedEntity.deprecated,
-                )
-                .where(
-                    IndexedEntity.project_id == project_id,
-                    IndexedEntity.branch == branch,
-                    IndexedEntity.entity_type.in_(index_types),
-                    IndexedEntity.iri != owl_thing_iri,
-                )
-                .order_by(IndexedEntity.local_name)
-            )
-        else:
-            # Subquery: entities matching via labels
+        # Base filter conditions
+        base_where = [
+            IndexedEntity.project_id == project_id,
+            IndexedEntity.branch == branch,
+            IndexedEntity.entity_type.in_(index_types),
+            IndexedEntity.iri != owl_thing_iri,
+        ]
+
+        if query != "*":
+            query_pattern = f"%{query}%"
+            # Subquery: entity IDs matching via labels
             label_match = (
                 select(IndexedLabel.entity_id)
                 .join(IndexedEntity, IndexedLabel.entity_id == IndexedEntity.id)
@@ -939,30 +932,45 @@ class OntologyIndexService:
                 )
                 .scalar_subquery()
             )
-
-            stmt = (
-                select(
-                    IndexedEntity.iri,
-                    IndexedEntity.local_name,
-                    IndexedEntity.entity_type,
-                    IndexedEntity.deprecated,
-                )
-                .where(
-                    IndexedEntity.project_id == project_id,
-                    IndexedEntity.branch == branch,
-                    IndexedEntity.entity_type.in_(index_types),
-                    IndexedEntity.iri != owl_thing_iri,
-                    (
-                        IndexedEntity.local_name.ilike(query_pattern)
-                        | IndexedEntity.iri.ilike(query_pattern)
-                        | IndexedEntity.id.in_(label_match)
-                    ),
-                )
-                .order_by(IndexedEntity.local_name)
+            base_where.append(
+                IndexedEntity.local_name.ilike(query_pattern)
+                | IndexedEntity.iri.ilike(query_pattern)
+                | IndexedEntity.id.in_(label_match)
             )
+
+        # Count total matches in SQL
+        count_stmt = select(func.count()).select_from(IndexedEntity).where(*base_where)
+        total = (await self.db.execute(count_stmt)).scalar() or 0
+
+        # Fetch paged results
+        stmt = (
+            select(
+                IndexedEntity.id,
+                IndexedEntity.iri,
+                IndexedEntity.local_name,
+                IndexedEntity.entity_type,
+                IndexedEntity.deprecated,
+            )
+            .where(*base_where)
+            .order_by(IndexedEntity.local_name)
+            .limit(limit)
+        )
 
         result = await self.db.execute(stmt)
         rows = result.all()
+
+        if not rows:
+            return {"results": [], "total": total}
+
+        # Bulk-resolve labels for the returned page
+        entity_ids = [row.id for row in rows]
+        labels_result = await self.db.execute(
+            select(IndexedLabel).where(IndexedLabel.entity_id.in_(entity_ids))
+        )
+        # Group labels by entity_id
+        labels_by_entity: dict[uuid.UUID, list[Any]] = {}
+        for lbl in labels_result.scalars().all():
+            labels_by_entity.setdefault(lbl.entity_id, []).append(lbl)
 
         # Map entity types back to API types
         reverse_type_map = {
@@ -973,11 +981,10 @@ class OntologyIndexService:
             ENTITY_TYPE_INDIVIDUAL: "individual",
         }
 
+        prefs = label_preferences or DEFAULT_LABEL_PREFERENCES
         results = []
         for row in rows:
-            label = await self._resolve_preferred_label(
-                project_id, branch, row.iri, label_preferences
-            )
+            label = self._pick_preferred_label(labels_by_entity.get(row.id, []), prefs)
             results.append(
                 {
                     "iri": row.iri,
@@ -988,21 +995,53 @@ class OntologyIndexService:
             )
 
         # Sort: prefix matches first, then alphabetical
-        query_lower = query.lower()
-
-        def sort_key(r: dict[str, Any]) -> tuple[int, str]:
-            label_lower = r["label"].lower()
-            if label_lower.startswith(query_lower):
-                return (0, label_lower)
-            return (1, label_lower)
-
         if query != "*":
+            query_lower = query.lower()
+
+            def sort_key(r: dict[str, Any]) -> tuple[int, str]:
+                label_lower = r["label"].lower()
+                if label_lower.startswith(query_lower):
+                    return (0, label_lower)
+                return (1, label_lower)
+
             results.sort(key=sort_key)
 
-        total = len(results)
-        results = results[:limit]
-
         return {"results": results, "total": total}
+
+    @staticmethod
+    def _pick_preferred_label(
+        labels: list[Any],
+        preferences: list[str],
+    ) -> str | None:
+        """Pick the preferred label from a pre-fetched list (no DB queries)."""
+        if not labels:
+            return None
+
+        for pref_string in preferences:
+            if "@" in pref_string:
+                prop_part, lang = pref_string.rsplit("@", 1)
+            else:
+                prop_part = pref_string
+                lang = None
+
+            prop_uri_ref = LABEL_PROPERTY_MAP.get(prop_part)
+            if prop_uri_ref is None:
+                continue
+            prop_iri_str = str(prop_uri_ref)
+
+            for label in labels:
+                if label.property_iri != prop_iri_str:
+                    continue
+                if lang is None or (lang == "" and label.lang is None) or label.lang == lang:
+                    return label.value  # type: ignore[no-any-return]
+
+        # Fallback: any rdfs:label
+        rdfs_label_iri = str(RDFS.label)
+        for label in labels:
+            if label.property_iri == rdfs_label_iri:
+                return label.value  # type: ignore[no-any-return]
+
+        return None
 
     # ──────────────────────────────────────────────
     # Label resolution
