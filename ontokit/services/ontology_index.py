@@ -45,12 +45,14 @@ ENTITY_TYPE_DATATYPE_PROPERTY = "datatype_property"
 ENTITY_TYPE_ANNOTATION_PROPERTY = "annotation_property"
 ENTITY_TYPE_INDIVIDUAL = "individual"
 
-# RDF type to entity_type mapping
+# RDF type to entity_type mapping (includes both OWL and RDFS base types)
 RDF_TYPE_MAP: list[tuple[URIRef, str]] = [
     (OWL.Class, ENTITY_TYPE_CLASS),
+    (RDFS.Class, ENTITY_TYPE_CLASS),
     (OWL.ObjectProperty, ENTITY_TYPE_OBJECT_PROPERTY),
     (OWL.DatatypeProperty, ENTITY_TYPE_DATATYPE_PROPERTY),
     (OWL.AnnotationProperty, ENTITY_TYPE_ANNOTATION_PROPERTY),
+    (RDF.Property, ENTITY_TYPE_OBJECT_PROPERTY),
     (OWL.NamedIndividual, ENTITY_TYPE_INDIVIDUAL),
 ]
 
