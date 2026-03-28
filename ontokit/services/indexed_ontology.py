@@ -61,8 +61,17 @@ class IndexedOntologyService:
             if pool is None:
                 return
 
-            if commit_hash and not await self.index.is_index_stale(project_id, branch, commit_hash):
-                return
+            status = await self.index.get_index_status(project_id, branch)
+            if commit_hash:
+                # Have a commit hash — only enqueue if index exists and is stale
+                if status is None or not await self.index.is_index_stale(
+                    project_id, branch, commit_hash
+                ):
+                    return
+            else:
+                # No commit hash — only enqueue if no index exists at all
+                if status is not None:
+                    return
 
             await pool.enqueue_job(
                 "run_ontology_index_task",
