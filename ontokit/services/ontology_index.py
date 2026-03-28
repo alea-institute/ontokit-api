@@ -247,11 +247,15 @@ class OntologyIndexService:
         )
 
     async def _index_graph(self, project_id: UUID, branch: str, graph: Graph) -> int:
-        """Extract data from RDF graph and insert into index tables."""
+        """Extract data from RDF graph and insert into index tables.
+
+        Flushes each buffer when it reaches BATCH_SIZE to avoid
+        accumulating the entire projection in memory for large ontologies.
+        """
         owl_thing = OWL.Thing
         entity_count = 0
 
-        # Collect all entities, labels, hierarchy, annotations
+        # Buffers flushed incrementally at BATCH_SIZE
         entity_rows: list[dict[str, Any]] = []
         label_rows: list[dict[str, Any]] = []
         hierarchy_rows: list[dict[str, Any]] = []
@@ -351,13 +355,30 @@ class OntologyIndexService:
                                 }
                             )
 
-        # Batch insert all rows
-        await self._batch_insert(IndexedEntity, entity_rows)
-        await self._batch_insert(IndexedLabel, label_rows)
-        await self._batch_insert(IndexedHierarchy, hierarchy_rows)
-        await self._batch_insert(IndexedAnnotation, annotation_rows)
+                # Flush buffers incrementally to avoid unbounded memory growth
+                if len(entity_rows) >= BATCH_SIZE:
+                    await self._flush_buffer(IndexedEntity, entity_rows)
+                if len(label_rows) >= BATCH_SIZE:
+                    await self._flush_buffer(IndexedLabel, label_rows)
+                if len(hierarchy_rows) >= BATCH_SIZE:
+                    await self._flush_buffer(IndexedHierarchy, hierarchy_rows)
+                if len(annotation_rows) >= BATCH_SIZE:
+                    await self._flush_buffer(IndexedAnnotation, annotation_rows)
+
+        # Flush remaining rows
+        await self._flush_buffer(IndexedEntity, entity_rows)
+        await self._flush_buffer(IndexedLabel, label_rows)
+        await self._flush_buffer(IndexedHierarchy, hierarchy_rows)
+        await self._flush_buffer(IndexedAnnotation, annotation_rows)
 
         return entity_count
+
+    async def _flush_buffer(self, model: type[Base], rows: list[dict[str, Any]]) -> None:
+        """Insert all rows in the buffer and clear it."""
+        if not rows:
+            return
+        await self._batch_insert(model, rows)
+        rows.clear()
 
     async def _batch_insert(self, model: type[Base], rows: list[dict[str, Any]]) -> None:
         """Insert rows in batches."""
