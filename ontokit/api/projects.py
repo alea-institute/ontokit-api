@@ -616,6 +616,21 @@ async def get_analytics(request: Request, project_id: str):
     }
 
 
+@router.get("/projects/{project_id}/analytics/activity")
+async def get_analytics_activity(request: Request, project_id: str, days: int = 30):
+    return {"days": days, "daily_counts": [], "total_changes": 0}
+
+
+@router.get("/projects/{project_id}/analytics/hot-entities")
+async def get_analytics_hot_entities(request: Request, project_id: str, limit: int = 20):
+    return []
+
+
+@router.get("/projects/{project_id}/analytics/contributors")
+async def get_analytics_contributors(request: Request, project_id: str, days: int = 30):
+    return []
+
+
 @router.get("/projects/{project_id}/embeddings")
 async def list_embeddings(request: Request, project_id: str):
     return {"items": [], "total": 0}
