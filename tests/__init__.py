@@ -1,1 +1,0 @@
-"""OntoKit API tests."""
