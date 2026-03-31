@@ -197,26 +197,23 @@ def _class_to_detail(owl_class, folio) -> OWLClassResponse:
             values=[LocalizedString(value=owl_class.definition)],
         ))
     if owl_class.alternative_labels:
-        for alt in owl_class.alternative_labels:
-            annotations.append(AnnotationProperty(
-                property_iri="http://www.w3.org/2004/02/skos/core#altLabel",
-                property_label="skos:altLabel",
-                values=[LocalizedString(value=alt)],
-            ))
+        annotations.append(AnnotationProperty(
+            property_iri="http://www.w3.org/2004/02/skos/core#altLabel",
+            property_label="skos:altLabel",
+            values=[LocalizedString(value=alt) for alt in owl_class.alternative_labels],
+        ))
     if owl_class.examples:
-        for ex in owl_class.examples:
-            annotations.append(AnnotationProperty(
-                property_iri="http://www.w3.org/2004/02/skos/core#example",
-                property_label="skos:example",
-                values=[LocalizedString(value=ex)],
-            ))
+        annotations.append(AnnotationProperty(
+            property_iri="http://www.w3.org/2004/02/skos/core#example",
+            property_label="skos:example",
+            values=[LocalizedString(value=ex) for ex in owl_class.examples],
+        ))
     if owl_class.notes:
-        for note in owl_class.notes:
-            annotations.append(AnnotationProperty(
-                property_iri="http://www.w3.org/2004/02/skos/core#note",
-                property_label="skos:note",
-                values=[LocalizedString(value=note)],
-            ))
+        annotations.append(AnnotationProperty(
+            property_iri="http://www.w3.org/2004/02/skos/core#note",
+            property_label="skos:note",
+            values=[LocalizedString(value=note) for note in owl_class.notes],
+        ))
     if owl_class.is_defined_by:
         annotations.append(AnnotationProperty(
             property_iri="http://www.w3.org/2000/01/rdf-schema#isDefinedBy",
@@ -236,22 +233,24 @@ def _class_to_detail(owl_class, folio) -> OWLClassResponse:
             values=[LocalizedString(value=owl_class.description)],
         ))
     if owl_class.see_also:
-        for sa in owl_class.see_also:
-            annotations.append(AnnotationProperty(
-                property_iri="http://www.w3.org/2000/01/rdf-schema#seeAlso",
-                property_label="rdfs:seeAlso",
-                values=[LocalizedString(value=sa)],
-            ))
+        annotations.append(AnnotationProperty(
+            property_iri="http://www.w3.org/2000/01/rdf-schema#seeAlso",
+            property_label="rdfs:seeAlso",
+            values=[LocalizedString(value=sa) for sa in owl_class.see_also],
+        ))
 
-    # Translations
+    # Translations - group all into one annotation to avoid duplicate React keys
     if owl_class.translations:
+        translation_values = []
         for lang_code, translated in owl_class.translations.items():
             if translated:
-                annotations.append(AnnotationProperty(
-                    property_iri="http://www.w3.org/2004/02/skos/core#prefLabel",
-                    property_label=f"skos:prefLabel@{lang_code}",
-                    values=[LocalizedString(value=translated, lang=lang_code)],
-                ))
+                translation_values.append(LocalizedString(value=translated, lang=lang_code))
+        if translation_values:
+            annotations.append(AnnotationProperty(
+                property_iri="http://www.w3.org/2004/02/skos/core#prefLabel",
+                property_label="skos:prefLabel",
+                values=translation_values,
+            ))
 
     return OWLClassResponse(
         iri=owl_class.iri,
@@ -569,13 +568,42 @@ async def list_suggestions(request: Request, project_id: str, status: str | None
 
 
 @router.get("/projects/{project_id}/lint")
-async def get_lint_status(request: Request, project_id: str, branch: str | None = None):
+async def get_lint(request: Request, project_id: str, branch: str | None = None):
     return {"status": "clean", "issues": [], "total": 0}
+
+
+@router.get("/projects/{project_id}/lint/status")
+async def get_lint_status(request: Request, project_id: str, branch: str | None = None):
+    return {
+        "status": "clean",
+        "total_issues": 0,
+        "errors": 0,
+        "warnings": 0,
+        "info": 0,
+        "last_run": None,
+    }
 
 
 @router.get("/projects/{project_id}/normalization")
 async def get_normalization(request: Request, project_id: str):
     return {"status": "normalized"}
+
+
+@router.get("/projects/{project_id}/normalization/status")
+async def get_normalization_status(request: Request, project_id: str):
+    return {"status": "normalized", "is_normalized": True}
+
+
+@router.get("/projects/{project_id}/upstream-sync")
+async def get_upstream_sync(request: Request, project_id: str):
+    return None
+
+
+@router.get("/projects/{project_id}/revisions/history")
+async def get_revision_history(
+    request: Request, project_id: str, branch: str | None = None, limit: int = 50
+):
+    return {"items": [], "total": 0}
 
 
 @router.get("/projects/{project_id}/analytics")
@@ -590,4 +618,34 @@ async def get_analytics(request: Request, project_id: str):
 
 @router.get("/projects/{project_id}/embeddings")
 async def list_embeddings(request: Request, project_id: str):
+    return {"items": [], "total": 0}
+
+
+@router.get("/projects/{project_id}/lint/issues")
+async def get_lint_issues(
+    request: Request, project_id: str, subject_iri: str | None = None, limit: int = 50
+):
+    return {"items": [], "total": 0}
+
+
+@router.get("/projects/{project_id}/entities/{entity_iri:path}/references")
+async def get_entity_references(
+    request: Request, project_id: str, entity_iri: str, branch: str | None = None
+):
+    return {"references": [], "total": 0}
+
+
+@router.get("/projects/{project_id}/analytics/entity/{entity_iri:path}/history")
+async def get_entity_history(
+    request: Request, project_id: str, entity_iri: str,
+    branch: str | None = None, limit: int = 50,
+):
+    return {"items": [], "total": 0}
+
+
+@router.get("/projects/{project_id}/entities/{entity_iri:path}/similar")
+async def get_similar_entities(
+    request: Request, project_id: str, entity_iri: str,
+    branch: str | None = None, limit: int = 10, threshold: float = 0.5,
+):
     return {"items": [], "total": 0}
