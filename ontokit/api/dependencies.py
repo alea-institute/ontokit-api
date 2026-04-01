@@ -1,0 +1,107 @@
+"""Shared dependencies for API route handlers."""
+
+import asyncio
+import logging
+import os
+from uuid import UUID
+
+from fastapi import HTTPException, status
+from rdflib import Graph
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ontokit.core.auth import CurrentUser
+from ontokit.models.project import Project
+
+logger = logging.getLogger(__name__)
+
+# Per-(project, branch) locks to prevent concurrent duplicate graph loads.
+_graph_load_locks: dict[tuple[UUID, str], asyncio.Lock] = {}
+
+
+async def load_project_graph(
+    project_id: UUID, branch: str | None, db: AsyncSession
+) -> tuple[Graph, str]:
+    """Load the ontology graph for a project, returning (graph, resolved_branch).
+
+    Resolves the branch to the repository default when not specified,
+    loads the ontology from git (falling back to storage), and returns
+    the in-memory RDFLib graph.
+    """
+    from ontokit.git.bare_repository import get_bare_git_service
+    from ontokit.services.ontology import get_ontology_service
+    from ontokit.services.storage import get_storage_service
+
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+
+    if not project.source_file_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Project does not have an ontology file",
+        )
+
+    storage = get_storage_service()
+    ontology = get_ontology_service(storage)
+    git = get_bare_git_service()
+
+    resolved_branch = await resolve_branch(project_id, branch)
+
+    key = (project_id, resolved_branch)
+    if key not in _graph_load_locks:
+        _graph_load_locks[key] = asyncio.Lock()
+
+    lock = _graph_load_locks[key]
+    async with lock:
+        if not ontology.is_loaded(project_id, resolved_branch):
+            filename = os.path.basename(project.source_file_path)
+            try:
+                await ontology.load_from_git(project_id, resolved_branch, filename, git)
+            except (FileNotFoundError, KeyError, ValueError):
+                if branch is not None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"Ontology file not found on branch '{resolved_branch}'",
+                    ) from None
+                logger.debug(
+                    "Git loading failed for project %s branch %s, falling back to storage",
+                    project_id,
+                    resolved_branch,
+                    exc_info=True,
+                )
+                await ontology.load_from_storage(
+                    project_id, project.source_file_path, resolved_branch
+                )
+
+    # Remove the lock once the graph is loaded and no other task is waiting on it.
+    if not lock.locked() and _graph_load_locks.get(key) is lock:
+        _graph_load_locks.pop(key, None)
+
+    graph = await ontology.get_graph(project_id, resolved_branch)
+    return graph, resolved_branch
+
+
+async def resolve_branch(project_id: UUID, branch: str | None) -> str:
+    """Resolve a branch name, falling back to the repository default."""
+    if branch:
+        return branch
+    from ontokit.git.bare_repository import get_bare_git_service
+
+    git = get_bare_git_service()
+    return await asyncio.to_thread(git.get_default_branch, project_id)
+
+
+async def verify_project_access(
+    project_id: UUID, db: AsyncSession, user: CurrentUser | None
+) -> None:
+    """Verify the user has access to the project.
+
+    For public projects, unauthenticated users are allowed.
+    For private projects, the user must be a member.
+    """
+    from ontokit.services.project_service import get_project_service
+
+    service = get_project_service(db)
+    await service.get(project_id, user)

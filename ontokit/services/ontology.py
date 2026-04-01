@@ -784,6 +784,13 @@ class OntologyService:
         """Inject a pre-parsed graph into the cache (for testing/benchmarks)."""
         self._graphs[(project_id, branch)] = graph
 
+    async def get_graph(self, ontology_id: UUID, branch: str = "main") -> Graph:
+        """Get the cached RDF graph for a project and branch.
+
+        Raises ``ValueError`` if the graph has not been loaded yet.
+        """
+        return await self._get_graph(ontology_id, branch)
+
     def is_loaded(self, project_id: UUID, branch: str = "main") -> bool:
         """Check if a project's ontology graph is loaded in memory for a given branch."""
         return (project_id, branch) in self._graphs

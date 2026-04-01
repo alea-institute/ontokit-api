@@ -5,21 +5,24 @@ services, validating that routes, dependency injection, and response schemas
 work together correctly.
 """
 
+from collections.abc import AsyncGenerator, Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
+from rdflib import Graph
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.database import get_db
 from ontokit.main import app
 
 
 @pytest.fixture
-def mock_db_client():
+def mock_db_client() -> Generator[tuple[TestClient, AsyncMock]]:
     """TestClient with a mocked database session."""
     mock_session = AsyncMock()
 
-    async def override_get_db():
+    async def override_get_db() -> AsyncGenerator[AsyncSession]:
         yield mock_session
 
     app.dependency_overrides[get_db] = override_get_db
@@ -31,13 +34,13 @@ def mock_db_client():
 class TestProjectWorkflow:
     """Test the project lifecycle through the API."""
 
-    def test_health_check_always_works(self, mock_db_client):
+    def test_health_check_always_works(self, mock_db_client: tuple[TestClient, AsyncMock]) -> None:
         client, _ = mock_db_client
         response = client.get("/health")
         assert response.status_code == 200
         assert response.json()["status"] == "healthy"
 
-    def test_search_returns_structure(self, mock_db_client):
+    def test_search_returns_structure(self, mock_db_client: tuple[TestClient, AsyncMock]) -> None:
         """Search endpoint returns a valid SearchResponse structure."""
         client, mock_session = mock_db_client
 
@@ -46,7 +49,7 @@ class TestProjectWorkflow:
         count_result = MagicMock()
         count_result.scalar_one.return_value = 0
         data_result = MagicMock()
-        data_result.__iter__ = lambda self: iter([])
+        data_result.__iter__ = MagicMock(return_value=iter([]))
         mock_session.execute = AsyncMock(side_effect=[count_result, data_result])
 
         response = client.get("/api/v1/search?q=test")
@@ -57,12 +60,26 @@ class TestProjectWorkflow:
         assert "query" in data
         assert data["query"] == "test"
 
-    def test_sparql_select_returns_structure(self, mock_db_client):
+    @patch(
+        "ontokit.api.routes.search.load_project_graph",
+        new_callable=AsyncMock,
+        return_value=(Graph(), "main"),
+    )
+    @patch("ontokit.api.routes.search.verify_project_access", new_callable=AsyncMock)
+    def test_sparql_select_returns_structure(
+        self,
+        _mock_access: AsyncMock,
+        _mock_graph: AsyncMock,
+        mock_db_client: tuple[TestClient, AsyncMock],
+    ) -> None:
         """SPARQL SELECT returns proper response structure."""
         client, _ = mock_db_client
         response = client.post(
             "/api/v1/search/sparql",
-            json={"query": "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"},
+            json={
+                "query": "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1",
+                "ontology_id": "00000000-0000-0000-0000-000000000000",
+            },
         )
         assert response.status_code == 200
         data = response.json()
@@ -70,12 +87,26 @@ class TestProjectWorkflow:
         assert "variables" in data
         assert "bindings" in data
 
-    def test_sparql_ask_returns_boolean(self, mock_db_client):
+    @patch(
+        "ontokit.api.routes.search.load_project_graph",
+        new_callable=AsyncMock,
+        return_value=(Graph(), "main"),
+    )
+    @patch("ontokit.api.routes.search.verify_project_access", new_callable=AsyncMock)
+    def test_sparql_ask_returns_boolean(
+        self,
+        _mock_access: AsyncMock,
+        _mock_graph: AsyncMock,
+        mock_db_client: tuple[TestClient, AsyncMock],
+    ) -> None:
         """SPARQL ASK returns a boolean result."""
         client, _ = mock_db_client
         response = client.post(
             "/api/v1/search/sparql",
-            json={"query": "ASK { ?s ?p ?o }"},
+            json={
+                "query": "ASK { ?s ?p ?o }",
+                "ontology_id": "00000000-0000-0000-0000-000000000000",
+            },
         )
         assert response.status_code == 200
         data = response.json()
@@ -86,7 +117,7 @@ class TestProjectWorkflow:
 class TestLintWorkflow:
     """Test the lint workflow through the API."""
 
-    def test_lint_rules_endpoint(self, mock_db_client):
+    def test_lint_rules_endpoint(self, mock_db_client: tuple[TestClient, AsyncMock]) -> None:
         """GET /api/v1/projects/{id}/lint/rules returns available rules."""
         client, mock_session = mock_db_client
 
