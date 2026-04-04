@@ -481,11 +481,12 @@ class ProjectService:
 
         # Apply search filter
         if search:
-            search_pattern = f"%{search}%"
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            search_pattern = f"%{escaped}%"
             query = query.where(
                 or_(
-                    Project.name.ilike(search_pattern),
-                    Project.description.ilike(search_pattern),
+                    Project.name.ilike(search_pattern, escape="\\"),
+                    Project.description.ilike(search_pattern, escape="\\"),
                 )
             )
 
