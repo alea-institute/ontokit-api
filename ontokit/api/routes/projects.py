@@ -108,7 +108,8 @@ async def list_projects(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=20, ge=1, le=100),
     filter: str | None = Query(
-        default=None, description="Filter: 'public', 'mine', or null for all accessible"
+        default=None,
+        description="Filter: 'public', 'private', 'mine', or null for all accessible",
     ),
     search: str | None = Query(
         default=None, max_length=200, description="Search by project name or description"
@@ -120,8 +121,9 @@ async def list_projects(
     For anonymous users, only public projects are returned.
     For authenticated users:
     - filter=public: Only public projects
-    - filter=mine: Projects where user is a member
-    - filter=null: All accessible (public + user's projects)
+    - filter=private: Private projects where user is a member
+    - filter=mine: All projects where user is a member (public + private)
+    - filter=null: All accessible (public + user's private projects)
     """
     return await service.list_accessible(
         user, skip=skip, limit=limit, filter_type=filter, search=search

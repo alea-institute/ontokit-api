@@ -465,8 +465,15 @@ class ProjectService:
             # Authenticated user
             if filter_type == "public":
                 query = query.where(Project.is_public == True)  # noqa: E712
+            elif filter_type == "private":
+                # Private projects where user is a member
+                subquery = select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)
+                query = query.where(
+                    Project.is_public == False,  # noqa: E712
+                    Project.id.in_(subquery),
+                )
             elif filter_type == "mine":
-                # Projects where user is a member
+                # All projects where user is a member (public + private)
                 subquery = select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)
                 query = query.where(Project.id.in_(subquery))
             else:
