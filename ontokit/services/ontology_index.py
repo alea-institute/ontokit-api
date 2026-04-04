@@ -654,12 +654,14 @@ class OntologyIndexService:
         # Return None so the frontend can distinguish "not indexed" from "zero".
         instance_count = None
 
-        # Get annotations from IndexedAnnotation (excludes rdfs:comment which
-        # is returned separately as `comments`)
+        # Get annotations from IndexedAnnotation (excludes rdfs:comment and
+        # label properties — those come from IndexedLabel below to avoid duplication)
+        label_property_iris = {str(uri) for _, uri in LABEL_PROPERTIES}
+        excluded_iris = label_property_iris | {rdfs_comment_iri}
         annotations_result = await self.db.execute(
             select(IndexedAnnotation).where(
                 IndexedAnnotation.entity_id == entity.id,
-                IndexedAnnotation.property_iri != rdfs_comment_iri,
+                IndexedAnnotation.property_iri.notin_(excluded_iris),
             )
         )
         annotations_by_prop: dict[str, list[dict[str, str]]] = {}
