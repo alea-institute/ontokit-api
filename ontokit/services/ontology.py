@@ -351,6 +351,306 @@ class OntologyService:
         # TODO: Implement hierarchy traversal
         raise NotImplementedError("Hierarchy implementation pending")
 
+    async def build_entity_graph(
+        self,
+        ontology_id: UUID,
+        class_iri: str,
+        branch: str = "main",
+        ancestors_depth: int = 5,
+        descendants_depth: int = 2,
+        max_nodes: int = 200,
+        include_see_also: bool = True,
+        max_see_also_per_node: int = 5,
+    ) -> "EntityGraphResponse | None":
+        """Build a multi-hop graph around a class via BFS.
+
+        Traverses ancestors (subClassOf upward), descendants (subClassOf downward),
+        and optional seeAlso cross-links. Returns nodes with lineage-based types
+        for ontology-agnostic coloring.
+        """
+        from ontokit.schemas.graph import EntityGraphResponse, GraphEdge, GraphNode
+
+        graph = await self._get_graph(ontology_id, branch)
+        class_uri = URIRef(class_iri)
+
+        if (class_uri, RDF.type, OWL.Class) not in graph:
+            return None
+
+        owl_thing = OWL.Thing
+        EXTERNAL_NAMESPACES = (
+            "http://www.w3.org/2000/01/rdf-schema#",
+            "http://www.w3.org/2002/07/owl#",
+            "http://xmlns.com/foaf/0.1/",
+            "http://purl.org/dc/elements/1.1/",
+            "http://purl.org/dc/terms/",
+            "http://www.w3.org/2004/02/skos/core#",
+        )
+
+        visited: dict[str, GraphNode] = {}
+        edges: list[GraphEdge] = []
+        edge_ids: set[str] = set()
+        total_discovered = [0]
+
+        def _get_local_name(iri: str) -> str:
+            if "#" in iri:
+                return iri.split("#")[-1]
+            return iri.rsplit("/", 1)[-1]
+
+        def _get_label(uri: URIRef) -> str:
+            label = select_preferred_label(graph, uri)
+            return label if label else _get_local_name(str(uri))
+
+        def _is_external(iri: str) -> bool:
+            return any(iri.startswith(ns) for ns in EXTERNAL_NAMESPACES)
+
+        def _is_root_class(uri: URIRef) -> bool:
+            parents = [
+                p for p in graph.objects(uri, RDFS.subClassOf)
+                if isinstance(p, URIRef) and p != owl_thing
+            ]
+            return len(parents) == 0
+
+        def _classify_node(uri: URIRef, is_focus: bool, depth: int) -> str:
+            iri = str(uri)
+            if is_focus:
+                return "focus"
+            if _is_external(iri):
+                return "external"
+            # Check if individual (instance, not a class)
+            if (uri, RDF.type, OWL.Class) not in graph:
+                for rdf_type in graph.objects(uri, RDF.type):
+                    if rdf_type in (OWL.ObjectProperty, OWL.DatatypeProperty, OWL.AnnotationProperty):
+                        return "property"
+                return "individual"
+            if _is_root_class(uri):
+                return "root"
+            return "class"
+
+        def _get_definition(uri: URIRef) -> str | None:
+            # Try SKOS definition first, then rdfs:comment
+            for obj in graph.objects(uri, SKOS.definition):
+                if isinstance(obj, RDFLiteral):
+                    return str(obj)
+            for obj in graph.objects(uri, RDFS.comment):
+                if isinstance(obj, RDFLiteral):
+                    return str(obj)
+            return None
+
+        def _child_count(uri: URIRef) -> int:
+            return sum(
+                1 for s in graph.subjects(RDFS.subClassOf, uri)
+                if isinstance(s, URIRef) and (s, RDF.type, OWL.Class) in graph
+            )
+
+        def _make_node(uri: URIRef, depth: int) -> GraphNode | None:
+            iri = str(uri)
+            if iri in visited:
+                return visited[iri]
+            total_discovered[0] += 1
+            if len(visited) >= max_nodes:
+                return None
+            is_focus = (uri == class_uri)
+            node = GraphNode(
+                id=iri,
+                label=_get_label(uri),
+                iri=iri,
+                definition=_get_definition(uri),
+                is_focus=is_focus,
+                is_root=_is_root_class(uri),
+                depth=depth,
+                node_type=_classify_node(uri, is_focus, depth),
+                child_count=_child_count(uri),
+            )
+            visited[iri] = node
+            return node
+
+        def _add_edge(source: str, target: str, edge_type: str, label: str | None = None) -> None:
+            eid = f"{source}->{target}:{edge_type}"
+            if eid in edge_ids:
+                return
+            edge_ids.add(eid)
+            edges.append(GraphEdge(id=eid, source=source, target=target, edge_type=edge_type, label=label))
+
+        # Create focus node
+        focus_node = _make_node(class_uri, 0)
+        if not focus_node:
+            return None
+
+        # BFS upward (ancestors)
+        ancestor_queue: list[tuple[URIRef, int]] = [(class_uri, 0)]
+        ancestor_visited: set[str] = {class_iri}
+        while ancestor_queue:
+            current_uri, current_depth = ancestor_queue.pop(0)
+            if current_depth >= ancestors_depth:
+                continue
+            for parent in graph.objects(current_uri, RDFS.subClassOf):
+                if not isinstance(parent, URIRef) or parent == owl_thing:
+                    continue
+                parent_iri = str(parent)
+                parent_node = _make_node(parent, -(current_depth + 1))
+                if parent_node is None:
+                    continue
+                _add_edge(parent_iri, str(current_uri), "subClassOf")
+                if parent_iri not in ancestor_visited:
+                    ancestor_visited.add(parent_iri)
+                    ancestor_queue.append((parent, current_depth + 1))
+
+        # BFS downward (descendants)
+        descendant_queue: list[tuple[URIRef, int]] = [(class_uri, 0)]
+        descendant_visited: set[str] = {class_iri}
+        while descendant_queue:
+            current_uri, current_depth = descendant_queue.pop(0)
+            if current_depth >= descendants_depth:
+                continue
+            for child in graph.subjects(RDFS.subClassOf, current_uri):
+                if not isinstance(child, URIRef):
+                    continue
+                child_iri = str(child)
+                child_node = _make_node(child, current_depth + 1)
+                if child_node is None:
+                    continue
+                _add_edge(str(current_uri), child_iri, "subClassOf")
+                if child_iri not in descendant_visited:
+                    descendant_visited.add(child_iri)
+                    descendant_queue.append((child, current_depth + 1))
+
+        # Collect equivalentClass and disjointWith for visited nodes
+        for node_iri in list(visited.keys()):
+            node_uri = URIRef(node_iri)
+            for equiv in graph.objects(node_uri, OWL.equivalentClass):
+                if isinstance(equiv, URIRef) and str(equiv) in visited:
+                    if node_iri < str(equiv):
+                        _add_edge(node_iri, str(equiv), "equivalentClass", "equivalentTo")
+                    else:
+                        _add_edge(str(equiv), node_iri, "equivalentClass", "equivalentTo")
+            for disj in graph.objects(node_uri, OWL.disjointWith):
+                if isinstance(disj, URIRef) and str(disj) in visited:
+                    if node_iri < str(disj):
+                        _add_edge(node_iri, str(disj), "disjointWith", "disjointWith")
+                    else:
+                        _add_edge(str(disj), node_iri, "disjointWith", "disjointWith")
+
+        # Extract seeAlso targets from OWL restrictions on rdfs:seeAlso
+        def _get_see_also_targets(uri: URIRef) -> list[URIRef]:
+            """Extract seeAlso targets from both direct triples and OWL restrictions.
+
+            FOLIO encodes seeAlso as owl:Restriction with owl:someValuesFrom
+            inside rdfs:subClassOf, not as direct rdfs:seeAlso triples.
+            """
+            targets: list[URIRef] = []
+            # Direct rdfs:seeAlso triples
+            for obj in graph.objects(uri, RDFS.seeAlso):
+                if isinstance(obj, URIRef):
+                    targets.append(obj)
+            # OWL restrictions: subClassOf -> Restriction(onProperty=seeAlso, someValuesFrom=X)
+            for sc in graph.objects(uri, RDFS.subClassOf):
+                if isinstance(sc, URIRef):
+                    continue  # Named superclass, not a restriction
+                # sc is a blank node (restriction)
+                on_prop = next(graph.objects(sc, OWL.onProperty), None)
+                if on_prop == RDFS.seeAlso:
+                    for val in graph.objects(sc, OWL.someValuesFrom):
+                        if isinstance(val, URIRef):
+                            targets.append(val)
+                    for val in graph.objects(sc, OWL.allValuesFrom):
+                        if isinstance(val, URIRef):
+                            targets.append(val)
+                    for val in graph.objects(sc, OWL.hasValue):
+                        if isinstance(val, URIRef):
+                            targets.append(val)
+            return targets
+
+        def _get_see_also_referrers(uri: URIRef) -> list[URIRef]:
+            """Find classes that have seeAlso restrictions pointing TO this URI."""
+            referrers: list[URIRef] = []
+            # Direct reverse rdfs:seeAlso
+            for subj in graph.subjects(RDFS.seeAlso, uri):
+                if isinstance(subj, URIRef):
+                    referrers.append(subj)
+            # Find restrictions that someValuesFrom -> uri
+            for restriction in graph.subjects(OWL.someValuesFrom, uri):
+                on_prop = next(graph.objects(restriction, OWL.onProperty), None)
+                if on_prop == RDFS.seeAlso:
+                    for cls in graph.subjects(RDFS.subClassOf, restriction):
+                        if isinstance(cls, URIRef) and (cls, RDF.type, OWL.Class) in graph:
+                            referrers.append(cls)
+            return referrers
+
+        # Collect seeAlso cross-links
+        # Outgoing seeAlso: checked on all visited nodes (focus + ancestors)
+        # Incoming seeAlso: only checked on the focus node (intermediates are too noisy)
+        see_also_nodes: list[URIRef] = []
+        if include_see_also:
+            for node_iri in list(visited.keys()):
+                node_uri = URIRef(node_iri)
+                sa_count = 0
+
+                # Outgoing: this node seeAlso -> related
+                for related in _get_see_also_targets(node_uri):
+                    if sa_count >= max_see_also_per_node:
+                        break
+                    related_iri = str(related)
+                    was_new = related_iri not in visited
+                    if was_new:
+                        related_node = _make_node(related, 0)
+                        if related_node is None:
+                            continue
+                        see_also_nodes.append(related)
+                    _add_edge(node_iri, related_iri, "seeAlso", "rdfs:seeAlso")
+                    sa_count += 1
+
+                # Incoming: only on the focus node to avoid cascade
+                if node_uri == class_uri:
+                    for referrer in _get_see_also_referrers(node_uri):
+                        if sa_count >= max_see_also_per_node:
+                            break
+                        referrer_iri = str(referrer)
+                        was_new = referrer_iri not in visited
+                        if was_new:
+                            referrer_node = _make_node(referrer, 0)
+                            if referrer_node is None:
+                                continue
+                            see_also_nodes.append(referrer)
+                        _add_edge(referrer_iri, node_iri, "seeAlso", "rdfs:seeAlso")
+                        sa_count += 1
+
+        # BFS upward from seeAlso nodes to their roots
+        if see_also_nodes:
+            sa_queue: list[tuple[URIRef, int]] = [(u, 0) for u in see_also_nodes]
+            sa_visited: set[str] = {str(u) for u in see_also_nodes} | ancestor_visited
+            while sa_queue:
+                current_uri, current_depth = sa_queue.pop(0)
+                if current_depth >= ancestors_depth:
+                    continue
+                for parent in graph.objects(current_uri, RDFS.subClassOf):
+                    if not isinstance(parent, URIRef) or parent == owl_thing:
+                        continue
+                    parent_iri = str(parent)
+                    parent_node = _make_node(parent, -(current_depth + 1))
+                    if parent_node is None:
+                        continue
+                    _add_edge(parent_iri, str(current_uri), "subClassOf")
+                    if parent_iri not in sa_visited:
+                        sa_visited.add(parent_iri)
+                        sa_queue.append((parent, current_depth + 1))
+
+        # Reclassify roots: primary roots (from subClassOf BFS) stay "root",
+        # roots discovered via seeAlso branches become "secondary_root"
+        for node in visited.values():
+            if node.node_type == "root" and node.iri not in ancestor_visited:
+                node.node_type = "secondary_root"
+
+        truncated = total_discovered[0] > len(visited)
+
+        return EntityGraphResponse(
+            focus_iri=class_iri,
+            focus_label=_get_label(class_uri),
+            nodes=list(visited.values()),
+            edges=edges,
+            truncated=truncated,
+            total_concept_count=total_discovered[0],
+        )
+
     async def get_root_classes(
         self,
         project_id: UUID,
