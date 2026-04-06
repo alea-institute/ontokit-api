@@ -684,7 +684,7 @@ async def get_ontology_class_ancestors(
 
 
 @router.get(
-    "/{project_id}/ontology/classes/{class_iri:path}/graph",
+    "/{project_id}/ontology/graph/{class_iri:path}",
     response_model=EntityGraphResponse,
 )
 async def get_ontology_class_graph(

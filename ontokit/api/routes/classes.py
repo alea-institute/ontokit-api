@@ -124,7 +124,7 @@ async def get_class_hierarchy(
 
 
 @router.get(
-    "/ontologies/{ontology_id}/classes/{class_iri:path}/graph",
+    "/ontologies/{ontology_id}/graph/{class_iri:path}",
     response_model=EntityGraphResponse,
 )
 async def get_class_graph(
