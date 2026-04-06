@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -459,8 +459,11 @@ class ProjectService:
         )
 
         if user is None:
-            # Anonymous: only public projects
-            query = query.where(Project.is_public == True)  # noqa: E712
+            # Anonymous: mine/private require membership, so return no rows
+            if filter_type in ("mine", "private"):
+                query = query.where(literal(False))
+            else:
+                query = query.where(Project.is_public == True)  # noqa: E712
         else:
             # Authenticated user
             if filter_type == "public":
