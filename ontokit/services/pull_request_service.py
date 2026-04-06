@@ -1520,6 +1520,73 @@ class PullRequestService:
                     pr.status = PRStatus.CLOSED.value
                 await self.db.commit()
 
+            # --- Phase 12: Trigger embedding rebuild on merge (DEDUP-03, D-04) ---
+            if pr_data.get("merged"):
+                # Clean up embeddings for the merged branch
+                merged_branch = pr_data.get("head", {}).get("ref", "")
+                if merged_branch:
+                    try:
+                        from ontokit.services.embedding_service import EmbeddingService
+
+                        embedding_svc = EmbeddingService(self.db)
+                        await embedding_svc.cleanup_merged_branch_embeddings(
+                            project_id, merged_branch
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to cleanup embeddings for merged branch %s", merged_branch
+                        )
+
+                # Enqueue rebuild job for default branch (with active-job dedup check)
+                try:
+                    from ontokit.api.utils.redis import get_arq_pool
+                    from ontokit.models.embedding import EmbeddingJob
+
+                    default_branch = pr_data.get("base", {}).get("ref", "main")
+                    active_job = (
+                        await self.db.execute(
+                            select(EmbeddingJob).where(
+                                EmbeddingJob.project_id == project_id,
+                                EmbeddingJob.branch == default_branch,
+                                EmbeddingJob.status.in_(["pending", "processing"]),
+                            )
+                        )
+                    ).scalars().first()
+
+                    if not active_job:
+                        import uuid as uuid_mod
+
+                        job_id = uuid_mod.uuid4()
+                        new_job = EmbeddingJob(
+                            id=job_id,
+                            project_id=project_id,
+                            branch=default_branch,
+                            status="pending",
+                        )
+                        self.db.add(new_job)
+                        await self.db.commit()
+
+                        pool = await get_arq_pool()
+                        await pool.enqueue_job(
+                            "run_embedding_generation_task",
+                            str(project_id),
+                            default_branch,
+                            str(job_id),
+                        )
+                        logger.info(
+                            "Enqueued embedding rebuild for %s/%s after merge",
+                            project_id,
+                            default_branch,
+                        )
+                    else:
+                        logger.info(
+                            "Embedding rebuild already in progress for %s/%s, skipping",
+                            project_id,
+                            default_branch,
+                        )
+                except Exception:
+                    logger.exception("Failed to enqueue embedding rebuild after merge")
+
         elif action == "reopened":
             if pr:
                 pr.status = PRStatus.OPEN.value

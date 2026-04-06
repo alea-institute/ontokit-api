@@ -73,6 +73,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.exception("Failed to initialise MinIO storage — continuing startup")
 
+    # --- Embedding Index Freshness Check (D-05) --------------------------
+    try:
+        from ontokit.services.startup_checks import check_and_trigger_embedding_rebuilds
+
+        await check_and_trigger_embedding_rebuilds()
+    except Exception:
+        logger.exception("Startup embedding freshness check failed — continuing")
+
     logger.info("Startup complete")
 
     yield
