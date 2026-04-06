@@ -85,6 +85,8 @@ class ProjectMember(Base):
     user_id: Mapped[str] = mapped_column(String(255), nullable=False)  # Zitadel user ID
     role: Mapped[str] = mapped_column(String(50), default="viewer")  # owner, admin, editor, viewer
     preferred_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Allows a trusted editor to self-merge structural PRs without peer review (default: off)
+    can_self_merge_structural: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     project: Mapped["Project"] = relationship(back_populates="members")

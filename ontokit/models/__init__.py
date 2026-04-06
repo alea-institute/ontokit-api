@@ -1,6 +1,7 @@
 """SQLAlchemy database models."""
 
 from ontokit.models.branch_metadata import BranchMetadata
+from ontokit.models.llm_config import LLMAuditLog, ProjectLLMConfig
 from ontokit.models.change_event import ChangeEventType, EntityChangeEvent
 from ontokit.models.embedding import EmbeddingJob, EntityEmbedding, ProjectEmbeddingConfig
 from ontokit.models.join_request import JoinRequest, JoinRequestStatus
@@ -35,6 +36,8 @@ from ontokit.models.user_github_token import UserGitHubToken
 
 __all__ = [
     "BranchMetadata",
+    "LLMAuditLog",
+    "ProjectLLMConfig",
     "ChangeEventType",
     "EmbeddingJob",
     "EntityChangeEvent",
