@@ -7,6 +7,7 @@ from ontokit.api.routes import (
     anonymous_suggestions,
     auth,
     classes,
+    duplicate_check,
     embeddings,
     join_requests,
     lint,
@@ -54,3 +55,5 @@ router.include_router(llm_routes.router, prefix="/projects", tags=["LLM"])
 router.include_router(llm_routes.public_router, tags=["LLM"])
 # Validation: pre-commit OWL reasoner checks (TOOL-04)
 router.include_router(validation.router, tags=["Validation"])
+# Duplicate check: composite scoring endpoint for pre-submission duplicate detection (DEDUP-04)
+router.include_router(duplicate_check.router, tags=["duplicate-check"])
