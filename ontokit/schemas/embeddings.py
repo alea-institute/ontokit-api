@@ -72,3 +72,14 @@ class RankedCandidate(BaseModel):
     iri: str
     label: str
     score: float
+
+
+class SemanticSearchResultWithBranch(BaseModel):
+    """Semantic search result that includes the branch — used for cross-branch duplicate detection (DEDUP-08)."""
+
+    iri: str
+    label: str
+    entity_type: str
+    score: float
+    deprecated: bool = False
+    branch: str
