@@ -453,41 +453,45 @@ class ProjectService:
             filter_type: Filter by 'public', 'private', 'mine', or None for all accessible
             search: Case-insensitive search on name and description
         """
-        # Build base query
-        query = select(Project).options(
-            selectinload(Project.members), selectinload(Project.github_integration)
-        )
+        # Build base query with eager-loading options
+        opts = [selectinload(Project.members), selectinload(Project.github_integration)]
+        query = select(Project).options(*opts)
 
+        # Build access-control clause (all projects the user can see)
         if user is None:
-            # Anonymous: mine/private require membership, so return no rows
+            access_clause = Project.is_public == True  # noqa: E712
+        else:
+            subquery = select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)
+            access_clause = or_(
+                Project.is_public == True,  # noqa: E712
+                Project.id.in_(subquery),
+            )
+
+        # Unfiltered total: count of all accessible projects (no filter/search)
+        unfiltered_count_query = select(func.count()).select_from(
+            select(Project.id).where(access_clause).subquery()
+        )
+        unfiltered_total = await self.db.scalar(unfiltered_count_query) or 0
+
+        # Apply access control + filter_type
+        if user is None:
             if filter_type in ("mine", "private"):
+                # Anonymous: mine/private require membership, so return no rows
                 query = query.where(literal(False))
             else:
-                query = query.where(Project.is_public == True)  # noqa: E712
+                query = query.where(access_clause)
         else:
-            # Authenticated user
             if filter_type == "public":
                 query = query.where(Project.is_public == True)  # noqa: E712
             elif filter_type == "private":
-                # Private projects where user is a member
-                subquery = select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)
                 query = query.where(
                     Project.is_public == False,  # noqa: E712
                     Project.id.in_(subquery),
                 )
             elif filter_type == "mine":
-                # All projects where user is a member (public + private)
-                subquery = select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)
                 query = query.where(Project.id.in_(subquery))
             else:
-                # All accessible: public OR user is a member
-                subquery = select(ProjectMember.project_id).where(ProjectMember.user_id == user.id)
-                query = query.where(
-                    or_(
-                        Project.is_public == True,  # noqa: E712
-                        Project.id.in_(subquery),
-                    )
-                )
+                query = query.where(access_clause)
 
         # Apply search filter
         if search:
@@ -500,7 +504,7 @@ class ProjectService:
                 )
             )
 
-        # Count total
+        # Count filtered total
         count_query = select(func.count()).select_from(query.subquery())
         total = await self.db.scalar(count_query) or 0
 
@@ -512,7 +516,13 @@ class ProjectService:
 
         items = [self._to_response(p, user) for p in projects]
 
-        return ProjectListResponse(items=items, total=total, skip=skip, limit=limit)
+        return ProjectListResponse(
+            items=items,
+            total=total,
+            unfiltered_total=unfiltered_total,
+            skip=skip,
+            limit=limit,
+        )
 
     async def get(self, project_id: UUID, user: CurrentUser | None) -> ProjectResponse:
         """
