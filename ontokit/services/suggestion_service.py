@@ -697,6 +697,21 @@ class SuggestionService:
         session.reviewer_feedback = data.reason
         session.reviewed_at = datetime.now(UTC)
         session.last_activity = datetime.now(UTC)
+
+        # D-10/D-11: Record duplicate rejection if canonical IRI provided
+        if data.canonical_iri and data.entity_iri:
+            from ontokit.models.duplicate_rejection import DuplicateRejection
+
+            dup_rejection = DuplicateRejection(
+                project_id=project_id,
+                rejected_iri=data.entity_iri,  # The actual entity IRI that was rejected
+                canonical_iri=data.canonical_iri,  # The canonical entity it duplicates
+                rejection_reason=data.reason,
+                rejected_by=user.id,
+                suggestion_session_id=session.id,
+            )
+            self.db.add(dup_rejection)
+
         await self.db.commit()
 
     async def request_changes(

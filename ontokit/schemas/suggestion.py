@@ -99,6 +99,8 @@ class SuggestionRejectRequest(BaseModel):
     """Request body for rejecting a suggestion session."""
 
     reason: str = Field(..., min_length=1, description="Reason for rejection")
+    entity_iri: str | None = None  # IRI of the entity being rejected as duplicate (D-10)
+    canonical_iri: str | None = None  # IRI of the canonical entity to link to (D-10)
 
 
 class SuggestionRequestChangesRequest(BaseModel):
