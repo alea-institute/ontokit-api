@@ -682,7 +682,14 @@ async def github_webhook(
                     sync_config.status = "checking"
                     await service.db.commit()
 
-                    pool = await get_arq_pool()
-                    await pool.enqueue_job("run_remote_check_task", str(project_id))
+                    try:
+                        pool = await get_arq_pool()
+                        if pool is not None:
+                            await pool.enqueue_job("run_remote_check_task", str(project_id))
+                    except Exception:
+                        logger.warning(
+                            "Failed to queue remote sync check after webhook push",
+                            exc_info=True,
+                        )
 
     return {"status": "ok"}
