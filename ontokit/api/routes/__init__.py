@@ -6,6 +6,7 @@ from ontokit.api.routes import (
     analytics,
     auth,
     classes,
+    duplicate_check,
     embeddings,
     generation,
     join_requests,
@@ -52,3 +53,5 @@ router.include_router(llm_routes.router, prefix="/projects", tags=["LLM"])
 router.include_router(llm_routes.public_router, tags=["LLM"])
 # Generation: LLM suggestion generation + entity validation (Phase 13)
 router.include_router(generation.router, tags=["Generation"])
+# Duplicate check: composite scoring endpoint for pre-submission duplicate detection (DEDUP-04)
+router.include_router(duplicate_check.router, tags=["duplicate-check"])
