@@ -76,10 +76,7 @@ def migrate_repo_to_bare(
         bare_repo = pygit2.Repository(str(target_path))
 
         # Count branches
-        branch_count = sum(
-            1 for ref in bare_repo.references
-            if ref.startswith("refs/heads/")
-        )
+        branch_count = sum(1 for ref in bare_repo.references if ref.startswith("refs/heads/"))
 
         # Count commits (on default branch)
         commit_count = 0
@@ -87,15 +84,14 @@ def migrate_repo_to_bare(
             for ref_name in bare_repo.references:
                 if ref_name.startswith("refs/heads/"):
                     ref = bare_repo.references[ref_name]
-                    for _ in bare_repo.walk(ref.target, pygit2.GIT_SORT_TIME):
+                    for _ in bare_repo.walk(ref.target, pygit2.enums.SortMode.TIME):
                         commit_count += 1
                     break
         except Exception:
             pass
 
         logger.info(
-            f"Successfully created bare repo with {branch_count} branches, "
-            f"~{commit_count} commits"
+            f"Successfully created bare repo with {branch_count} branches, ~{commit_count} commits"
         )
 
         return True
@@ -155,9 +151,7 @@ def migrate_all_repos(
             target_path = base_path / f"{project_id}.git"
 
             if target_path.exists():
-                logger.warning(
-                    f"Target {target_path} already exists, skipping {item.name}"
-                )
+                logger.warning(f"Target {target_path} already exists, skipping {item.name}")
                 skipped += 1
                 continue
 
@@ -209,6 +203,7 @@ def main() -> int:
         # Try to load from settings
         try:
             from ontokit.core.config import settings
+
             base_path = Path(settings.git_repos_base_path)
         except ImportError:
             # Default fallback
@@ -225,7 +220,7 @@ def main() -> int:
         keep_old=args.keep_old,
     )
 
-    logger.info(f"Migration complete:")
+    logger.info("Migration complete:")
     logger.info(f"  Migrated: {migrated}")
     logger.info(f"  Skipped:  {skipped}")
     logger.info(f"  Failed:   {failed}")

@@ -9,8 +9,11 @@ Prerequisites:
     pip install httpx
 """
 
+from __future__ import annotations
+
 import sys
 import time
+from typing import Any
 
 import httpx
 
@@ -69,10 +72,10 @@ def get_admin_token() -> str:
     # Fallback: check environment variable
     import os
 
-    pat = os.environ.get("ZITADEL_ADMIN_PAT")
-    if pat:
+    env_pat = os.environ.get("ZITADEL_ADMIN_PAT")
+    if env_pat:
         print("  Using PAT from environment variable")
-        return pat
+        return env_pat
 
     print("ERROR: Could not get admin PAT.")
     print("You may need to create applications manually in Zitadel console.")
@@ -109,16 +112,16 @@ def create_project(client: httpx.Client, token: str) -> str:
         )
         projects = list_resp.json().get("result", [])
         if projects:
-            return projects[0]["id"]
+            return str(projects[0]["id"])
         raise Exception("Could not find existing project")
 
     resp.raise_for_status()
-    project_id = resp.json()["id"]
+    project_id: str = resp.json()["id"]
     print(f"  Created project: {project_id}")
     return project_id
 
 
-def create_web_application(client: httpx.Client, token: str, project_id: str) -> dict:
+def create_web_application(client: httpx.Client, token: str, project_id: str) -> dict[str, Any]:
     """Create the web application for Next.js frontend."""
     print("Creating web application...")
 
@@ -154,12 +157,12 @@ def create_web_application(client: httpx.Client, token: str, project_id: str) ->
         return {}
 
     resp.raise_for_status()
-    data = resp.json()
+    data: dict[str, Any] = resp.json()
     print(f"  Created web app - Client ID: {data.get('clientId')}")
     return data
 
 
-def create_native_application(client: httpx.Client, token: str, project_id: str) -> dict:
+def create_native_application(client: httpx.Client, token: str, project_id: str) -> dict[str, Any]:
     """Create the native application for desktop clients (Device Flow)."""
     print("Creating native application for desktop clients...")
 
@@ -195,12 +198,12 @@ def create_native_application(client: httpx.Client, token: str, project_id: str)
         return {}
 
     resp.raise_for_status()
-    data = resp.json()
+    data: dict[str, Any] = resp.json()
     print(f"  Created native app - Client ID: {data.get('clientId')}")
     return data
 
 
-def create_api_application(client: httpx.Client, token: str, project_id: str) -> dict:
+def create_api_application(client: httpx.Client, token: str, project_id: str) -> dict[str, Any]:
     """Create the API application for backend-to-backend auth."""
     print("Creating API application...")
 
@@ -218,12 +221,12 @@ def create_api_application(client: httpx.Client, token: str, project_id: str) ->
         return {}
 
     resp.raise_for_status()
-    data = resp.json()
+    data: dict[str, Any] = resp.json()
     print(f"  Created API app - Client ID: {data.get('clientId')}")
     return data
 
 
-def main():
+def main() -> None:
     """Main setup function."""
     print("=" * 60)
     print("OntoKit Zitadel Setup")
