@@ -450,7 +450,7 @@ class ProjectService:
             user: Current user (None for anonymous)
             skip: Pagination offset
             limit: Maximum results to return
-            filter_type: Filter by 'public', 'mine', or None for all accessible
+            filter_type: Filter by 'public', 'private', 'mine', or None for all accessible
             search: Case-insensitive search on name and description
         """
         # Build base query
