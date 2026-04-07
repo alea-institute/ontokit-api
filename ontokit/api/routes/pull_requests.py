@@ -679,13 +679,16 @@ async def github_webhook(
                     touched_files.update(commit.get("modified", []))
 
                 if sync_config.file_path in touched_files:
-                    sync_config.status = "checking"
-                    await service.db.commit()
-
                     try:
                         pool = await get_arq_pool()
                         if pool is not None:
                             await pool.enqueue_job("run_remote_check_task", str(project_id))
+                            sync_config.status = "checking"
+                            await service.db.commit()
+                        else:
+                            logger.warning(
+                                "ARQ pool is None; skipping remote sync check after webhook push"
+                            )
                     except Exception:
                         logger.warning(
                             "Failed to queue remote sync check after webhook push",
