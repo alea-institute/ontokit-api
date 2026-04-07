@@ -142,6 +142,7 @@ class ProjectListResponse(BaseModel):
 
     items: list[ProjectResponse]
     total: int
+    unfiltered_total: int
     skip: int
     limit: int
 
