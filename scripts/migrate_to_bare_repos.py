@@ -84,7 +84,7 @@ def migrate_repo_to_bare(
             for ref_name in bare_repo.references:
                 if ref_name.startswith("refs/heads/"):
                     ref = bare_repo.references[ref_name]
-                    for _ in bare_repo.walk(ref.target, pygit2.GIT_SORT_TIME):  # type: ignore[arg-type]
+                    for _ in bare_repo.walk(ref.target, pygit2.enums.SortMode.TIME):
                         commit_count += 1
                     break
         except Exception:
