@@ -12,8 +12,12 @@ Collaborative OWL ontology curation API built with FastAPI.
 
 - **RESTful API** for managing ontologies, classes, properties, and individuals
 - **Project management** with public/private visibility and team collaboration
+- **Git-based version control** with branching, pull requests, and sync from remote (pygit2 bare repos)
+- **Ontology linting** with 20+ semantic validation rules
+- **Semantic search** powered by sentence-transformers
 - **Authentication** via Zitadel (OpenID Connect)
-- **Real-time collaboration** support via WebSockets
+- **Real-time collaboration** via WebSockets
+- **Background job queue** with ARQ + Redis
 - **Object storage** integration with MinIO for ontology files
 
 ## Quick Start
@@ -66,12 +70,14 @@ See the [wiki](https://github.com/CatholicOS/ontokit-api/wiki) for full document
 
 ## Tech Stack
 
-- **Framework**: FastAPI (Python 3.11+)
+- **Framework**: FastAPI (Python 3.13)
 - **Database**: PostgreSQL 17 + SQLAlchemy 2.0 (async)
-- **Cache**: Redis
+- **Cache/Queue**: Redis 7 + ARQ
 - **Object Storage**: MinIO (S3-compatible)
 - **Authentication**: Zitadel (OIDC)
+- **Git**: pygit2 (bare repositories for concurrent access)
 - **Ontology Processing**: RDFLib, OWLReady2
+- **Semantic Search**: sentence-transformers
 
 ## License
 
