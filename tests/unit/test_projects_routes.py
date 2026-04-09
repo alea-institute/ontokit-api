@@ -1,7 +1,10 @@
 """Tests for project and search routes."""
 
+from __future__ import annotations
+
 from collections.abc import AsyncGenerator, Generator
-from unittest.mock import AsyncMock, patch
+from typing import Any
+from unittest.mock import MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,13 +15,17 @@ from ontokit.core.database import get_db
 from ontokit.main import app
 
 
+async def _noop_verify_access(*_args: Any, **_kwargs: Any) -> None:  # noqa: ARG001
+    """No-op replacement for verify_project_access in tests."""
+
+
 @pytest.fixture
 def mock_db_client() -> Generator[TestClient]:
     """Create a test client with the database dependency overridden.
 
     This avoids real database connections for routes that depend on ``get_db``.
     """
-    mock_session = AsyncMock()
+    mock_session = MagicMock()
 
     async def _override_get_db() -> AsyncGenerator[AsyncSession]:
         yield mock_session
@@ -80,72 +87,32 @@ class TestSearchRoute:
         response = client.get("/api/v1/search")
         assert response.status_code == 422
 
-    @patch("ontokit.api.routes.search.verify_project_access", new_callable=AsyncMock)
-    def test_sparql_blocks_insert(
-        self, _mock_access: AsyncMock, mock_db_client: TestClient
+    @pytest.mark.parametrize(
+        ("query", "expect_detail"),
+        [
+            ("INSERT DATA { <http://ex.org/s> <http://ex.org/p> <http://ex.org/o> }", True),
+            ("DELETE WHERE { ?s ?p ?o }", False),
+            ("DROP GRAPH <http://example.org/graph>", False),
+            ("CLEAR ALL", False),
+            ("CREATE GRAPH <http://example.org/new>", False),
+        ],
+        ids=["insert", "delete", "drop", "clear", "create"],
+    )
+    @patch("ontokit.api.routes.search.verify_project_access", _noop_verify_access)
+    def test_sparql_blocks_mutation(
+        self, mock_db_client: TestClient, query: str, expect_detail: bool
     ) -> None:
-        """POST /api/v1/search/sparql with INSERT query returns 400."""
+        """POST /api/v1/search/sparql with mutating queries returns 400."""
         response = mock_db_client.post(
             "/api/v1/search/sparql",
             json={
-                "query": "INSERT DATA { <http://ex.org/s> <http://ex.org/p> <http://ex.org/o> }",
+                "query": query,
                 "ontology_id": "00000000-0000-0000-0000-000000000000",
             },
         )
         assert response.status_code == 400
-        assert "not allowed" in response.json()["detail"].lower()
-
-    @patch("ontokit.api.routes.search.verify_project_access", new_callable=AsyncMock)
-    def test_sparql_blocks_delete(
-        self, _mock_access: AsyncMock, mock_db_client: TestClient
-    ) -> None:
-        """POST /api/v1/search/sparql with DELETE query returns 400."""
-        response = mock_db_client.post(
-            "/api/v1/search/sparql",
-            json={
-                "query": "DELETE WHERE { ?s ?p ?o }",
-                "ontology_id": "00000000-0000-0000-0000-000000000000",
-            },
-        )
-        assert response.status_code == 400
-
-    @patch("ontokit.api.routes.search.verify_project_access", new_callable=AsyncMock)
-    def test_sparql_blocks_drop(self, _mock_access: AsyncMock, mock_db_client: TestClient) -> None:
-        """POST /api/v1/search/sparql with DROP query returns 400."""
-        response = mock_db_client.post(
-            "/api/v1/search/sparql",
-            json={
-                "query": "DROP GRAPH <http://example.org/graph>",
-                "ontology_id": "00000000-0000-0000-0000-000000000000",
-            },
-        )
-        assert response.status_code == 400
-
-    @patch("ontokit.api.routes.search.verify_project_access", new_callable=AsyncMock)
-    def test_sparql_blocks_clear(self, _mock_access: AsyncMock, mock_db_client: TestClient) -> None:
-        """POST /api/v1/search/sparql with CLEAR query returns 400."""
-        response = mock_db_client.post(
-            "/api/v1/search/sparql",
-            json={
-                "query": "CLEAR ALL",
-                "ontology_id": "00000000-0000-0000-0000-000000000000",
-            },
-        )
-        assert response.status_code == 400
-
-    @patch("ontokit.api.routes.search.verify_project_access", new_callable=AsyncMock)
-    def test_sparql_blocks_create(
-        self, _mock_access: AsyncMock, mock_db_client: TestClient
-    ) -> None:
-        """POST /api/v1/search/sparql with CREATE query returns 400."""
-        response = mock_db_client.post(
-            "/api/v1/search/sparql",
-            json={
-                "query": "CREATE GRAPH <http://example.org/new>",
-                "ontology_id": "00000000-0000-0000-0000-000000000000",
-            },
-        )
-        assert response.status_code == 400
+        if expect_detail:
+            assert "not allowed" in response.json()["detail"].lower()
 
     def test_sparql_empty_query_rejected(self, client: TestClient) -> None:
         """POST /api/v1/search/sparql with empty query returns 422."""
