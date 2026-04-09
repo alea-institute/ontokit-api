@@ -55,11 +55,15 @@ jobs:
           fetch-depth: 2
       - uses: astral-sh/setup-uv@v4
       - run: uv sync --group dev
-      - run: uv run pytest tests/ -v --cov=ontokit --cov-branch --cov-report=xml
+      - run: uv run pytest tests/ -v --cov=ontokit --cov-branch --cov-report=xml --junitxml=junit.xml
       - uses: codecov/codecov-action@v5
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           fail_ci_if_error: true
+      - uses: codecov/test-results-action@v1
+        if: ${{ !cancelled() }}
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   build:
     runs-on: ubuntu-latest
