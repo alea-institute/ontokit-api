@@ -87,11 +87,15 @@ These three jobs run on pushes to `main` and `dev` (and on PRs). The publish job
 
 Releases follow a Weblate-inspired workflow. All commands below are run from the `ontokit-api/` directory.
 
-### 1. Prepare the release (on `dev`)
+### 1. Prepare the release (on a release branch)
+
+Create a release branch from `dev` and run the prepare script:
 
 ```bash
-git checkout dev
+git checkout dev && git pull
+git checkout -b release/0.2.0
 python scripts/prepare-release.py
+git push -u origin release/0.2.0
 ```
 
 This script:
@@ -100,21 +104,24 @@ This script:
 3. Writes the updated version back to `ontokit/version.py`.
 4. Creates a git commit: `chore: releasing 0.2.0`.
 
-### 2. Merge into `main` and tag
+### 2. Open a PR to `main`
 
 ```bash
-git checkout main
-git merge dev
+gh pr create --base main --title "Release 0.2.0" \
+  --body "Merge release 0.2.0 into main for tagging."
+```
+
+Wait for CI (lint, test, build) to pass and merge the PR.
+
+### 3. Tag the release
+
+```bash
+git checkout main && git pull
 git tag -s ontokit-0.2.0
+git push origin --tags
 ```
 
 Tags must match the pattern `ontokit-*` to trigger the publish pipeline.
-
-### 3. Push `main` and the tag
-
-```bash
-git push origin main --tags
-```
 
 ### 4. CI publishes automatically
 
@@ -129,27 +136,34 @@ When the tag reaches GitHub, the CI workflow runs the lint/test/build jobs and t
 
 ### 5. Set the next development version (on `dev`)
 
+Create a branch from `dev`, bump the version, and open a PR:
+
 ```bash
-git checkout dev
+git checkout dev && git pull
+git checkout -b chore/next-dev-version
 python scripts/set-version.py 0.3.0
-git push origin dev
+git push -u origin chore/next-dev-version
+gh pr create --base dev --title "chore: set version to 0.3.0-dev" \
+  --body "Start the next development cycle."
 ```
 
 This script:
 1. Updates `ontokit/version.py` to `0.3.0-dev`.
 2. Creates a git commit: `chore: setting version to 0.3.0-dev`.
 
+Merge the PR to start the next development cycle.
+
 ### Quick reference
 
 ```
-dev                                                                  dev
- │                                                                    │
- │  prepare-release.py               tag & push                       │
- │  (strips -dev)                    (on main)                        │
- │       │                              │            ┌─ PyPI          │  set-version.py 0.4.0
- ▼       ▼                              ▼            │                │       │
-0.3.0-dev ──▸ 0.3.0 ──merge──▸ main ──tag──▸ CI ────┼─ GitHub Release│       ▼
-                                                     └─ GHCR         └── 0.4.0-dev
+dev                                                                       dev
+ │                                                                         │
+ │  release/0.2.0 branch        PR → main        tag                      │
+ │  prepare-release.py           (CI gate)        (push)                   │
+ │       │                          │                │       ┌─ PyPI       │  chore/next-dev-version
+ ▼       ▼                          ▼                ▼       │             │  set-version.py 0.3.0
+0.2.0-dev ──▸ 0.2.0 ──PR──▸ main (merge) ──tag──▸ CI ──────┼─ GitHub     │  PR → dev
+                                                             └─ GHCR      └── 0.3.0-dev
 ```
 
 ## Patch releases
