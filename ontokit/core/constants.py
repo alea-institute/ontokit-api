@@ -14,3 +14,9 @@ ONTOKIT_SYNC_COMMITTER_EMAIL = "sync@ontokit.dev"
 ONTOKIT_COMMITTER_EMAILS: frozenset[str] = frozenset(
     {ONTOKIT_COMMITTER_EMAIL, ONTOKIT_SYNC_COMMITTER_EMAIL}
 )
+
+# Redis pubsub channels for real-time updates.
+LINT_UPDATES_CHANNEL = "lint:updates"
+NORMALIZATION_UPDATES_CHANNEL = "normalization:updates"
+ONTOLOGY_INDEX_UPDATES_CHANNEL = "ontology_index:updates"
+REMOTE_SYNC_UPDATES_CHANNEL = "remote_sync:updates"

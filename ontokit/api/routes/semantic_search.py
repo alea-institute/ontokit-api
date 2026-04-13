@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def get_embeddings(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> EmbeddingService:
+    """Dependency to get embedding service with database session."""
+    return EmbeddingService(db)
+
+
 async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser | None) -> None:
     from fastapi import HTTPException
 
@@ -41,6 +48,7 @@ async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser |
 async def semantic_search(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
+    service: Annotated[EmbeddingService, Depends(get_embeddings)],
     user: OptionalUser,
     q: str = Query(..., min_length=1, description="Search query"),
     branch: str | None = Query(default=None),
@@ -54,7 +62,6 @@ async def semantic_search(
         from ontokit.git import get_git_service
 
         resolved_branch = get_git_service().get_default_branch(project_id)
-    service = EmbeddingService(db)
     return await service.semantic_search(project_id, resolved_branch, q, limit, threshold)
 
 
@@ -66,6 +73,7 @@ async def find_similar_entities(
     project_id: UUID,
     iri: str,
     db: Annotated[AsyncSession, Depends(get_db)],
+    service: Annotated[EmbeddingService, Depends(get_embeddings)],
     user: OptionalUser,
     branch: str | None = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
@@ -79,7 +87,6 @@ async def find_similar_entities(
 
         resolved_branch = get_git_service().get_default_branch(project_id)
     decoded_iri = unquote(iri)
-    service = EmbeddingService(db)
     return await service.find_similar(project_id, resolved_branch, decoded_iri, limit, threshold)
 
 
@@ -91,6 +98,7 @@ async def rank_suggestions(
     project_id: UUID,
     body: RankSuggestionRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
+    service: Annotated[EmbeddingService, Depends(get_embeddings)],
     user: RequiredUser,
 ) -> list[RankedCandidate]:
     """Rank candidate entities by similarity to a context entity."""
@@ -99,5 +107,4 @@ async def rank_suggestions(
         from ontokit.git import get_git_service
 
         body.branch = get_git_service().get_default_branch(project_id)
-    service = EmbeddingService(db)
     return await service.rank_suggestions(project_id, body)

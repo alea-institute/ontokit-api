@@ -10,12 +10,19 @@ from arq import ArqRedis, cron
 from arq.connections import RedisSettings
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import selectinload
 
 from ontokit.core.config import settings
+from ontokit.core.constants import (
+    LINT_UPDATES_CHANNEL,
+    NORMALIZATION_UPDATES_CHANNEL,
+    ONTOLOGY_INDEX_UPDATES_CHANNEL,
+    REMOTE_SYNC_UPDATES_CHANNEL,
+)
 from ontokit.core.encryption import decrypt_token
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
-from ontokit.models.project import Project
+from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.services.github_sync import sync_github_project
@@ -24,17 +31,7 @@ from ontokit.services.normalization_service import NormalizationService
 from ontokit.services.ontology import get_ontology_service
 from ontokit.services.storage import get_storage_service
 
-# Redis pubsub channels for remote sync updates
-REMOTE_SYNC_UPDATES_CHANNEL = "remote_sync:updates"
-
 logger = logging.getLogger(__name__)
-
-# Redis pubsub channels for updates
-LINT_UPDATES_CHANNEL = "lint:updates"
-NORMALIZATION_UPDATES_CHANNEL = "normalization:updates"
-
-
-ONTOLOGY_INDEX_UPDATES_CHANNEL = "ontology_index:updates"
 
 
 async def run_ontology_index_task(
@@ -61,14 +58,20 @@ async def run_ontology_index_task(
     project_uuid = UUID(project_id)
 
     try:
-        # Verify project exists
-        result = await db.execute(select(Project).where(Project.id == project_uuid))
+        # Verify project exists (eagerly load github_integration for file path)
+        result = await db.execute(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
         project = result.scalar_one_or_none()
 
         if not project:
             raise ValueError(f"Project {project_id} not found")
 
-        if not project.source_file_path:
+        filename = get_git_ontology_path(project)
+
+        if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
 
         logger.info("Starting ontology index for project %s branch %s", project_id, branch)
@@ -80,13 +83,8 @@ async def run_ontology_index_task(
         )
 
         # Load ontology from git or storage
-        import os
-
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
-        filename = getattr(project, "git_ontology_path", None) or os.path.basename(
-            project.source_file_path
-        )
 
         git_service = BareGitRepositoryService()
         if git_service.repository_exists(project_uuid):
@@ -100,12 +98,14 @@ async def run_ontology_index_task(
                     commit_hash = repo.get_branch_commit_hash(branch)
                 except Exception:
                     commit_hash = "unknown"
-        else:
+        elif project.source_file_path:
             graph = await ontology_service.load_from_storage(
                 project_uuid, project.source_file_path, branch
             )
             if commit_hash is None:
                 commit_hash = "storage"
+        else:
+            raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
         # Run indexing
         from ontokit.services.ontology_index import OntologyIndexService

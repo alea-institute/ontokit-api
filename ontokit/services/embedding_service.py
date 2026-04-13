@@ -250,31 +250,37 @@ class EmbeddingService:
 
         try:
             # Load graph
+            from sqlalchemy.orm import selectinload
+
             from ontokit.git.bare_repository import BareGitRepositoryService
-            from ontokit.models.project import Project
+            from ontokit.models.project import Project, get_git_ontology_path
             from ontokit.services.ontology import get_ontology_service
             from ontokit.services.storage import get_storage_service
 
-            proj_result = await self._db.execute(select(Project).where(Project.id == project_id))
+            proj_result = await self._db.execute(
+                select(Project)
+                .options(selectinload(Project.github_integration))
+                .where(Project.id == project_id)
+            )
             project = proj_result.scalar_one_or_none()
-            if not project or not project.source_file_path:
-                raise ValueError("Project not found or has no ontology file")
+            if not project:
+                raise ValueError("Project not found")
+            if not project.source_file_path and not project.github_integration:
+                raise ValueError("Project has no ontology file")
 
             storage = get_storage_service()
             ontology = get_ontology_service(storage)
             git = BareGitRepositoryService()
 
-            import os
-
-            filename = getattr(project, "git_ontology_path", None) or os.path.basename(
-                project.source_file_path
-            )
+            filename = get_git_ontology_path(project)
             try:
                 graph = await ontology.load_from_git(project_id, branch, filename, git)
             except (FileNotFoundError, KeyError, ValueError):
                 # Only fall back to storage for the default branch; a specific
                 # branch that doesn't exist in git should fail the job rather
                 # than silently embedding the storage snapshot under that branch.
+                if not project.source_file_path:
+                    raise
                 default_branch = git.get_default_branch(project_id)
                 if branch and branch != default_branch:
                     raise

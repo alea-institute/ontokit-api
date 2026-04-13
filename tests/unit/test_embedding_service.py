@@ -834,6 +834,179 @@ class TestEmbedProject:
         ):
             await service.embed_project(PROJECT_ID, "feature-branch", job_id)
 
+    @pytest.mark.asyncio
+    async def test_embed_project_no_source_and_no_integration_raises(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """Raises ValueError when project has no source_file_path and no integration."""
+        job_id = uuid.uuid4()
+
+        # No existing job
+        job_result = MagicMock()
+        job_result.scalar_one_or_none.return_value = None
+
+        # Project with no source and no integration
+        mock_project = MagicMock()
+        mock_project.source_file_path = None
+        mock_project.github_integration = None
+        proj_result = MagicMock()
+        proj_result.scalar_one_or_none.return_value = mock_project
+
+        mock_db.execute = AsyncMock(
+            side_effect=[
+                job_result,  # select EmbeddingJob
+                proj_result,  # select Project
+                MagicMock(),  # except handler: update EmbeddingJob status
+            ]
+        )
+
+        with pytest.raises(ValueError, match="has no ontology file"):
+            await service.embed_project(PROJECT_ID, BRANCH, job_id)
+
+    @pytest.mark.asyncio
+    async def test_embed_project_no_source_file_reraises_on_git_failure(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """Re-raises when git load fails and project has no source_file_path for fallback."""
+        from unittest.mock import patch
+
+        job_id = uuid.uuid4()
+
+        # No existing job
+        job_result = MagicMock()
+        job_result.scalar_one_or_none.return_value = None
+
+        # Project with integration but no source_file_path
+        mock_project = MagicMock()
+        mock_project.source_file_path = None
+        mock_project.github_integration = MagicMock()
+        proj_result = MagicMock()
+        proj_result.scalar_one_or_none.return_value = mock_project
+
+        cfg_result = MagicMock()
+        cfg_result.scalar_one_or_none.return_value = _make_config_row()
+
+        mock_db.execute.side_effect = [
+            job_result,  # select EmbeddingJob
+            proj_result,  # select Project
+            cfg_result,  # _get_provider
+        ]
+
+        mock_ontology = MagicMock()
+        mock_ontology.load_from_git = AsyncMock(side_effect=FileNotFoundError("not found"))
+
+        with (
+            patch(
+                "ontokit.services.embedding_service.get_embedding_provider",
+                return_value=AsyncMock(provider_name="local", model_id="m"),
+            ),
+            patch(
+                "ontokit.services.ontology.get_ontology_service",
+                return_value=mock_ontology,
+            ),
+            patch(
+                "ontokit.git.bare_repository.BareGitRepositoryService",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "ontokit.services.storage.get_storage_service",
+                return_value=MagicMock(),
+            ),
+            pytest.raises(FileNotFoundError),
+        ):
+            await service.embed_project(PROJECT_ID, BRANCH, job_id)
+
+    @pytest.mark.asyncio
+    async def test_embed_project_storage_fallback_when_no_git(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """Falls back to storage loading when git load fails on default branch."""
+        from unittest.mock import patch
+
+        from rdflib import Graph
+
+        job_id = uuid.uuid4()
+
+        # No existing job
+        job_result = MagicMock()
+        job_result.scalar_one_or_none.return_value = None
+
+        # Project with source_file_path
+        mock_project = MagicMock()
+        mock_project.source_file_path = "ontology.ttl"
+        mock_project.github_integration = MagicMock()
+        proj_result = MagicMock()
+        proj_result.scalar_one_or_none.return_value = mock_project
+
+        cfg = _make_config_row()
+        cfg_result = MagicMock()
+        cfg_result.scalar_one_or_none.return_value = cfg
+
+        empty_graph = Graph()
+
+        mock_ontology = MagicMock()
+        mock_ontology.load_from_git = AsyncMock(side_effect=FileNotFoundError("not found"))
+        mock_ontology.load_from_storage = AsyncMock(return_value=empty_graph)
+
+        mock_git = MagicMock()
+        mock_git.get_default_branch.return_value = "main"
+
+        mock_db.execute.side_effect = [
+            job_result,  # select EmbeddingJob
+            proj_result,  # select Project
+            cfg_result,  # _get_provider
+            MagicMock(),  # delete prune
+            cfg_result,  # config for last_full_embed_at
+        ]
+
+        with (
+            patch(
+                "ontokit.services.embedding_service.get_embedding_provider",
+                return_value=AsyncMock(provider_name="local", model_id="m"),
+            ),
+            patch(
+                "ontokit.services.ontology.get_ontology_service",
+                return_value=mock_ontology,
+            ),
+            patch(
+                "ontokit.git.bare_repository.BareGitRepositoryService",
+                return_value=mock_git,
+            ),
+            patch(
+                "ontokit.services.storage.get_storage_service",
+                return_value=MagicMock(),
+            ),
+        ):
+            await service.embed_project(PROJECT_ID, "main", job_id)
+
+        mock_ontology.load_from_storage.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_embed_project_not_found_raises(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """Raises ValueError when project is not found in the database."""
+        job_id = uuid.uuid4()
+
+        # No existing job
+        job_result = MagicMock()
+        job_result.scalar_one_or_none.return_value = None
+
+        # Project not found
+        proj_result = MagicMock()
+        proj_result.scalar_one_or_none.return_value = None
+
+        mock_db.execute = AsyncMock(
+            side_effect=[
+                job_result,  # select EmbeddingJob
+                proj_result,  # select Project
+                MagicMock(),  # except handler: update EmbeddingJob status
+            ]
+        )
+
+        with pytest.raises(ValueError, match="Project not found"):
+            await service.embed_project(PROJECT_ID, BRANCH, job_id)
+
 
 # ---------------------------------------------------------------------------
 # embed_single_entity

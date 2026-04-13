@@ -1,5 +1,8 @@
 """Project management endpoints."""
 
+import asyncio
+import contextlib
+import json
 import logging
 from typing import Annotated
 from uuid import UUID
@@ -12,6 +15,8 @@ from fastapi import (
     HTTPException,
     Query,
     UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
     status,
 )
 from sqlalchemy import delete as sa_delete
@@ -21,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
+from ontokit.core.constants import ONTOLOGY_INDEX_UPDATES_CHANNEL
 from ontokit.core.database import get_db
 from ontokit.core.encryption import decrypt_token
 from ontokit.git import GitRepositoryService, get_git_service
@@ -55,6 +61,8 @@ from ontokit.schemas.pull_request import (
     GitHubRepoFilesResponse,
     ProjectCreateFromGitHub,
 )
+from ontokit.services.change_event_service import ChangeEventService
+from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.github_service import get_github_service
 from ontokit.services.indexed_ontology import IndexedOntologyService
 from ontokit.services.ontology import OntologyService, get_ontology_service
@@ -90,6 +98,21 @@ def get_ontology() -> OntologyService:
 def get_git() -> GitRepositoryService:
     """Dependency to get git repository service."""
     return get_git_service()
+
+
+def get_index(db: Annotated[AsyncSession, Depends(get_db)]) -> OntologyIndexService:
+    """Dependency to get ontology index service with database session."""
+    return OntologyIndexService(db)
+
+
+def get_change_events(db: Annotated[AsyncSession, Depends(get_db)]) -> ChangeEventService:
+    """Dependency to get change event service with database session."""
+    return ChangeEventService(db)
+
+
+def get_embeddings(db: Annotated[AsyncSession, Depends(get_db)]) -> EmbeddingService:
+    """Dependency to get embedding service with database session."""
+    return EmbeddingService(db)
 
 
 def get_indexed_ontology(
@@ -1146,6 +1169,7 @@ async def delete_branch(
     service: Annotated[ProjectService, Depends(get_service)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    index_service: Annotated[OntologyIndexService, Depends(get_index)],
     user: RequiredUser,
     force: bool = Query(
         default=False, description="Force delete even if branch has unmerged changes"
@@ -1227,7 +1251,6 @@ async def delete_branch(
 
     # Clean up ontology index for deleted branch
     try:
-        index_service = OntologyIndexService(db)
         await index_service.delete_branch_index(project_id, branch_name, auto_commit=False)
     except Exception:
         logger.warning("Failed to clean up ontology index for deleted branch", exc_info=True)
@@ -1246,7 +1269,8 @@ async def save_source_content(
     storage: Annotated[StorageService, Depends(get_storage)],
     ontology: Annotated[OntologyService, Depends(get_ontology)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    change_service: Annotated[ChangeEventService, Depends(get_change_events)],
+    embed_service: Annotated[EmbeddingService, Depends(get_embeddings)],
     user: RequiredUser,
     branch: str | None = Query(default=None, description="Branch to commit to"),
 ) -> SourceContentSaveResponse:
@@ -1349,9 +1373,6 @@ async def save_source_content(
     change_events = []
     try:
         new_graph = await ontology._get_graph(project_id, current_branch)
-        from ontokit.services.change_event_service import ChangeEventService
-
-        change_service = ChangeEventService(db)
         change_events = await change_service.record_events_from_diff(
             project_id,
             current_branch,
@@ -1368,9 +1389,8 @@ async def save_source_content(
     if change_events:
         try:
             from ontokit.models.change_event import ChangeEventType
-            from ontokit.services.embedding_service import EmbeddingService
 
-            embed_config = await EmbeddingService(db).get_config(project_id)
+            embed_config = await embed_service.get_config(project_id)
             if embed_config and embed_config.auto_embed_on_save:
                 pool = await get_arq_pool()
                 if pool is None:
@@ -1415,6 +1435,36 @@ async def save_source_content(
     )
 
 
+@router.get("/{project_id}/ontology/index-status")
+async def get_ontology_index_status(
+    project_id: UUID,
+    service: Annotated[ProjectService, Depends(get_service)],
+    git: Annotated[GitRepositoryService, Depends(get_git)],
+    index_service: Annotated[OntologyIndexService, Depends(get_index)],
+    user: OptionalUser,
+    branch: str | None = Query(default=None, description="Branch to check index status for"),
+) -> dict[str, str | int | None]:
+    """Get the ontology search index status for a project/branch."""
+    project = await service.get(project_id, user)
+    resolved_branch = branch or git.get_default_branch(project_id)
+
+    index_status = await index_service.get_index_status(project.id, resolved_branch)
+
+    if index_status is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No index status found for this project and branch",
+        )
+
+    return {
+        "status": index_status.status,
+        "entity_count": index_status.entity_count,
+        "indexed_at": index_status.indexed_at.isoformat() if index_status.indexed_at else None,
+        "commit_hash": index_status.commit_hash,
+        "error_message": index_status.error_message,
+    }
+
+
 @router.post("/{project_id}/ontology/reindex", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_ontology_reindex(
     project_id: UUID,
@@ -1453,3 +1503,89 @@ async def trigger_ontology_reindex(
     )
 
     return {"status": "accepted", "branch": resolved_branch}
+
+
+# ---------------------------------------------------------------------------
+# WebSocket for real-time ontology index updates
+# ---------------------------------------------------------------------------
+
+
+class IndexConnectionManager:
+    """Manages WebSocket connections for ontology index update notifications."""
+
+    def __init__(self) -> None:
+        self.active_connections: dict[str, list[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, project_id: str) -> None:
+        if project_id not in self.active_connections:
+            self.active_connections[project_id] = []
+        self.active_connections[project_id].append(websocket)
+
+    def disconnect(self, websocket: WebSocket, project_id: str) -> None:
+        if project_id in self.active_connections:
+            if websocket in self.active_connections[project_id]:
+                self.active_connections[project_id].remove(websocket)
+            if not self.active_connections[project_id]:
+                del self.active_connections[project_id]
+
+
+index_ws_manager = IndexConnectionManager()
+
+
+@router.websocket("/{project_id}/ontology/index-ws")
+async def ontology_index_websocket(
+    websocket: WebSocket,
+    project_id: UUID,
+    token: str | None = Query(default=None, description="Bearer token for authentication"),
+) -> None:
+    """WebSocket endpoint for real-time ontology index updates.
+
+    Forwards index_started, index_complete, and index_failed events
+    from the background worker to connected clients.
+
+    Pass ``token`` as a query parameter for authentication (WebSocket
+    connections cannot use HTTP Authorization headers from browsers).
+    """
+    from ontokit.api.utils.ws_auth import authenticate_ws
+
+    project_id_str = str(project_id)
+
+    if not await authenticate_ws(websocket, project_id, token):
+        return
+
+    await index_ws_manager.connect(websocket, project_id_str)
+
+    pubsub = None
+    try:
+        pool = await get_arq_pool()
+        pubsub = pool.pubsub()
+        await pubsub.subscribe(ONTOLOGY_INDEX_UPDATES_CHANNEL)
+
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
+            if message and message["type"] == "message":
+                try:
+                    data = json.loads(message["data"])
+                    if data.get("project_id") == project_id_str:
+                        await websocket.send_json(data)
+                except json.JSONDecodeError:
+                    pass
+
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
+            except TimeoutError:
+                pass
+            except WebSocketDisconnect:
+                break
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.exception(f"Index WebSocket error for project {project_id_str}: {e}")
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011, reason="Internal server error")
+    finally:
+        index_ws_manager.disconnect(websocket, project_id_str)
+        if pubsub:
+            with contextlib.suppress(Exception):
+                await pubsub.unsubscribe(ONTOLOGY_INDEX_UPDATES_CHANNEL)

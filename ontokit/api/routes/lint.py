@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
-from ontokit.core.database import async_session_maker, get_db
+from ontokit.core.constants import LINT_UPDATES_CHANNEL
+from ontokit.core.database import get_db
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.project import Project
 from ontokit.schemas.lint import (
@@ -32,7 +33,6 @@ from ontokit.schemas.lint import (
 )
 from ontokit.services.linter import get_available_rules
 from ontokit.services.project_service import get_project_service
-from ontokit.worker import LINT_UPDATES_CHANNEL
 
 logger = logging.getLogger(__name__)
 
@@ -496,8 +496,7 @@ class LintConnectionManager:
         self.active_connections: dict[str, list[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, project_id: str) -> None:
-        """Accept connection and add to project's connection list."""
-        await websocket.accept()
+        """Add connection to project's connection list."""
         if project_id not in self.active_connections:
             self.active_connections[project_id] = []
         self.active_connections[project_id].append(websocket)
@@ -534,6 +533,7 @@ manager = LintConnectionManager()
 async def lint_websocket(
     websocket: WebSocket,
     project_id: UUID,
+    token: str | None = Query(default=None, description="Bearer token for authentication"),
 ) -> None:
     """
     WebSocket endpoint for real-time lint updates.
@@ -544,16 +544,13 @@ async def lint_websocket(
     - Lint run fails
 
     Messages are JSON objects with a "type" field indicating the event type.
+    Pass ``token`` as a query parameter for authentication.
     """
+    from ontokit.api.utils.ws_auth import authenticate_ws
+
     project_id_str = str(project_id)
 
-    # Verify project exists (basic access check) using manual session
-    async with async_session_maker() as db:
-        result = await db.execute(select(Project).where(Project.id == project_id))
-        project = result.scalar_one_or_none()
-
-    if not project:
-        await websocket.close(code=4004, reason="Project not found")
+    if not await authenticate_ws(websocket, project_id, token):
         return
 
     await manager.connect(websocket, project_id_str)
@@ -591,6 +588,8 @@ async def lint_websocket(
         pass
     except Exception as e:
         logger.exception(f"WebSocket error for project {project_id_str}: {e}")
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011, reason="Internal server error")
     finally:
         manager.disconnect(websocket, project_id_str)
         if pubsub:

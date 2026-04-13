@@ -379,14 +379,13 @@ class TestLintConnectionManager:
 
     @pytest.mark.asyncio
     async def test_connect_adds_websocket(self) -> None:
-        """connect() accepts the websocket and adds it to active_connections."""
+        """connect() adds the websocket to active_connections."""
         mgr = LintConnectionManager()
         ws = AsyncMock(spec=WebSocket)
         project_id = "test-project"
 
         await mgr.connect(ws, project_id)
 
-        ws.accept.assert_awaited_once()
         assert ws in mgr.active_connections[project_id]
 
     @pytest.mark.asyncio
