@@ -696,6 +696,7 @@ async def github_webhook(
                     for commit in external_commits:
                         touched_files.update(commit.get("added", []))
                         touched_files.update(commit.get("modified", []))
+                        touched_files.update(commit.get("removed", []))
 
                     if sync_config.file_path in touched_files:
                         previous_status = sync_config.status
