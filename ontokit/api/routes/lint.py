@@ -588,6 +588,8 @@ async def lint_websocket(
         pass
     except Exception as e:
         logger.exception(f"WebSocket error for project {project_id_str}: {e}")
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011, reason="Internal server error")
     finally:
         manager.disconnect(websocket, project_id_str)
         if pubsub:

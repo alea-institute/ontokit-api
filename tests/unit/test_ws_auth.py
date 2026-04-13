@@ -31,6 +31,7 @@ class TestAuthenticateWs:
         ws = AsyncMock(spec=WebSocket)
         result = await authenticate_ws(ws, PROJECT_UUID, token=None)
         assert result is False
+        ws.accept.assert_awaited_once()
         ws.close.assert_awaited_once_with(code=4001, reason="Authentication required")
 
     @pytest.mark.asyncio
@@ -42,6 +43,7 @@ class TestAuthenticateWs:
         ):
             result = await authenticate_ws(ws, PROJECT_UUID, token="bad")
         assert result is False
+        ws.accept.assert_awaited_once()
         ws.close.assert_awaited_once_with(code=4001, reason="Invalid or expired token")
 
     @pytest.mark.asyncio
@@ -53,6 +55,7 @@ class TestAuthenticateWs:
         ):
             result = await authenticate_ws(ws, PROJECT_UUID, token="tok")
         assert result is False
+        ws.accept.assert_awaited_once()
         ws.close.assert_awaited_once_with(code=1011, reason="Internal server error")
 
     @pytest.mark.asyncio
@@ -77,6 +80,7 @@ class TestAuthenticateWs:
             result = await authenticate_ws(ws, PROJECT_UUID, token="tok")
 
         assert result is False
+        ws.accept.assert_awaited_once()
         ws.close.assert_awaited_once_with(code=4004, reason="Project not found")
 
     @pytest.mark.asyncio
@@ -101,6 +105,7 @@ class TestAuthenticateWs:
             result = await authenticate_ws(ws, PROJECT_UUID, token="tok")
 
         assert result is False
+        ws.accept.assert_awaited_once()
         ws.close.assert_awaited_once_with(code=4003, reason="Access denied")
 
     @pytest.mark.asyncio
@@ -125,6 +130,7 @@ class TestAuthenticateWs:
             result = await authenticate_ws(ws, PROJECT_UUID, token="tok")
 
         assert result is False
+        ws.accept.assert_awaited_once()
         ws.close.assert_awaited_once_with(code=1011, reason="Internal server error")
 
     @pytest.mark.asyncio
@@ -149,4 +155,5 @@ class TestAuthenticateWs:
             result = await authenticate_ws(ws, PROJECT_UUID, token="tok")
 
         assert result is True
+        ws.accept.assert_awaited_once()
         ws.close.assert_not_awaited()

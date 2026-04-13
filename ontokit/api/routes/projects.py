@@ -62,6 +62,7 @@ from ontokit.schemas.pull_request import (
     ProjectCreateFromGitHub,
 )
 from ontokit.services.change_event_service import ChangeEventService
+from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.github_service import get_github_service
 from ontokit.services.indexed_ontology import IndexedOntologyService
 from ontokit.services.ontology import OntologyService, get_ontology_service
@@ -107,6 +108,11 @@ def get_index(db: Annotated[AsyncSession, Depends(get_db)]) -> OntologyIndexServ
 def get_change_events(db: Annotated[AsyncSession, Depends(get_db)]) -> ChangeEventService:
     """Dependency to get change event service with database session."""
     return ChangeEventService(db)
+
+
+def get_embeddings(db: Annotated[AsyncSession, Depends(get_db)]) -> EmbeddingService:
+    """Dependency to get embedding service with database session."""
+    return EmbeddingService(db)
 
 
 def get_indexed_ontology(
@@ -1263,8 +1269,8 @@ async def save_source_content(
     storage: Annotated[StorageService, Depends(get_storage)],
     ontology: Annotated[OntologyService, Depends(get_ontology)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
-    db: Annotated[AsyncSession, Depends(get_db)],
     change_service: Annotated[ChangeEventService, Depends(get_change_events)],
+    embed_service: Annotated[EmbeddingService, Depends(get_embeddings)],
     user: RequiredUser,
     branch: str | None = Query(default=None, description="Branch to commit to"),
 ) -> SourceContentSaveResponse:
@@ -1383,9 +1389,8 @@ async def save_source_content(
     if change_events:
         try:
             from ontokit.models.change_event import ChangeEventType
-            from ontokit.services.embedding_service import EmbeddingService
 
-            embed_config = await EmbeddingService(db).get_config(project_id)
+            embed_config = await embed_service.get_config(project_id)
             if embed_config and embed_config.auto_embed_on_save:
                 pool = await get_arq_pool()
                 if pool is None:
@@ -1577,6 +1582,8 @@ async def ontology_index_websocket(
         pass
     except Exception as e:
         logger.exception(f"Index WebSocket error for project {project_id_str}: {e}")
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011, reason="Internal server error")
     finally:
         index_ws_manager.disconnect(websocket, project_id_str)
         if pubsub:
