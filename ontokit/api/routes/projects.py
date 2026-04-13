@@ -1415,6 +1415,37 @@ async def save_source_content(
     )
 
 
+@router.get("/{project_id}/ontology/index-status")
+async def get_ontology_index_status(
+    project_id: UUID,
+    service: Annotated[ProjectService, Depends(get_service)],
+    git: Annotated[GitRepositoryService, Depends(get_git)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+    branch: str | None = Query(default=None, description="Branch to check index status for"),
+) -> dict[str, str | int | None]:
+    """Get the ontology search index status for a project/branch."""
+    project = await service.get(project_id, user)
+    resolved_branch = branch or git.get_default_branch(project_id)
+
+    index_service = OntologyIndexService(db)
+    index_status = await index_service.get_index_status(project.id, resolved_branch)
+
+    if index_status is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No index status found for this project and branch",
+        )
+
+    return {
+        "status": index_status.status,
+        "entity_count": index_status.entity_count,
+        "indexed_at": index_status.indexed_at.isoformat() if index_status.indexed_at else None,
+        "commit_hash": index_status.commit_hash,
+        "error_message": index_status.error_message,
+    }
+
+
 @router.post("/{project_id}/ontology/reindex", status_code=status.HTTP_202_ACCEPTED)
 async def trigger_ontology_reindex(
     project_id: UUID,
