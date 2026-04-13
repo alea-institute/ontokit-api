@@ -705,9 +705,7 @@ async def github_webhook(
                         try:
                             pool = await get_arq_pool()
                             if pool is not None:
-                                await pool.enqueue_job(
-                                    "run_remote_check_task", str(project_id)
-                                )
+                                await pool.enqueue_job("run_remote_check_task", str(project_id))
                             else:
                                 logger.warning(
                                     "ARQ pool is None; skipping remote sync check"
