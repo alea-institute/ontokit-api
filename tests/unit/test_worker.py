@@ -1017,6 +1017,30 @@ class TestRunOntologyIndexTaskEdgeCases:
 
         assert result["commit_hash"] == "unknown"
 
+    @pytest.mark.asyncio
+    async def test_no_git_repo_and_no_storage_file_raises(
+        self, mock_ctx: dict[str, Any], project_id: str
+    ) -> None:
+        """Raises ValueError when git repo doesn't exist and project has no source_file_path."""
+        project = Mock()
+        project.source_file_path = None
+        project.github_integration = MagicMock()  # has integration so early guard passes
+        mock_result = Mock()
+        mock_result.scalar_one_or_none.return_value = project
+        mock_ctx["db"].execute.return_value = mock_result
+
+        with (
+            patch("ontokit.worker.get_storage_service"),
+            patch("ontokit.worker.get_ontology_service"),
+            patch("ontokit.worker.BareGitRepositoryService") as mock_git_cls,
+            patch("ontokit.worker.get_git_ontology_path", return_value="ontology.ttl"),
+        ):
+            mock_git_svc = mock_git_cls.return_value
+            mock_git_svc.repository_exists.return_value = False
+
+            with pytest.raises(ValueError, match="no git repository and no storage file"):
+                await run_ontology_index_task(mock_ctx, project_id, "main")
+
 
 # ---------------------------------------------------------------------------
 # run_lint_task – failure path
