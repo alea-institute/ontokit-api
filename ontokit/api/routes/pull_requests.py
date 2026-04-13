@@ -668,7 +668,7 @@ async def github_webhook(
             external_commits = [
                 c
                 for c in commits
-                if c.get("committer", {}).get("email") not in ONTOKIT_COMMITTER_EMAILS
+                if (c.get("committer") or {}).get("email") not in ONTOKIT_COMMITTER_EMAILS
             ]
 
             if not external_commits:
@@ -694,9 +694,9 @@ async def github_webhook(
                     # Check if any external commit touches the tracked file
                     touched_files: set[str] = set()
                     for commit in external_commits:
-                        touched_files.update(commit.get("added", []))
-                        touched_files.update(commit.get("modified", []))
-                        touched_files.update(commit.get("removed", []))
+                        touched_files.update(commit.get("added") or [])
+                        touched_files.update(commit.get("modified") or [])
+                        touched_files.update(commit.get("removed") or [])
 
                     if sync_config.file_path in touched_files:
                         previous_status = sync_config.status
