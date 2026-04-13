@@ -263,8 +263,10 @@ class EmbeddingService:
                 .where(Project.id == project_id)
             )
             project = proj_result.scalar_one_or_none()
-            if not project or not project.source_file_path:
-                raise ValueError("Project not found or has no ontology file")
+            if not project:
+                raise ValueError("Project not found")
+            if not project.source_file_path and not project.github_integration:
+                raise ValueError("Project has no ontology file")
 
             storage = get_storage_service()
             ontology = get_ontology_service(storage)
@@ -277,6 +279,8 @@ class EmbeddingService:
                 # Only fall back to storage for the default branch; a specific
                 # branch that doesn't exist in git should fail the job rather
                 # than silently embedding the storage snapshot under that branch.
+                if not project.source_file_path:
+                    raise
                 default_branch = git.get_default_branch(project_id)
                 if branch and branch != default_branch:
                     raise

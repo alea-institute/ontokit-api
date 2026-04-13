@@ -5,12 +5,12 @@ from __future__ import annotations
 import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
 
-from ontokit.api.routes.projects import get_git, get_service
+from ontokit.api.routes.projects import get_git, get_index, get_service
 from ontokit.main import app
 from ontokit.models.ontology_index import IndexingStatus
 
@@ -62,24 +62,30 @@ def mock_git_service() -> Generator[MagicMock, None, None]:
         app.dependency_overrides.pop(get_git, None)
 
 
+@pytest.fixture
+def mock_index_service() -> Generator[AsyncMock, None, None]:
+    mock_idx = AsyncMock()
+    app.dependency_overrides[get_index] = lambda: mock_idx
+    try:
+        yield mock_idx
+    finally:
+        app.dependency_overrides.pop(get_index, None)
+
+
 class TestGetOntologyIndexStatus:
     """Tests for the GET index-status endpoint."""
 
-    @patch("ontokit.api.routes.projects.OntologyIndexService")
     def test_returns_status_when_index_exists(
         self,
-        mock_index_cls: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
         mock_project_service: AsyncMock,
         mock_git_service: MagicMock,  # noqa: ARG002
+        mock_index_service: AsyncMock,
     ) -> None:
         """Returns 200 with index status fields when a record exists."""
         client, _ = authed_client
         mock_project_service.get.return_value = _fake_project()
-
-        mock_index_svc = AsyncMock()
-        mock_index_svc.get_index_status.return_value = _fake_index_status()
-        mock_index_cls.return_value = mock_index_svc
+        mock_index_service.get_index_status.return_value = _fake_index_status()
 
         response = client.get(URL)
 
@@ -91,90 +97,74 @@ class TestGetOntologyIndexStatus:
         assert data["indexed_at"] == "2026-01-15T12:00:00+00:00"
         assert data["error_message"] is None
 
-    @patch("ontokit.api.routes.projects.OntologyIndexService")
     def test_returns_404_when_no_index_record(
         self,
-        mock_index_cls: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
         mock_project_service: AsyncMock,
         mock_git_service: MagicMock,  # noqa: ARG002
+        mock_index_service: AsyncMock,
     ) -> None:
         """Returns 404 when no index status record exists for the branch."""
         client, _ = authed_client
         mock_project_service.get.return_value = _fake_project()
-
-        mock_index_svc = AsyncMock()
-        mock_index_svc.get_index_status.return_value = None
-        mock_index_cls.return_value = mock_index_svc
+        mock_index_service.get_index_status.return_value = None
 
         response = client.get(URL)
 
         assert response.status_code == 404
         assert "No index status found" in response.json()["detail"]
 
-    @patch("ontokit.api.routes.projects.OntologyIndexService")
     def test_uses_explicit_branch_param(
         self,
-        mock_index_cls: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
         mock_project_service: AsyncMock,
         mock_git_service: MagicMock,
+        mock_index_service: AsyncMock,
     ) -> None:
         """Passes the explicit branch query param to the service."""
         client, _ = authed_client
         mock_project_service.get.return_value = _fake_project()
-
-        mock_index_svc = AsyncMock()
-        mock_index_svc.get_index_status.return_value = _fake_index_status()
-        mock_index_cls.return_value = mock_index_svc
+        mock_index_service.get_index_status.return_value = _fake_index_status()
 
         response = client.get(URL, params={"branch": "develop"})
 
         assert response.status_code == 200
-        mock_index_svc.get_index_status.assert_awaited_once_with(PROJECT_ID, "develop")
+        mock_index_service.get_index_status.assert_awaited_once_with(PROJECT_ID, "develop")
         mock_git_service.get_default_branch.assert_not_called()
 
-    @patch("ontokit.api.routes.projects.OntologyIndexService")
     def test_defaults_to_project_default_branch(
         self,
-        mock_index_cls: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
         mock_project_service: AsyncMock,
         mock_git_service: MagicMock,
+        mock_index_service: AsyncMock,
     ) -> None:
         """Falls back to the project default branch when no branch param is given."""
         client, _ = authed_client
         mock_project_service.get.return_value = _fake_project()
-
-        mock_index_svc = AsyncMock()
-        mock_index_svc.get_index_status.return_value = _fake_index_status()
-        mock_index_cls.return_value = mock_index_svc
+        mock_index_service.get_index_status.return_value = _fake_index_status()
 
         response = client.get(URL)
 
         assert response.status_code == 200
         mock_git_service.get_default_branch.assert_called_once_with(PROJECT_ID)
-        mock_index_svc.get_index_status.assert_awaited_once_with(PROJECT_ID, "main")
+        mock_index_service.get_index_status.assert_awaited_once_with(PROJECT_ID, "main")
 
-    @patch("ontokit.api.routes.projects.OntologyIndexService")
     def test_returns_failed_status_with_error_message(
         self,
-        mock_index_cls: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
         mock_project_service: AsyncMock,
         mock_git_service: MagicMock,  # noqa: ARG002
+        mock_index_service: AsyncMock,
     ) -> None:
         """Returns error_message when index status is failed."""
         client, _ = authed_client
         mock_project_service.get.return_value = _fake_project()
-
-        mock_index_svc = AsyncMock()
-        mock_index_svc.get_index_status.return_value = _fake_index_status(
+        mock_index_service.get_index_status.return_value = _fake_index_status(
             status=IndexingStatus.FAILED.value,
             entity_count=0,
             error_message="Parse error in ontology.ttl",
         )
-        mock_index_cls.return_value = mock_index_svc
 
         response = client.get(URL)
 

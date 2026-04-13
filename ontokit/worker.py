@@ -73,7 +73,9 @@ async def run_ontology_index_task(
         if not project:
             raise ValueError(f"Project {project_id} not found")
 
-        if not project.source_file_path:
+        filename = get_git_ontology_path(project)
+
+        if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
 
         logger.info("Starting ontology index for project %s branch %s", project_id, branch)
@@ -87,7 +89,6 @@ async def run_ontology_index_task(
         # Load ontology from git or storage
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
-        filename = get_git_ontology_path(project)
 
         git_service = BareGitRepositoryService()
         if git_service.repository_exists(project_uuid):
@@ -101,12 +102,14 @@ async def run_ontology_index_task(
                     commit_hash = repo.get_branch_commit_hash(branch)
                 except Exception:
                     commit_hash = "unknown"
-        else:
+        elif project.source_file_path:
             graph = await ontology_service.load_from_storage(
                 project_uuid, project.source_file_path, branch
             )
             if commit_hash is None:
                 commit_hash = "storage"
+        else:
+            raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
         # Run indexing
         from ontokit.services.ontology_index import OntologyIndexService

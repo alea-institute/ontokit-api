@@ -63,9 +63,10 @@ class TestRunOntologyIndexTask:
     async def test_project_no_source_file_raises(
         self, mock_ctx: dict[str, Any], project_id: str
     ) -> None:
-        """Raises ValueError when the project has no source_file_path."""
+        """Raises ValueError when the project has no source_file_path and no integration."""
         project = Mock()
         project.source_file_path = None
+        project.github_integration = None
         mock_result = Mock()
         mock_result.scalar_one_or_none.return_value = project
         mock_ctx["db"].execute.return_value = mock_result

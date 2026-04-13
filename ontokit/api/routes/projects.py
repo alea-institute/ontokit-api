@@ -98,6 +98,11 @@ def get_git() -> GitRepositoryService:
     return get_git_service()
 
 
+def get_index(db: Annotated[AsyncSession, Depends(get_db)]) -> OntologyIndexService:
+    """Dependency to get ontology index service with database session."""
+    return OntologyIndexService(db)
+
+
 def get_indexed_ontology(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> IndexedOntologyService:
@@ -1426,7 +1431,7 @@ async def get_ontology_index_status(
     project_id: UUID,
     service: Annotated[ProjectService, Depends(get_service)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
-    db: Annotated[AsyncSession, Depends(get_db)],
+    index_service: Annotated[OntologyIndexService, Depends(get_index)],
     user: RequiredUser,
     branch: str | None = Query(default=None, description="Branch to check index status for"),
 ) -> dict[str, str | int | None]:
@@ -1434,7 +1439,6 @@ async def get_ontology_index_status(
     project = await service.get(project_id, user)
     resolved_branch = branch or git.get_default_branch(project_id)
 
-    index_service = OntologyIndexService(db)
     index_status = await index_service.get_index_status(project.id, resolved_branch)
 
     if index_status is None:
