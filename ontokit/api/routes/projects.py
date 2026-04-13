@@ -1,5 +1,8 @@
 """Project management endpoints."""
 
+import asyncio
+import contextlib
+import json
 import logging
 from typing import Annotated
 from uuid import UUID
@@ -12,6 +15,8 @@ from fastapi import (
     HTTPException,
     Query,
     UploadFile,
+    WebSocket,
+    WebSocketDisconnect,
     status,
 )
 from sqlalchemy import delete as sa_delete
@@ -21,10 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
-from ontokit.core.database import get_db
+from ontokit.core.database import async_session_maker, get_db
 from ontokit.core.encryption import decrypt_token
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.branch_metadata import BranchMetadata
+from ontokit.models.project import Project
 from ontokit.models.pull_request import GitHubIntegration, PRStatus, PullRequest
 from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.schemas.owl_class import EntitySearchResponse, OWLClassResponse, OWLClassTreeResponse
@@ -1484,3 +1490,89 @@ async def trigger_ontology_reindex(
     )
 
     return {"status": "accepted", "branch": resolved_branch}
+
+
+# ---------------------------------------------------------------------------
+# WebSocket for real-time ontology index updates
+# ---------------------------------------------------------------------------
+
+ONTOLOGY_INDEX_UPDATES_CHANNEL = "ontology_index:updates"
+
+
+class IndexConnectionManager:
+    """Manages WebSocket connections for ontology index update notifications."""
+
+    def __init__(self) -> None:
+        self.active_connections: dict[str, list[WebSocket]] = {}
+
+    async def connect(self, websocket: WebSocket, project_id: str) -> None:
+        await websocket.accept()
+        if project_id not in self.active_connections:
+            self.active_connections[project_id] = []
+        self.active_connections[project_id].append(websocket)
+
+    def disconnect(self, websocket: WebSocket, project_id: str) -> None:
+        if project_id in self.active_connections:
+            if websocket in self.active_connections[project_id]:
+                self.active_connections[project_id].remove(websocket)
+            if not self.active_connections[project_id]:
+                del self.active_connections[project_id]
+
+
+index_ws_manager = IndexConnectionManager()
+
+
+@router.websocket("/{project_id}/ontology/index-ws")
+async def ontology_index_websocket(
+    websocket: WebSocket,
+    project_id: UUID,
+) -> None:
+    """WebSocket endpoint for real-time ontology index updates.
+
+    Forwards index_started, index_complete, and index_failed events
+    from the background worker to connected clients.
+    """
+    project_id_str = str(project_id)
+
+    async with async_session_maker() as db:
+        result = await db.execute(select(Project).where(Project.id == project_id))
+        project = result.scalar_one_or_none()
+
+    if not project:
+        await websocket.close(code=4004, reason="Project not found")
+        return
+
+    await index_ws_manager.connect(websocket, project_id_str)
+
+    pubsub = None
+    try:
+        pool = await get_arq_pool()
+        pubsub = pool.pubsub()
+        await pubsub.subscribe(ONTOLOGY_INDEX_UPDATES_CHANNEL)
+
+        while True:
+            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
+            if message and message["type"] == "message":
+                try:
+                    data = json.loads(message["data"])
+                    if data.get("project_id") == project_id_str:
+                        await websocket.send_json(data)
+                except json.JSONDecodeError:
+                    pass
+
+            try:
+                await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
+            except TimeoutError:
+                pass
+            except WebSocketDisconnect:
+                break
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as e:
+        logger.exception(f"Index WebSocket error for project {project_id_str}: {e}")
+    finally:
+        index_ws_manager.disconnect(websocket, project_id_str)
+        if pubsub:
+            with contextlib.suppress(Exception):
+                await pubsub.unsubscribe(ONTOLOGY_INDEX_UPDATES_CHANNEL)
