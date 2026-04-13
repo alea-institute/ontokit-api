@@ -4,7 +4,7 @@
 [![PyPI](https://img.shields.io/pypi/v/ontokit)](https://pypi.org/project/ontokit/)
 [![Python](https://img.shields.io/python/required-version-toml?tomlFilePath=https%3A%2F%2Fraw.githubusercontent.com%2FCatholicOS%2Fontokit-api%2Fmain%2Fpyproject.toml)](https://github.com/CatholicOS/ontokit-api)
 [![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
-[![codecov](https://codecov.io/gh/CatholicOS/ontokit-api/graph/badge.svg?token=MUF88DIN0X)](https://codecov.io/gh/CatholicOS/ontokit-api)
+[![codecov](https://codecov.io/gh/CatholicOS/ontokit-api/branch/dev/graph/badge.svg?token=MUF88DIN0X)](https://codecov.io/gh/CatholicOS/ontokit-api)
 
 Collaborative OWL ontology curation API built with FastAPI.
 
