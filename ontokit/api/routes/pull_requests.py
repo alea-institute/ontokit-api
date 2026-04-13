@@ -660,45 +660,66 @@ async def github_webhook(
             push_branch = ref[len("refs/heads/") :]
             commits = payload.get("commits", [])
 
-            from ontokit.models.remote_sync import RemoteSyncConfig
+            # Loop prevention: skip remote sync check if all commits in this push
+            # were authored by OntoKit itself (prevents feedback loops when
+            # OntoKit pushes to the same repo it tracks as upstream).
+            from ontokit.core.constants import ONTOKIT_COMMITTER_EMAILS
 
-            sync_result = await service.db.execute(
-                select(RemoteSyncConfig).where(
-                    RemoteSyncConfig.project_id == project_id,
-                    RemoteSyncConfig.enabled.is_(True),
-                    RemoteSyncConfig.frequency == "webhook",
+            external_commits = [
+                c
+                for c in commits
+                if (c.get("committer") or {}).get("email") not in ONTOKIT_COMMITTER_EMAILS
+            ]
+
+            if not external_commits:
+                logger.info(
+                    "Skipping remote sync check for project %s: "
+                    "all %d commit(s) in push are OntoKit-authored",
+                    project_id,
+                    len(commits),
                 )
-            )
-            sync_config = sync_result.scalar_one_or_none()
+            else:
+                from ontokit.models.remote_sync import RemoteSyncConfig
 
-            if sync_config and sync_config.branch == push_branch:
-                # Check if any commit touches the tracked file
-                touched_files: set[str] = set()
-                for commit in commits:
-                    touched_files.update(commit.get("added", []))
-                    touched_files.update(commit.get("modified", []))
+                sync_result = await service.db.execute(
+                    select(RemoteSyncConfig).where(
+                        RemoteSyncConfig.project_id == project_id,
+                        RemoteSyncConfig.enabled.is_(True),
+                        RemoteSyncConfig.frequency == "webhook",
+                    )
+                )
+                sync_config = sync_result.scalar_one_or_none()
 
-                if sync_config.file_path in touched_files:
-                    previous_status = sync_config.status
-                    sync_config.status = "checking"
-                    await service.db.commit()
+                if sync_config and sync_config.branch == push_branch:
+                    # Check if any external commit touches the tracked file
+                    touched_files: set[str] = set()
+                    for commit in external_commits:
+                        touched_files.update(commit.get("added") or [])
+                        touched_files.update(commit.get("modified") or [])
+                        touched_files.update(commit.get("removed") or [])
 
-                    try:
-                        pool = await get_arq_pool()
-                        if pool is not None:
-                            await pool.enqueue_job("run_remote_check_task", str(project_id))
-                        else:
+                    if sync_config.file_path in touched_files:
+                        previous_status = sync_config.status
+                        sync_config.status = "checking"
+                        await service.db.commit()
+
+                        try:
+                            pool = await get_arq_pool()
+                            if pool is not None:
+                                await pool.enqueue_job("run_remote_check_task", str(project_id))
+                            else:
+                                logger.warning(
+                                    "ARQ pool is None; skipping remote sync check"
+                                    " after webhook push"
+                                )
+                                sync_config.status = previous_status
+                                await service.db.commit()
+                        except Exception:
                             logger.warning(
-                                "ARQ pool is None; skipping remote sync check after webhook push"
+                                "Failed to queue remote sync check after webhook push",
+                                exc_info=True,
                             )
                             sync_config.status = previous_status
                             await service.db.commit()
-                    except Exception:
-                        logger.warning(
-                            "Failed to queue remote sync check after webhook push",
-                            exc_info=True,
-                        )
-                        sync_config.status = previous_status
-                        await service.db.commit()
 
     return {"status": "ok"}
