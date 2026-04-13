@@ -79,64 +79,56 @@ class TestGetEntityReferences:
 class TestTriggerConsistencyCheck:
     """Tests for POST /api/v1/projects/{id}/quality/check."""
 
-    @patch("ontokit.api.routes.quality._get_redis")
-    @patch("ontokit.api.routes.quality.run_consistency_check")
-    @patch("ontokit.api.routes.quality.load_project_graph", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
     def test_trigger_check_success(
         self,
         mock_access: AsyncMock,  # noqa: ARG002
-        mock_load: AsyncMock,
-        mock_check: MagicMock,
-        mock_redis_fn: MagicMock,
+        mock_resolve: AsyncMock,
+        mock_pool_fn: AsyncMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Consistency check returns job_id on success."""
+        """Consistency check enqueues a job and returns job_id."""
         client, _ = authed_client
 
-        mock_graph = MagicMock(spec=Graph)
-        mock_load.return_value = (mock_graph, "main")
+        mock_resolve.return_value = "main"
 
-        mock_result = MagicMock()
-        mock_result.model_dump_json.return_value = '{"issues": []}'
-        mock_check.return_value = mock_result
-
-        mock_redis = AsyncMock()
-        mock_redis_fn.return_value = mock_redis
+        mock_job = MagicMock()
+        mock_pool = AsyncMock()
+        mock_pool.enqueue_job.return_value = mock_job
+        mock_pool_fn.return_value = mock_pool
 
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
         assert response.status_code == 200
         data = response.json()
         assert "job_id" in data
         assert len(data["job_id"]) > 0
+        mock_pool.enqueue_job.assert_called_once()
+        call_args = mock_pool.enqueue_job.call_args[0]
+        assert call_args[0] == "run_consistency_check_task"
 
-    @patch("ontokit.api.routes.quality._get_redis")
-    @patch("ontokit.api.routes.quality.run_consistency_check")
-    @patch("ontokit.api.routes.quality.load_project_graph", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
-    def test_trigger_check_redis_failure_still_succeeds(
+    def test_trigger_check_enqueue_failure(
         self,
         mock_access: AsyncMock,  # noqa: ARG002
-        mock_load: AsyncMock,
-        mock_check: MagicMock,
-        mock_redis_fn: MagicMock,
+        mock_resolve: AsyncMock,
+        mock_pool_fn: AsyncMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Consistency check succeeds even when Redis caching fails."""
+        """Returns 500 when ARQ job enqueue returns None."""
         client, _ = authed_client
 
-        mock_graph = MagicMock(spec=Graph)
-        mock_load.return_value = (mock_graph, "main")
+        mock_resolve.return_value = "main"
 
-        mock_result = MagicMock()
-        mock_result.model_dump_json.return_value = '{"issues": []}'
-        mock_check.return_value = mock_result
-
-        mock_redis_fn.side_effect = RuntimeError("Redis unavailable")
+        mock_pool = AsyncMock()
+        mock_pool.enqueue_job.return_value = None
+        mock_pool_fn.return_value = mock_pool
 
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
-        # Should still return 200 since Redis failure is caught with warning
-        assert response.status_code == 200
+        assert response.status_code == 500
 
 
 class TestGetQualityJobResult:
@@ -196,57 +188,180 @@ class TestGetQualityJobResult:
 class TestDetectDuplicates:
     """Tests for POST /api/v1/projects/{id}/quality/duplicates."""
 
-    @patch("ontokit.api.routes.quality.find_duplicates")
-    @patch("ontokit.api.routes.quality.load_project_graph", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
     def test_detect_duplicates_success(
         self,
         mock_access: AsyncMock,  # noqa: ARG002
-        mock_load: AsyncMock,
-        mock_find: MagicMock,
+        mock_resolve: AsyncMock,
+        mock_pool_fn: AsyncMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns duplicate detection results."""
+        """Returns job_id when duplicate detection is enqueued."""
         client, _ = authed_client
 
-        mock_graph = MagicMock(spec=Graph)
-        mock_load.return_value = (mock_graph, "main")
-        mock_find.return_value = {
-            "clusters": [],
-            "threshold": 0.85,
-            "checked_at": datetime.now(UTC).isoformat(),
-        }
+        mock_resolve.return_value = "main"
+
+        mock_job = MagicMock()
+        mock_pool = AsyncMock()
+        mock_pool.enqueue_job.return_value = mock_job
+        mock_pool_fn.return_value = mock_pool
 
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")
         assert response.status_code == 200
         data = response.json()
-        assert data["clusters"] == []
-        assert data["threshold"] == 0.85
+        assert "job_id" in data
+        assert len(data["job_id"]) > 0
+        mock_pool.enqueue_job.assert_called_once()
+        call_args = mock_pool.enqueue_job.call_args[0]
+        assert call_args[0] == "run_duplicate_detection_task"
 
-    @patch("ontokit.api.routes.quality.find_duplicates")
-    @patch("ontokit.api.routes.quality.load_project_graph", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
     def test_detect_duplicates_custom_threshold(
         self,
         mock_access: AsyncMock,  # noqa: ARG002
-        mock_load: AsyncMock,
-        mock_find: MagicMock,
+        mock_resolve: AsyncMock,
+        mock_pool_fn: AsyncMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Custom threshold parameter is forwarded to find_duplicates."""
+        """Custom threshold parameter is forwarded to the enqueued job."""
         client, _ = authed_client
 
-        mock_graph = MagicMock(spec=Graph)
-        mock_load.return_value = (mock_graph, "main")
-        mock_find.return_value = {
-            "clusters": [],
-            "threshold": 0.9,
-            "checked_at": datetime.now(UTC).isoformat(),
-        }
+        mock_resolve.return_value = "main"
+
+        mock_job = MagicMock()
+        mock_pool = AsyncMock()
+        mock_pool.enqueue_job.return_value = mock_job
+        mock_pool_fn.return_value = mock_pool
 
         response = client.post(
             f"/api/v1/projects/{PROJECT_ID}/quality/duplicates",
             params={"threshold": 0.9},
         )
         assert response.status_code == 200
-        mock_find.assert_called_once_with(mock_graph, 0.9)
+        # Verify threshold was passed to enqueue_job
+        call_args = mock_pool.enqueue_job.call_args[0]
+        assert call_args[3] == 0.9  # threshold is the 4th positional arg
+
+
+class TestGetDuplicateJobResult:
+    """Tests for GET /api/v1/projects/{id}/quality/duplicates/jobs/{job_id}."""
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_job_result_cached(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns cached duplicate result when available in Redis."""
+        client, _ = authed_client
+
+        cached_data = json.dumps(
+            {
+                "clusters": [],
+                "threshold": 0.85,
+                "checked_at": datetime.now(UTC).isoformat(),
+            }
+        )
+
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = cached_data
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["clusters"] == []
+        assert data["threshold"] == 0.85
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_job_result_not_found(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 404 when duplicate job result is not cached."""
+        client, _ = authed_client
+
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = None
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")
+        assert response.status_code == 404
+
+
+class TestGetLatestDuplicates:
+    """Tests for GET /api/v1/projects/{id}/quality/duplicates/latest."""
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_latest_cached(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_resolve: AsyncMock,
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns cached duplicate results."""
+        client, _ = authed_client
+
+        mock_resolve.return_value = "main"
+
+        cached_data = json.dumps(
+            {
+                "clusters": [
+                    {
+                        "entities": [
+                            {"iri": "http://ex.org/A", "label": "Thing A", "entity_type": "class"},
+                            {"iri": "http://ex.org/B", "label": "Thing B", "entity_type": "class"},
+                        ],
+                        "similarity": 0.92,
+                    }
+                ],
+                "threshold": 0.85,
+                "checked_at": datetime.now(UTC).isoformat(),
+            }
+        )
+
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = cached_data
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/latest")
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["clusters"]) == 1
+        assert data["clusters"][0]["similarity"] == 0.92
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_latest_empty(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_resolve: AsyncMock,
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns empty result when no cached data exists."""
+        client, _ = authed_client
+
+        mock_resolve.return_value = "main"
+
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = None
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/latest")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["clusters"] == []

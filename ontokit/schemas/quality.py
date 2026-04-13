@@ -107,6 +107,10 @@ class DuplicateCluster(BaseModel):
     similarity: float
 
 
+class DuplicateDetectionTriggerResponse(BaseModel):
+    job_id: str
+
+
 class DuplicateDetectionResult(BaseModel):
     clusters: list[DuplicateCluster]
     threshold: float
