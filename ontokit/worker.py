@@ -13,6 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.orm import selectinload
 
 from ontokit.core.config import settings
+from ontokit.core.constants import (
+    LINT_UPDATES_CHANNEL,
+    NORMALIZATION_UPDATES_CHANNEL,
+    ONTOLOGY_INDEX_UPDATES_CHANNEL,
+    REMOTE_SYNC_UPDATES_CHANNEL,
+)
 from ontokit.core.encryption import decrypt_token
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
@@ -25,17 +31,7 @@ from ontokit.services.normalization_service import NormalizationService
 from ontokit.services.ontology import get_ontology_service
 from ontokit.services.storage import get_storage_service
 
-# Redis pubsub channels for remote sync updates
-REMOTE_SYNC_UPDATES_CHANNEL = "remote_sync:updates"
-
 logger = logging.getLogger(__name__)
-
-# Redis pubsub channels for updates
-LINT_UPDATES_CHANNEL = "lint:updates"
-NORMALIZATION_UPDATES_CHANNEL = "normalization:updates"
-
-
-ONTOLOGY_INDEX_UPDATES_CHANNEL = "ontology_index:updates"
 
 
 async def run_ontology_index_task(

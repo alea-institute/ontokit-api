@@ -26,7 +26,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
-from ontokit.core.database import async_session_maker, get_db
+from ontokit.core.constants import ONTOLOGY_INDEX_UPDATES_CHANNEL
+from ontokit.core.database import get_db
 from ontokit.core.encryption import decrypt_token
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.branch_metadata import BranchMetadata
@@ -1435,7 +1436,7 @@ async def get_ontology_index_status(
     service: Annotated[ProjectService, Depends(get_service)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
     index_service: Annotated[OntologyIndexService, Depends(get_index)],
-    user: RequiredUser,
+    user: OptionalUser,
     branch: str | None = Query(default=None, description="Branch to check index status for"),
 ) -> dict[str, str | int | None]:
     """Get the ontology search index status for a project/branch."""
@@ -1503,8 +1504,6 @@ async def trigger_ontology_reindex(
 # WebSocket for real-time ontology index updates
 # ---------------------------------------------------------------------------
 
-ONTOLOGY_INDEX_UPDATES_CHANNEL = "ontology_index:updates"
-
 
 class IndexConnectionManager:
     """Manages WebSocket connections for ontology index update notifications."""
@@ -1543,41 +1542,12 @@ async def ontology_index_websocket(
     Pass ``token`` as a query parameter for authentication (WebSocket
     connections cannot use HTTP Authorization headers from browsers).
     """
-    from ontokit.core.auth import CurrentUser, fetch_userinfo, validate_token
+    from ontokit.api.utils.ws_auth import authenticate_ws
 
     project_id_str = str(project_id)
 
-    # Authenticate
-    if not token:
-        await websocket.close(code=4001, reason="Authentication required")
+    if not await authenticate_ws(websocket, project_id, token):
         return
-
-    try:
-        payload = await validate_token(token)
-        name = payload.name
-        email = payload.email
-        username = payload.preferred_username
-        if not name or not email:
-            userinfo = await fetch_userinfo(token)
-            if userinfo:
-                name = name or userinfo.get("name") or userinfo.get("preferred_username")
-                email = email or userinfo.get("email")
-                username = username or userinfo.get("preferred_username")
-        user = CurrentUser(
-            id=payload.sub, email=email, name=name, username=username, roles=payload.roles
-        )
-    except Exception:
-        await websocket.close(code=4001, reason="Invalid or expired token")
-        return
-
-    # Verify project access
-    async with async_session_maker() as db:
-        svc = ProjectService(db)
-        try:
-            await svc.get(project_id, user)
-        except Exception:
-            await websocket.close(code=4004, reason="Project not found or access denied")
-            return
 
     await index_ws_manager.connect(websocket, project_id_str)
 

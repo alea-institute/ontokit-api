@@ -14,7 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
-from ontokit.core.database import async_session_maker, get_db
+from ontokit.core.constants import LINT_UPDATES_CHANNEL
+from ontokit.core.database import get_db
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.project import Project
 from ontokit.schemas.lint import (
@@ -32,7 +33,6 @@ from ontokit.schemas.lint import (
 )
 from ontokit.services.linter import get_available_rules
 from ontokit.services.project_service import get_project_service
-from ontokit.worker import LINT_UPDATES_CHANNEL
 
 logger = logging.getLogger(__name__)
 
@@ -547,42 +547,12 @@ async def lint_websocket(
     Messages are JSON objects with a "type" field indicating the event type.
     Pass ``token`` as a query parameter for authentication.
     """
-    from ontokit.core.auth import CurrentUser, fetch_userinfo, validate_token
-    from ontokit.services.project_service import ProjectService
+    from ontokit.api.utils.ws_auth import authenticate_ws
 
     project_id_str = str(project_id)
 
-    # Authenticate
-    if not token:
-        await websocket.close(code=4001, reason="Authentication required")
+    if not await authenticate_ws(websocket, project_id, token):
         return
-
-    try:
-        payload = await validate_token(token)
-        name = payload.name
-        email = payload.email
-        username = payload.preferred_username
-        if not name or not email:
-            userinfo = await fetch_userinfo(token)
-            if userinfo:
-                name = name or userinfo.get("name") or userinfo.get("preferred_username")
-                email = email or userinfo.get("email")
-                username = username or userinfo.get("preferred_username")
-        user = CurrentUser(
-            id=payload.sub, email=email, name=name, username=username, roles=payload.roles
-        )
-    except Exception:
-        await websocket.close(code=4001, reason="Invalid or expired token")
-        return
-
-    # Verify project access
-    async with async_session_maker() as db:
-        svc = ProjectService(db)
-        try:
-            await svc.get(project_id, user)
-        except Exception:
-            await websocket.close(code=4004, reason="Project not found or access denied")
-            return
 
     await manager.connect(websocket, project_id_str)
 
