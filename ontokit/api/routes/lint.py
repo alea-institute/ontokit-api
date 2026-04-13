@@ -534,6 +534,7 @@ manager = LintConnectionManager()
 async def lint_websocket(
     websocket: WebSocket,
     project_id: UUID,
+    token: str | None = Query(default=None, description="Bearer token for authentication"),
 ) -> None:
     """
     WebSocket endpoint for real-time lint updates.
@@ -544,17 +545,44 @@ async def lint_websocket(
     - Lint run fails
 
     Messages are JSON objects with a "type" field indicating the event type.
+    Pass ``token`` as a query parameter for authentication.
     """
+    from ontokit.core.auth import CurrentUser, fetch_userinfo, validate_token
+    from ontokit.services.project_service import ProjectService
+
     project_id_str = str(project_id)
 
-    # Verify project exists (basic access check) using manual session
-    async with async_session_maker() as db:
-        result = await db.execute(select(Project).where(Project.id == project_id))
-        project = result.scalar_one_or_none()
-
-    if not project:
-        await websocket.close(code=4004, reason="Project not found")
+    # Authenticate
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
         return
+
+    try:
+        payload = await validate_token(token)
+        name = payload.name
+        email = payload.email
+        username = payload.preferred_username
+        if not name or not email:
+            userinfo = await fetch_userinfo(token)
+            if userinfo:
+                name = name or userinfo.get("name") or userinfo.get("preferred_username")
+                email = email or userinfo.get("email")
+                username = username or userinfo.get("preferred_username")
+        user = CurrentUser(
+            id=payload.sub, email=email, name=name, username=username, roles=payload.roles
+        )
+    except Exception:
+        await websocket.close(code=4001, reason="Invalid or expired token")
+        return
+
+    # Verify project access
+    async with async_session_maker() as db:
+        svc = ProjectService(db)
+        try:
+            await svc.get(project_id, user)
+        except Exception:
+            await websocket.close(code=4004, reason="Project not found or access denied")
+            return
 
     await manager.connect(websocket, project_id_str)
 
