@@ -30,7 +30,6 @@ from ontokit.core.database import async_session_maker, get_db
 from ontokit.core.encryption import decrypt_token
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.branch_metadata import BranchMetadata
-from ontokit.models.project import Project
 from ontokit.models.pull_request import GitHubIntegration, PRStatus, PullRequest
 from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.schemas.owl_class import EntitySearchResponse, OWLClassResponse, OWLClassTreeResponse
@@ -1534,21 +1533,51 @@ index_ws_manager = IndexConnectionManager()
 async def ontology_index_websocket(
     websocket: WebSocket,
     project_id: UUID,
+    token: str | None = Query(default=None, description="Bearer token for authentication"),
 ) -> None:
     """WebSocket endpoint for real-time ontology index updates.
 
     Forwards index_started, index_complete, and index_failed events
     from the background worker to connected clients.
+
+    Pass ``token`` as a query parameter for authentication (WebSocket
+    connections cannot use HTTP Authorization headers from browsers).
     """
+    from ontokit.core.auth import CurrentUser, fetch_userinfo, validate_token
+
     project_id_str = str(project_id)
 
-    async with async_session_maker() as db:
-        result = await db.execute(select(Project).where(Project.id == project_id))
-        project = result.scalar_one_or_none()
-
-    if not project:
-        await websocket.close(code=4004, reason="Project not found")
+    # Authenticate
+    if not token:
+        await websocket.close(code=4001, reason="Authentication required")
         return
+
+    try:
+        payload = await validate_token(token)
+        name = payload.name
+        email = payload.email
+        username = payload.preferred_username
+        if not name or not email:
+            userinfo = await fetch_userinfo(token)
+            if userinfo:
+                name = name or userinfo.get("name") or userinfo.get("preferred_username")
+                email = email or userinfo.get("email")
+                username = username or userinfo.get("preferred_username")
+        user = CurrentUser(
+            id=payload.sub, email=email, name=name, username=username, roles=payload.roles
+        )
+    except Exception:
+        await websocket.close(code=4001, reason="Invalid or expired token")
+        return
+
+    # Verify project access
+    async with async_session_maker() as db:
+        svc = ProjectService(db)
+        try:
+            await svc.get(project_id, user)
+        except Exception:
+            await websocket.close(code=4004, reason="Project not found or access denied")
+            return
 
     await index_ws_manager.connect(websocket, project_id_str)
 

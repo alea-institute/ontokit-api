@@ -18,6 +18,7 @@ from ontokit.api.routes.projects import (
 
 PROJECT_ID = "12345678-1234-5678-1234-567812345678"
 PROJECT_UUID = UUID(PROJECT_ID)
+FAKE_TOKEN = "fake-jwt-token"
 
 
 # ---------------------------------------------------------------------------
@@ -74,27 +75,36 @@ class TestIndexConnectionManager:
 
 
 # ---------------------------------------------------------------------------
-# Helper: mock DB context manager
+# Helpers
 # ---------------------------------------------------------------------------
 
 
-def _mock_db_context(project_exists: bool = True) -> tuple[AsyncMock, AsyncMock]:
-    """Return (mock_session_maker, mock_db) with project query configured."""
-    mock_db = AsyncMock()
-    mock_result = Mock()
-    if project_exists:
-        mock_project = Mock()
-        mock_project.id = PROJECT_ID
-        mock_result.scalar_one_or_none.return_value = mock_project
-    else:
-        mock_result.scalar_one_or_none.return_value = None
-    mock_db.execute.return_value = mock_result
+def _fake_token_payload() -> Mock:
+    """Return a mock TokenPayload from validate_token."""
+    payload = Mock()
+    payload.sub = "user-1"
+    payload.name = "Test User"
+    payload.email = "test@example.com"
+    payload.preferred_username = "testuser"
+    payload.roles = ["owner"]
+    return payload
 
-    mock_ctx = AsyncMock()
-    mock_ctx.__aenter__ = AsyncMock(return_value=mock_db)
-    mock_ctx.__aexit__ = AsyncMock(return_value=False)
-    mock_session_maker = Mock(return_value=mock_ctx)
-    return mock_session_maker, mock_db
+
+def _mock_auth_and_project(
+    project_exists: bool = True,
+) -> tuple[AsyncMock, AsyncMock]:
+    """Return (mock_validate_token, mock_project_service_cls) patches."""
+    mock_validate = AsyncMock(return_value=_fake_token_payload())
+
+    mock_svc = AsyncMock()
+    if project_exists:
+        mock_svc.get.return_value = Mock()  # project response
+    else:
+        from fastapi import HTTPException
+
+        mock_svc.get.side_effect = HTTPException(status_code=404, detail="Not found")
+
+    return mock_validate, mock_svc
 
 
 def _mock_pubsub(messages: list[Any]) -> tuple[AsyncMock, AsyncMock]:
@@ -116,7 +126,6 @@ def _mock_pubsub(messages: list[Any]) -> tuple[AsyncMock, AsyncMock]:
     mock_pubsub = AsyncMock()
     mock_pubsub.get_message = fake_get_message
     mock_pool = AsyncMock()
-    # pubsub() is a sync method that returns the PubSub object
     mock_pool.pubsub = Mock(return_value=mock_pubsub)
     return mock_pool, mock_pubsub
 
@@ -130,35 +139,68 @@ class TestOntologyIndexWebSocketUnit:
     """Direct async tests for ontology_index_websocket function."""
 
     @pytest.mark.asyncio
-    async def test_project_not_found_closes_ws(self) -> None:
-        """Closes with 4004 when project doesn't exist."""
+    async def test_no_token_closes_with_4001(self) -> None:
+        """Closes with 4001 when no token is provided."""
         ws = AsyncMock(spec=WebSocket)
-        mock_sm, _ = _mock_db_context(project_exists=False)
+        await ontology_index_websocket(ws, PROJECT_UUID, token=None)
+        ws.close.assert_awaited_once_with(code=4001, reason="Authentication required")
 
-        with patch("ontokit.api.routes.projects.async_session_maker", mock_sm):
-            await ontology_index_websocket(ws, PROJECT_UUID)
+    @pytest.mark.asyncio
+    async def test_invalid_token_closes_with_4001(self) -> None:
+        """Closes with 4001 when token validation fails."""
+        ws = AsyncMock(spec=WebSocket)
+        mock_validate = AsyncMock(side_effect=ValueError("bad token"))
 
-        ws.close.assert_awaited_once_with(code=4004, reason="Project not found")
+        with patch("ontokit.core.auth.validate_token", mock_validate):
+            await ontology_index_websocket(ws, PROJECT_UUID, token="bad-token")
+
+        ws.close.assert_awaited_once_with(code=4001, reason="Invalid or expired token")
+
+    @pytest.mark.asyncio
+    async def test_project_not_found_closes_with_4004(self) -> None:
+        """Closes with 4004 when project access is denied."""
+        ws = AsyncMock(spec=WebSocket)
+        mock_validate, mock_svc = _mock_auth_and_project(project_exists=False)
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
+        with (
+            patch("ontokit.core.auth.validate_token", mock_validate),
+            patch("ontokit.core.auth.fetch_userinfo", AsyncMock(return_value=None)),
+            patch("ontokit.api.routes.projects.async_session_maker", Mock(return_value=mock_ctx)),
+            patch("ontokit.api.routes.projects.ProjectService", return_value=mock_svc),
+        ):
+            await ontology_index_websocket(ws, PROJECT_UUID, token=FAKE_TOKEN)
+
+        ws.close.assert_awaited_once_with(code=4004, reason="Project not found or access denied")
 
     @pytest.mark.asyncio
     async def test_connects_and_forwards_matching_message(self) -> None:
         """Forwards messages matching the project_id."""
         ws = AsyncMock(spec=WebSocket)
-        # After first pubsub cycle returns None, receive_text raises disconnect
         ws.receive_text = AsyncMock(side_effect=WebSocketDisconnect(code=1000))
 
-        mock_sm, _ = _mock_db_context(project_exists=True)
+        mock_validate, mock_svc = _mock_auth_and_project(project_exists=True)
         index_msg = {"type": "index_complete", "project_id": PROJECT_ID, "entity_count": 100}
         mock_pool, mock_pubsub = _mock_pubsub([index_msg])
+
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
 
         mock_mgr = AsyncMock()
 
         with (
-            patch("ontokit.api.routes.projects.async_session_maker", mock_sm),
+            patch("ontokit.core.auth.validate_token", mock_validate),
+            patch("ontokit.core.auth.fetch_userinfo", AsyncMock(return_value=None)),
+            patch("ontokit.api.routes.projects.async_session_maker", Mock(return_value=mock_ctx)),
+            patch("ontokit.api.routes.projects.ProjectService", return_value=mock_svc),
             patch("ontokit.api.routes.projects.get_arq_pool", return_value=mock_pool),
             patch("ontokit.api.routes.projects.index_ws_manager", mock_mgr),
         ):
-            await ontology_index_websocket(ws, PROJECT_UUID)
+            await ontology_index_websocket(ws, PROJECT_UUID, token=FAKE_TOKEN)
 
         mock_mgr.connect.assert_awaited_once()
         ws.send_json.assert_awaited_once_with(index_msg)
@@ -171,16 +213,23 @@ class TestOntologyIndexWebSocketUnit:
         ws = AsyncMock(spec=WebSocket)
         ws.receive_text = AsyncMock(side_effect=WebSocketDisconnect(code=1000))
 
-        mock_sm, _ = _mock_db_context(project_exists=True)
+        mock_validate, mock_svc = _mock_auth_and_project(project_exists=True)
         other_msg = {"type": "index_complete", "project_id": "other-project"}
         mock_pool, _ = _mock_pubsub([other_msg])
 
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
         with (
-            patch("ontokit.api.routes.projects.async_session_maker", mock_sm),
+            patch("ontokit.core.auth.validate_token", mock_validate),
+            patch("ontokit.core.auth.fetch_userinfo", AsyncMock(return_value=None)),
+            patch("ontokit.api.routes.projects.async_session_maker", Mock(return_value=mock_ctx)),
+            patch("ontokit.api.routes.projects.ProjectService", return_value=mock_svc),
             patch("ontokit.api.routes.projects.get_arq_pool", return_value=mock_pool),
             patch("ontokit.api.routes.projects.index_ws_manager", AsyncMock()),
         ):
-            await ontology_index_websocket(ws, PROJECT_UUID)
+            await ontology_index_websocket(ws, PROJECT_UUID, token=FAKE_TOKEN)
 
         ws.send_json.assert_not_awaited()
 
@@ -188,19 +237,25 @@ class TestOntologyIndexWebSocketUnit:
     async def test_handles_malformed_json(self) -> None:
         """Skips malformed JSON without crashing, delivers valid ones."""
         ws = AsyncMock(spec=WebSocket)
-        # First iteration: TimeoutError (loop continues), second: disconnect
         ws.receive_text = AsyncMock(side_effect=[TimeoutError, WebSocketDisconnect(code=1000)])
 
-        mock_sm, _ = _mock_db_context(project_exists=True)
+        mock_validate, mock_svc = _mock_auth_and_project(project_exists=True)
         valid_msg = {"type": "index_started", "project_id": PROJECT_ID}
         mock_pool, _ = _mock_pubsub(["not valid json{{{", valid_msg])
 
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
         with (
-            patch("ontokit.api.routes.projects.async_session_maker", mock_sm),
+            patch("ontokit.core.auth.validate_token", mock_validate),
+            patch("ontokit.core.auth.fetch_userinfo", AsyncMock(return_value=None)),
+            patch("ontokit.api.routes.projects.async_session_maker", Mock(return_value=mock_ctx)),
+            patch("ontokit.api.routes.projects.ProjectService", return_value=mock_svc),
             patch("ontokit.api.routes.projects.get_arq_pool", return_value=mock_pool),
             patch("ontokit.api.routes.projects.index_ws_manager", AsyncMock()),
         ):
-            await ontology_index_websocket(ws, PROJECT_UUID)
+            await ontology_index_websocket(ws, PROJECT_UUID, token=FAKE_TOKEN)
 
         ws.send_json.assert_awaited_once_with(valid_msg)
 
@@ -209,20 +264,27 @@ class TestOntologyIndexWebSocketUnit:
         """Disconnects and unsubscribes even on unexpected errors."""
         ws = AsyncMock(spec=WebSocket)
 
-        mock_sm, _ = _mock_db_context(project_exists=True)
+        mock_validate, mock_svc = _mock_auth_and_project(project_exists=True)
         mock_pubsub = AsyncMock()
         mock_pubsub.get_message = AsyncMock(side_effect=RuntimeError("Redis down"))
         mock_pool = AsyncMock()
         mock_pool.pubsub = Mock(return_value=mock_pubsub)
 
+        mock_ctx = AsyncMock()
+        mock_ctx.__aenter__ = AsyncMock(return_value=AsyncMock())
+        mock_ctx.__aexit__ = AsyncMock(return_value=False)
+
         mock_mgr = AsyncMock()
 
         with (
-            patch("ontokit.api.routes.projects.async_session_maker", mock_sm),
+            patch("ontokit.core.auth.validate_token", mock_validate),
+            patch("ontokit.core.auth.fetch_userinfo", AsyncMock(return_value=None)),
+            patch("ontokit.api.routes.projects.async_session_maker", Mock(return_value=mock_ctx)),
+            patch("ontokit.api.routes.projects.ProjectService", return_value=mock_svc),
             patch("ontokit.api.routes.projects.get_arq_pool", return_value=mock_pool),
             patch("ontokit.api.routes.projects.index_ws_manager", mock_mgr),
         ):
-            await ontology_index_websocket(ws, PROJECT_UUID)
+            await ontology_index_websocket(ws, PROJECT_UUID, token=FAKE_TOKEN)
 
         mock_mgr.disconnect.assert_called_once()
         mock_pubsub.unsubscribe.assert_awaited()
