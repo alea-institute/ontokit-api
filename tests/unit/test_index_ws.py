@@ -33,7 +33,6 @@ class TestIndexConnectionManager:
         mgr = IndexConnectionManager()
         ws = AsyncMock(spec=WebSocket)
         await mgr.connect(ws, "proj")
-        ws.accept.assert_awaited_once()
         assert ws in mgr.active_connections["proj"]
 
     @pytest.mark.asyncio

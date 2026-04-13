@@ -34,7 +34,12 @@ async def authenticate_ws(
 
     Unexpected server errors are closed with **1011** (internal error)
     and logged.
+
+    The WebSocket is accepted before any error close so that the client
+    receives a proper close frame rather than a raw HTTP 403.
     """
+    await websocket.accept()
+
     # --- Token required ---
     if not token:
         await websocket.close(code=4001, reason="Authentication required")

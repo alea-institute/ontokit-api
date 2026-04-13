@@ -496,8 +496,7 @@ class LintConnectionManager:
         self.active_connections: dict[str, list[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, project_id: str) -> None:
-        """Accept connection and add to project's connection list."""
-        await websocket.accept()
+        """Add connection to project's connection list."""
         if project_id not in self.active_connections:
             self.active_connections[project_id] = []
         self.active_connections[project_id].append(websocket)
