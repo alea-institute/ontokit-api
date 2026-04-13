@@ -10,12 +10,13 @@ from arq import ArqRedis, cron
 from arq.connections import RedisSettings
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import selectinload
 
 from ontokit.core.config import settings
 from ontokit.core.encryption import decrypt_token
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
-from ontokit.models.project import Project
+from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.services.github_sync import sync_github_project
@@ -61,8 +62,12 @@ async def run_ontology_index_task(
     project_uuid = UUID(project_id)
 
     try:
-        # Verify project exists
-        result = await db.execute(select(Project).where(Project.id == project_uuid))
+        # Verify project exists (eagerly load github_integration for file path)
+        result = await db.execute(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
         project = result.scalar_one_or_none()
 
         if not project:
@@ -80,13 +85,9 @@ async def run_ontology_index_task(
         )
 
         # Load ontology from git or storage
-        import os
-
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
-        filename = getattr(project, "git_ontology_path", None) or os.path.basename(
-            project.source_file_path
-        )
+        filename = get_git_ontology_path(project)
 
         git_service = BareGitRepositoryService()
         if git_service.repository_exists(project_uuid):
