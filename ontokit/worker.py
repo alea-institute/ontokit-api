@@ -558,12 +558,10 @@ async def run_consistency_check_task(
             raise ValueError(f"Project {project_id} has no ontology file")
 
         # Load ontology graph
-        import os
-
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
         git_service = BareGitRepositoryService()
-        filename = os.path.basename(project.source_file_path)
+        filename = get_git_ontology_path(project)
 
         if git_service.repository_exists(project_uuid):
             graph = await ontology_service.load_from_git(
@@ -679,12 +677,10 @@ async def run_duplicate_detection_task(
             raise ValueError(f"Project {project_id} has no ontology file")
 
         # Load ontology graph
-        import os
-
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
         git_service = BareGitRepositoryService()
-        filename = os.path.basename(project.source_file_path)
+        filename = get_git_ontology_path(project)
 
         if git_service.repository_exists(project_uuid):
             graph = await ontology_service.load_from_git(
