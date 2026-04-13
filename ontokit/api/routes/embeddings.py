@@ -29,6 +29,13 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
+def get_embeddings(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> EmbeddingService:
+    """Dependency to get embedding service with database session."""
+    return EmbeddingService(db)
+
+
 async def _verify_write_access(project_id: UUID, db: AsyncSession, user: CurrentUser) -> None:
     service = get_project_service(db)
     project_response = await service.get(project_id, user)
@@ -43,13 +50,12 @@ async def _verify_write_access(project_id: UUID, db: AsyncSession, user: Current
 async def get_embedding_config(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
+    embed_service: Annotated[EmbeddingService, Depends(get_embeddings)],
     user: RequiredUser,
 ) -> EmbeddingConfig:
     """Get embedding configuration for a project."""
     service = get_project_service(db)
     await service.get(project_id, user)
-
-    embed_service = EmbeddingService(db)
     config = await embed_service.get_config(project_id)
     if not config:
         return EmbeddingConfig(
@@ -67,11 +73,11 @@ async def update_embedding_config(
     project_id: UUID,
     data: EmbeddingConfigUpdate,
     db: Annotated[AsyncSession, Depends(get_db)],
+    embed_service: Annotated[EmbeddingService, Depends(get_embeddings)],
     user: RequiredUser,
 ) -> EmbeddingConfig:
     """Update embedding configuration."""
     await _verify_write_access(project_id, db, user)
-    embed_service = EmbeddingService(db)
     return await embed_service.update_config(project_id, data)
 
 
@@ -148,6 +154,7 @@ async def generate_embeddings(
 async def get_embedding_status(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
+    embed_service: Annotated[EmbeddingService, Depends(get_embeddings)],
     user: RequiredUser,
     branch: str | None = Query(default=None),
 ) -> EmbeddingStatus:
@@ -158,7 +165,6 @@ async def get_embedding_status(
     git = get_git_service()
     resolved_branch = branch or git.get_default_branch(project_id)
 
-    embed_service = EmbeddingService(db)
     return await embed_service.get_status(project_id, resolved_branch)
 
 
@@ -169,9 +175,9 @@ async def get_embedding_status(
 async def clear_embeddings(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
+    embed_service: Annotated[EmbeddingService, Depends(get_embeddings)],
     user: RequiredUser,
 ) -> None:
     """Clear all embeddings for a project."""
     await _verify_write_access(project_id, db, user)
-    embed_service = EmbeddingService(db)
     await embed_service.clear_embeddings(project_id)

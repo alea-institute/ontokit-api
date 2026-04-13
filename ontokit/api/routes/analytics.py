@@ -34,6 +34,13 @@ async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser |
         raise
 
 
+def get_change_events(
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> ChangeEventService:
+    """Dependency to get change event service with database session."""
+    return ChangeEventService(db)
+
+
 @router.get(
     "/{project_id}/analytics/activity",
     response_model=ProjectActivity,
@@ -41,12 +48,12 @@ async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser |
 async def get_project_activity(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
+    service: Annotated[ChangeEventService, Depends(get_change_events)],
     user: OptionalUser,
     days: int = Query(default=30, ge=1, le=365),
 ) -> ProjectActivity:
     """Get project activity over time."""
     await _verify_access(project_id, db, user)
-    service = ChangeEventService(db)
     return await service.get_activity(project_id, days)
 
 
@@ -58,6 +65,7 @@ async def get_entity_history(
     project_id: UUID,
     iri: str,
     db: Annotated[AsyncSession, Depends(get_db)],
+    service: Annotated[ChangeEventService, Depends(get_change_events)],
     user: OptionalUser,
     branch: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
@@ -65,7 +73,6 @@ async def get_entity_history(
     """Get change history for a specific entity."""
     await _verify_access(project_id, db, user)
     decoded_iri = unquote(iri)
-    service = ChangeEventService(db)
     return await service.get_entity_history(project_id, decoded_iri, branch, limit)
 
 
@@ -76,12 +83,12 @@ async def get_entity_history(
 async def get_hot_entities(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
+    service: Annotated[ChangeEventService, Depends(get_change_events)],
     user: OptionalUser,
     limit: int = Query(default=20, ge=1, le=100),
 ) -> list[HotEntity]:
     """Get most frequently edited entities in the last 30 days."""
     await _verify_access(project_id, db, user)
-    service = ChangeEventService(db)
     return await service.get_hot_entities(project_id, limit)
 
 
@@ -92,10 +99,10 @@ async def get_hot_entities(
 async def get_contributors(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
+    service: Annotated[ChangeEventService, Depends(get_change_events)],
     user: OptionalUser,
     days: int = Query(default=30, ge=1, le=365),
 ) -> list[ContributorStats]:
     """Get contributor statistics."""
     await _verify_access(project_id, db, user)
-    service = ChangeEventService(db)
     return await service.get_contributors(project_id, days)

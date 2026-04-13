@@ -61,6 +61,7 @@ from ontokit.schemas.pull_request import (
     GitHubRepoFilesResponse,
     ProjectCreateFromGitHub,
 )
+from ontokit.services.change_event_service import ChangeEventService
 from ontokit.services.github_service import get_github_service
 from ontokit.services.indexed_ontology import IndexedOntologyService
 from ontokit.services.ontology import OntologyService, get_ontology_service
@@ -101,6 +102,11 @@ def get_git() -> GitRepositoryService:
 def get_index(db: Annotated[AsyncSession, Depends(get_db)]) -> OntologyIndexService:
     """Dependency to get ontology index service with database session."""
     return OntologyIndexService(db)
+
+
+def get_change_events(db: Annotated[AsyncSession, Depends(get_db)]) -> ChangeEventService:
+    """Dependency to get change event service with database session."""
+    return ChangeEventService(db)
 
 
 def get_indexed_ontology(
@@ -1157,6 +1163,7 @@ async def delete_branch(
     service: Annotated[ProjectService, Depends(get_service)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    index_service: Annotated[OntologyIndexService, Depends(get_index)],
     user: RequiredUser,
     force: bool = Query(
         default=False, description="Force delete even if branch has unmerged changes"
@@ -1238,7 +1245,6 @@ async def delete_branch(
 
     # Clean up ontology index for deleted branch
     try:
-        index_service = OntologyIndexService(db)
         await index_service.delete_branch_index(project_id, branch_name, auto_commit=False)
     except Exception:
         logger.warning("Failed to clean up ontology index for deleted branch", exc_info=True)
@@ -1258,6 +1264,7 @@ async def save_source_content(
     ontology: Annotated[OntologyService, Depends(get_ontology)],
     git: Annotated[GitRepositoryService, Depends(get_git)],
     db: Annotated[AsyncSession, Depends(get_db)],
+    change_service: Annotated[ChangeEventService, Depends(get_change_events)],
     user: RequiredUser,
     branch: str | None = Query(default=None, description="Branch to commit to"),
 ) -> SourceContentSaveResponse:
@@ -1360,9 +1367,6 @@ async def save_source_content(
     change_events = []
     try:
         new_graph = await ontology._get_graph(project_id, current_branch)
-        from ontokit.services.change_event_service import ChangeEventService
-
-        change_service = ChangeEventService(db)
         change_events = await change_service.record_events_from_diff(
             project_id,
             current_branch,
