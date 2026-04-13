@@ -7,6 +7,7 @@ from typing import Annotated
 from urllib.parse import unquote
 from uuid import UUID
 
+import pydantic
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -111,18 +112,21 @@ async def get_quality_job_result(
     """Get consistency check results by job ID."""
     await verify_project_access(project_id, db, user)
 
+    redis = _get_redis()
+    cached = await redis.get(f"quality_job:{project_id}:{job_id}")
+    if cached is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job result not found or expired",
+        )
     try:
-        redis = _get_redis()
-        cached = await redis.get(f"quality_job:{project_id}:{job_id}")
-        if cached:
-            return ConsistencyCheckResult.model_validate_json(cached)
-    except Exception:
-        logger.warning("Failed to read quality job from Redis", exc_info=True)
-
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Job result not found or expired",
-    )
+        return ConsistencyCheckResult.model_validate_json(cached)
+    except pydantic.ValidationError as e:
+        logger.error("Corrupt cached consistency result for job %s: %s", job_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Cached result is corrupt",
+        ) from e
 
 
 @router.get(
@@ -141,14 +145,17 @@ async def get_consistency_issues(
     # Resolve the branch so cache keys match what trigger_consistency_check stored
     resolved_branch = await resolve_branch(project_id, branch)
 
-    try:
-        redis = _get_redis()
-        cache_key = f"quality:{project_id}:{resolved_branch}"
-        cached = await redis.get(cache_key)
-        if cached:
+    redis = _get_redis()
+    cached = await redis.get(f"quality:{project_id}:{resolved_branch}")
+    if cached is not None:
+        try:
             return ConsistencyCheckResult.model_validate_json(cached)
-    except Exception:
-        logger.warning("Failed to read consistency cache from Redis", exc_info=True)
+        except pydantic.ValidationError as e:
+            logger.error("Corrupt cached consistency result: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Cached result is corrupt",
+            ) from e
 
     # No cached result — return empty
     from datetime import UTC, datetime
@@ -218,18 +225,21 @@ async def get_duplicate_job_result(
     """Get duplicate detection results by job ID."""
     await verify_project_access(project_id, db, user)
 
+    redis = _get_redis()
+    cached = await redis.get(f"duplicates_job:{project_id}:{job_id}")
+    if cached is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Job result not found or expired",
+        )
     try:
-        redis = _get_redis()
-        cached = await redis.get(f"duplicates_job:{project_id}:{job_id}")
-        if cached:
-            return DuplicateDetectionResult.model_validate_json(cached)
-    except Exception:
-        logger.warning("Failed to read duplicates job from Redis", exc_info=True)
-
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail="Job result not found or expired",
-    )
+        return DuplicateDetectionResult.model_validate_json(cached)
+    except pydantic.ValidationError as e:
+        logger.error("Corrupt cached duplicates result for job %s: %s", job_id, e)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Cached result is corrupt",
+        ) from e
 
 
 @router.get(
@@ -246,13 +256,17 @@ async def get_latest_duplicates(
     await verify_project_access(project_id, db, user)
     resolved_branch = await resolve_branch(project_id, branch)
 
-    try:
-        redis = _get_redis()
-        cached = await redis.get(f"duplicates:{project_id}:{resolved_branch}")
-        if cached:
+    redis = _get_redis()
+    cached = await redis.get(f"duplicates:{project_id}:{resolved_branch}")
+    if cached is not None:
+        try:
             return DuplicateDetectionResult.model_validate_json(cached)
-    except Exception:
-        logger.warning("Failed to read duplicates cache from Redis", exc_info=True)
+        except pydantic.ValidationError as e:
+            logger.error("Corrupt cached duplicates result: %s", e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Cached result is corrupt",
+            ) from e
 
     from datetime import UTC, datetime
 

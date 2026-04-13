@@ -107,6 +107,8 @@ class TestTriggerConsistencyCheck:
         mock_pool.enqueue_job.assert_called_once()
         call_args = mock_pool.enqueue_job.call_args[0]
         assert call_args[0] == "run_consistency_check_task"
+        # The job_id returned to the client must match what was enqueued
+        assert data["job_id"] == call_args[3]
 
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
@@ -211,13 +213,13 @@ class TestGetQualityJobResult:
         mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns 404 when Redis raises an exception."""
+        """Returns 500 when Redis raises an operational exception."""
         client, _ = authed_client
 
         mock_redis_fn.side_effect = RuntimeError("Redis down")
 
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/jobs/{JOB_ID}")
-        assert response.status_code == 404
+        assert response.status_code == 500
 
 
 class TestGetConsistencyIssues:
@@ -292,23 +294,21 @@ class TestGetConsistencyIssues:
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
-    def test_get_issues_redis_failure_returns_empty(
+    def test_get_issues_redis_failure(
         self,
         mock_access: AsyncMock,  # noqa: ARG002
         mock_resolve: AsyncMock,
         mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns empty result when Redis raises an exception."""
+        """Returns 500 when Redis raises an operational exception."""
         client, _ = authed_client
 
         mock_resolve.return_value = "main"
         mock_redis_fn.side_effect = RuntimeError("Redis down")
 
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/issues")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["issues"] == []
+        assert response.status_code == 500
 
 
 class TestDetectDuplicates:
@@ -342,6 +342,8 @@ class TestDetectDuplicates:
         mock_pool.enqueue_job.assert_called_once()
         call_args = mock_pool.enqueue_job.call_args[0]
         assert call_args[0] == "run_duplicate_detection_task"
+        # The job_id returned to the client must match what was enqueued
+        assert data["job_id"] == call_args[4]
 
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
@@ -368,9 +370,12 @@ class TestDetectDuplicates:
             params={"threshold": 0.9},
         )
         assert response.status_code == 200
+        data = response.json()
         # Verify threshold was passed to enqueue_job
         call_args = mock_pool.enqueue_job.call_args[0]
         assert call_args[3] == 0.9  # threshold is the 4th positional arg
+        # The job_id returned to the client must match what was enqueued
+        assert data["job_id"] == call_args[4]
 
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
@@ -472,13 +477,13 @@ class TestGetDuplicateJobResult:
         mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns 404 when Redis raises an exception."""
+        """Returns 500 when Redis raises an operational exception."""
         client, _ = authed_client
 
         mock_redis_fn.side_effect = RuntimeError("Redis down")
 
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")
-        assert response.status_code == 404
+        assert response.status_code == 500
 
 
 class TestGetLatestDuplicates:
@@ -552,20 +557,18 @@ class TestGetLatestDuplicates:
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
-    def test_get_latest_redis_failure_returns_empty(
+    def test_get_latest_redis_failure(
         self,
         mock_access: AsyncMock,  # noqa: ARG002
         mock_resolve: AsyncMock,
         mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns empty result when Redis raises an exception."""
+        """Returns 500 when Redis raises an operational exception."""
         client, _ = authed_client
 
         mock_resolve.return_value = "main"
         mock_redis_fn.side_effect = RuntimeError("Redis down")
 
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/latest")
-        assert response.status_code == 200
-        data = response.json()
-        assert data["clusters"] == []
+        assert response.status_code == 500
