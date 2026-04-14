@@ -294,6 +294,7 @@ async def quality_websocket(
     Pass ``token`` as a query parameter for authentication.
     """
     import asyncio
+    import contextlib
 
     from ontokit.api.utils.ws_auth import authenticate_ws
 
@@ -333,4 +334,6 @@ async def quality_websocket(
         logger.error("Quality WebSocket error for project %s: %s", project_id, e)
     finally:
         if pubsub:
-            await pubsub.unsubscribe(QUALITY_UPDATES_CHANNEL)
+            with contextlib.suppress(Exception):
+                await pubsub.unsubscribe(QUALITY_UPDATES_CHANNEL)
+                await pubsub.aclose()  # type: ignore[no-untyped-call]
