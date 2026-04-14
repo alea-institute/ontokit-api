@@ -122,9 +122,10 @@ class TestRunConsistencyCheckTask:
 
     @pytest.mark.asyncio
     async def test_project_no_ontology(self) -> None:
-        """Raises ValueError when project has no ontology file."""
+        """Raises ValueError when project has no ontology file and no integration."""
         project = MagicMock()
         project.source_file_path = None
+        project.github_integration = None
         ctx = _make_ctx(project=project)
 
         with pytest.raises(ValueError, match="no ontology file"):
@@ -252,9 +253,10 @@ class TestRunDuplicateDetectionTask:
 
     @pytest.mark.asyncio
     async def test_project_no_ontology(self) -> None:
-        """Raises ValueError when project has no ontology file."""
+        """Raises ValueError when project has no ontology file and no integration."""
         project = MagicMock()
         project.source_file_path = None
+        project.github_integration = None
         ctx = _make_ctx(project=project)
 
         with pytest.raises(ValueError, match="no ontology file"):

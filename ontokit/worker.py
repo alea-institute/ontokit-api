@@ -549,12 +549,16 @@ async def run_consistency_check_task(
             ),
         )
 
-        # Load project
-        result = await db.execute(select(Project).where(Project.id == project_uuid))
+        # Load project (eagerly load github_integration for file path resolution)
+        result = await db.execute(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
         project = result.scalar_one_or_none()
         if not project:
             raise ValueError(f"Project {project_id} not found")
-        if not project.source_file_path:
+        if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
 
         # Load ontology graph
@@ -567,10 +571,12 @@ async def run_consistency_check_task(
             graph = await ontology_service.load_from_git(
                 project_uuid, branch, filename, git_service
             )
-        else:
+        elif project.source_file_path:
             graph = await ontology_service.load_from_storage(
                 project_uuid, project.source_file_path, branch
             )
+        else:
+            raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
         # Run consistency check (CPU-bound, run in thread)
         import asyncio
@@ -671,12 +677,16 @@ async def run_duplicate_detection_task(
             ),
         )
 
-        # Load project
-        result = await db.execute(select(Project).where(Project.id == project_uuid))
+        # Load project (eagerly load github_integration for file path resolution)
+        result = await db.execute(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
         project = result.scalar_one_or_none()
         if not project:
             raise ValueError(f"Project {project_id} not found")
-        if not project.source_file_path:
+        if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
 
         # Load ontology graph
@@ -689,10 +699,12 @@ async def run_duplicate_detection_task(
             graph = await ontology_service.load_from_git(
                 project_uuid, branch, filename, git_service
             )
-        else:
+        elif project.source_file_path:
             graph = await ontology_service.load_from_storage(
                 project_uuid, project.source_file_path, branch
             )
+        else:
+            raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
         # Run duplicate detection (CPU-bound, run in thread)
         import asyncio
