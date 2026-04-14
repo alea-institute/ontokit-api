@@ -120,6 +120,7 @@ class TestTriggerConsistencyCheck:
         assert "quality_job_status" in set_args[0][0]
         assert set_args[0][1] == "pending"
 
+    @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -128,9 +129,10 @@ class TestTriggerConsistencyCheck:
         mock_access: AsyncMock,  # noqa: ARG002
         mock_resolve: AsyncMock,
         mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns 500 when ARQ job enqueue returns None."""
+        """Returns 500 and cleans up pending key when enqueue returns None."""
         client, _ = authed_client
 
         mock_resolve.return_value = "main"
@@ -139,9 +141,16 @@ class TestTriggerConsistencyCheck:
         mock_pool.enqueue_job.return_value = None
         mock_pool_fn.return_value = mock_pool
 
+        mock_redis = AsyncMock()
+        mock_redis_fn.return_value = mock_redis
+
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
         assert response.status_code == 500
+        # Pending key should be set then deleted
+        mock_redis.set.assert_called_once()
+        mock_redis.delete.assert_called_once()
 
+    @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -150,16 +159,21 @@ class TestTriggerConsistencyCheck:
         mock_access: AsyncMock,  # noqa: ARG002
         mock_resolve: AsyncMock,
         mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns 500 when ARQ pool raises an exception."""
+        """Returns 500 and cleans up pending key when ARQ pool raises."""
         client, _ = authed_client
 
         mock_resolve.return_value = "main"
         mock_pool_fn.side_effect = RuntimeError("Redis unavailable")
 
+        mock_redis = AsyncMock()
+        mock_redis_fn.return_value = mock_redis
+
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
         assert response.status_code == 500
+        mock_redis.delete.assert_called_once()
 
 
 class TestGetQualityJobResult:
@@ -237,6 +251,44 @@ class TestGetQualityJobResult:
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/jobs/{JOB_ID}")
         assert response.status_code == 500
         assert "Out of memory" in response.json()["detail"]
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_job_result_failed_unparseable(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 500 with unknown error when failed status is not valid JSON."""
+        client, _ = authed_client
+
+        mock_redis = AsyncMock()
+        mock_redis.get.side_effect = [None, b"not-json"]
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/jobs/{JOB_ID}")
+        assert response.status_code == 500
+        assert "Unknown error" in response.json()["detail"]
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_job_result_corrupt_cached(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 500 when cached result fails Pydantic validation."""
+        client, _ = authed_client
+
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = b'{"not": "a valid result"}'
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/jobs/{JOB_ID}")
+        assert response.status_code == 500
+        assert "corrupt" in response.json()["detail"].lower()
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -318,6 +370,29 @@ class TestGetConsistencyIssues:
         assert response.status_code == 200
         data = response.json()
         assert len(data["issues"]) == 1
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_issues_corrupt_cached(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_resolve: AsyncMock,
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 500 when cached result fails Pydantic validation."""
+        client, _ = authed_client
+
+        mock_resolve.return_value = "main"
+
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = b'{"invalid": true}'
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/issues")
+        assert response.status_code == 500
+        assert "corrupt" in response.json()["detail"].lower()
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
@@ -444,6 +519,7 @@ class TestDetectDuplicates:
         # The job_id returned to the client must match what was enqueued
         assert data["job_id"] == call_args[4]
 
+    @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -452,9 +528,10 @@ class TestDetectDuplicates:
         mock_access: AsyncMock,  # noqa: ARG002
         mock_resolve: AsyncMock,
         mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns 500 when ARQ job enqueue returns None."""
+        """Returns 500 and cleans up pending key when enqueue returns None."""
         client, _ = authed_client
 
         mock_resolve.return_value = "main"
@@ -463,9 +540,15 @@ class TestDetectDuplicates:
         mock_pool.enqueue_job.return_value = None
         mock_pool_fn.return_value = mock_pool
 
+        mock_redis = AsyncMock()
+        mock_redis_fn.return_value = mock_redis
+
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")
         assert response.status_code == 500
+        mock_redis.set.assert_called_once()
+        mock_redis.delete.assert_called_once()
 
+    @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -474,16 +557,21 @@ class TestDetectDuplicates:
         mock_access: AsyncMock,  # noqa: ARG002
         mock_resolve: AsyncMock,
         mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns 500 when ARQ pool raises an exception."""
+        """Returns 500 and cleans up pending key when ARQ pool raises."""
         client, _ = authed_client
 
         mock_resolve.return_value = "main"
         mock_pool_fn.side_effect = RuntimeError("Redis unavailable")
 
+        mock_redis = AsyncMock()
+        mock_redis_fn.return_value = mock_redis
+
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")
         assert response.status_code == 500
+        mock_redis.delete.assert_called_once()
 
 
 class TestGetDuplicateJobResult:
@@ -558,6 +646,44 @@ class TestGetDuplicateJobResult:
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")
         assert response.status_code == 500
         assert "Timeout exceeded" in response.json()["detail"]
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_job_result_failed_unparseable(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 500 with unknown error when failed status is not valid JSON."""
+        client, _ = authed_client
+
+        mock_redis = AsyncMock()
+        mock_redis.get.side_effect = [None, b"not-json"]
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")
+        assert response.status_code == 500
+        assert "Unknown error" in response.json()["detail"]
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_job_result_corrupt_cached(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 500 when cached result fails Pydantic validation."""
+        client, _ = authed_client
+
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = b'{"not": "valid"}'
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")
+        assert response.status_code == 500
+        assert "corrupt" in response.json()["detail"].lower()
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -637,6 +763,29 @@ class TestGetLatestDuplicates:
         data = response.json()
         assert len(data["clusters"]) == 1
         assert data["clusters"][0]["similarity"] == 0.92
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_latest_corrupt_cached(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_resolve: AsyncMock,
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 500 when cached result fails Pydantic validation."""
+        client, _ = authed_client
+
+        mock_resolve.return_value = "main"
+
+        mock_redis = AsyncMock()
+        mock_redis.get.return_value = b'{"broken": true}'
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/latest")
+        assert response.status_code == 500
+        assert "corrupt" in response.json()["detail"].lower()
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
