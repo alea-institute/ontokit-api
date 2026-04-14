@@ -77,6 +77,11 @@ async def trigger_consistency_check(
 
     job_id = str(uuid.uuid4())
 
+    # Set pending status before enqueue to avoid race with fast-completing workers
+    redis = _get_redis()
+    status_key = f"quality_job_status:{project_id}:{job_id}"
+    await redis.set(status_key, "pending", ex=600)
+
     try:
         pool = await get_arq_pool()
         job = await pool.enqueue_job(
@@ -86,6 +91,7 @@ async def trigger_consistency_check(
             job_id,
         )
         if job is None:
+            await redis.delete(status_key)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to enqueue consistency check job",
@@ -93,15 +99,12 @@ async def trigger_consistency_check(
     except HTTPException:
         raise
     except Exception as e:
+        await redis.delete(status_key)
         logger.exception("Failed to enqueue consistency check: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to enqueue consistency check job",
         ) from e
-
-    # Mark the job as pending so polling clients can distinguish queued from unknown
-    redis = _get_redis()
-    await redis.set(f"quality_job_status:{project_id}:{job_id}", "pending", ex=600)
 
     return ConsistencyCheckTriggerResponse(job_id=job_id)
 
@@ -136,9 +139,20 @@ async def get_quality_job_result(
                 detail="Cached result is corrupt",
             ) from e
 
-    # No result yet — check if the job is still pending
+    # No result yet — check if the job is still pending or failed
     job_status = await redis.get(f"quality_job_status:{project_id}:{job_id}")
     if job_status is not None:
+        status_str = job_status.decode() if isinstance(job_status, bytes) else str(job_status)
+        if status_str != "pending":
+            try:
+                failure = json.loads(status_str)
+                error_msg = failure.get("error", "Unknown error")
+            except json.JSONDecodeError:
+                error_msg = "Unknown error"
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Job failed: {error_msg}",
+            )
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content=QualityJobPendingResponse(job_id=job_id).model_dump(),
@@ -207,6 +221,11 @@ async def detect_duplicates(
 
     job_id = str(uuid.uuid4())
 
+    # Set pending status before enqueue to avoid race with fast-completing workers
+    redis = _get_redis()
+    status_key = f"duplicates_job_status:{project_id}:{job_id}"
+    await redis.set(status_key, "pending", ex=600)
+
     try:
         pool = await get_arq_pool()
         job = await pool.enqueue_job(
@@ -217,6 +236,7 @@ async def detect_duplicates(
             job_id,
         )
         if job is None:
+            await redis.delete(status_key)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to enqueue duplicate detection job",
@@ -224,15 +244,12 @@ async def detect_duplicates(
     except HTTPException:
         raise
     except Exception as e:
+        await redis.delete(status_key)
         logger.exception("Failed to enqueue duplicate detection: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to enqueue duplicate detection job",
         ) from e
-
-    # Mark the job as pending so polling clients can distinguish queued from unknown
-    redis = _get_redis()
-    await redis.set(f"duplicates_job_status:{project_id}:{job_id}", "pending", ex=600)
 
     return DuplicateDetectionTriggerResponse(job_id=job_id)
 
@@ -267,9 +284,20 @@ async def get_duplicate_job_result(
                 detail="Cached result is corrupt",
             ) from e
 
-    # No result yet — check if the job is still pending
+    # No result yet — check if the job is still pending or failed
     job_status = await redis.get(f"duplicates_job_status:{project_id}:{job_id}")
     if job_status is not None:
+        status_str = job_status.decode() if isinstance(job_status, bytes) else str(job_status)
+        if status_str != "pending":
+            try:
+                failure = json.loads(status_str)
+                error_msg = failure.get("error", "Unknown error")
+            except json.JSONDecodeError:
+                error_msg = "Unknown error"
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Job failed: {error_msg}",
+            )
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
             content=QualityJobPendingResponse(job_id=job_id).model_dump(),

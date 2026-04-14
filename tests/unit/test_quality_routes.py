@@ -220,6 +220,26 @@ class TestGetQualityJobResult:
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_job_result_failed(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 500 when the job failed and status key contains error."""
+        client, _ = authed_client
+
+        mock_redis = AsyncMock()
+        failed_status = json.dumps({"state": "failed", "error": "Out of memory"})
+        mock_redis.get.side_effect = [None, failed_status.encode()]
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/jobs/{JOB_ID}")
+        assert response.status_code == 500
+        assert "Out of memory" in response.json()["detail"]
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
     def test_get_job_result_not_found(
         self,
         mock_access: AsyncMock,  # noqa: ARG002
@@ -518,6 +538,26 @@ class TestGetDuplicateJobResult:
         data = response.json()
         assert data["status"] == "pending"
         assert data["job_id"] == JOB_ID
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_job_result_failed(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 500 when the job failed and status key contains error."""
+        client, _ = authed_client
+
+        mock_redis = AsyncMock()
+        failed_status = json.dumps({"state": "failed", "error": "Timeout exceeded"})
+        mock_redis.get.side_effect = [None, failed_status.encode()]
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")
+        assert response.status_code == 500
+        assert "Timeout exceeded" in response.json()["detail"]
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)

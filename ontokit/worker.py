@@ -629,7 +629,12 @@ async def run_consistency_check_task(
             e,
         )
         if job_id:
-            await redis.delete(f"quality_job_status:{project_id}:{job_id}")
+            # Write a short-lived failed status so polling clients can surface the error
+            await redis.set(
+                f"quality_job_status:{project_id}:{job_id}",
+                json.dumps({"state": "failed", "error": str(e)}),
+                ex=600,
+            )
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
             json.dumps(
@@ -757,7 +762,12 @@ async def run_duplicate_detection_task(
             e,
         )
         if job_id:
-            await redis.delete(f"duplicates_job_status:{project_id}:{job_id}")
+            # Write a short-lived failed status so polling clients can surface the error
+            await redis.set(
+                f"duplicates_job_status:{project_id}:{job_id}",
+                json.dumps({"state": "failed", "error": str(e)}),
+                ex=600,
+            )
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
             json.dumps(
