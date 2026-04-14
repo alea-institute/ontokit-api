@@ -10,7 +10,10 @@ Steps to perform:
 
 3. **Delete the stale local branch**: Delete the candidate branch identified in step 1. If no candidate was identified (current branch was already `dev`/`main` and no argument given), list recent local branches (excluding dev and main) and ask which one to delete.
 
-4. **Check if a Docker rebuild is needed**: Compare the pulled changes to see if any of these files changed: `Dockerfile`, `Dockerfile.prod`, `pyproject.toml`, `uv.lock`, `compose.yaml`, or `alembic/`. If any of `Dockerfile`, `Dockerfile.prod`, `pyproject.toml`, `uv.lock`, or `compose.yaml` changed, run `docker compose up -d --build` to rebuild (this also recreates containers and re-runs migrations). If only `alembic/` changed (new migration files), run `docker compose up -d --force-recreate api worker` to recreate the containers so migrations run on startup. If none of the above changed, just run `docker compose restart api worker` to pick up the volume-mounted code changes.
+4. **Check if a Docker rebuild is needed**: Compare the pulled changes against `Dockerfile`, `Dockerfile.prod`, `pyproject.toml`, `uv.lock`, `compose.yaml`, and `alembic/`, then run the first matching command:
+   - `Dockerfile`, `Dockerfile.prod`, `pyproject.toml`, `uv.lock`, or `compose.yaml` changed → `docker compose up -d --build` (rebuilds images, recreates containers, re-runs migrations)
+   - Only `alembic/` changed (new migrations) → `docker compose up -d --force-recreate api worker` (recreates containers so migrations run on startup)
+   - None of the above changed → `docker compose restart api worker` (picks up volume-mounted code changes)
 
 5. **Verify**: Run `docker compose ps` to confirm all services are healthy.
 
