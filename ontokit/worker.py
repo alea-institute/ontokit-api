@@ -46,24 +46,16 @@ _FORMAT_MAP: dict[str, str] = {
 }
 
 
-def _sync_load_from_git(
-    git_service: BareGitRepositoryService,
-    project_id: UUID,
-    branch: str,
-    filename: str,
-) -> Any:
-    """Load and parse an ontology from git synchronously (for use with asyncio.to_thread).
+def _parse_rdf(content_str: str, rdf_format: str) -> Any:
+    """Parse RDF content into a Graph (for use with ProcessPoolExecutor).
 
-    RDFLib's graph.parse() is CPU-bound and can take minutes for large ontologies.
-    Running this in a thread keeps the worker event loop responsive.
+    RDFLib's graph.parse() is CPU-bound and holds the GIL, so it must run
+    in a separate process to keep the worker event loop responsive.
     """
     from rdflib import Graph
 
-    content = git_service.get_file_from_branch(project_id, branch, filename)
-    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-    rdf_format = _FORMAT_MAP.get(ext, "turtle")
     graph = Graph()
-    graph.parse(data=content.decode("utf-8"), format=rdf_format)
+    graph.parse(data=content_str, format=rdf_format)
     return graph
 
 
@@ -593,30 +585,37 @@ async def run_consistency_check_task(
         if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
 
-        # Load ontology graph (graph.parse is CPU-bound for large files)
+        # Load ontology content and parse in a subprocess (CPU-bound, holds GIL)
         import asyncio
+        from concurrent.futures import ProcessPoolExecutor
 
-        storage = get_storage_service()
-        ontology_service = get_ontology_service(storage)
         git_service = BareGitRepositoryService()
         filename = get_git_ontology_path(project)
 
         if git_service.repository_exists(project_uuid):
-            # load_from_git is async-in-name-only — run in thread to avoid blocking
-            graph = await asyncio.to_thread(
-                lambda: _sync_load_from_git(git_service, project_uuid, branch, filename)
-            )
+            content_bytes = git_service.get_file_from_branch(project_uuid, branch, filename)
+            content_str = content_bytes.decode("utf-8")
         elif project.source_file_path:
-            graph = await ontology_service.load_from_storage(
-                project_uuid, project.source_file_path, branch
-            )
+            storage = get_storage_service()
+            content_bytes = await storage.download_file(project.source_file_path)
+            content_str = content_bytes.decode("utf-8")
         else:
             raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
-        # Run consistency check (CPU-bound, run in thread)
+        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        rdf_format = _FORMAT_MAP.get(ext, "turtle")
+
+        loop = asyncio.get_running_loop()
+        with ProcessPoolExecutor(max_workers=1) as pool:
+            graph = await loop.run_in_executor(pool, _parse_rdf, content_str, rdf_format)
+
+        # Run consistency check (also CPU-bound)
         from ontokit.services.consistency_service import run_consistency_check
 
-        check_result = await asyncio.to_thread(run_consistency_check, graph, project_id, branch)
+        with ProcessPoolExecutor(max_workers=1) as pool:
+            check_result = await loop.run_in_executor(
+                pool, run_consistency_check, graph, project_id, branch
+            )
 
         # Cache result in Redis and clear the pending status key
         result_json = check_result.model_dump_json()
@@ -727,31 +726,35 @@ async def run_duplicate_detection_task(
         if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
 
-        # Load ontology graph (graph.parse is CPU-bound for large files)
+        # Load ontology content and parse in a subprocess (CPU-bound, holds GIL)
         import asyncio
+        from concurrent.futures import ProcessPoolExecutor
 
-        storage = get_storage_service()
-        ontology_service = get_ontology_service(storage)
         git_service = BareGitRepositoryService()
         filename = get_git_ontology_path(project)
 
         if git_service.repository_exists(project_uuid):
-            # load_from_git is async-in-name-only — run in thread to avoid blocking
-            graph = await asyncio.to_thread(
-                lambda: _sync_load_from_git(git_service, project_uuid, branch, filename)
-            )
+            content_bytes = git_service.get_file_from_branch(project_uuid, branch, filename)
+            content_str = content_bytes.decode("utf-8")
         elif project.source_file_path:
-            graph = await ontology_service.load_from_storage(
-                project_uuid, project.source_file_path, branch
-            )
+            storage = get_storage_service()
+            content_bytes = await storage.download_file(project.source_file_path)
+            content_str = content_bytes.decode("utf-8")
         else:
             raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
-        # Run duplicate detection (CPU-bound, run in thread)
+        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        rdf_format = _FORMAT_MAP.get(ext, "turtle")
 
+        loop = asyncio.get_running_loop()
+        with ProcessPoolExecutor(max_workers=1) as pool:
+            graph = await loop.run_in_executor(pool, _parse_rdf, content_str, rdf_format)
+
+        # Run duplicate detection (also CPU-bound)
         from ontokit.services.duplicate_detection_service import find_duplicates
 
-        detection_result = await asyncio.to_thread(find_duplicates, graph, threshold)
+        with ProcessPoolExecutor(max_workers=1) as pool:
+            detection_result = await loop.run_in_executor(pool, find_duplicates, graph, threshold)
 
         # Cache result in Redis and clear the pending status key
         result_json = detection_result.model_dump_json()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
@@ -13,6 +14,26 @@ from ontokit.worker import run_consistency_check_task, run_duplicate_detection_t
 PROJECT_ID = "12345678-1234-5678-1234-567812345678"
 PROJECT_UUID = UUID(PROJECT_ID)
 JOB_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+class _InlineExecutor:
+    """A fake executor that runs callables inline (no subprocess)."""
+
+    def __enter__(self) -> _InlineExecutor:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        pass
+
+    def submit(self, fn: Any, *args: Any) -> Any:
+        from concurrent.futures import Future
+
+        f: Future[object] = Future()
+        try:
+            f.set_result(fn(*args))
+        except Exception as e:
+            f.set_exception(e)
+        return f
 
 
 def _make_ctx(
@@ -39,16 +60,12 @@ class TestRunConsistencyCheckTask:
 
     @pytest.mark.asyncio
     @patch("ontokit.services.consistency_service.run_consistency_check")
-    @patch("ontokit.worker._sync_load_from_git")
-    @patch("ontokit.worker.get_ontology_service")
-    @patch("ontokit.worker.get_storage_service")
+    @patch("ontokit.worker._parse_rdf")
     @patch("ontokit.worker.BareGitRepositoryService")
     async def test_success_with_git(
         self,
         mock_git_cls: MagicMock,
-        mock_storage_fn: MagicMock,  # noqa: ARG002
-        mock_ontology_fn: MagicMock,  # noqa: ARG002
-        mock_sync_load: MagicMock,
+        mock_parse: MagicMock,
         mock_check: MagicMock,
     ) -> None:
         """Runs consistency check via git and caches result."""
@@ -56,16 +73,18 @@ class TestRunConsistencyCheckTask:
 
         mock_git = MagicMock()
         mock_git.repository_exists.return_value = True
+        mock_git.get_file_from_branch.return_value = b"<turtle content>"
         mock_git_cls.return_value = mock_git
 
-        mock_sync_load.return_value = MagicMock(spec=Graph)
+        mock_parse.return_value = MagicMock(spec=Graph)
 
         mock_result = MagicMock()
         mock_result.issues = [MagicMock(), MagicMock()]
         mock_result.model_dump_json.return_value = '{"issues": [{}, {}]}'
         mock_check.return_value = mock_result
 
-        result = await run_consistency_check_task(ctx, PROJECT_ID, "main", JOB_ID)
+        with patch("concurrent.futures.ProcessPoolExecutor", return_value=_InlineExecutor()):
+            result = await run_consistency_check_task(ctx, PROJECT_ID, "main", JOB_ID)
 
         assert result["status"] == "completed"
         assert result["issues_found"] == 2
@@ -77,14 +96,12 @@ class TestRunConsistencyCheckTask:
         assert redis.publish.await_count == 2  # started + complete
 
     @pytest.mark.asyncio
-    @patch("ontokit.worker.get_ontology_service")
     @patch("ontokit.worker.get_storage_service")
     @patch("ontokit.worker.BareGitRepositoryService")
     async def test_success_with_storage_fallback(
         self,
         mock_git_cls: MagicMock,
-        mock_storage_fn: MagicMock,  # noqa: ARG002
-        mock_ontology_fn: MagicMock,
+        mock_storage_fn: MagicMock,
     ) -> None:
         """Falls back to storage when git repo doesn't exist."""
         ctx = _make_ctx()
@@ -93,21 +110,26 @@ class TestRunConsistencyCheckTask:
         mock_git.repository_exists.return_value = False
         mock_git_cls.return_value = mock_git
 
-        mock_ontology = MagicMock()
-        mock_ontology.load_from_storage = AsyncMock(return_value=MagicMock(spec=Graph))
-        mock_ontology_fn.return_value = mock_ontology
+        mock_storage = AsyncMock()
+        mock_storage.download_file.return_value = b"<turtle content>"
+        mock_storage_fn.return_value = mock_storage
 
         mock_result = MagicMock()
         mock_result.issues = []
         mock_result.model_dump_json.return_value = '{"issues": []}'
 
-        with patch(
-            "ontokit.services.consistency_service.run_consistency_check", return_value=mock_result
+        with (
+            patch("ontokit.worker._parse_rdf", return_value=MagicMock(spec=Graph)),
+            patch(
+                "ontokit.services.consistency_service.run_consistency_check",
+                return_value=mock_result,
+            ),
+            patch("concurrent.futures.ProcessPoolExecutor", return_value=_InlineExecutor()),
         ):
             result = await run_consistency_check_task(ctx, PROJECT_ID, "main", JOB_ID)
 
         assert result["status"] == "completed"
-        mock_ontology.load_from_storage.assert_awaited_once()
+        mock_storage.download_file.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_project_not_found(self) -> None:
@@ -133,16 +155,12 @@ class TestRunConsistencyCheckTask:
 
     @pytest.mark.asyncio
     @patch("ontokit.services.consistency_service.run_consistency_check")
-    @patch("ontokit.worker._sync_load_from_git")
-    @patch("ontokit.worker.get_ontology_service")
-    @patch("ontokit.worker.get_storage_service")
+    @patch("ontokit.worker._parse_rdf")
     @patch("ontokit.worker.BareGitRepositoryService")
     async def test_without_job_id(
         self,
         mock_git_cls: MagicMock,
-        mock_storage_fn: MagicMock,  # noqa: ARG002
-        mock_ontology_fn: MagicMock,  # noqa: ARG002
-        mock_sync_load: MagicMock,
+        mock_parse: MagicMock,
         mock_check: MagicMock,
     ) -> None:
         """Caches only by branch key when no job_id is provided."""
@@ -150,16 +168,18 @@ class TestRunConsistencyCheckTask:
 
         mock_git = MagicMock()
         mock_git.repository_exists.return_value = True
+        mock_git.get_file_from_branch.return_value = b"<turtle content>"
         mock_git_cls.return_value = mock_git
 
-        mock_sync_load.return_value = MagicMock(spec=Graph)
+        mock_parse.return_value = MagicMock(spec=Graph)
 
         mock_result = MagicMock()
         mock_result.issues = []
         mock_result.model_dump_json.return_value = '{"issues": []}'
         mock_check.return_value = mock_result
 
-        result = await run_consistency_check_task(ctx, PROJECT_ID, "main", None)
+        with patch("concurrent.futures.ProcessPoolExecutor", return_value=_InlineExecutor()):
+            result = await run_consistency_check_task(ctx, PROJECT_ID, "main", None)
 
         assert result["status"] == "completed"
         # Only cache_key set (no job_key)
@@ -172,16 +192,12 @@ class TestRunDuplicateDetectionTask:
 
     @pytest.mark.asyncio
     @patch("ontokit.services.duplicate_detection_service.find_duplicates")
-    @patch("ontokit.worker._sync_load_from_git")
-    @patch("ontokit.worker.get_ontology_service")
-    @patch("ontokit.worker.get_storage_service")
+    @patch("ontokit.worker._parse_rdf")
     @patch("ontokit.worker.BareGitRepositoryService")
     async def test_success_with_git(
         self,
         mock_git_cls: MagicMock,
-        mock_storage_fn: MagicMock,  # noqa: ARG002
-        mock_ontology_fn: MagicMock,  # noqa: ARG002
-        mock_sync_load: MagicMock,
+        mock_parse: MagicMock,
         mock_find: MagicMock,
     ) -> None:
         """Runs duplicate detection via git and caches result."""
@@ -189,16 +205,18 @@ class TestRunDuplicateDetectionTask:
 
         mock_git = MagicMock()
         mock_git.repository_exists.return_value = True
+        mock_git.get_file_from_branch.return_value = b"<turtle content>"
         mock_git_cls.return_value = mock_git
 
-        mock_sync_load.return_value = MagicMock(spec=Graph)
+        mock_parse.return_value = MagicMock(spec=Graph)
 
         mock_result = MagicMock()
         mock_result.clusters = [MagicMock()]
         mock_result.model_dump_json.return_value = '{"clusters": [{}]}'
         mock_find.return_value = mock_result
 
-        result = await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
+        with patch("concurrent.futures.ProcessPoolExecutor", return_value=_InlineExecutor()):
+            result = await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
 
         assert result["status"] == "completed"
         assert result["clusters_found"] == 1
@@ -209,14 +227,12 @@ class TestRunDuplicateDetectionTask:
         assert redis.publish.await_count == 2
 
     @pytest.mark.asyncio
-    @patch("ontokit.worker.get_ontology_service")
     @patch("ontokit.worker.get_storage_service")
     @patch("ontokit.worker.BareGitRepositoryService")
     async def test_success_with_storage_fallback(
         self,
         mock_git_cls: MagicMock,
-        mock_storage_fn: MagicMock,  # noqa: ARG002
-        mock_ontology_fn: MagicMock,
+        mock_storage_fn: MagicMock,
     ) -> None:
         """Falls back to storage when git repo doesn't exist."""
         ctx = _make_ctx()
@@ -225,21 +241,26 @@ class TestRunDuplicateDetectionTask:
         mock_git.repository_exists.return_value = False
         mock_git_cls.return_value = mock_git
 
-        mock_ontology = MagicMock()
-        mock_ontology.load_from_storage = AsyncMock(return_value=MagicMock(spec=Graph))
-        mock_ontology_fn.return_value = mock_ontology
+        mock_storage = AsyncMock()
+        mock_storage.download_file.return_value = b"<turtle content>"
+        mock_storage_fn.return_value = mock_storage
 
         mock_result = MagicMock()
         mock_result.clusters = []
         mock_result.model_dump_json.return_value = '{"clusters": []}'
 
-        with patch(
-            "ontokit.services.duplicate_detection_service.find_duplicates", return_value=mock_result
+        with (
+            patch("ontokit.worker._parse_rdf", return_value=MagicMock(spec=Graph)),
+            patch(
+                "ontokit.services.duplicate_detection_service.find_duplicates",
+                return_value=mock_result,
+            ),
+            patch("concurrent.futures.ProcessPoolExecutor", return_value=_InlineExecutor()),
         ):
             result = await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
 
         assert result["status"] == "completed"
-        mock_ontology.load_from_storage.assert_awaited_once()
+        mock_storage.download_file.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_project_not_found(self) -> None:
@@ -264,16 +285,12 @@ class TestRunDuplicateDetectionTask:
 
     @pytest.mark.asyncio
     @patch("ontokit.services.duplicate_detection_service.find_duplicates")
-    @patch("ontokit.worker._sync_load_from_git")
-    @patch("ontokit.worker.get_ontology_service")
-    @patch("ontokit.worker.get_storage_service")
+    @patch("ontokit.worker._parse_rdf")
     @patch("ontokit.worker.BareGitRepositoryService")
     async def test_custom_threshold(
         self,
         mock_git_cls: MagicMock,
-        mock_storage_fn: MagicMock,  # noqa: ARG002
-        mock_ontology_fn: MagicMock,  # noqa: ARG002
-        mock_sync_load: MagicMock,
+        mock_parse: MagicMock,
         mock_find: MagicMock,
     ) -> None:
         """Custom threshold is forwarded to find_duplicates."""
@@ -281,16 +298,18 @@ class TestRunDuplicateDetectionTask:
 
         mock_git = MagicMock()
         mock_git.repository_exists.return_value = True
+        mock_git.get_file_from_branch.return_value = b"<turtle content>"
         mock_git_cls.return_value = mock_git
 
-        mock_sync_load.return_value = MagicMock(spec=Graph)
+        mock_parse.return_value = MagicMock(spec=Graph)
 
         mock_result = MagicMock()
         mock_result.clusters = []
         mock_result.model_dump_json.return_value = '{"clusters": []}'
         mock_find.return_value = mock_result
 
-        await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.95, JOB_ID)
+        with patch("concurrent.futures.ProcessPoolExecutor", return_value=_InlineExecutor()):
+            await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.95, JOB_ID)
 
         mock_find.assert_called_once()
         call_args = mock_find.call_args[0]
