@@ -39,6 +39,7 @@ class TestRunConsistencyCheckTask:
 
     @pytest.mark.asyncio
     @patch("ontokit.services.consistency_service.run_consistency_check")
+    @patch("ontokit.worker._sync_load_from_git")
     @patch("ontokit.worker.get_ontology_service")
     @patch("ontokit.worker.get_storage_service")
     @patch("ontokit.worker.BareGitRepositoryService")
@@ -46,7 +47,8 @@ class TestRunConsistencyCheckTask:
         self,
         mock_git_cls: MagicMock,
         mock_storage_fn: MagicMock,  # noqa: ARG002
-        mock_ontology_fn: MagicMock,
+        mock_ontology_fn: MagicMock,  # noqa: ARG002
+        mock_sync_load: MagicMock,
         mock_check: MagicMock,
     ) -> None:
         """Runs consistency check via git and caches result."""
@@ -56,9 +58,7 @@ class TestRunConsistencyCheckTask:
         mock_git.repository_exists.return_value = True
         mock_git_cls.return_value = mock_git
 
-        mock_ontology = MagicMock()
-        mock_ontology.load_from_git = AsyncMock(return_value=MagicMock(spec=Graph))
-        mock_ontology_fn.return_value = mock_ontology
+        mock_sync_load.return_value = MagicMock(spec=Graph)
 
         mock_result = MagicMock()
         mock_result.issues = [MagicMock(), MagicMock()]
@@ -133,6 +133,7 @@ class TestRunConsistencyCheckTask:
 
     @pytest.mark.asyncio
     @patch("ontokit.services.consistency_service.run_consistency_check")
+    @patch("ontokit.worker._sync_load_from_git")
     @patch("ontokit.worker.get_ontology_service")
     @patch("ontokit.worker.get_storage_service")
     @patch("ontokit.worker.BareGitRepositoryService")
@@ -140,7 +141,8 @@ class TestRunConsistencyCheckTask:
         self,
         mock_git_cls: MagicMock,
         mock_storage_fn: MagicMock,  # noqa: ARG002
-        mock_ontology_fn: MagicMock,
+        mock_ontology_fn: MagicMock,  # noqa: ARG002
+        mock_sync_load: MagicMock,
         mock_check: MagicMock,
     ) -> None:
         """Caches only by branch key when no job_id is provided."""
@@ -150,9 +152,7 @@ class TestRunConsistencyCheckTask:
         mock_git.repository_exists.return_value = True
         mock_git_cls.return_value = mock_git
 
-        mock_ontology = MagicMock()
-        mock_ontology.load_from_git = AsyncMock(return_value=MagicMock(spec=Graph))
-        mock_ontology_fn.return_value = mock_ontology
+        mock_sync_load.return_value = MagicMock(spec=Graph)
 
         mock_result = MagicMock()
         mock_result.issues = []
@@ -172,6 +172,7 @@ class TestRunDuplicateDetectionTask:
 
     @pytest.mark.asyncio
     @patch("ontokit.services.duplicate_detection_service.find_duplicates")
+    @patch("ontokit.worker._sync_load_from_git")
     @patch("ontokit.worker.get_ontology_service")
     @patch("ontokit.worker.get_storage_service")
     @patch("ontokit.worker.BareGitRepositoryService")
@@ -179,7 +180,8 @@ class TestRunDuplicateDetectionTask:
         self,
         mock_git_cls: MagicMock,
         mock_storage_fn: MagicMock,  # noqa: ARG002
-        mock_ontology_fn: MagicMock,
+        mock_ontology_fn: MagicMock,  # noqa: ARG002
+        mock_sync_load: MagicMock,
         mock_find: MagicMock,
     ) -> None:
         """Runs duplicate detection via git and caches result."""
@@ -189,9 +191,7 @@ class TestRunDuplicateDetectionTask:
         mock_git.repository_exists.return_value = True
         mock_git_cls.return_value = mock_git
 
-        mock_ontology = MagicMock()
-        mock_ontology.load_from_git = AsyncMock(return_value=MagicMock(spec=Graph))
-        mock_ontology_fn.return_value = mock_ontology
+        mock_sync_load.return_value = MagicMock(spec=Graph)
 
         mock_result = MagicMock()
         mock_result.clusters = [MagicMock()]
@@ -264,6 +264,7 @@ class TestRunDuplicateDetectionTask:
 
     @pytest.mark.asyncio
     @patch("ontokit.services.duplicate_detection_service.find_duplicates")
+    @patch("ontokit.worker._sync_load_from_git")
     @patch("ontokit.worker.get_ontology_service")
     @patch("ontokit.worker.get_storage_service")
     @patch("ontokit.worker.BareGitRepositoryService")
@@ -271,7 +272,8 @@ class TestRunDuplicateDetectionTask:
         self,
         mock_git_cls: MagicMock,
         mock_storage_fn: MagicMock,  # noqa: ARG002
-        mock_ontology_fn: MagicMock,
+        mock_ontology_fn: MagicMock,  # noqa: ARG002
+        mock_sync_load: MagicMock,
         mock_find: MagicMock,
     ) -> None:
         """Custom threshold is forwarded to find_duplicates."""
@@ -281,9 +283,7 @@ class TestRunDuplicateDetectionTask:
         mock_git.repository_exists.return_value = True
         mock_git_cls.return_value = mock_git
 
-        mock_ontology = MagicMock()
-        mock_ontology.load_from_git = AsyncMock(return_value=MagicMock(spec=Graph))
-        mock_ontology_fn.return_value = mock_ontology
+        mock_sync_load.return_value = MagicMock(spec=Graph)
 
         mock_result = MagicMock()
         mock_result.clusters = []

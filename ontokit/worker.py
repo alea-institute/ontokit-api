@@ -34,6 +34,38 @@ from ontokit.services.storage import get_storage_service
 
 logger = logging.getLogger(__name__)
 
+# Format map matching ontokit.services.ontology.FORMAT_MAP
+_FORMAT_MAP: dict[str, str] = {
+    ".ttl": "turtle",
+    ".owl": "xml",
+    ".rdf": "xml",
+    ".n3": "n3",
+    ".nt": "nt",
+    ".jsonld": "json-ld",
+    ".json": "json-ld",
+}
+
+
+def _sync_load_from_git(
+    git_service: BareGitRepositoryService,
+    project_id: UUID,
+    branch: str,
+    filename: str,
+) -> Any:
+    """Load and parse an ontology from git synchronously (for use with asyncio.to_thread).
+
+    RDFLib's graph.parse() is CPU-bound and can take minutes for large ontologies.
+    Running this in a thread keeps the worker event loop responsive.
+    """
+    from rdflib import Graph
+
+    content = git_service.get_file_from_branch(project_id, branch, filename)
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    rdf_format = _FORMAT_MAP.get(ext, "turtle")
+    graph = Graph()
+    graph.parse(data=content.decode("utf-8"), format=rdf_format)
+    return graph
+
 
 async def run_ontology_index_task(
     ctx: dict[str, Any],
@@ -561,15 +593,18 @@ async def run_consistency_check_task(
         if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
 
-        # Load ontology graph
+        # Load ontology graph (graph.parse is CPU-bound for large files)
+        import asyncio
+
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
         git_service = BareGitRepositoryService()
         filename = get_git_ontology_path(project)
 
         if git_service.repository_exists(project_uuid):
-            graph = await ontology_service.load_from_git(
-                project_uuid, branch, filename, git_service
+            # load_from_git is async-in-name-only — run in thread to avoid blocking
+            graph = await asyncio.to_thread(
+                lambda: _sync_load_from_git(git_service, project_uuid, branch, filename)
             )
         elif project.source_file_path:
             graph = await ontology_service.load_from_storage(
@@ -579,8 +614,6 @@ async def run_consistency_check_task(
             raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
         # Run consistency check (CPU-bound, run in thread)
-        import asyncio
-
         from ontokit.services.consistency_service import run_consistency_check
 
         check_result = await asyncio.to_thread(run_consistency_check, graph, project_id, branch)
@@ -694,15 +727,18 @@ async def run_duplicate_detection_task(
         if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
 
-        # Load ontology graph
+        # Load ontology graph (graph.parse is CPU-bound for large files)
+        import asyncio
+
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
         git_service = BareGitRepositoryService()
         filename = get_git_ontology_path(project)
 
         if git_service.repository_exists(project_uuid):
-            graph = await ontology_service.load_from_git(
-                project_uuid, branch, filename, git_service
+            # load_from_git is async-in-name-only — run in thread to avoid blocking
+            graph = await asyncio.to_thread(
+                lambda: _sync_load_from_git(git_service, project_uuid, branch, filename)
             )
         elif project.source_file_path:
             graph = await ontology_service.load_from_storage(
@@ -712,7 +748,6 @@ async def run_duplicate_detection_task(
             raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
         # Run duplicate detection (CPU-bound, run in thread)
-        import asyncio
 
         from ontokit.services.duplicate_detection_service import find_duplicates
 
