@@ -79,6 +79,7 @@ class TestGetEntityReferences:
 class TestTriggerConsistencyCheck:
     """Tests for POST /api/v1/projects/{id}/quality/check."""
 
+    @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -87,9 +88,10 @@ class TestTriggerConsistencyCheck:
         mock_access: AsyncMock,  # noqa: ARG002
         mock_resolve: AsyncMock,
         mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Consistency check enqueues a job and returns job_id."""
+        """Consistency check enqueues a job, sets pending key, and returns job_id."""
         client, _ = authed_client
 
         mock_resolve.return_value = "main"
@@ -98,6 +100,9 @@ class TestTriggerConsistencyCheck:
         mock_pool = AsyncMock()
         mock_pool.enqueue_job.return_value = mock_job
         mock_pool_fn.return_value = mock_pool
+
+        mock_redis = AsyncMock()
+        mock_redis_fn.return_value = mock_redis
 
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
         assert response.status_code == 200
@@ -109,6 +114,11 @@ class TestTriggerConsistencyCheck:
         assert call_args[0] == "run_consistency_check_task"
         # The job_id returned to the client must match what was enqueued
         assert data["job_id"] == call_args[3]
+        # Pending status key must be set in Redis
+        mock_redis.set.assert_called_once()
+        set_args = mock_redis.set.call_args
+        assert "quality_job_status" in set_args[0][0]
+        assert set_args[0][1] == "pending"
 
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
@@ -188,17 +198,40 @@ class TestGetQualityJobResult:
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_job_result_pending(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 202 when job result is not ready but status key exists."""
+        client, _ = authed_client
+
+        mock_redis = AsyncMock()
+        # First call: result key → None; second call: status key → "pending"
+        mock_redis.get.side_effect = [None, b"pending"]
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/jobs/{JOB_ID}")
+        assert response.status_code == 202
+        data = response.json()
+        assert data["status"] == "pending"
+        assert data["job_id"] == JOB_ID
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
     def test_get_job_result_not_found(
         self,
         mock_access: AsyncMock,  # noqa: ARG002
         mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns 404 when job result is not cached."""
+        """Returns 404 when both result and status keys are absent."""
         client, _ = authed_client
 
         mock_redis = AsyncMock()
-        mock_redis.get.return_value = None
+        # Both result key and status key return None
+        mock_redis.get.side_effect = [None, None]
         mock_redis_fn.return_value = mock_redis
 
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/jobs/{JOB_ID}")
@@ -314,6 +347,7 @@ class TestGetConsistencyIssues:
 class TestDetectDuplicates:
     """Tests for POST /api/v1/projects/{id}/quality/duplicates."""
 
+    @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -322,6 +356,7 @@ class TestDetectDuplicates:
         mock_access: AsyncMock,  # noqa: ARG002
         mock_resolve: AsyncMock,
         mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
         """Returns job_id when duplicate detection is enqueued."""
@@ -334,6 +369,9 @@ class TestDetectDuplicates:
         mock_pool.enqueue_job.return_value = mock_job
         mock_pool_fn.return_value = mock_pool
 
+        mock_redis = AsyncMock()
+        mock_redis_fn.return_value = mock_redis
+
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")
         assert response.status_code == 200
         data = response.json()
@@ -344,7 +382,13 @@ class TestDetectDuplicates:
         assert call_args[0] == "run_duplicate_detection_task"
         # The job_id returned to the client must match what was enqueued
         assert data["job_id"] == call_args[4]
+        # Pending status key must be set in Redis
+        mock_redis.set.assert_called_once()
+        set_args = mock_redis.set.call_args
+        assert "duplicates_job_status" in set_args[0][0]
+        assert set_args[0][1] == "pending"
 
+    @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -353,6 +397,7 @@ class TestDetectDuplicates:
         mock_access: AsyncMock,  # noqa: ARG002
         mock_resolve: AsyncMock,
         mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
         """Custom threshold parameter is forwarded to the enqueued job."""
@@ -364,6 +409,8 @@ class TestDetectDuplicates:
         mock_pool = AsyncMock()
         mock_pool.enqueue_job.return_value = mock_job
         mock_pool_fn.return_value = mock_pool
+
+        mock_redis_fn.return_value = AsyncMock()
 
         response = client.post(
             f"/api/v1/projects/{PROJECT_ID}/quality/duplicates",
@@ -453,17 +500,38 @@ class TestGetDuplicateJobResult:
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_get_job_result_pending(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 202 when job result is not ready but status key exists."""
+        client, _ = authed_client
+
+        mock_redis = AsyncMock()
+        mock_redis.get.side_effect = [None, b"pending"]
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")
+        assert response.status_code == 202
+        data = response.json()
+        assert data["status"] == "pending"
+        assert data["job_id"] == JOB_ID
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
     def test_get_job_result_not_found(
         self,
         mock_access: AsyncMock,  # noqa: ARG002
         mock_redis_fn: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns 404 when duplicate job result is not cached."""
+        """Returns 404 when both result and status keys are absent."""
         client, _ = authed_client
 
         mock_redis = AsyncMock()
-        mock_redis.get.return_value = None
+        mock_redis.get.side_effect = [None, None]
         mock_redis_fn.return_value = mock_redis
 
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")

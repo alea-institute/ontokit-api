@@ -579,12 +579,13 @@ async def run_consistency_check_task(
 
         check_result = await asyncio.to_thread(run_consistency_check, graph, project_id, branch)
 
-        # Cache result in Redis
+        # Cache result in Redis and clear the pending status key
         result_json = check_result.model_dump_json()
         cache_key = f"quality:{project_id}:{branch}"
         if job_id:
             job_key = f"quality_job:{project_id}:{job_id}"
             await redis.set(job_key, result_json, ex=600)
+            await redis.delete(f"quality_job_status:{project_id}:{job_id}")
         await redis.set(cache_key, result_json, ex=600)
 
         logger.info(
@@ -621,6 +622,8 @@ async def run_consistency_check_task(
             branch,
             e,
         )
+        if job_id:
+            await redis.delete(f"quality_job_status:{project_id}:{job_id}")
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
             json.dumps(
@@ -698,12 +701,13 @@ async def run_duplicate_detection_task(
 
         detection_result = await asyncio.to_thread(find_duplicates, graph, threshold)
 
-        # Cache result in Redis
+        # Cache result in Redis and clear the pending status key
         result_json = detection_result.model_dump_json()
         cache_key = f"duplicates:{project_id}:{branch}"
         if job_id:
             job_key = f"duplicates_job:{project_id}:{job_id}"
             await redis.set(job_key, result_json, ex=600)
+            await redis.delete(f"duplicates_job_status:{project_id}:{job_id}")
         await redis.set(cache_key, result_json, ex=600)
 
         logger.info(
@@ -740,6 +744,8 @@ async def run_duplicate_detection_task(
             branch,
             e,
         )
+        if job_id:
+            await redis.delete(f"duplicates_job_status:{project_id}:{job_id}")
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
             json.dumps(

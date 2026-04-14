@@ -10,7 +10,9 @@ from uuid import UUID
 import pydantic
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
+from starlette.responses import Response
 
 from ontokit.api.dependencies import load_project_graph, resolve_branch, verify_project_access
 from ontokit.api.utils.redis import get_arq_pool
@@ -23,6 +25,7 @@ from ontokit.schemas.quality import (
     CrossReferencesResponse,
     DuplicateDetectionResult,
     DuplicateDetectionTriggerResponse,
+    QualityJobPendingResponse,
 )
 from ontokit.services.cross_reference_service import get_cross_references
 
@@ -96,37 +99,55 @@ async def trigger_consistency_check(
             detail="Failed to enqueue consistency check job",
         ) from e
 
+    # Mark the job as pending so polling clients can distinguish queued from unknown
+    redis = _get_redis()
+    await redis.set(f"quality_job_status:{project_id}:{job_id}", "pending", ex=600)
+
     return ConsistencyCheckTriggerResponse(job_id=job_id)
 
 
 @router.get(
     "/{project_id}/quality/jobs/{job_id}",
     response_model=ConsistencyCheckResult,
+    responses={202: {"model": QualityJobPendingResponse, "description": "Job is still pending"}},
 )
 async def get_quality_job_result(
     project_id: UUID,
     job_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: OptionalUser,
-) -> ConsistencyCheckResult:
-    """Get consistency check results by job ID."""
+) -> ConsistencyCheckResult | Response:
+    """Get consistency check results by job ID.
+
+    Returns 200 with results when complete, 202 when still pending,
+    or 404 when the job ID is unknown or expired.
+    """
     await verify_project_access(project_id, db, user)
 
     redis = _get_redis()
     cached = await redis.get(f"quality_job:{project_id}:{job_id}")
-    if cached is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Job result not found or expired",
+    if cached is not None:
+        try:
+            return ConsistencyCheckResult.model_validate_json(cached)
+        except pydantic.ValidationError as e:
+            logger.error("Corrupt cached consistency result for job %s: %s", job_id, e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Cached result is corrupt",
+            ) from e
+
+    # No result yet — check if the job is still pending
+    job_status = await redis.get(f"quality_job_status:{project_id}:{job_id}")
+    if job_status is not None:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=QualityJobPendingResponse(job_id=job_id).model_dump(),
         )
-    try:
-        return ConsistencyCheckResult.model_validate_json(cached)
-    except pydantic.ValidationError as e:
-        logger.error("Corrupt cached consistency result for job %s: %s", job_id, e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Cached result is corrupt",
-        ) from e
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Job result not found or expired",
+    )
 
 
 @router.get(
@@ -209,37 +230,55 @@ async def detect_duplicates(
             detail="Failed to enqueue duplicate detection job",
         ) from e
 
+    # Mark the job as pending so polling clients can distinguish queued from unknown
+    redis = _get_redis()
+    await redis.set(f"duplicates_job_status:{project_id}:{job_id}", "pending", ex=600)
+
     return DuplicateDetectionTriggerResponse(job_id=job_id)
 
 
 @router.get(
     "/{project_id}/quality/duplicates/jobs/{job_id}",
     response_model=DuplicateDetectionResult,
+    responses={202: {"model": QualityJobPendingResponse, "description": "Job is still pending"}},
 )
 async def get_duplicate_job_result(
     project_id: UUID,
     job_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     user: OptionalUser,
-) -> DuplicateDetectionResult:
-    """Get duplicate detection results by job ID."""
+) -> DuplicateDetectionResult | Response:
+    """Get duplicate detection results by job ID.
+
+    Returns 200 with results when complete, 202 when still pending,
+    or 404 when the job ID is unknown or expired.
+    """
     await verify_project_access(project_id, db, user)
 
     redis = _get_redis()
     cached = await redis.get(f"duplicates_job:{project_id}:{job_id}")
-    if cached is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Job result not found or expired",
+    if cached is not None:
+        try:
+            return DuplicateDetectionResult.model_validate_json(cached)
+        except pydantic.ValidationError as e:
+            logger.error("Corrupt cached duplicates result for job %s: %s", job_id, e)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Cached result is corrupt",
+            ) from e
+
+    # No result yet — check if the job is still pending
+    job_status = await redis.get(f"duplicates_job_status:{project_id}:{job_id}")
+    if job_status is not None:
+        return JSONResponse(
+            status_code=status.HTTP_202_ACCEPTED,
+            content=QualityJobPendingResponse(job_id=job_id).model_dump(),
         )
-    try:
-        return DuplicateDetectionResult.model_validate_json(cached)
-    except pydantic.ValidationError as e:
-        logger.error("Corrupt cached duplicates result for job %s: %s", job_id, e)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Cached result is corrupt",
-        ) from e
+
+    raise HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail="Job result not found or expired",
+    )
 
 
 @router.get(
@@ -309,8 +348,11 @@ async def quality_websocket(
         pubsub = pool.pubsub()
         await pubsub.subscribe(QUALITY_UPDATES_CHANNEL)
 
+        # TODO: Replace this 0.1s poll loop with concurrent coroutines
+        # (blocking Redis listener + blocking WS receive) when tackling #78
+        # (per-project Redis pubsub channels). The lint WS uses the same
+        # pattern and both should be refactored together.
         while True:
-            # Check for Redis messages (non-blocking with short timeout)
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
             if message and message["type"] == "message":
                 try:
