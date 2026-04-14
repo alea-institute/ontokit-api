@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from arq import ArqRedis, cron
+from arq import ArqRedis, cron, func
 from arq.connections import RedisSettings
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -1211,8 +1211,8 @@ class WorkerSettings:
     functions = [
         run_ontology_index_task,
         run_lint_task,
-        run_consistency_check_task,
-        run_duplicate_detection_task,
+        func(run_consistency_check_task, timeout=900),  # 15 min for large ontologies
+        func(run_duplicate_detection_task, timeout=900),  # 15 min for large ontologies
         check_normalization_status_task,
         run_normalization_task,
         check_all_projects_normalization,
