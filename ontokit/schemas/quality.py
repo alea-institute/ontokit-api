@@ -107,7 +107,19 @@ class DuplicateCluster(BaseModel):
     similarity: float
 
 
+class DuplicateDetectionTriggerResponse(BaseModel):
+    job_id: str
+
+
 class DuplicateDetectionResult(BaseModel):
     clusters: list[DuplicateCluster]
     threshold: float
     checked_at: str
+
+
+# --- Shared job status ---
+
+
+class QualityJobPendingResponse(BaseModel):
+    job_id: str
+    status: Literal["pending"] = "pending"

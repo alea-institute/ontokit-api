@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from arq import ArqRedis, cron
+from arq import ArqRedis, cron, func
 from arq.connections import RedisSettings
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -17,6 +17,7 @@ from ontokit.core.constants import (
     LINT_UPDATES_CHANNEL,
     NORMALIZATION_UPDATES_CHANNEL,
     ONTOLOGY_INDEX_UPDATES_CHANNEL,
+    QUALITY_UPDATES_CHANNEL,
     REMOTE_SYNC_UPDATES_CHANNEL,
 )
 from ontokit.core.encryption import decrypt_token
@@ -32,6 +33,43 @@ from ontokit.services.ontology import get_ontology_service
 from ontokit.services.storage import get_storage_service
 
 logger = logging.getLogger(__name__)
+
+# Format map matching ontokit.services.ontology.FORMAT_MAP
+_FORMAT_MAP: dict[str, str] = {
+    ".ttl": "turtle",
+    ".owl": "xml",
+    ".rdf": "xml",
+    ".n3": "n3",
+    ".nt": "nt",
+    ".jsonld": "json-ld",
+    ".json": "json-ld",
+}
+
+
+def _parse_rdf(content_str: str, rdf_format: str) -> Any:
+    """Parse RDF content into a Graph (for use with ProcessPoolExecutor).
+
+    RDFLib's graph.parse() is CPU-bound and holds the GIL, so it must run
+    in a separate process to keep the worker event loop responsive.
+    """
+    from rdflib import Graph
+
+    graph = Graph()
+    graph.parse(data=content_str, format=rdf_format)
+    return graph
+
+
+def _parse_and_run_consistency_check(
+    content_str: str, rdf_format: str, project_id: str, branch: str
+) -> Any:
+    """Parse RDF and run consistency check in a single subprocess.
+
+    Avoids double-pickling the Graph object across process boundaries.
+    """
+    from ontokit.services.consistency_service import run_consistency_check
+
+    graph = _parse_rdf(content_str, rdf_format)
+    return run_consistency_check(graph, project_id, branch)
 
 
 async def run_ontology_index_task(
@@ -517,6 +555,249 @@ async def auto_submit_stale_suggestions(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
 
 
+async def run_consistency_check_task(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str = "main",
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Background task to run consistency checks on a project ontology.
+
+    Loads the graph, runs all consistency rules, caches the result in Redis,
+    and publishes progress via the QUALITY_UPDATES_CHANNEL.
+    """
+    db: AsyncSession = ctx["db"]
+    redis: ArqRedis = ctx["redis"]
+
+    project_uuid = UUID(project_id)
+
+    try:
+        # Notify start
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "consistency_started",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                }
+            ),
+        )
+
+        # Load project (eagerly load github_integration for file path resolution)
+        result = await db.execute(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
+        project = result.scalar_one_or_none()
+        if not project:
+            raise ValueError(f"Project {project_id} not found")
+        if not project.source_file_path and not project.github_integration:
+            raise ValueError(f"Project {project_id} has no ontology file")
+
+        # Load ontology content and parse in a subprocess (CPU-bound, holds GIL)
+        import asyncio
+        from concurrent.futures import ProcessPoolExecutor
+
+        git_service = BareGitRepositoryService()
+        filename = get_git_ontology_path(project)
+
+        if git_service.repository_exists(project_uuid):
+            content_bytes = git_service.get_file_from_branch(project_uuid, branch, filename)
+            content_str = content_bytes.decode("utf-8")
+        elif project.source_file_path:
+            storage = get_storage_service()
+            content_bytes = await storage.download_file(project.source_file_path)
+            content_str = content_bytes.decode("utf-8")
+        else:
+            raise ValueError(f"Project {project_id} has no git repository and no storage file")
+
+        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        rdf_format = _FORMAT_MAP.get(ext, "turtle")
+
+        # Parse RDF and run consistency check in a single subprocess
+        # (avoids double-pickling the Graph object across process boundaries)
+        loop = asyncio.get_running_loop()
+        with ProcessPoolExecutor(max_workers=1) as pool:
+            check_result = await loop.run_in_executor(
+                pool,
+                _parse_and_run_consistency_check,
+                content_str,
+                rdf_format,
+                project_id,
+                branch,
+            )
+
+        # Cache result in Redis and clear the pending status key
+        result_json = check_result.model_dump_json()
+        cache_key = f"quality:{project_id}:{branch}"
+        if job_id:
+            job_key = f"quality_job:{project_id}:{job_id}"
+            await redis.set(job_key, result_json, ex=600)
+            await redis.delete(f"quality_job_status:{project_id}:{job_id}")
+        await redis.set(cache_key, result_json, ex=600)
+
+        logger.info(
+            "Consistency check completed for project %s branch %s: %d issues",
+            project_id,
+            branch,
+            len(check_result.issues),
+        )
+
+        # Notify completion
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "consistency_complete",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                    "issues_found": len(check_result.issues),
+                }
+            ),
+        )
+
+        return {
+            "job_id": job_id,
+            "issues_found": len(check_result.issues),
+            "status": "completed",
+        }
+
+    except Exception as e:
+        logger.exception(
+            "Consistency check failed for project %s branch %s: %s",
+            project_id,
+            branch,
+            e,
+        )
+        if job_id:
+            # Write a short-lived failed status so polling clients can surface the error
+            await redis.set(
+                f"quality_job_status:{project_id}:{job_id}",
+                json.dumps({"state": "failed", "error": str(e)}),
+                ex=600,
+            )
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "consistency_failed",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                    "error": str(e),
+                }
+            ),
+        )
+        raise
+
+
+async def run_duplicate_detection_task(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str = "main",
+    threshold: float = 0.85,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Background task to detect duplicate entities in a project ontology.
+
+    Uses the PostgreSQL trigram index on indexed_labels for fast fuzzy matching,
+    caches the result in Redis, and publishes progress via QUALITY_UPDATES_CHANNEL.
+    """
+    db: AsyncSession = ctx["db"]
+    redis: ArqRedis = ctx["redis"]
+
+    project_uuid = UUID(project_id)
+
+    try:
+        # Notify start
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "duplicates_started",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                }
+            ),
+        )
+
+        # Run duplicate detection via PostgreSQL trigram similarity
+        from ontokit.services.duplicate_detection_service import find_duplicates_sql
+
+        detection_result = await find_duplicates_sql(db, project_uuid, branch, threshold)
+
+        # Cache result in Redis and clear the pending status key
+        result_json = detection_result.model_dump_json()
+        cache_key = f"duplicates:{project_id}:{branch}"
+        if job_id:
+            job_key = f"duplicates_job:{project_id}:{job_id}"
+            await redis.set(job_key, result_json, ex=600)
+            await redis.delete(f"duplicates_job_status:{project_id}:{job_id}")
+        await redis.set(cache_key, result_json, ex=600)
+
+        logger.info(
+            "Duplicate detection completed for project %s branch %s: %d clusters",
+            project_id,
+            branch,
+            len(detection_result.clusters),
+        )
+
+        # Notify completion
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "duplicates_complete",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                    "clusters_found": len(detection_result.clusters),
+                }
+            ),
+        )
+
+        return {
+            "job_id": job_id,
+            "clusters_found": len(detection_result.clusters),
+            "status": "completed",
+        }
+
+    except Exception as e:
+        logger.exception(
+            "Duplicate detection failed for project %s branch %s: %s",
+            project_id,
+            branch,
+            e,
+        )
+        if job_id:
+            # Write a short-lived failed status so polling clients can surface the error
+            await redis.set(
+                f"duplicates_job_status:{project_id}:{job_id}",
+                json.dumps({"state": "failed", "error": str(e)}),
+                ex=600,
+            )
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "duplicates_failed",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                    "error": str(e),
+                }
+            ),
+        )
+        raise
+
+
 async def run_embedding_generation_task(
     ctx: dict[str, Any],
     project_id: str,
@@ -907,6 +1188,8 @@ class WorkerSettings:
     functions = [
         run_ontology_index_task,
         run_lint_task,
+        func(run_consistency_check_task, timeout=900),  # 15 min for large ontologies
+        func(run_duplicate_detection_task, timeout=900),  # 15 min for large ontologies
         check_normalization_status_task,
         run_normalization_task,
         check_all_projects_normalization,
