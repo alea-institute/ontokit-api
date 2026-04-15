@@ -76,12 +76,13 @@ async def find_duplicates_sql(
     # The GIN trigram index on indexed_labels.value makes `value % 'literal'`
     # a sub-linear indexed lookup instead of a full table scan.
     pair_sim: dict[tuple[str, str], float] = {}
-    matched: set[str] = set()
+    queried: set[str] = set()  # Track seeds already queried (not just matched)
 
     for row in entities:
         eid = str(row.entity_id)
-        if eid in matched:
-            continue  # Skip entities already clustered
+        if eid in queried:
+            continue
+        queried.add(eid)
 
         similar = await db.execute(
             text("""
@@ -111,8 +112,6 @@ async def find_duplicates_sql(
             if mid not in entity_ids:
                 continue
             pair_sim[(row.iri, match.iri)] = float(match.sim)
-            matched.add(eid)
-            matched.add(mid)
 
     # Build clusters via union-find from the collected pair_sim data
     ds = DisjointSet()

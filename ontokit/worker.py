@@ -59,6 +59,19 @@ def _parse_rdf(content_str: str, rdf_format: str) -> Any:
     return graph
 
 
+def _parse_and_run_consistency_check(
+    content_str: str, rdf_format: str, project_id: str, branch: str
+) -> Any:
+    """Parse RDF and run consistency check in a single subprocess.
+
+    Avoids double-pickling the Graph object across process boundaries.
+    """
+    from ontokit.services.consistency_service import run_consistency_check
+
+    graph = _parse_rdf(content_str, rdf_format)
+    return run_consistency_check(graph, project_id, branch)
+
+
 async def run_ontology_index_task(
     ctx: dict[str, Any],
     project_id: str,
@@ -605,16 +618,17 @@ async def run_consistency_check_task(
         ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
         rdf_format = _FORMAT_MAP.get(ext, "turtle")
 
+        # Parse RDF and run consistency check in a single subprocess
+        # (avoids double-pickling the Graph object across process boundaries)
         loop = asyncio.get_running_loop()
         with ProcessPoolExecutor(max_workers=1) as pool:
-            graph = await loop.run_in_executor(pool, _parse_rdf, content_str, rdf_format)
-
-        # Run consistency check (also CPU-bound)
-        from ontokit.services.consistency_service import run_consistency_check
-
-        with ProcessPoolExecutor(max_workers=1) as pool:
             check_result = await loop.run_in_executor(
-                pool, run_consistency_check, graph, project_id, branch
+                pool,
+                _parse_and_run_consistency_check,
+                content_str,
+                rdf_format,
+                project_id,
+                branch,
             )
 
         # Cache result in Redis and clear the pending status key

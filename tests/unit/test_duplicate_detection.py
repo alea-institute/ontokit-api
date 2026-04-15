@@ -182,6 +182,37 @@ class TestFindDuplicatesSql:
         assert len(result.clusters[0].entities) == 3
         assert result.clusters[0].similarity >= 0.85
 
+    @pytest.mark.asyncio
+    async def test_transitive_clustering(self) -> None:
+        """A~B and B~C should cluster all three even if A!~C directly."""
+        e1_id = UUID("aaaaaaaa-0000-0000-0000-000000000001")
+        e2_id = UUID("aaaaaaaa-0000-0000-0000-000000000002")
+        e3_id = UUID("aaaaaaaa-0000-0000-0000-000000000003")
+
+        entities = [
+            _row(entity_id=e1_id, iri="http://ex.org/A", entity_type="class", value="Alpha"),
+            _row(entity_id=e2_id, iri="http://ex.org/B", entity_type="class", value="Alpho"),
+            _row(entity_id=e3_id, iri="http://ex.org/C", entity_type="class", value="Alphi"),
+        ]
+
+        # A matches B, B matches C, but A does NOT directly match C
+        similar_map = {
+            "Alpha": [
+                _row(entity_id=e2_id, iri="http://ex.org/B", value="Alpho", sim=0.9),
+            ],
+            "Alpho": [
+                _row(entity_id=e3_id, iri="http://ex.org/C", value="Alphi", sim=0.88),
+            ],
+            # "Alphi" → no matches (A is too different)
+        }
+
+        db = _mock_db(entities, similar_map)
+        result = await find_duplicates_sql(db, PROJECT_ID, "main", threshold=0.85)
+
+        assert len(result.clusters) == 1
+        iris = {e.iri for e in result.clusters[0].entities}
+        assert iris == {"http://ex.org/A", "http://ex.org/B", "http://ex.org/C"}
+
 
 def test_find_duplicates_by_label() -> None:
     g = Graph()
