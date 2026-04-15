@@ -692,8 +692,8 @@ async def run_duplicate_detection_task(
     """
     Background task to detect duplicate entities in a project ontology.
 
-    Loads the graph, runs O(n²) label similarity comparisons, caches the
-    result in Redis, and publishes progress via the QUALITY_UPDATES_CHANNEL.
+    Uses the PostgreSQL trigram index on indexed_labels for fast fuzzy matching,
+    caches the result in Redis, and publishes progress via QUALITY_UPDATES_CHANNEL.
     """
     db: AsyncSession = ctx["db"]
     redis: ArqRedis = ctx["redis"]
@@ -714,47 +714,10 @@ async def run_duplicate_detection_task(
             ),
         )
 
-        # Load project (eagerly load github_integration for file path resolution)
-        result = await db.execute(
-            select(Project)
-            .options(selectinload(Project.github_integration))
-            .where(Project.id == project_uuid)
-        )
-        project = result.scalar_one_or_none()
-        if not project:
-            raise ValueError(f"Project {project_id} not found")
-        if not project.source_file_path and not project.github_integration:
-            raise ValueError(f"Project {project_id} has no ontology file")
+        # Run duplicate detection via PostgreSQL trigram similarity
+        from ontokit.services.duplicate_detection_service import find_duplicates_sql
 
-        # Load ontology content and parse in a subprocess (CPU-bound, holds GIL)
-        import asyncio
-        from concurrent.futures import ProcessPoolExecutor
-
-        git_service = BareGitRepositoryService()
-        filename = get_git_ontology_path(project)
-
-        if git_service.repository_exists(project_uuid):
-            content_bytes = git_service.get_file_from_branch(project_uuid, branch, filename)
-            content_str = content_bytes.decode("utf-8")
-        elif project.source_file_path:
-            storage = get_storage_service()
-            content_bytes = await storage.download_file(project.source_file_path)
-            content_str = content_bytes.decode("utf-8")
-        else:
-            raise ValueError(f"Project {project_id} has no git repository and no storage file")
-
-        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        rdf_format = _FORMAT_MAP.get(ext, "turtle")
-
-        loop = asyncio.get_running_loop()
-        with ProcessPoolExecutor(max_workers=1) as pool:
-            graph = await loop.run_in_executor(pool, _parse_rdf, content_str, rdf_format)
-
-        # Run duplicate detection (also CPU-bound)
-        from ontokit.services.duplicate_detection_service import find_duplicates
-
-        with ProcessPoolExecutor(max_workers=1) as pool:
-            detection_result = await loop.run_in_executor(pool, find_duplicates, graph, threshold)
+        detection_result = await find_duplicates_sql(db, project_uuid, branch, threshold)
 
         # Cache result in Redis and clear the pending status key
         result_json = detection_result.model_dump_json()

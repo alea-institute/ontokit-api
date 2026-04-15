@@ -191,32 +191,22 @@ class TestRunDuplicateDetectionTask:
     """Tests for run_duplicate_detection_task."""
 
     @pytest.mark.asyncio
-    @patch("ontokit.services.duplicate_detection_service.find_duplicates")
-    @patch("ontokit.worker._parse_rdf")
-    @patch("ontokit.worker.BareGitRepositoryService")
-    async def test_success_with_git(
+    @patch(
+        "ontokit.services.duplicate_detection_service.find_duplicates_sql", new_callable=AsyncMock
+    )
+    async def test_success(
         self,
-        mock_git_cls: MagicMock,
-        mock_parse: MagicMock,
-        mock_find: MagicMock,
+        mock_find: AsyncMock,
     ) -> None:
-        """Runs duplicate detection via git and caches result."""
+        """Runs SQL-based duplicate detection and caches result."""
         ctx = _make_ctx()
-
-        mock_git = MagicMock()
-        mock_git.repository_exists.return_value = True
-        mock_git.get_file_from_branch.return_value = b"<turtle content>"
-        mock_git_cls.return_value = mock_git
-
-        mock_parse.return_value = MagicMock(spec=Graph)
 
         mock_result = MagicMock()
         mock_result.clusters = [MagicMock()]
         mock_result.model_dump_json.return_value = '{"clusters": [{}]}'
         mock_find.return_value = mock_result
 
-        with patch("concurrent.futures.ProcessPoolExecutor", return_value=_InlineExecutor()):
-            result = await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
+        result = await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
 
         assert result["status"] == "completed"
         assert result["clusters_found"] == 1
@@ -227,90 +217,23 @@ class TestRunDuplicateDetectionTask:
         assert redis.publish.await_count == 2
 
     @pytest.mark.asyncio
-    @patch("ontokit.worker.get_storage_service")
-    @patch("ontokit.worker.BareGitRepositoryService")
-    async def test_success_with_storage_fallback(
-        self,
-        mock_git_cls: MagicMock,
-        mock_storage_fn: MagicMock,
-    ) -> None:
-        """Falls back to storage when git repo doesn't exist."""
-        ctx = _make_ctx()
-
-        mock_git = MagicMock()
-        mock_git.repository_exists.return_value = False
-        mock_git_cls.return_value = mock_git
-
-        mock_storage = AsyncMock()
-        mock_storage.download_file.return_value = b"<turtle content>"
-        mock_storage_fn.return_value = mock_storage
-
-        mock_result = MagicMock()
-        mock_result.clusters = []
-        mock_result.model_dump_json.return_value = '{"clusters": []}'
-
-        with (
-            patch("ontokit.worker._parse_rdf", return_value=MagicMock(spec=Graph)),
-            patch(
-                "ontokit.services.duplicate_detection_service.find_duplicates",
-                return_value=mock_result,
-            ),
-            patch("concurrent.futures.ProcessPoolExecutor", return_value=_InlineExecutor()),
-        ):
-            result = await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
-
-        assert result["status"] == "completed"
-        mock_storage.download_file.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    async def test_project_not_found(self) -> None:
-        """Raises ValueError when project doesn't exist."""
-        ctx = _make_ctx(project_exists=False)
-
-        with pytest.raises(ValueError, match="not found"):
-            await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
-
-        ctx["redis"].publish.assert_awaited()
-
-    @pytest.mark.asyncio
-    async def test_project_no_ontology(self) -> None:
-        """Raises ValueError when project has no ontology file and no integration."""
-        project = MagicMock()
-        project.source_file_path = None
-        project.github_integration = None
-        ctx = _make_ctx(project=project)
-
-        with pytest.raises(ValueError, match="no ontology file"):
-            await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
-
-    @pytest.mark.asyncio
-    @patch("ontokit.services.duplicate_detection_service.find_duplicates")
-    @patch("ontokit.worker._parse_rdf")
-    @patch("ontokit.worker.BareGitRepositoryService")
+    @patch(
+        "ontokit.services.duplicate_detection_service.find_duplicates_sql", new_callable=AsyncMock
+    )
     async def test_custom_threshold(
         self,
-        mock_git_cls: MagicMock,
-        mock_parse: MagicMock,
-        mock_find: MagicMock,
+        mock_find: AsyncMock,
     ) -> None:
-        """Custom threshold is forwarded to find_duplicates."""
+        """Custom threshold is forwarded to find_duplicates_sql."""
         ctx = _make_ctx()
-
-        mock_git = MagicMock()
-        mock_git.repository_exists.return_value = True
-        mock_git.get_file_from_branch.return_value = b"<turtle content>"
-        mock_git_cls.return_value = mock_git
-
-        mock_parse.return_value = MagicMock(spec=Graph)
 
         mock_result = MagicMock()
         mock_result.clusters = []
         mock_result.model_dump_json.return_value = '{"clusters": []}'
         mock_find.return_value = mock_result
 
-        with patch("concurrent.futures.ProcessPoolExecutor", return_value=_InlineExecutor()):
-            await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.95, JOB_ID)
+        await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.95, JOB_ID)
 
         mock_find.assert_called_once()
-        call_args = mock_find.call_args[0]
-        assert call_args[1] == 0.95
+        call_args = mock_find.call_args
+        assert call_args[0][3] == 0.95  # threshold is the 4th positional arg
