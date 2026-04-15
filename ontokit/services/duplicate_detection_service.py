@@ -17,6 +17,24 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.schemas.quality import DuplicateCluster, DuplicateDetectionResult, DuplicateEntity
 
 
+class DisjointSet:
+    """Union-find data structure with path compression."""
+
+    def __init__(self) -> None:
+        self._parent: dict[str, str] = {}
+
+    def find(self, x: str) -> str:
+        while self._parent.get(x, x) != x:
+            self._parent[x] = self._parent.get(self._parent[x], self._parent[x])
+            x = self._parent[x]
+        return x
+
+    def union(self, x: str, y: str) -> None:
+        px, py = self.find(x), self.find(y)
+        if px != py:
+            self._parent[px] = py
+
+
 async def find_duplicates_sql(
     db: AsyncSession,
     project_id: UUID,
@@ -56,7 +74,7 @@ async def find_duplicates_sql(
 
     # Step 2: For each entity's label, find similar labels using GIN index.
     # The GIN trigram index on indexed_labels.value makes `value % 'literal'`
-    # an indexed O(1) lookup instead of a full table scan.
+    # a sub-linear indexed lookup instead of a full table scan.
     pair_sim: dict[tuple[str, str], float] = {}
     matched: set[str] = set()
 
@@ -97,25 +115,14 @@ async def find_duplicates_sql(
             matched.add(mid)
 
     # Build clusters via union-find from the collected pair_sim data
-    parent: dict[str, str] = {}
-
-    def find(x: str) -> str:
-        while parent.get(x, x) != x:
-            parent[x] = parent.get(parent[x], parent[x])
-            x = parent[x]
-        return x
-
-    def union(x: str, y: str) -> None:
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
+    ds = DisjointSet()
 
     # Union all matched pairs and build entity_info lookup
     entity_info: dict[str, tuple[str, str]] = {}  # iri → (label, entity_type)
     iri_lookup = {iri: (label, etype) for _eid, (iri, label, etype) in entity_map.items()}
 
     for iri_a, iri_b in pair_sim:
-        union(iri_a, iri_b)
+        ds.union(iri_a, iri_b)
         if iri_a in iri_lookup:
             entity_info[iri_a] = (iri_lookup[iri_a][0], iri_lookup[iri_a][1])
         if iri_b in iri_lookup:
@@ -124,7 +131,7 @@ async def find_duplicates_sql(
     # Build clusters
     clusters_map: dict[str, list[str]] = defaultdict(list)
     for iri in entity_info:
-        clusters_map[find(iri)].append(iri)
+        clusters_map[ds.find(iri)].append(iri)
 
     clusters = []
     for _root, members in clusters_map.items():
@@ -191,19 +198,7 @@ def find_duplicates(graph: Graph, threshold: float = 0.85) -> DuplicateDetection
     for iri, label, etype in entities:
         by_type[etype].append((iri, label))
 
-    parent: dict[str, str] = {}
-
-    def find(x: str) -> str:
-        while parent.get(x, x) != x:
-            parent[x] = parent.get(parent[x], parent[x])
-            x = parent[x]
-        return x
-
-    def union(x: str, y: str) -> None:
-        px, py = find(x), find(y)
-        if px != py:
-            parent[px] = py
-
+    ds = DisjointSet()
     pair_sim: dict[tuple[str, str], float] = {}
 
     for _etype, etype_entities in by_type.items():
@@ -217,12 +212,12 @@ def find_duplicates(graph: Graph, threshold: float = 0.85) -> DuplicateDetection
                 sim = difflib.SequenceMatcher(None, norm_a, norm_b).ratio()
                 pair_sim[(iri_a, iri_b)] = sim
                 if sim >= threshold:
-                    union(iri_a, iri_b)
+                    ds.union(iri_a, iri_b)
 
     clusters_map: dict[str, list[tuple[str, str, str]]] = defaultdict(list)
     entity_lookup = {iri: (label, etype) for iri, label, etype in entities}
     for iri, (label, etype) in entity_lookup.items():
-        root = find(iri)
+        root = ds.find(iri)
         clusters_map[root].append((iri, label, etype))
 
     clusters = []
