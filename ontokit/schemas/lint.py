@@ -122,3 +122,46 @@ class LintRulesResponse(BaseModel):
     """List of available lint rules."""
 
     rules: list[LintRuleInfo]
+
+
+# ---------------------------------------------------------------------------
+# Per-project lint configuration
+# ---------------------------------------------------------------------------
+
+
+class LintLevelInfo(BaseModel):
+    """Information about a progressive lint level."""
+
+    level: int
+    name: str
+    description: str
+    rule_ids: list[str]
+
+
+class LintLevelsResponse(BaseModel):
+    """List of available lint levels."""
+
+    levels: list[LintLevelInfo]
+
+
+class LintConfigResponse(BaseModel):
+    """Current lint configuration for a project."""
+
+    project_id: UUID
+    lint_level: int | None = None
+    enabled_rules: list[str] | None = None
+    effective_rules: list[str]
+    updated_at: datetime | None = None
+
+
+class LintConfigUpdate(BaseModel):
+    """Request body for updating lint configuration.
+
+    Set ``lint_level`` to use a preset level (1-5).
+    Set ``enabled_rules`` to configure individual rules.
+    Set both to ``None`` to reset to default (all rules).
+    When ``lint_level`` is set, it takes precedence over ``enabled_rules``.
+    """
+
+    lint_level: int | None = Field(default=None, ge=1, le=5)
+    enabled_rules: list[str] | None = None

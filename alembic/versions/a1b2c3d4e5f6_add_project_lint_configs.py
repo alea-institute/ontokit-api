@@ -1,0 +1,49 @@
+"""add project lint configs
+
+Revision ID: a1b2c3d4e5f6
+Revises: r1s2t3u4v5w6
+Create Date: 2026-04-20
+"""
+
+import sqlalchemy as sa
+
+from alembic import op
+
+# revision identifiers, used by Alembic.
+revision = "a1b2c3d4e5f6"
+down_revision = "r1s2t3u4v5w6"
+branch_labels = None
+depends_on = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "project_lint_configs",
+        sa.Column("id", sa.Uuid(), nullable=False),
+        sa.Column("project_id", sa.Uuid(), nullable=False),
+        sa.Column("lint_level", sa.Integer(), nullable=True),
+        sa.Column("enabled_rules", sa.String(length=2000), nullable=True),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("id"),
+        sa.UniqueConstraint("project_id"),
+    )
+    op.create_index(
+        "ix_project_lint_configs_project_id",
+        "project_lint_configs",
+        ["project_id"],
+    )
+
+
+def downgrade() -> None:
+    op.drop_index("ix_project_lint_configs_project_id", table_name="project_lint_configs")
+    op.drop_table("project_lint_configs")

@@ -17,11 +17,16 @@ from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
 from ontokit.core.constants import LINT_UPDATES_CHANNEL
 from ontokit.core.database import get_db
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
+from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project
 from ontokit.schemas.lint import (
+    LintConfigResponse,
+    LintConfigUpdate,
     LintIssueListResponse,
     LintIssueResponse,
     LintIssueTypeValue,
+    LintLevelInfo,
+    LintLevelsResponse,
     LintRuleInfo,
     LintRulesResponse,
     LintRunDetailResponse,
@@ -31,7 +36,7 @@ from ontokit.schemas.lint import (
     LintSummaryResponse,
     LintTriggerResponse,
 )
-from ontokit.services.linter import get_available_rules
+from ontokit.services.linter import ALL_RULE_IDS, LINT_LEVELS, get_available_rules
 from ontokit.services.project_service import get_project_service
 
 logger = logging.getLogger(__name__)
@@ -44,6 +49,7 @@ async def verify_project_access(
     db: AsyncSession,
     user: CurrentUser | None,
     require_write: bool = False,
+    require_manage: bool = False,
 ) -> Project:
     """
     Verify user has access to the project.
@@ -53,6 +59,7 @@ async def verify_project_access(
         db: Database session
         user: Current user (from auth)
         require_write: If True, require editor/admin/owner access
+        require_manage: If True, require admin/owner access
 
     Returns:
         The Project model if access is granted
@@ -74,6 +81,12 @@ async def verify_project_access(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found",
+        )
+
+    if require_manage and project_response.user_role not in ("owner", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
         )
 
     if require_write and project_response.user_role not in ("owner", "admin", "editor"):
@@ -464,6 +477,141 @@ async def dismiss_issue(
     # Mark as resolved
     issue.resolved_at = datetime.now(UTC)
     await db.commit()
+
+
+@router.get("/{project_id}/lint/config", response_model=LintConfigResponse)
+async def get_lint_config(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: OptionalUser,
+) -> LintConfigResponse:
+    """
+    Get the current lint configuration for a project.
+
+    Returns the lint level and/or enabled rules, plus the effective set of
+    rules that will be checked on the next lint run.
+    """
+    await verify_project_access(project_id, db, user)
+
+    result = await db.execute(
+        select(ProjectLintConfig).where(ProjectLintConfig.project_id == project_id)
+    )
+    config = result.scalar_one_or_none()
+
+    if config is None:
+        return LintConfigResponse(
+            project_id=project_id,
+            effective_rules=sorted(ALL_RULE_IDS),
+        )
+
+    effective = config.get_enabled_rule_ids()
+    enabled_list = (
+        sorted(r.strip() for r in config.enabled_rules.split(",") if r.strip())
+        if config.enabled_rules
+        else None
+    )
+
+    return LintConfigResponse(
+        project_id=project_id,
+        lint_level=config.lint_level,
+        enabled_rules=enabled_list,
+        effective_rules=sorted(effective) if effective is not None else sorted(ALL_RULE_IDS),
+        updated_at=config.updated_at,
+    )
+
+
+@router.put("/{project_id}/lint/config", response_model=LintConfigResponse)
+async def update_lint_config(
+    project_id: UUID,
+    body: LintConfigUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> LintConfigResponse:
+    """
+    Update lint configuration for a project.
+
+    Requires owner or admin role.
+
+    Set ``lint_level`` to use a preset level (1-5).
+    Set ``enabled_rules`` to configure individual rules.
+    Set both to ``null`` to reset to default (all rules).
+    """
+    await verify_project_access(project_id, db, user, require_manage=True)
+
+    # Validate rule IDs if provided
+    if body.enabled_rules is not None:
+        invalid = set(body.enabled_rules) - ALL_RULE_IDS
+        if invalid:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Unknown rule IDs: {', '.join(sorted(invalid))}",
+            )
+
+    result = await db.execute(
+        select(ProjectLintConfig).where(ProjectLintConfig.project_id == project_id)
+    )
+    config = result.scalar_one_or_none()
+
+    enabled_rules_str = (
+        ",".join(sorted(body.enabled_rules)) if body.enabled_rules is not None else None
+    )
+
+    if config is None:
+        config = ProjectLintConfig(
+            project_id=project_id,
+            lint_level=body.lint_level,
+            enabled_rules=enabled_rules_str,
+        )
+        db.add(config)
+    else:
+        config.lint_level = body.lint_level
+        config.enabled_rules = enabled_rules_str
+
+    await db.commit()
+    await db.refresh(config)
+
+    effective = config.get_enabled_rule_ids()
+    enabled_list = (
+        sorted(r.strip() for r in config.enabled_rules.split(",") if r.strip())
+        if config.enabled_rules
+        else None
+    )
+
+    return LintConfigResponse(
+        project_id=project_id,
+        lint_level=config.lint_level,
+        enabled_rules=enabled_list,
+        effective_rules=sorted(effective) if effective is not None else sorted(ALL_RULE_IDS),
+        updated_at=config.updated_at,
+    )
+
+
+@router.get("/lint/levels", response_model=LintLevelsResponse)
+async def get_lint_levels() -> LintLevelsResponse:
+    """
+    Get the list of available progressive lint levels.
+
+    Each level includes all rules from the previous level plus additional rules.
+    """
+    level_names = {
+        1: ("Critical", "Structural errors that break ontology validity"),
+        2: ("Structural", "Orphan classes, duplicates, and disjointness violations"),
+        3: ("Labels", "Missing, empty, and duplicate label checks"),
+        4: ("Quality", "Comments and per-language label checks"),
+        5: ("All", "All available rules including domain/range and cardinality"),
+    }
+
+    return LintLevelsResponse(
+        levels=[
+            LintLevelInfo(
+                level=lvl,
+                name=level_names[lvl][0],
+                description=level_names[lvl][1],
+                rule_ids=sorted(rules),
+            )
+            for lvl, rules in sorted(LINT_LEVELS.items())
+        ]
+    )
 
 
 @router.get("/lint/rules", response_model=LintRulesResponse)

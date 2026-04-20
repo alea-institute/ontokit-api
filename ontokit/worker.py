@@ -23,6 +23,7 @@ from ontokit.core.constants import (
 from ontokit.core.encryption import decrypt_token
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
+from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.models.user_github_token import UserGitHubToken
@@ -252,8 +253,15 @@ async def run_lint_task(
             project.source_file_path,
         )
 
+        # Load per-project lint configuration
+        config_result = await db.execute(
+            select(ProjectLintConfig).where(ProjectLintConfig.project_id == project_uuid)
+        )
+        lint_config = config_result.scalar_one_or_none()
+        enabled_rules = lint_config.get_enabled_rule_ids() if lint_config else None
+
         # Run linting
-        linter = get_linter()
+        linter = get_linter(enabled_rules=enabled_rules)
         lint_results: list[LintResult] = await linter.lint(graph, project_uuid)
 
         # Save issues to database
