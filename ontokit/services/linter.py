@@ -478,12 +478,19 @@ class OntologyLinter:
 
     async def _check_label_per_language(self, graph: Graph) -> list[LintResult]:
         """
-        Find resources with multiple different labels for the same language.
+        Find resources with multiple different labels for the same predicate and language.
 
-        Adapted from skos-ttl-editor's labelCheck.
+        Each label predicate (rdfs:label, skos:prefLabel, skos:altLabel) is checked
+        independently — having different values across different predicates is valid.
         """
         issues = []
         SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
+
+        label_predicates = [
+            (RDFS.label, "rdfs:label"),
+            (SKOS.prefLabel, "skos:prefLabel"),
+            (SKOS.altLabel, "skos:altLabel"),
+        ]
 
         for class_uri in graph.subjects(RDF.type, OWL.Class):
             if not isinstance(class_uri, URIRef):
@@ -491,39 +498,36 @@ class OntologyLinter:
             if class_uri == OWL.Thing:
                 continue
 
-            # Collect all labels with their language tags
-            labels_by_lang: dict[str | None, list[str]] = defaultdict(list)
+            for predicate, pred_name in label_predicates:
+                # Collect labels by language for this specific predicate
+                labels_by_lang: dict[str | None, list[str]] = defaultdict(list)
 
-            # Check rdfs:label
-            for label in graph.objects(class_uri, RDFS.label):
-                if isinstance(label, RDFLiteral):
-                    lang = label.language
-                    labels_by_lang[lang].append(str(label))
+                for label in graph.objects(class_uri, predicate):
+                    if isinstance(label, RDFLiteral):
+                        labels_by_lang[label.language].append(str(label))
 
-            # Check skos:prefLabel
-            for label in graph.objects(class_uri, SKOS.prefLabel):
-                if isinstance(label, RDFLiteral):
-                    lang = label.language
-                    labels_by_lang[lang].append(str(label))
-
-            # Check for multiple different labels per language
-            for lang, label_values in labels_by_lang.items():
-                unique_values = list(set(label_values))
-                if len(unique_values) > 1:
-                    lang_str = lang or "no language tag"
-                    issues.append(
-                        LintResult(
-                            issue_type=LintIssueType.ERROR.value,
-                            rule_id="label-per-language",
-                            message=f"Multiple different labels for language '{lang_str}'",
-                            subject_iri=str(class_uri),
-                            details={
-                                "local_name": self._get_local_name(class_uri),
-                                "language": lang_str,
-                                "labels": unique_values,
-                            },
+                # Check for multiple different labels per language within this predicate
+                for lang, label_values in labels_by_lang.items():
+                    unique_values = list(set(label_values))
+                    if len(unique_values) > 1:
+                        lang_str = lang or "no language tag"
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.ERROR.value,
+                                rule_id="label-per-language",
+                                message=(
+                                    f"Multiple different {pred_name} values "
+                                    f"for language '{lang_str}'"
+                                ),
+                                subject_iri=str(class_uri),
+                                details={
+                                    "local_name": self._get_local_name(class_uri),
+                                    "predicate": pred_name,
+                                    "language": lang_str,
+                                    "labels": unique_values,
+                                },
+                            )
                         )
-                    )
 
         return issues
 
