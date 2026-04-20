@@ -487,8 +487,12 @@ class OntologyLinter:
         """
         Find resources with multiple different labels for the same predicate and language.
 
-        Each label predicate (rdfs:label, skos:prefLabel, skos:altLabel) is checked
-        independently — having different values across different predicates is valid.
+        Only checks predicates with cardinality constraints:
+        - rdfs:label: conventionally one per language
+        - skos:prefLabel: at most one per language (SKOS integrity condition S14)
+
+        skos:altLabel and skos:hiddenLabel are explicitly unconstrained —
+        multiple values per language is their intended usage (synonyms, variants).
         """
         issues = []
         SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
@@ -496,7 +500,6 @@ class OntologyLinter:
         label_predicates = [
             (RDFS.label, "rdfs:label"),
             (SKOS.prefLabel, "skos:prefLabel"),
-            (SKOS.altLabel, "skos:altLabel"),
         ]
 
         for class_uri in graph.subjects(RDF.type, OWL.Class):
