@@ -8,7 +8,7 @@ from uuid import UUID
 
 from rdflib import Graph, Namespace, URIRef
 from rdflib import Literal as RDFLiteral
-from rdflib.namespace import OWL, RDF, RDFS
+from rdflib.namespace import OWL, RDF, RDFS, XSD
 
 from ontokit.models.lint import LintIssueType
 
@@ -132,6 +132,12 @@ LINT_RULES: list[LintRuleInfo] = [
         description="Resource has labels but none in English",
         severity=LintIssueType.WARNING.value,
     ),
+    LintRuleInfo(
+        rule_id="missing-language-tag",
+        name="Missing Language Tag",
+        description="Label or annotation has no language tag (plain literal or xsd:string)",
+        severity=LintIssueType.WARNING.value,
+    ),
 ]
 
 # Map rule IDs to their info
@@ -149,6 +155,7 @@ _LEVEL_3_RULES: set[str] = _LEVEL_2_RULES | {
     "empty-label",
     "duplicate-label",
     "missing-english-label",
+    "missing-language-tag",
 }
 _LEVEL_4_RULES: set[str] = _LEVEL_3_RULES | {"missing-comment", "label-per-language"}
 _LEVEL_5_RULES: set[str] = {r.rule_id for r in LINT_RULES}
@@ -975,6 +982,67 @@ class OntologyLinter:
                         },
                     )
                 )
+
+        return issues
+
+    async def _check_missing_language_tag(self, graph: Graph) -> list[LintResult]:
+        """
+        Find label/annotation predicates with plain literals or xsd:string
+        instead of language-tagged literals.
+        """
+        issues = []
+        SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
+        DC = Namespace("http://purl.org/dc/elements/1.1/")
+        DCTERMS = Namespace("http://purl.org/dc/terms/")
+
+        # Predicates that should typically have language tags
+        lang_predicates = [
+            (RDFS.label, "rdfs:label"),
+            (RDFS.comment, "rdfs:comment"),
+            (SKOS.prefLabel, "skos:prefLabel"),
+            (SKOS.altLabel, "skos:altLabel"),
+            (SKOS.hiddenLabel, "skos:hiddenLabel"),
+            (SKOS.definition, "skos:definition"),
+            (SKOS.note, "skos:note"),
+            (SKOS.scopeNote, "skos:scopeNote"),
+            (SKOS.historyNote, "skos:historyNote"),
+            (SKOS.editorialNote, "skos:editorialNote"),
+            (SKOS.changeNote, "skos:changeNote"),
+            (SKOS.example, "skos:example"),
+            (DC.title, "dc:title"),
+            (DC.description, "dc:description"),
+            (DCTERMS.title, "dcterms:title"),
+            (DCTERMS.description, "dcterms:description"),
+        ]
+
+        for class_uri in graph.subjects(RDF.type, OWL.Class):
+            if not isinstance(class_uri, URIRef):
+                continue
+            if class_uri == OWL.Thing:
+                continue
+
+            for predicate, pred_name in lang_predicates:
+                for obj in graph.objects(class_uri, predicate):
+                    if not isinstance(obj, RDFLiteral):
+                        continue
+                    # Flag if no language tag: plain literal or explicit xsd:string
+                    if obj.language is None:
+                        datatype_note = ""
+                        if obj.datatype == XSD.string:
+                            datatype_note = " (typed as xsd:string)"
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.WARNING.value,
+                                rule_id="missing-language-tag",
+                                message=(f"{pred_name} has no language tag{datatype_note}"),
+                                subject_iri=str(class_uri),
+                                details={
+                                    "local_name": self._get_local_name(class_uri),
+                                    "predicate": pred_name,
+                                    "value": str(obj)[:100],
+                                },
+                            )
+                        )
 
         return issues
 
