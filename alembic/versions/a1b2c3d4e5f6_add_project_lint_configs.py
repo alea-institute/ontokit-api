@@ -37,13 +37,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("project_id"),
     )
-    op.create_index(
-        "ix_project_lint_configs_project_id",
-        "project_lint_configs",
-        ["project_id"],
-    )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_project_lint_configs_project_id", table_name="project_lint_configs")
     op.drop_table("project_lint_configs")

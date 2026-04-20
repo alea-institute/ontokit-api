@@ -605,8 +605,8 @@ async def get_lint_levels() -> LintLevelsResponse:
         levels=[
             LintLevelInfo(
                 level=lvl,
-                name=level_names[lvl][0],
-                description=level_names[lvl][1],
+                name=level_names.get(lvl, ("Unknown", ""))[0],
+                description=level_names.get(lvl, ("", "Unknown level"))[1],
                 rule_ids=sorted(rules),
             )
             for lvl, rules in sorted(LINT_LEVELS.items())
