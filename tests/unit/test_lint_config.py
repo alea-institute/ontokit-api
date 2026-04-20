@@ -11,6 +11,7 @@ Covers:
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from uuid import uuid4
 
@@ -146,6 +147,14 @@ class TestProjectLintConfigModel:
         config = self._make_config(enabled_rules="")
         result = config.get_enabled_rule_ids()
         assert result is None
+
+    def test_repr(self) -> None:
+        """__repr__ includes project_id and lint_level."""
+        config = self._make_config(lint_level=3)
+        config.project_id = PROJECT_ID
+        result = ProjectLintConfig.__repr__(config)
+        assert "lint_level=3" in result
+        assert PROJECT_ID in result
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +402,31 @@ class TestUpdateLintConfig:
         assert data["enabled_rules"] is None
         # Effective rules should be all rules when config is reset
         assert set(data["effective_rules"]) == ALL_RULE_IDS
+
+    @patch("ontokit.api.routes.lint.get_project_service")
+    def test_manage_access_forbidden_for_editor(
+        self,
+        mock_get_svc: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Returns 403 when user has editor role (admin/owner required)."""
+        client, mock_session = authed_client
+
+        mock_svc = AsyncMock()
+        mock_svc.get.return_value = SimpleNamespace(user_role="editor")
+        mock_get_svc.return_value = mock_svc
+
+        mock_project = Mock()
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = mock_project
+        mock_session.execute.return_value = mock_result
+
+        response = client.put(
+            f"/api/v1/projects/{PROJECT_ID}/lint/config",
+            json={"lint_level": 1},
+        )
+        assert response.status_code == 403
+        assert "admin access required" in response.json()["detail"].lower()
 
     def test_lint_level_validation_too_low(
         self,
