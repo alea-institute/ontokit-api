@@ -34,6 +34,7 @@ def upgrade() -> None:
             ["projects.id"],
             ondelete="CASCADE",
         ),
+        sa.CheckConstraint("lint_level BETWEEN 1 AND 5", name="ck_lint_level_range"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("project_id"),
     )

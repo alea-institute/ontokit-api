@@ -559,6 +559,7 @@ async def update_lint_config(
         set_={
             "lint_level": body.lint_level,
             "enabled_rules": enabled_rules_str,
+            "updated_at": func.now(),
         },
     )
     await db.execute(stmt)
