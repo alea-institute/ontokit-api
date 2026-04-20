@@ -9,7 +9,7 @@ from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
-from sqlalchemy import case, func, select
+from sqlalchemy import case, delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -477,6 +477,27 @@ async def dismiss_issue(
 
     # Mark as resolved
     issue.resolved_at = datetime.now(UTC)
+    await db.commit()
+
+
+@router.delete(
+    "/{project_id}/lint/results",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def clear_lint_results(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> None:
+    """
+    Clear all lint results (runs and issues) for a project.
+
+    Requires authentication and admin/owner access.
+    """
+    await verify_project_access(project_id, db, user, require_manage=True)
+
+    # Delete all lint runs (issues cascade-delete via relationship)
+    await db.execute(delete(LintRun).where(LintRun.project_id == project_id))
     await db.commit()
 
 
