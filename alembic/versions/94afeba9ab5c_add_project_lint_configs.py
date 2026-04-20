@@ -1,6 +1,6 @@
 """add project lint configs
 
-Revision ID: a1b2c3d4e5f6
+Revision ID: 94afeba9ab5c
 Revises: r1s2t3u4v5w6
 Create Date: 2026-04-20
 """
@@ -10,7 +10,7 @@ import sqlalchemy as sa
 from alembic import op
 
 # revision identifiers, used by Alembic.
-revision = "a1b2c3d4e5f6"
+revision = "94afeba9ab5c"
 down_revision = "r1s2t3u4v5w6"
 branch_labels = None
 depends_on = None
