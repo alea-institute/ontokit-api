@@ -156,8 +156,9 @@ _LEVEL_3_RULES: set[str] = _LEVEL_2_RULES | {
     "duplicate-label",
     "missing-english-label",
     "missing-language-tag",
+    "missing-comment",
 }
-_LEVEL_4_RULES: set[str] = _LEVEL_3_RULES | {"missing-comment", "label-per-language"}
+_LEVEL_4_RULES: set[str] = _LEVEL_3_RULES | {"label-per-language"}
 _LEVEL_5_RULES: set[str] = {r.rule_id for r in LINT_RULES}
 
 LINT_LEVELS: dict[int, set[str]] = {
