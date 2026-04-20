@@ -45,13 +45,17 @@ class ProjectLintConfig(Base):
     def get_enabled_rule_ids(self) -> set[str] | None:
         """Resolve the effective set of enabled rule IDs.
 
-        Returns ``None`` when no configuration has been set (meaning all rules).
+        Returns:
+            - ``None`` when no configuration has been set (meaning all rules)
+            - An empty ``set()`` when rules are explicitly set to none
+            - A non-empty ``set`` of specific rule IDs otherwise
         """
         from ontokit.services.linter import ALL_RULE_IDS, get_rules_for_level
 
         if self.lint_level is not None:
             return get_rules_for_level(self.lint_level)
-        if self.enabled_rules is not None and self.enabled_rules.strip():
+        if self.enabled_rules is not None:
+            # Empty string means explicitly "no rules"; non-empty is parsed
             ids = {r.strip() for r in self.enabled_rules.split(",") if r.strip()}
             return ids & ALL_RULE_IDS
         return None

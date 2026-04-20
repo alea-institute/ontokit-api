@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Type definitions
 LintIssueTypeValue = Literal["error", "warning", "info"]
@@ -158,10 +158,24 @@ class LintConfigUpdate(BaseModel):
     """Request body for updating lint configuration.
 
     Set ``lint_level`` to use a preset level (1-5).
-    Set ``enabled_rules`` to configure individual rules.
+    Set ``enabled_rules`` to configure individual rules (can be empty list to disable all).
     Set both to ``None`` to reset to default (all rules).
     When ``lint_level`` is set, it takes precedence over ``enabled_rules``.
     """
 
     lint_level: int | None = Field(default=None, ge=1, le=5)
     enabled_rules: list[str] | None = None
+
+    @field_validator("enabled_rules")
+    @classmethod
+    def validate_rule_ids(cls, v: list[str] | None) -> list[str] | None:
+        """Reject unknown rule IDs at schema level."""
+        if v is None:
+            return v
+        from ontokit.services.linter import ALL_RULE_IDS
+
+        invalid = set(v) - ALL_RULE_IDS
+        if invalid:
+            msg = f"Unknown rule IDs: {', '.join(sorted(invalid))}"
+            raise ValueError(msg)
+        return v

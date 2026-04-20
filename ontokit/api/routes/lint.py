@@ -10,6 +10,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import case, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
@@ -479,6 +480,30 @@ async def dismiss_issue(
     await db.commit()
 
 
+def _serialize_lint_config(
+    project_id: UUID, config: ProjectLintConfig | None
+) -> LintConfigResponse:
+    """Build a LintConfigResponse from a ProjectLintConfig (or None for defaults)."""
+    if config is None:
+        return LintConfigResponse(
+            project_id=project_id,
+            effective_rules=sorted(ALL_RULE_IDS),
+        )
+
+    effective = config.get_enabled_rule_ids()
+    enabled_list: list[str] | None = None
+    if config.enabled_rules is not None:
+        enabled_list = sorted(r.strip() for r in config.enabled_rules.split(",") if r.strip())
+
+    return LintConfigResponse(
+        project_id=project_id,
+        lint_level=config.lint_level,
+        enabled_rules=enabled_list,
+        effective_rules=sorted(effective) if effective is not None else sorted(ALL_RULE_IDS),
+        updated_at=config.updated_at,
+    )
+
+
 @router.get("/{project_id}/lint/config", response_model=LintConfigResponse)
 async def get_lint_config(
     project_id: UUID,
@@ -497,27 +522,7 @@ async def get_lint_config(
         select(ProjectLintConfig).where(ProjectLintConfig.project_id == project_id)
     )
     config = result.scalar_one_or_none()
-
-    if config is None:
-        return LintConfigResponse(
-            project_id=project_id,
-            effective_rules=sorted(ALL_RULE_IDS),
-        )
-
-    effective = config.get_enabled_rule_ids()
-    enabled_list = (
-        sorted(r.strip() for r in config.enabled_rules.split(",") if r.strip())
-        if config.enabled_rules
-        else None
-    )
-
-    return LintConfigResponse(
-        project_id=project_id,
-        lint_level=config.lint_level,
-        enabled_rules=enabled_list,
-        effective_rules=sorted(effective) if effective is not None else sorted(ALL_RULE_IDS),
-        updated_at=config.updated_at,
-    )
+    return _serialize_lint_config(project_id, config)
 
 
 @router.put("/{project_id}/lint/config", response_model=LintConfigResponse)
@@ -533,57 +538,49 @@ async def update_lint_config(
     Requires owner or admin role.
 
     Set ``lint_level`` to use a preset level (1-5).
-    Set ``enabled_rules`` to configure individual rules.
+    Set ``enabled_rules`` to configure individual rules (empty list disables all).
     Set both to ``null`` to reset to default (all rules).
     """
     await verify_project_access(project_id, db, user, require_manage=True)
 
-    # Validate rule IDs if provided
+    # enabled_rules=[] is stored as "" to distinguish from None (unset)
+    enabled_rules_str: str | None = None
     if body.enabled_rules is not None:
-        invalid = set(body.enabled_rules) - ALL_RULE_IDS
-        if invalid:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"Unknown rule IDs: {', '.join(sorted(invalid))}",
-            )
+        enabled_rules_str = ",".join(sorted(body.enabled_rules))
 
+    # Upsert to handle concurrent first-time PUTs safely
+    stmt = pg_insert(ProjectLintConfig).values(
+        project_id=project_id,
+        lint_level=body.lint_level,
+        enabled_rules=enabled_rules_str,
+    )
+    stmt = stmt.on_conflict_do_update(
+        index_elements=[ProjectLintConfig.project_id],
+        set_={
+            "lint_level": body.lint_level,
+            "enabled_rules": enabled_rules_str,
+        },
+    )
+    await db.execute(stmt)
+    await db.commit()
+
+    # Re-fetch the config to return the updated state
     result = await db.execute(
         select(ProjectLintConfig).where(ProjectLintConfig.project_id == project_id)
     )
-    config = result.scalar_one_or_none()
+    config = result.scalar_one()
+    return _serialize_lint_config(project_id, config)
 
-    enabled_rules_str = (
-        ",".join(sorted(body.enabled_rules)) if body.enabled_rules is not None else None
-    )
 
-    if config is None:
-        config = ProjectLintConfig(
-            project_id=project_id,
-            lint_level=body.lint_level,
-            enabled_rules=enabled_rules_str,
-        )
-        db.add(config)
-    else:
-        config.lint_level = body.lint_level
-        config.enabled_rules = enabled_rules_str
+_LEVEL_METADATA: dict[int, tuple[str, str]] = {
+    1: ("Critical", "Structural errors that break ontology validity"),
+    2: ("Structural", "Orphan classes, duplicates, and disjointness violations"),
+    3: ("Labels", "Missing, empty, and duplicate label checks"),
+    4: ("Quality", "Comments and per-language label checks"),
+    5: ("All", "All available rules including domain/range and cardinality"),
+}
 
-    await db.commit()
-    await db.refresh(config)
-
-    effective = config.get_enabled_rule_ids()
-    enabled_list = (
-        sorted(r.strip() for r in config.enabled_rules.split(",") if r.strip())
-        if config.enabled_rules
-        else None
-    )
-
-    return LintConfigResponse(
-        project_id=project_id,
-        lint_level=config.lint_level,
-        enabled_rules=enabled_list,
-        effective_rules=sorted(effective) if effective is not None else sorted(ALL_RULE_IDS),
-        updated_at=config.updated_at,
-    )
+_LEVEL_FALLBACK: tuple[str, str] = ("Unknown", "Unknown level")
 
 
 @router.get("/lint/levels", response_model=LintLevelsResponse)
@@ -593,20 +590,12 @@ async def get_lint_levels() -> LintLevelsResponse:
 
     Each level includes all rules from the previous level plus additional rules.
     """
-    level_names = {
-        1: ("Critical", "Structural errors that break ontology validity"),
-        2: ("Structural", "Orphan classes, duplicates, and disjointness violations"),
-        3: ("Labels", "Missing, empty, and duplicate label checks"),
-        4: ("Quality", "Comments and per-language label checks"),
-        5: ("All", "All available rules including domain/range and cardinality"),
-    }
-
     return LintLevelsResponse(
         levels=[
             LintLevelInfo(
                 level=lvl,
-                name=level_names.get(lvl, ("Unknown", ""))[0],
-                description=level_names.get(lvl, ("", "Unknown level"))[1],
+                name=_LEVEL_METADATA.get(lvl, _LEVEL_FALLBACK)[0],
+                description=_LEVEL_METADATA.get(lvl, _LEVEL_FALLBACK)[1],
                 rule_ids=sorted(rules),
             )
             for lvl, rules in sorted(LINT_LEVELS.items())

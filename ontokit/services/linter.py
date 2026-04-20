@@ -137,47 +137,31 @@ LINT_RULES: list[LintRuleInfo] = [
 # Map rule IDs to their info
 LINT_RULES_MAP: dict[str, LintRuleInfo] = {rule.rule_id: rule for rule in LINT_RULES}
 
-# Progressive lint levels — each level includes all rules from previous levels
+# Progressive lint levels — each level cumulatively includes the previous
+_LEVEL_1_RULES: set[str] = {"undefined-parent", "circular-hierarchy", "undefined-prefix"}
+_LEVEL_2_RULES: set[str] = _LEVEL_1_RULES | {
+    "orphan-class",
+    "duplicate-triple",
+    "disjoint-violation",
+}
+_LEVEL_3_RULES: set[str] = _LEVEL_2_RULES | {
+    "missing-label",
+    "empty-label",
+    "duplicate-label",
+    "missing-english-label",
+}
+_LEVEL_4_RULES: set[str] = _LEVEL_3_RULES | {"missing-comment", "label-per-language"}
+_LEVEL_5_RULES: set[str] = {r.rule_id for r in LINT_RULES}
+
 LINT_LEVELS: dict[int, set[str]] = {
-    1: {"undefined-parent", "circular-hierarchy", "undefined-prefix"},
-    2: {
-        "undefined-parent",
-        "circular-hierarchy",
-        "undefined-prefix",
-        "orphan-class",
-        "duplicate-triple",
-        "disjoint-violation",
-    },
-    3: {
-        "undefined-parent",
-        "circular-hierarchy",
-        "undefined-prefix",
-        "orphan-class",
-        "duplicate-triple",
-        "disjoint-violation",
-        "missing-label",
-        "empty-label",
-        "duplicate-label",
-        "missing-english-label",
-    },
-    4: {
-        "undefined-parent",
-        "circular-hierarchy",
-        "undefined-prefix",
-        "orphan-class",
-        "duplicate-triple",
-        "disjoint-violation",
-        "missing-label",
-        "empty-label",
-        "duplicate-label",
-        "missing-english-label",
-        "missing-comment",
-        "label-per-language",
-    },
-    5: {r.rule_id for r in LINT_RULES},
+    1: _LEVEL_1_RULES,
+    2: _LEVEL_2_RULES,
+    3: _LEVEL_3_RULES,
+    4: _LEVEL_4_RULES,
+    5: _LEVEL_5_RULES,
 }
 
-ALL_RULE_IDS: set[str] = {r.rule_id for r in LINT_RULES}
+ALL_RULE_IDS: set[str] = _LEVEL_5_RULES
 
 
 def get_rules_for_level(level: int) -> set[str]:

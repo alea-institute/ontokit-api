@@ -143,10 +143,10 @@ class TestProjectLintConfigModel:
         assert result == {"missing-label", "orphan-class"}
 
     def test_empty_enabled_rules_string(self) -> None:
-        """An empty enabled_rules string is treated as no config (all rules)."""
+        """An empty enabled_rules string means explicitly 'no rules' (empty set)."""
         config = self._make_config(enabled_rules="")
         result = config.get_enabled_rule_ids()
-        assert result is None
+        assert result == set()
 
     def test_repr(self) -> None:
         """__repr__ includes project_id and lint_level."""
@@ -251,29 +251,37 @@ class TestGetLintConfig:
 class TestUpdateLintConfig:
     """Tests for PUT /api/v1/projects/{id}/lint/config."""
 
+    @staticmethod
+    def _mock_upsert_session(
+        mock_session: AsyncMock,
+        config_after: Mock,
+    ) -> None:
+        """Configure mock session for upsert flow (execute upsert, commit, re-fetch)."""
+        # First execute: upsert statement (returns nothing meaningful)
+        upsert_result = MagicMock()
+        # Second execute: re-fetch after commit
+        refetch_result = MagicMock()
+        refetch_result.scalar_one.return_value = config_after
+        mock_session.execute.side_effect = [upsert_result, refetch_result]
+
     @patch("ontokit.api.routes.lint.verify_project_access", new_callable=AsyncMock)
     def test_set_lint_level(
         self,
         mock_access: AsyncMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Setting lint_level creates a new config and returns level rules."""
+        """Setting lint_level creates/updates config and returns level rules."""
         client, mock_session = authed_client
         mock_access.return_value = Mock()
 
-        # No existing config
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value = mock_result
-
-        # After commit+refresh, mock the config object
         now = datetime.now(UTC)
+        config_after = Mock()
+        config_after.lint_level = 3
+        config_after.enabled_rules = None
+        config_after.updated_at = now
+        config_after.get_enabled_rule_ids.return_value = get_rules_for_level(3)
 
-        async def _refresh(obj: object) -> None:
-            obj.updated_at = now  # type: ignore[attr-defined]
-            obj.get_enabled_rule_ids = Mock(return_value=get_rules_for_level(3))  # type: ignore[attr-defined]
-
-        mock_session.refresh = AsyncMock(side_effect=_refresh)
+        self._mock_upsert_session(mock_session, config_after)
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/lint/config",
@@ -294,19 +302,14 @@ class TestUpdateLintConfig:
         client, mock_session = authed_client
         mock_access.return_value = Mock()
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value = mock_result
-
         now = datetime.now(UTC)
+        config_after = Mock()
+        config_after.lint_level = None
+        config_after.enabled_rules = "missing-label,orphan-class"
+        config_after.updated_at = now
+        config_after.get_enabled_rule_ids.return_value = {"missing-label", "orphan-class"}
 
-        async def _refresh(obj: object) -> None:
-            obj.updated_at = now  # type: ignore[attr-defined]
-            obj.get_enabled_rule_ids = Mock(  # type: ignore[attr-defined]
-                return_value={"missing-label", "orphan-class"}
-            )
-
-        mock_session.refresh = AsyncMock(side_effect=_refresh)
+        self._mock_upsert_session(mock_session, config_after)
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/lint/config",
@@ -316,22 +319,18 @@ class TestUpdateLintConfig:
         data = response.json()
         assert set(data["effective_rules"]) == {"missing-label", "orphan-class"}
 
-    @patch("ontokit.api.routes.lint.verify_project_access", new_callable=AsyncMock)
     def test_invalid_rule_ids_rejected(
         self,
-        mock_access: AsyncMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Unknown rule IDs return 422."""
-        client, mock_session = authed_client
-        mock_access.return_value = Mock()
+        """Unknown rule IDs return 422 via Pydantic schema validation."""
+        client, _ = authed_client
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/lint/config",
             json={"enabled_rules": ["missing-label", "totally-fake-rule"]},
         )
         assert response.status_code == 422
-        assert "totally-fake-rule" in response.json()["detail"]
 
     @patch("ontokit.api.routes.lint.verify_project_access", new_callable=AsyncMock)
     def test_update_existing_config(
@@ -339,32 +338,27 @@ class TestUpdateLintConfig:
         mock_access: AsyncMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Updating an existing config modifies the record."""
+        """Updating an existing config uses upsert and returns new state."""
         client, mock_session = authed_client
         mock_access.return_value = Mock()
 
         now = datetime.now(UTC)
-        existing = Mock()
-        existing.lint_level = 1
-        existing.enabled_rules = None
-        existing.updated_at = now
+        config_after = Mock()
+        config_after.lint_level = 4
+        config_after.enabled_rules = None
+        config_after.updated_at = now
+        config_after.get_enabled_rule_ids.return_value = get_rules_for_level(4)
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = existing
-        mock_session.execute.return_value = mock_result
-
-        async def _refresh(obj: object) -> None:
-            obj.updated_at = now  # type: ignore[attr-defined]
-            obj.get_enabled_rule_ids = Mock(return_value=get_rules_for_level(4))  # type: ignore[attr-defined]
-
-        mock_session.refresh = AsyncMock(side_effect=_refresh)
+        self._mock_upsert_session(mock_session, config_after)
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/lint/config",
             json={"lint_level": 4},
         )
         assert response.status_code == 200
-        assert existing.lint_level == 4
+        data = response.json()
+        assert data["lint_level"] == 4
+        assert set(data["effective_rules"]) == get_rules_for_level(4)
 
     @patch("ontokit.api.routes.lint.verify_project_access", new_callable=AsyncMock)
     def test_reset_config(
@@ -377,20 +371,13 @@ class TestUpdateLintConfig:
         mock_access.return_value = Mock()
 
         now = datetime.now(UTC)
-        existing = Mock()
-        existing.lint_level = 2
-        existing.enabled_rules = "missing-label"
-        existing.updated_at = now
+        config_after = Mock()
+        config_after.lint_level = None
+        config_after.enabled_rules = None
+        config_after.updated_at = now
+        config_after.get_enabled_rule_ids.return_value = None
 
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = existing
-        mock_session.execute.return_value = mock_result
-
-        async def _refresh(obj: object) -> None:
-            obj.updated_at = now  # type: ignore[attr-defined]
-            obj.get_enabled_rule_ids = Mock(return_value=None)  # type: ignore[attr-defined]
-
-        mock_session.refresh = AsyncMock(side_effect=_refresh)
+        self._mock_upsert_session(mock_session, config_after)
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/lint/config",
@@ -400,8 +387,34 @@ class TestUpdateLintConfig:
         data = response.json()
         assert data["lint_level"] is None
         assert data["enabled_rules"] is None
-        # Effective rules should be all rules when config is reset
         assert set(data["effective_rules"]) == ALL_RULE_IDS
+
+    @patch("ontokit.api.routes.lint.verify_project_access", new_callable=AsyncMock)
+    def test_set_empty_rules_disables_all(
+        self,
+        mock_access: AsyncMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Setting enabled_rules to empty list explicitly disables all rules."""
+        client, mock_session = authed_client
+        mock_access.return_value = Mock()
+
+        now = datetime.now(UTC)
+        config_after = Mock()
+        config_after.lint_level = None
+        config_after.enabled_rules = ""
+        config_after.updated_at = now
+        config_after.get_enabled_rule_ids.return_value = set()
+
+        self._mock_upsert_session(mock_session, config_after)
+
+        response = client.put(
+            f"/api/v1/projects/{PROJECT_ID}/lint/config",
+            json={"enabled_rules": []},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["effective_rules"] == []
 
     @patch("ontokit.api.routes.lint.get_project_service")
     def test_manage_access_forbidden_for_editor(
