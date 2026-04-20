@@ -595,8 +595,8 @@ async def update_lint_config(
 
 
 _LEVEL_METADATA: dict[int, tuple[str, str]] = {
-    1: ("Critical", "Structural errors that break ontology validity"),
-    2: ("Structural", "Orphan classes, duplicates, and disjointness violations"),
+    1: ("Critical", "Undefined parents, circular hierarchies, undefined prefixes"),
+    2: ("Consistency", "Orphan classes, duplicate triples, and disjointness violations"),
     3: ("Labels", "Missing, empty, and duplicate label checks"),
     4: ("Quality", "Comments and per-language label checks"),
     5: ("All", "All available rules including domain/range and cardinality"),
