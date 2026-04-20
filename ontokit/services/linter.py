@@ -594,11 +594,12 @@ class OntologyLinter:
         issues = []
 
         # Group triples by subject
+        # Use o.n3() to preserve language tags and datatypes in comparisons
         subject_triples: dict[str, list[tuple[str, str]]] = defaultdict(list)
 
         for s, p, o in graph:
             if isinstance(s, URIRef):
-                po_key = (str(p), str(o))
+                po_key = (str(p), o.n3())
                 subject_triples[str(s)].append(po_key)
 
         # Find duplicates within each subject
