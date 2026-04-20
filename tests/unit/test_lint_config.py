@@ -142,10 +142,10 @@ class TestProjectLintConfigModel:
         assert result == {"missing-label", "orphan-class"}
 
     def test_empty_enabled_rules_string(self) -> None:
-        """An empty enabled_rules string returns empty set."""
+        """An empty enabled_rules string is treated as no config (all rules)."""
         config = self._make_config(enabled_rules="")
         result = config.get_enabled_rule_ids()
-        assert result == set()
+        assert result is None
 
 
 # ---------------------------------------------------------------------------

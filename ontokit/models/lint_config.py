@@ -51,7 +51,7 @@ class ProjectLintConfig(Base):
 
         if self.lint_level is not None:
             return get_rules_for_level(self.lint_level)
-        if self.enabled_rules is not None:
+        if self.enabled_rules is not None and self.enabled_rules.strip():
             ids = {r.strip() for r in self.enabled_rules.split(",") if r.strip()}
             return ids & ALL_RULE_IDS
         return None
