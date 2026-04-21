@@ -1020,14 +1020,14 @@ class OntologyLinter:
             (DCTERMS.description, "dcterms:description"),
         ]
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
+        for subject in set(graph.subjects()):
+            if not isinstance(subject, URIRef):
                 continue
-            if class_uri == OWL.Thing:
+            if subject == OWL.Thing:
                 continue
 
             for predicate, pred_name in lang_predicates:
-                for obj in graph.objects(class_uri, predicate):
+                for obj in graph.objects(subject, predicate):
                     if not isinstance(obj, RDFLiteral):
                         continue
                     # Flag if no language tag: plain literal or explicit xsd:string
@@ -1040,9 +1040,9 @@ class OntologyLinter:
                                 issue_type=LintIssueType.WARNING.value,
                                 rule_id="missing-language-tag",
                                 message=(f"{pred_name} has no language tag{datatype_note}"),
-                                subject_iri=str(class_uri),
+                                subject_iri=str(subject),
                                 details={
-                                    "local_name": self._get_local_name(class_uri),
+                                    "local_name": self._get_local_name(subject),
                                     "predicate": pred_name,
                                     "value": str(obj)[:100],
                                 },
