@@ -47,6 +47,7 @@ async def test_missing_label() -> None:
     assert len(matches) == 1
     assert matches[0].issue_type == "warning"
     assert matches[0].subject_iri == str(EX.Animal)
+    assert matches[0].subject_type == "class"
 
 
 # ---------------------------------------------------------------------------
@@ -701,6 +702,7 @@ async def test_redundant_regional_label() -> None:
     assert "@es-mx" in matches[0].message
     assert matches[0].details["base_language"] == "es"
     assert sorted(matches[0].details["regional_tags"]) == ["es-es", "es-mx"]
+    assert matches[0].subject_type == "class"
 
 
 async def test_no_redundant_regional_when_values_differ() -> None:
@@ -745,6 +747,9 @@ async def test_redundant_regional_base_and_regional_same_value() -> None:
     assert len(matches) == 1
     assert "@es" in matches[0].message
     assert "@es-es" in matches[0].message
+    # Base tag is present, so message should suggest removing the regional variant
+    assert "consider removing" in matches[0].message
+    assert matches[0].subject_type == "class"
 
 
 async def test_redundant_regional_skips_non_literal_and_untagged() -> None:

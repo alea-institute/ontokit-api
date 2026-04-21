@@ -12,6 +12,9 @@ from rdflib.namespace import OWL, RDF, RDFS, SKOS, XSD
 
 from ontokit.models.lint import LintIssueType
 
+DC = Namespace("http://purl.org/dc/elements/1.1/")
+DCTERMS = Namespace("http://purl.org/dc/terms/")
+
 
 @dataclass
 class LintResult:
@@ -224,6 +227,7 @@ class OntologyLinter:
     """Service for checking ontology health and finding issues."""
 
     enabled_rules: set[str] = field(default_factory=lambda: {r.rule_id for r in LINT_RULES})
+    _uri_subjects: set[URIRef] = field(default_factory=set, init=False, repr=False)
 
     def get_enabled_rules(self) -> list[LintRuleInfo]:
         """Get list of enabled lint rules."""
@@ -242,6 +246,11 @@ class OntologyLinter:
         """
         issues: list[LintResult] = []
 
+        # Pre-compute subjects once for all checkers
+        self._uri_subjects: set[URIRef] = {
+            s for s in graph.subjects() if isinstance(s, URIRef) and s != OWL.Thing
+        }
+
         # Run each enabled rule
         for rule_id in self.enabled_rules:
             checker_name = f"_check_{rule_id.replace('-', '_')}"
@@ -256,12 +265,7 @@ class OntologyLinter:
         """Find resources without rdfs:label."""
         issues = []
 
-        for subject in set(graph.subjects()):
-            if not isinstance(subject, URIRef):
-                continue
-            if subject == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             # Check for any rdfs:label
             labels = list(graph.objects(subject, RDFS.label))
             if not labels:
@@ -282,12 +286,7 @@ class OntologyLinter:
         """Find resources without rdfs:comment."""
         issues = []
 
-        for subject in set(graph.subjects()):
-            if not isinstance(subject, URIRef):
-                continue
-            if subject == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             # Check for any rdfs:comment
             comments = list(graph.objects(subject, RDFS.comment))
             if not comments:
@@ -457,12 +456,7 @@ class OntologyLinter:
         """Find resources with empty string labels."""
         issues = []
 
-        for subject in set(graph.subjects()):
-            if not isinstance(subject, URIRef):
-                continue
-            if subject == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             # Check each label
             for label in graph.objects(subject, RDFS.label):
                 if isinstance(label, RDFLiteral):
@@ -474,7 +468,7 @@ class OntologyLinter:
                                 rule_id="empty-label",
                                 message="Resource has an empty rdfs:label",
                                 subject_iri=str(subject),
-                                subject_type="class",
+                                subject_type=self._determine_entity_type(graph, subject),
                                 details={
                                     "local_name": self._get_local_name(subject),
                                     "language": label.language,
@@ -491,12 +485,7 @@ class OntologyLinter:
         # Build map of label → list of resource IRIs
         label_to_resources: dict[str, list[str]] = defaultdict(list)
 
-        for subject in set(graph.subjects()):
-            if not isinstance(subject, URIRef):
-                continue
-            if subject == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             for label in graph.objects(subject, RDFS.label):
                 if isinstance(label, RDFLiteral):
                     label_str = str(label).strip().lower()
@@ -519,7 +508,9 @@ class OntologyLinter:
                                 rule_id="duplicate-label",
                                 message=f"Label '{original_label}' is shared with {len(other_resources)} other resource(s)",
                                 subject_iri=resource_iri,
-                                subject_type="class",
+                                subject_type=self._determine_entity_type(
+                                    graph, URIRef(resource_iri)
+                                ),
                                 details={
                                     "local_name": self._get_local_name(URIRef(resource_iri)),
                                     "label": original_label,
@@ -549,12 +540,7 @@ class OntologyLinter:
             (SKOS.prefLabel, "skos:prefLabel"),
         ]
 
-        for subject in set(graph.subjects()):
-            if not isinstance(subject, URIRef):
-                continue
-            if subject == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             for predicate, pred_name in label_predicates:
                 # Collect labels by language for this specific predicate
                 labels_by_lang: dict[str | None, list[str]] = defaultdict(list)
@@ -577,7 +563,7 @@ class OntologyLinter:
                                     f"for language '{lang_str}'"
                                 ),
                                 subject_iri=str(subject),
-                                subject_type="class",
+                                subject_type=self._determine_entity_type(graph, subject),
                                 details={
                                     "local_name": self._get_local_name(subject),
                                     "predicate": pred_name,
@@ -1005,12 +991,7 @@ class OntologyLinter:
         """
         issues = []
 
-        for subject in set(graph.subjects()):
-            if not isinstance(subject, URIRef):
-                continue
-            if subject == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             # Collect all labels
             all_labels = []
             has_english = False
@@ -1036,7 +1017,7 @@ class OntologyLinter:
                         rule_id="missing-english-label",
                         message=f"No English label defined (has labels in: {', '.join(languages)})",
                         subject_iri=str(subject),
-                        subject_type="class",
+                        subject_type=self._determine_entity_type(graph, subject),
                         details={
                             "local_name": self._get_local_name(subject),
                             "available_languages": languages,
@@ -1052,9 +1033,6 @@ class OntologyLinter:
         instead of language-tagged literals.
         """
         issues = []
-
-        DC = Namespace("http://purl.org/dc/elements/1.1/")
-        DCTERMS = Namespace("http://purl.org/dc/terms/")
 
         # Predicates that should typically have language tags
         lang_predicates = [
@@ -1076,12 +1054,7 @@ class OntologyLinter:
             (DCTERMS.description, "dcterms:description"),
         ]
 
-        for subject in set(graph.subjects()):
-            if not isinstance(subject, URIRef):
-                continue
-            if subject == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             for predicate, pred_name in lang_predicates:
                 for obj in graph.objects(subject, predicate):
                     if not isinstance(obj, RDFLiteral):
@@ -1139,12 +1112,7 @@ class OntologyLinter:
             (DCTERMS.description, "dcterms:description"),
         ]
 
-        for subject in set(graph.subjects()):
-            if not isinstance(subject, URIRef):
-                continue
-            if subject == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             for predicate, pred_name in predicates:
                 # Group literals by (base_language, value)
                 regional_groups: dict[tuple[str, str], list[str]] = defaultdict(list)
@@ -1161,6 +1129,13 @@ class OntologyLinter:
                         continue
                     sorted_tags = sorted(tags)
                     tag_list = ", ".join(f"@{t}" for t in sorted_tags)
+                    if base_lang in sorted_tags:
+                        # Base tag already present — suggest removing regional variants
+                        regional_only = [t for t in sorted_tags if t != base_lang]
+                        drop_list = ", ".join(f"@{t}" for t in regional_only)
+                        action = f"consider removing {drop_list}"
+                    else:
+                        action = f"consider using @{base_lang} instead"
                     issues.append(
                         LintResult(
                             issue_type=LintIssueType.INFO.value,
@@ -1168,7 +1143,7 @@ class OntologyLinter:
                             message=(
                                 f"Redundant regional variants: {pred_name} "
                                 f'"{value[:80]}" has identical values for '
-                                f"{tag_list} — consider using @{base_lang} instead"
+                                f"{tag_list} — {action}"
                             ),
                             subject_iri=str(subject),
                             subject_type=self._determine_entity_type(graph, subject),
@@ -1194,29 +1169,24 @@ class OntologyLinter:
         issues: list[LintResult] = []
 
         # Determine the ontology's base namespace from the graph
-        base_ns = None
+        base_ns_candidates: set[str] = set()
         for s in graph.subjects(RDF.type, OWL.Ontology):
             if isinstance(s, URIRef):
-                base_ns = str(s).rstrip("/") + "/"
+                stripped = str(s).rstrip("/#")
+                base_ns_candidates.add(stripped + "#")
+                base_ns_candidates.add(stripped + "/")
                 break
 
-        # If no owl:Ontology found, try to infer from the most common namespace
-        if not base_ns:
-            from collections import Counter
-
-            ns_counts: Counter[str] = Counter()
-            for s in graph.subjects():
-                if isinstance(s, URIRef):
-                    iri = str(s)
-                    if "#" in iri:
-                        ns_counts[iri[: iri.rindex("#") + 1]] += 1
-                    elif "/" in iri:
-                        ns_counts[iri[: iri.rindex("/") + 1]] += 1
-            if ns_counts:
-                base_ns = ns_counts.most_common(1)[0][0]
-
-        if not base_ns:
-            return issues
+        base_ns = None
+        if base_ns_candidates:
+            # Pick the candidate that actually contains subjects
+            for candidate in base_ns_candidates:
+                if any(str(subj).startswith(candidate) for subj in self._uri_subjects):
+                    base_ns = candidate
+                    break
+            # Fallback to first candidate if neither matches
+            if not base_ns:
+                base_ns = next(iter(base_ns_candidates))
 
         # Well-known vocabulary namespaces to skip
         skip_prefixes = {
@@ -1232,9 +1202,26 @@ class OntologyLinter:
             "http://xmlns.com/foaf/0.1/",
         }
 
-        for subject in set(graph.subjects()):
-            if not isinstance(subject, URIRef):
-                continue
+        # If no owl:Ontology found, infer from most common namespace
+        if not base_ns:
+            from collections import Counter
+
+            ns_counts: Counter[str] = Counter()
+            for s in self._uri_subjects:
+                iri = str(s)
+                if any(iri.startswith(p) for p in skip_prefixes):
+                    continue
+                if "#" in iri:
+                    ns_counts[iri[: iri.rindex("#") + 1]] += 1
+                elif "/" in iri:
+                    ns_counts[iri[: iri.rindex("/") + 1]] += 1
+            if ns_counts:
+                base_ns = ns_counts.most_common(1)[0][0]
+
+        if not base_ns:
+            return issues
+
+        for subject in self._uri_subjects:
             iri = str(subject)
 
             # Only check IRIs in the ontology's own namespace
