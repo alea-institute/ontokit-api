@@ -198,6 +198,7 @@ async def run_ontology_index_task(
 async def run_lint_task(
     ctx: dict[str, Any],
     project_id: str,
+    branch: str = "main",
 ) -> dict[str, Any]:
     """
     Background task to lint an ontology project.
@@ -205,6 +206,7 @@ async def run_lint_task(
     Args:
         ctx: ARQ context with db session and services
         project_id: The project UUID to lint
+        branch: The git branch to lint (default: "main")
 
     Returns:
         Dict with run_id and issues_found
@@ -216,15 +218,21 @@ async def run_lint_task(
     run: LintRun | None = None
 
     try:
-        # Verify project exists and get its details
-        result = await db.execute(select(Project).where(Project.id == project_uuid))
+        # Verify project exists (eagerly load github_integration for file path)
+        result = await db.execute(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
         project = result.scalar_one_or_none()
 
         if not project:
             raise ValueError(f"Project {project_id} not found")
 
-        if not project.source_file_path:
+        if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
+
+        filename = get_git_ontology_path(project)
 
         # Create lint run record
         run = LintRun(
@@ -244,14 +252,19 @@ async def run_lint_task(
             f'{{"type": "lint_started", "project_id": "{project_id}", "run_id": "{run_id}"}}',
         )
 
-        # Load ontology from storage
+        # Load ontology from git or storage
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
 
-        graph = await ontology_service.load_from_storage(
-            project_uuid,
-            project.source_file_path,
-        )
+        git_service = BareGitRepositoryService()
+        if git_service.repository_exists(project_uuid):
+            graph = await ontology_service.load_from_git(
+                project_uuid, branch, filename, git_service
+            )
+        elif project.source_file_path:
+            graph = await ontology_service.load_from_storage(project_uuid, project.source_file_path)
+        else:
+            raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
         # Load per-project lint configuration
         config_result = await db.execute(

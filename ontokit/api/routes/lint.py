@@ -758,3 +758,4 @@ async def lint_websocket(
         if pubsub:
             with contextlib.suppress(Exception):
                 await pubsub.unsubscribe(LINT_UPDATES_CHANNEL)
+                await pubsub.aclose()  # type: ignore[no-untyped-call]
