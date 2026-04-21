@@ -167,6 +167,13 @@ LINT_RULES: list[LintRuleInfo] = [
         severity=LintIssueType.INFO.value,
         scope=_ALL,
     ),
+    LintRuleInfo(
+        rule_id="missing-type-declaration",
+        name="Missing Type Declaration",
+        description="Resource has no rdf:type declaration (not declared as class, property, or individual)",
+        severity=LintIssueType.WARNING.value,
+        scope=_ALL,
+    ),
 ]
 
 # Map rule IDs to their info
@@ -178,6 +185,7 @@ _LEVEL_2_RULES: set[str] = _LEVEL_1_RULES | {
     "orphan-class",
     "duplicate-triple",
     "disjoint-violation",
+    "missing-type-declaration",
 }
 _LEVEL_3_RULES: set[str] = _LEVEL_2_RULES | {
     "missing-label",
@@ -1173,6 +1181,85 @@ class OntologyLinter:
                             },
                         )
                     )
+
+        return issues
+
+    async def _check_missing_type_declaration(self, graph: Graph) -> list[LintResult]:
+        """
+        Find resources that appear as subjects but have no rdf:type declaration.
+
+        Only checks IRIs in the ontology's own namespace — external vocabulary
+        terms (OWL, RDF, RDFS, XSD, SKOS, DC, etc.) are skipped.
+        """
+        issues: list[LintResult] = []
+
+        # Determine the ontology's base namespace from the graph
+        base_ns = None
+        for s in graph.subjects(RDF.type, OWL.Ontology):
+            if isinstance(s, URIRef):
+                base_ns = str(s).rstrip("/") + "/"
+                break
+
+        # If no owl:Ontology found, try to infer from the most common namespace
+        if not base_ns:
+            from collections import Counter
+
+            ns_counts: Counter[str] = Counter()
+            for s in graph.subjects():
+                if isinstance(s, URIRef):
+                    iri = str(s)
+                    if "#" in iri:
+                        ns_counts[iri[: iri.rindex("#") + 1]] += 1
+                    elif "/" in iri:
+                        ns_counts[iri[: iri.rindex("/") + 1]] += 1
+            if ns_counts:
+                base_ns = ns_counts.most_common(1)[0][0]
+
+        if not base_ns:
+            return issues
+
+        # Well-known vocabulary namespaces to skip
+        skip_prefixes = {
+            str(OWL),
+            str(RDF),
+            str(RDFS),
+            str(XSD),
+            str(SKOS),
+            "http://purl.org/dc/elements/1.1/",
+            "http://purl.org/dc/terms/",
+            "http://www.w3.org/ns/prov#",
+            "http://www.w3.org/2006/time#",
+            "http://xmlns.com/foaf/0.1/",
+        }
+
+        for subject in set(graph.subjects()):
+            if not isinstance(subject, URIRef):
+                continue
+            iri = str(subject)
+
+            # Only check IRIs in the ontology's own namespace
+            if not iri.startswith(base_ns):
+                continue
+
+            # Skip if it's a well-known vocabulary term
+            if any(iri.startswith(prefix) for prefix in skip_prefixes):
+                continue
+
+            # Check for rdf:type
+            types = list(graph.objects(subject, RDF.type))
+            if not types:
+                issues.append(
+                    LintResult(
+                        issue_type=LintIssueType.WARNING.value,
+                        rule_id="missing-type-declaration",
+                        message="Resource has no rdf:type declaration",
+                        subject_iri=iri,
+                        subject_type="other",
+                        details={
+                            "local_name": self._get_local_name(subject),
+                        },
+                    )
+                )
 
         return issues
 
