@@ -673,3 +673,57 @@ async def test_no_missing_english_label_skos_preflabel_en() -> None:
 
     matches = _results_with_rule(issues, "missing-english-label")
     assert len(matches) == 0
+
+
+# ---------------------------------------------------------------------------
+# 21. redundant-regional-label
+# ---------------------------------------------------------------------------
+
+
+async def test_redundant_regional_label() -> None:
+    """Identical values across regional variants trigger redundant-regional-label."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Asignación", lang="es-es")))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Asignación", lang="es-mx")))
+
+    linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "redundant-regional-label")
+    assert len(matches) == 1
+    assert matches[0].issue_type == "info"
+    assert matches[0].subject_iri == str(EX.Thing)
+    assert matches[0].details is not None
+    assert "@es-es" in matches[0].message
+    assert "@es-mx" in matches[0].message
+    assert matches[0].details["base_language"] == "es"
+    assert sorted(matches[0].details["regional_tags"]) == ["es-es", "es-mx"]
+
+
+async def test_no_redundant_regional_when_values_differ() -> None:
+    """Different values across regional variants do NOT trigger the rule."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Color", lang="en-us")))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Colour", lang="en-gb")))
+
+    linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "redundant-regional-label")
+    assert len(matches) == 0
+
+
+async def test_no_redundant_regional_for_base_language() -> None:
+    """A single regional tag or base-only tags do not trigger the rule."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    g.add((EX.Thing, RDFS.label, Literal("Thing", lang="en")))
+    g.add((EX.Thing, RDFS.label, Literal("Chose", lang="fr")))
+
+    linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "redundant-regional-label")
+    assert len(matches) == 0

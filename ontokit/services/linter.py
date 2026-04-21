@@ -138,6 +138,12 @@ LINT_RULES: list[LintRuleInfo] = [
         description="Label or annotation has no language tag (plain literal or xsd:string)",
         severity=LintIssueType.WARNING.value,
     ),
+    LintRuleInfo(
+        rule_id="redundant-regional-label",
+        name="Redundant Regional Label",
+        description="Regional language variants have identical values and should use the base tag",
+        severity=LintIssueType.INFO.value,
+    ),
 ]
 
 # Map rule IDs to their info
@@ -157,7 +163,11 @@ _LEVEL_3_RULES: set[str] = _LEVEL_2_RULES | {
     "missing-english-label",
     "missing-language-tag",
 }
-_LEVEL_4_RULES: set[str] = _LEVEL_3_RULES | {"missing-comment", "label-per-language"}
+_LEVEL_4_RULES: set[str] = _LEVEL_3_RULES | {
+    "missing-comment",
+    "label-per-language",
+    "redundant-regional-label",
+}
 _LEVEL_5_RULES: set[str] = {r.rule_id for r in LINT_RULES}
 
 LINT_LEVELS: dict[int, set[str]] = {
@@ -1047,6 +1057,83 @@ class OntologyLinter:
                                 },
                             )
                         )
+
+        return issues
+
+    async def _check_redundant_regional_label(self, graph: Graph) -> list[LintResult]:
+        """
+        Find annotations where regional language variants have identical values.
+
+        When e.g. @es-es and @es-mx carry the same text, the regional qualifier
+        adds no value and the base tag (@es) should be used instead.
+        """
+        issues = []
+        SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
+        DC = Namespace("http://purl.org/dc/elements/1.1/")
+        DCTERMS = Namespace("http://purl.org/dc/terms/")
+
+        predicates = [
+            (RDFS.label, "rdfs:label"),
+            (RDFS.comment, "rdfs:comment"),
+            (SKOS.prefLabel, "skos:prefLabel"),
+            (SKOS.altLabel, "skos:altLabel"),
+            (SKOS.hiddenLabel, "skos:hiddenLabel"),
+            (SKOS.definition, "skos:definition"),
+            (SKOS.note, "skos:note"),
+            (SKOS.scopeNote, "skos:scopeNote"),
+            (SKOS.historyNote, "skos:historyNote"),
+            (SKOS.editorialNote, "skos:editorialNote"),
+            (SKOS.changeNote, "skos:changeNote"),
+            (SKOS.example, "skos:example"),
+            (DC.title, "dc:title"),
+            (DC.description, "dc:description"),
+            (DCTERMS.title, "dcterms:title"),
+            (DCTERMS.description, "dcterms:description"),
+        ]
+
+        for subject in set(graph.subjects()):
+            if not isinstance(subject, URIRef):
+                continue
+            if subject == OWL.Thing:
+                continue
+
+            for predicate, pred_name in predicates:
+                # Group literals by (base_language, value)
+                regional_groups: dict[tuple[str, str], list[str]] = defaultdict(list)
+
+                for obj in graph.objects(subject, predicate):
+                    if not isinstance(obj, RDFLiteral) or obj.language is None:
+                        continue
+                    lang = obj.language.lower()
+                    if "-" not in lang:
+                        continue  # Not a regional variant
+                    base_lang = lang.split("-")[0]
+                    regional_groups[(base_lang, str(obj))].append(lang)
+
+                for (base_lang, value), tags in regional_groups.items():
+                    if len(tags) < 2:
+                        continue
+                    sorted_tags = sorted(tags)
+                    tag_list = ", ".join(f"@{t}" for t in sorted_tags)
+                    issues.append(
+                        LintResult(
+                            issue_type=LintIssueType.INFO.value,
+                            rule_id="redundant-regional-label",
+                            message=(
+                                f"Redundant regional variants: {pred_name} "
+                                f'"{value[:80]}" has identical values for '
+                                f"{tag_list} — consider using @{base_lang} instead"
+                            ),
+                            subject_iri=str(subject),
+                            details={
+                                "local_name": self._get_local_name(subject),
+                                "predicate": pred_name,
+                                "value": value[:100],
+                                "regional_tags": sorted_tags,
+                                "base_language": base_lang,
+                            },
+                        )
+                    )
 
         return issues
 
