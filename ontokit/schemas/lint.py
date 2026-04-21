@@ -118,6 +118,9 @@ class LintRuleInfo(BaseModel):
     name: str
     description: str
     severity: LintIssueTypeValue
+    scope: list[str] = Field(
+        description="Entity types this rule applies to: class, property, individual",
+    )
 
 
 class LintRulesResponse(BaseModel):

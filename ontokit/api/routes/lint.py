@@ -641,6 +641,7 @@ async def get_lint_rules() -> LintRulesResponse:
                 name=rule.name,
                 description=rule.description,
                 severity=cast("LintIssueTypeValue", rule.severity),
+                scope=rule.scope,
             )
             for rule in rules
         ]

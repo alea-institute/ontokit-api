@@ -33,7 +33,11 @@ class LintRuleInfo:
     name: str
     description: str
     severity: str
+    scope: list[str] = field(default_factory=lambda: ["class"])
 
+
+# Scope constants for rule applicability
+_ALL = ["class", "property", "individual"]
 
 # Available lint rules with their metadata
 LINT_RULES: list[LintRuleInfo] = [
@@ -42,108 +46,126 @@ LINT_RULES: list[LintRuleInfo] = [
         name="Missing Label",
         description="Resources should have at least one rdfs:label annotation",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="missing-comment",
         name="Missing Comment",
         description="Resources should have a description via rdfs:comment",
         severity=LintIssueType.INFO.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="orphan-class",
         name="Orphan Class",
         description="Classes with no parent (other than owl:Thing) and no children may be misplaced",
         severity=LintIssueType.WARNING.value,
+        scope=["class"],
     ),
     LintRuleInfo(
         rule_id="undefined-parent",
         name="Undefined Parent",
         description="Class references a parent that is not defined in the ontology",
         severity=LintIssueType.ERROR.value,
+        scope=["class"],
     ),
     LintRuleInfo(
         rule_id="circular-hierarchy",
         name="Circular Hierarchy",
         description="Circular inheritance detected in class hierarchy",
         severity=LintIssueType.ERROR.value,
+        scope=["class"],
     ),
     LintRuleInfo(
         rule_id="empty-label",
         name="Empty Label",
         description="Resource has a label that is an empty string",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="duplicate-label",
         name="Duplicate Label",
         description="Multiple resources share the same label, which may cause confusion",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="label-per-language",
         name="Duplicate Label Per Language",
         description="Resource has multiple different labels for the same language tag",
         severity=LintIssueType.ERROR.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="undefined-prefix",
         name="Undefined Prefix",
         description="IRI uses a prefix that is not defined in the namespace bindings",
         severity=LintIssueType.ERROR.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="duplicate-triple",
         name="Duplicate Triple",
         description="Same predicate-object pair appears multiple times for the same subject",
         severity=LintIssueType.INFO.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="domain-violation",
         name="Domain Violation",
         description="Property used on a subject that is not in its declared domain",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="range-violation",
         name="Range Violation",
         description="Property value is not in the declared range",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="cardinality-violation",
         name="Cardinality Violation",
         description="Property usage violates declared cardinality constraints",
         severity=LintIssueType.ERROR.value,
+        scope=["individual"],
     ),
     LintRuleInfo(
         rule_id="disjoint-violation",
         name="Disjoint Class Violation",
         description="Resource is typed with classes declared as disjoint",
         severity=LintIssueType.ERROR.value,
+        scope=["individual"],
     ),
     LintRuleInfo(
         rule_id="inverse-property-inconsistency",
         name="Inverse Property Inconsistency",
         description="Inverse property relationship is not symmetric",
         severity=LintIssueType.WARNING.value,
+        scope=["property"],
     ),
     LintRuleInfo(
         rule_id="missing-english-label",
         name="Missing English Label",
         description="Resource has labels but none in English",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="missing-language-tag",
         name="Missing Language Tag",
         description="Label or annotation has no language tag (plain literal or xsd:string)",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="redundant-regional-label",
         name="Redundant Regional Label",
         description="Regional language variants have identical values and should use the base tag",
         severity=LintIssueType.INFO.value,
+        scope=_ALL,
     ),
 ]
 
