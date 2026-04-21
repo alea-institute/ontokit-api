@@ -2,8 +2,8 @@
 
 from uuid import uuid4
 
-from rdflib import Graph, Literal, Namespace
-from rdflib.namespace import OWL, RDF, RDFS
+from rdflib import BNode, Graph, Literal, Namespace
+from rdflib.namespace import OWL, RDF, RDFS, XSD
 
 from ontokit.services.linter import (
     LINT_RULES,
@@ -522,6 +522,153 @@ async def test_no_missing_english_label_when_present() -> None:
     g.add((EX.Thing, RDF.type, OWL.Class))
     g.add((EX.Thing, RDFS.label, Literal("Thing", lang="en")))
     g.add((EX.Thing, RDFS.label, Literal("Chose", lang="fr")))
+
+    linter = OntologyLinter(enabled_rules={"missing-english-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-english-label")
+    assert len(matches) == 0
+
+
+# ---------------------------------------------------------------------------
+# 18. missing-language-tag
+# ---------------------------------------------------------------------------
+
+SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
+
+
+async def test_missing_language_tag_plain_literal() -> None:
+    """A plain literal without a language tag triggers missing-language-tag."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Animal, RDFS.label, Literal("Animal")))  # no lang
+
+    linter = OntologyLinter(enabled_rules={"missing-language-tag"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-language-tag")
+    assert len(matches) == 1
+    assert matches[0].issue_type == "warning"
+    assert matches[0].subject_iri == str(EX.Animal)
+
+
+async def test_missing_language_tag_xsd_string() -> None:
+    """An xsd:string typed literal triggers missing-language-tag with datatype note."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Animal, RDFS.label, Literal("Animal", datatype=XSD.string)))
+
+    linter = OntologyLinter(enabled_rules={"missing-language-tag"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-language-tag")
+    assert len(matches) == 1
+    assert "xsd:string" in matches[0].message
+
+
+async def test_no_missing_language_tag_when_present() -> None:
+    """A literal with a language tag does not trigger missing-language-tag."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Animal, RDFS.label, Literal("Animal", lang="en")))
+
+    linter = OntologyLinter(enabled_rules={"missing-language-tag"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-language-tag")
+    assert len(matches) == 0
+
+
+async def test_missing_language_tag_non_literal_object_skipped() -> None:
+    """A URIRef object on a label predicate is silently skipped."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Animal, RDFS.label, EX.SomeURI))  # not a literal
+
+    linter = OntologyLinter(enabled_rules={"missing-language-tag"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-language-tag")
+    assert len(matches) == 0
+
+
+# ---------------------------------------------------------------------------
+# 19. BNode / OWL.Thing skip branches
+# ---------------------------------------------------------------------------
+
+
+async def test_bnode_subjects_skipped() -> None:
+    """BNode subjects are skipped by all annotation lint rules."""
+    g = Graph()
+    bnode = BNode()
+    g.add((bnode, RDF.type, OWL.Class))
+    g.add((bnode, RDFS.label, Literal("Blank", lang="fr")))
+    g.add((bnode, RDFS.label, Literal("Other", lang="fr")))
+
+    rules = {
+        "missing-label",
+        "missing-comment",
+        "empty-label",
+        "duplicate-label",
+        "label-per-language",
+        "missing-english-label",
+        "missing-language-tag",
+    }
+    linter = OntologyLinter(enabled_rules=rules)
+    issues = await linter.lint(g, PROJECT_ID)
+
+    # No issue should reference a BNode IRI
+    for issue in issues:
+        assert issue.subject_iri is None or not issue.subject_iri.startswith("_:")
+
+
+async def test_owl_thing_skipped() -> None:
+    """OWL.Thing is skipped by all annotation lint rules."""
+    g = Graph()
+    g.add((OWL.Thing, RDF.type, OWL.Class))
+    g.add((OWL.Thing, RDFS.label, Literal("Thing", lang="fr")))
+    g.add((OWL.Thing, RDFS.label, Literal("Chose", lang="fr")))
+
+    rules = {
+        "missing-label",
+        "missing-comment",
+        "empty-label",
+        "duplicate-label",
+        "label-per-language",
+        "missing-english-label",
+        "missing-language-tag",
+    }
+    linter = OntologyLinter(enabled_rules=rules)
+    issues = await linter.lint(g, PROJECT_ID)
+
+    owl_thing_iri = str(OWL.Thing)
+    for issue in issues:
+        assert issue.subject_iri != owl_thing_iri
+
+
+# ---------------------------------------------------------------------------
+# 20. missing-english-label with skos:prefLabel
+# ---------------------------------------------------------------------------
+
+
+async def test_missing_english_label_skos_preflabel() -> None:
+    """A resource with only a non-English skos:prefLabel triggers the rule."""
+    g = Graph()
+    g.add((EX.Chose, RDF.type, OWL.Class))
+    g.add((EX.Chose, SKOS.prefLabel, Literal("Chose", lang="fr")))
+
+    linter = OntologyLinter(enabled_rules={"missing-english-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-english-label")
+    assert len(matches) == 1
+
+
+async def test_no_missing_english_label_skos_preflabel_en() -> None:
+    """An English skos:prefLabel satisfies the rule even without rdfs:label."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    g.add((EX.Thing, SKOS.prefLabel, Literal("Thing", lang="en")))
 
     linter = OntologyLinter(enabled_rules={"missing-english-label"})
     issues = await linter.lint(g, PROJECT_ID)
