@@ -51,6 +51,7 @@ LABEL_PROPERTY_MAP = {
     "rdfs:label": RDFS.label,
     "skos:prefLabel": SKOS.prefLabel,
     "skos:altLabel": SKOS.altLabel,
+    "skos:hiddenLabel": SKOS.hiddenLabel,
     "dcterms:title": URIRef("http://purl.org/dc/terms/title"),
     "dc:title": URIRef("http://purl.org/dc/elements/1.1/title"),
 }

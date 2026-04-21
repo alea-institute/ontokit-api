@@ -731,6 +731,22 @@ async def test_no_redundant_regional_for_base_language() -> None:
     assert len(matches) == 0
 
 
+async def test_redundant_regional_base_and_regional_same_value() -> None:
+    """Base tag @es and regional @es-es with same value triggers the rule."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Cosa", lang="es")))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Cosa", lang="es-es")))
+
+    linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "redundant-regional-label")
+    assert len(matches) == 1
+    assert "@es" in matches[0].message
+    assert "@es-es" in matches[0].message
+
+
 async def test_redundant_regional_skips_non_literal_and_untagged() -> None:
     """Non-literal objects and literals without language tags are skipped."""
     g = Graph()

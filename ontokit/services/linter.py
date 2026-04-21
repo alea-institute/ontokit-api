@@ -8,7 +8,7 @@ from uuid import UUID
 
 from rdflib import Graph, Namespace, URIRef
 from rdflib import Literal as RDFLiteral
-from rdflib.namespace import OWL, RDF, RDFS, XSD
+from rdflib.namespace import OWL, RDF, RDFS, SKOS, XSD
 
 from ontokit.models.lint import LintIssueType
 
@@ -21,6 +21,7 @@ class LintResult:
     rule_id: str
     message: str
     subject_iri: str | None = None
+    subject_type: str | None = None  # "class", "property", "individual", "other"
     details: dict[str, Any] | None = None
 
 
@@ -170,22 +171,22 @@ _LEVEL_4_RULES: set[str] = _LEVEL_3_RULES | {
 }
 _LEVEL_5_RULES: set[str] = {r.rule_id for r in LINT_RULES}
 
-LINT_LEVELS: dict[int, set[str]] = {
-    1: _LEVEL_1_RULES,
-    2: _LEVEL_2_RULES,
-    3: _LEVEL_3_RULES,
-    4: _LEVEL_4_RULES,
-    5: _LEVEL_5_RULES,
+LINT_LEVELS: dict[int, frozenset[str]] = {
+    1: frozenset(_LEVEL_1_RULES),
+    2: frozenset(_LEVEL_2_RULES),
+    3: frozenset(_LEVEL_3_RULES),
+    4: frozenset(_LEVEL_4_RULES),
+    5: frozenset(_LEVEL_5_RULES),
 }
 
-ALL_RULE_IDS: set[str] = _LEVEL_5_RULES
+ALL_RULE_IDS: frozenset[str] = LINT_LEVELS[5]
 
 
 def get_rules_for_level(level: int) -> set[str]:
     """Return the set of rule IDs enabled at a given lint level (1-5)."""
     if level < 1 or level > 5:
         raise ValueError(f"Lint level must be between 1 and 5, got {level}")
-    return LINT_LEVELS[level].copy()
+    return set(LINT_LEVELS[level])
 
 
 @dataclass
@@ -240,6 +241,7 @@ class OntologyLinter:
                         rule_id="missing-label",
                         message="Resource has no rdfs:label annotation",
                         subject_iri=str(subject),
+                        subject_type=self._determine_entity_type(graph, subject),
                         details={"local_name": self._get_local_name(subject)},
                     )
                 )
@@ -267,6 +269,7 @@ class OntologyLinter:
                         rule_id="missing-comment",
                         message="Resource has no rdfs:comment description",
                         subject_iri=str(subject),
+                        subject_type=self._determine_entity_type(graph, subject),
                         details={
                             "local_name": self._get_local_name(subject),
                             "label": label,
@@ -307,6 +310,7 @@ class OntologyLinter:
                         rule_id="orphan-class",
                         message="Class has no parent classes and no children",
                         subject_iri=str(class_uri),
+                        subject_type="class",
                         details={
                             "local_name": self._get_local_name(class_uri),
                             "label": label,
@@ -345,6 +349,7 @@ class OntologyLinter:
                             rule_id="undefined-parent",
                             message="References undefined parent class",
                             subject_iri=str(class_uri),
+                            subject_type="class",
                             details={
                                 "local_name": self._get_local_name(class_uri),
                                 "label": label,
@@ -408,6 +413,7 @@ class OntologyLinter:
                             rule_id="circular-hierarchy",
                             message=f"Circular inheritance: {' → '.join(cycle_labels)} → {cycle_labels[0]}",
                             subject_iri=cycle[0],
+                            subject_type="class",
                             details={
                                 "cycle_iris": cycle,
                                 "cycle_labels": cycle_labels,
@@ -438,6 +444,7 @@ class OntologyLinter:
                                 rule_id="empty-label",
                                 message="Resource has an empty rdfs:label",
                                 subject_iri=str(subject),
+                                subject_type="class",
                                 details={
                                     "local_name": self._get_local_name(subject),
                                     "language": label.language,
@@ -482,6 +489,7 @@ class OntologyLinter:
                                 rule_id="duplicate-label",
                                 message=f"Label '{original_label}' is shared with {len(other_resources)} other resource(s)",
                                 subject_iri=resource_iri,
+                                subject_type="class",
                                 details={
                                     "local_name": self._get_local_name(URIRef(resource_iri)),
                                     "label": original_label,
@@ -505,7 +513,6 @@ class OntologyLinter:
         multiple values per language is their intended usage (synonyms, variants).
         """
         issues = []
-        SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
 
         label_predicates = [
             (RDFS.label, "rdfs:label"),
@@ -540,6 +547,7 @@ class OntologyLinter:
                                     f"for language '{lang_str}'"
                                 ),
                                 subject_iri=str(subject),
+                                subject_type="class",
                                 details={
                                     "local_name": self._get_local_name(subject),
                                     "predicate": pred_name,
@@ -586,6 +594,7 @@ class OntologyLinter:
                                 rule_id="undefined-prefix",
                                 message=f"Prefix '{prefix}' is not defined",
                                 subject_iri=iri,
+                                subject_type="other",
                                 details={
                                     "prefix": prefix,
                                     "iri": iri,
@@ -626,6 +635,7 @@ class OntologyLinter:
                             rule_id="duplicate-triple",
                             message=f"Duplicate triple: predicate-object pair appears {count} times",
                             subject_iri=subject_iri,
+                            subject_type=self._determine_entity_type(graph, URIRef(subject_iri)),
                             details={
                                 "predicate": po[0],
                                 "object": po[1],
@@ -688,6 +698,7 @@ class OntologyLinter:
                             rule_id="domain-violation",
                             message="Property used on subject not in declared domain",
                             subject_iri=str(s),
+                            subject_type=self._determine_entity_type(graph, URIRef(str(s))),
                             details={
                                 "property": prop_str,
                                 "expected_domains": list(domains),
@@ -742,6 +753,7 @@ class OntologyLinter:
                             rule_id="range-violation",
                             message="Property value not in declared range",
                             subject_iri=str(s),
+                            subject_type=self._determine_entity_type(graph, URIRef(str(s))),
                             details={
                                 "property": prop_str,
                                 "object": str(o),
@@ -804,6 +816,7 @@ class OntologyLinter:
                                 rule_id="cardinality-violation",
                                 message=f"Cardinality violation: expected exactly {exact_cardinality}, found {value_count}",
                                 subject_iri=str(instance),
+                                subject_type="individual",
                                 details={
                                     "property": str(on_property),
                                     "expected": exact_cardinality,
@@ -819,6 +832,7 @@ class OntologyLinter:
                                 rule_id="cardinality-violation",
                                 message=f"Cardinality violation: max {max_cardinality}, found {value_count}",
                                 subject_iri=str(instance),
+                                subject_type="individual",
                                 details={
                                     "property": str(on_property),
                                     "max": max_cardinality,
@@ -834,6 +848,7 @@ class OntologyLinter:
                                 rule_id="cardinality-violation",
                                 message=f"Cardinality violation: min {min_cardinality}, found {value_count}",
                                 subject_iri=str(instance),
+                                subject_type="individual",
                                 details={
                                     "property": str(on_property),
                                     "min": min_cardinality,
@@ -890,6 +905,7 @@ class OntologyLinter:
                                 rule_id="disjoint-violation",
                                 message="Resource is typed with disjoint classes",
                                 subject_iri=str(instance),
+                                subject_type="individual",
                                 details={
                                     "class1": t1,
                                     "class2": t2,
@@ -939,6 +955,7 @@ class OntologyLinter:
                                 rule_id="inverse-property-inconsistency",
                                 message="Missing inverse property assertion",
                                 subject_iri=str(s),
+                                subject_type="property",
                                 details={
                                     "property": prop_str,
                                     "object": str(o),
@@ -957,7 +974,6 @@ class OntologyLinter:
         Adapted from skos-ttl-editor's labelCheck warning.
         """
         issues = []
-        SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
 
         for subject in set(graph.subjects()):
             if not isinstance(subject, URIRef):
@@ -990,6 +1006,7 @@ class OntologyLinter:
                         rule_id="missing-english-label",
                         message=f"No English label defined (has labels in: {', '.join(languages)})",
                         subject_iri=str(subject),
+                        subject_type="class",
                         details={
                             "local_name": self._get_local_name(subject),
                             "available_languages": languages,
@@ -1005,7 +1022,7 @@ class OntologyLinter:
         instead of language-tagged literals.
         """
         issues = []
-        SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
+
         DC = Namespace("http://purl.org/dc/elements/1.1/")
         DCTERMS = Namespace("http://purl.org/dc/terms/")
 
@@ -1050,6 +1067,7 @@ class OntologyLinter:
                                 rule_id="missing-language-tag",
                                 message=(f"{pred_name} has no language tag{datatype_note}"),
                                 subject_iri=str(subject),
+                                subject_type=self._determine_entity_type(graph, subject),
                                 details={
                                     "local_name": self._get_local_name(subject),
                                     "predicate": pred_name,
@@ -1068,7 +1086,7 @@ class OntologyLinter:
         adds no value and the base tag (@es) should be used instead.
         """
         issues = []
-        SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
+
         DC = Namespace("http://purl.org/dc/elements/1.1/")
         DCTERMS = Namespace("http://purl.org/dc/terms/")
 
@@ -1105,8 +1123,6 @@ class OntologyLinter:
                     if not isinstance(obj, RDFLiteral) or obj.language is None:
                         continue
                     lang = obj.language.lower()
-                    if "-" not in lang:
-                        continue  # Not a regional variant
                     base_lang = lang.split("-")[0]
                     regional_groups[(base_lang, str(obj))].append(lang)
 
@@ -1125,6 +1141,7 @@ class OntologyLinter:
                                 f"{tag_list} — consider using @{base_lang} instead"
                             ),
                             subject_iri=str(subject),
+                            subject_type=self._determine_entity_type(graph, subject),
                             details={
                                 "local_name": self._get_local_name(subject),
                                 "predicate": pred_name,
@@ -1136,6 +1153,26 @@ class OntologyLinter:
                     )
 
         return issues
+
+    @staticmethod
+    def _determine_entity_type(graph: Graph, uri: URIRef) -> str:
+        """Return 'class', 'property', 'individual', or 'other' for a URI."""
+        types = set(graph.objects(uri, RDF.type))
+        if OWL.Class in types or RDFS.Class in types:
+            return "class"
+        if any(
+            t in types
+            for t in (
+                OWL.ObjectProperty,
+                OWL.DatatypeProperty,
+                OWL.AnnotationProperty,
+                RDF.Property,
+            )
+        ):
+            return "property"
+        if types:
+            return "individual"
+        return "other"
 
     @staticmethod
     def _get_local_name(uri: URIRef) -> str:
