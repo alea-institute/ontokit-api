@@ -38,7 +38,7 @@ from ontokit.schemas.lint import (
     LintTriggerResponse,
     SubjectTypeValue,
 )
-from ontokit.services.linter import ALL_RULE_IDS, LINT_LEVELS, get_available_rules
+from ontokit.services.linter import ALL_RULE_IDS, LINT_LEVEL_DEFINITIONS, get_available_rules
 from ontokit.services.project_service import get_project_service
 
 logger = logging.getLogger(__name__)
@@ -597,17 +597,6 @@ async def update_lint_config(
     return _serialize_lint_config(project_id, config)
 
 
-_LEVEL_METADATA: dict[int, tuple[str, str]] = {
-    1: ("Critical", "Undefined parents, circular hierarchies, undefined prefixes"),
-    2: ("Consistency", "Orphan classes, duplicate triples, and disjointness violations"),
-    3: ("Labels", "Missing, empty, and duplicate label checks"),
-    4: ("Quality", "Comments, per-language label checks, and redundant regional variants"),
-    5: ("All", "All available rules including domain/range and cardinality"),
-}
-
-_LEVEL_FALLBACK: tuple[str, str] = ("Unknown", "Unknown level")
-
-
 @router.get("/lint/levels", response_model=LintLevelsResponse)
 async def get_lint_levels() -> LintLevelsResponse:
     """
@@ -619,11 +608,11 @@ async def get_lint_levels() -> LintLevelsResponse:
         levels=[
             LintLevelInfo(
                 level=lvl,
-                name=_LEVEL_METADATA.get(lvl, _LEVEL_FALLBACK)[0],
-                description=_LEVEL_METADATA.get(lvl, _LEVEL_FALLBACK)[1],
-                rule_ids=sorted(rules),
+                name=defn.name,
+                description=defn.description,
+                rule_ids=sorted(defn.rules),
             )
-            for lvl, rules in sorted(LINT_LEVELS.items())
+            for lvl, defn in sorted(LINT_LEVEL_DEFINITIONS.items())
         ]
     )
 

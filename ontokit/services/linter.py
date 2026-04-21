@@ -3,7 +3,7 @@
 import contextlib
 from collections import defaultdict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from rdflib import Graph, Namespace, URIRef
@@ -213,6 +213,43 @@ LINT_LEVELS: dict[int, frozenset[str]] = {
 }
 
 ALL_RULE_IDS: frozenset[str] = LINT_LEVELS[5]
+
+
+class LintLevelDefinition(NamedTuple):
+    """Metadata for a progressive lint level."""
+
+    name: str
+    description: str
+    rules: frozenset[str]
+
+
+LINT_LEVEL_DEFINITIONS: dict[int, LintLevelDefinition] = {
+    1: LintLevelDefinition(
+        "Critical",
+        "Undefined parents, circular hierarchies, undefined prefixes",
+        LINT_LEVELS[1],
+    ),
+    2: LintLevelDefinition(
+        "Consistency",
+        "Orphan classes, duplicate triples, and disjointness violations",
+        LINT_LEVELS[2],
+    ),
+    3: LintLevelDefinition(
+        "Labels",
+        "Missing, empty, and duplicate label checks",
+        LINT_LEVELS[3],
+    ),
+    4: LintLevelDefinition(
+        "Quality",
+        "Comments, per-language label checks, and redundant regional variants",
+        LINT_LEVELS[4],
+    ),
+    5: LintLevelDefinition(
+        "All",
+        "All available rules including domain/range and cardinality",
+        LINT_LEVELS[5],
+    ),
+}
 
 
 def get_rules_for_level(level: int) -> set[str]:
