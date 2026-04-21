@@ -36,6 +36,7 @@ from ontokit.schemas.lint import (
     LintRunStatusValue,
     LintSummaryResponse,
     LintTriggerResponse,
+    SubjectTypeValue,
 )
 from ontokit.services.linter import ALL_RULE_IDS, LINT_LEVELS, get_available_rules
 from ontokit.services.project_service import get_project_service
@@ -333,6 +334,7 @@ async def get_lint_run(
                 rule_id=issue.rule_id,
                 message=issue.message,
                 subject_iri=issue.subject_iri,
+                subject_type=cast("SubjectTypeValue | None", issue.subject_type),
                 details=issue.details,
                 created_at=issue.created_at,
                 resolved_at=issue.resolved_at,
@@ -425,6 +427,7 @@ async def get_lint_issues(
                 rule_id=issue.rule_id,
                 message=issue.message,
                 subject_iri=issue.subject_iri,
+                subject_type=cast("SubjectTypeValue | None", issue.subject_type),
                 details=issue.details,
                 created_at=issue.created_at,
                 resolved_at=issue.resolved_at,
