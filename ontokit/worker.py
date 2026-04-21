@@ -273,6 +273,7 @@ async def run_lint_task(
                 rule_id=lint_result.rule_id,
                 message=lint_result.message,
                 subject_iri=lint_result.subject_iri,
+                subject_type=lint_result.subject_type,
                 details=lint_result.details,
             )
             db.add(issue)

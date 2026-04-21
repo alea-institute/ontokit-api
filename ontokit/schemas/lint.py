@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 # Type definitions
 LintIssueTypeValue = Literal["error", "warning", "info"]
 LintRunStatusValue = Literal["pending", "running", "completed", "failed"]
+SubjectTypeValue = Literal["class", "property", "individual", "other"]
 
 
 class LintIssueBase(BaseModel):
@@ -18,6 +19,7 @@ class LintIssueBase(BaseModel):
     rule_id: str = Field(..., min_length=1, max_length=100)
     message: str
     subject_iri: str | None = None
+    subject_type: SubjectTypeValue | None = None
     details: dict[str, Any] | None = None
 
 

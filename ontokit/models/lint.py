@@ -66,6 +66,7 @@ class LintIssue(Base):
     rule_id: Mapped[str] = mapped_column(String(100), nullable=False)
     message: Mapped[str] = mapped_column(Text, nullable=False)
     subject_iri: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    subject_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
     details: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
