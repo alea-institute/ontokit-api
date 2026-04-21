@@ -598,7 +598,7 @@ _LEVEL_METADATA: dict[int, tuple[str, str]] = {
     1: ("Critical", "Undefined parents, circular hierarchies, undefined prefixes"),
     2: ("Consistency", "Orphan classes, duplicate triples, and disjointness violations"),
     3: ("Labels", "Missing, empty, and duplicate label checks"),
-    4: ("Quality", "Comments and per-language label checks"),
+    4: ("Quality", "Comments, per-language label checks, and redundant regional variants"),
     5: ("All", "All available rules including domain/range and cardinality"),
 }
 
