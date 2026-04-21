@@ -613,6 +613,7 @@ async def test_bnode_subjects_skipped() -> None:
         "label-per-language",
         "missing-english-label",
         "missing-language-tag",
+        "redundant-regional-label",
     }
     linter = OntologyLinter(enabled_rules=rules)
     issues = await linter.lint(g, PROJECT_ID)
@@ -636,6 +637,7 @@ async def test_owl_thing_skipped() -> None:
         "label-per-language",
         "missing-english-label",
         "missing-language-tag",
+        "redundant-regional-label",
     }
     linter = OntologyLinter(enabled_rules=rules)
     issues = await linter.lint(g, PROJECT_ID)
@@ -721,6 +723,22 @@ async def test_no_redundant_regional_for_base_language() -> None:
     g.add((EX.Thing, RDF.type, OWL.Class))
     g.add((EX.Thing, RDFS.label, Literal("Thing", lang="en")))
     g.add((EX.Thing, RDFS.label, Literal("Chose", lang="fr")))
+
+    linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "redundant-regional-label")
+    assert len(matches) == 0
+
+
+async def test_redundant_regional_skips_non_literal_and_untagged() -> None:
+    """Non-literal objects and literals without language tags are skipped."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    # URIRef as label value (not a literal)
+    g.add((EX.Thing, RDFS.label, EX.SomeURI))
+    # Plain literal without language tag
+    g.add((EX.Thing, RDFS.label, Literal("plain")))
 
     linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
     issues = await linter.lint(g, PROJECT_ID)
