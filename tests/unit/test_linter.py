@@ -3,7 +3,7 @@
 from uuid import uuid4
 
 from rdflib import BNode, Graph, Literal, Namespace
-from rdflib.namespace import OWL, RDF, RDFS, XSD
+from rdflib.namespace import OWL, RDF, RDFS, SKOS, XSD
 
 from ontokit.services.linter import (
     LINT_RULES,
@@ -534,8 +534,6 @@ async def test_no_missing_english_label_when_present() -> None:
 # ---------------------------------------------------------------------------
 # 18. missing-language-tag
 # ---------------------------------------------------------------------------
-
-SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
 
 
 async def test_missing_language_tag_plain_literal() -> None:

@@ -1090,9 +1090,6 @@ class OntologyLinter:
         """
         issues = []
 
-        DC = Namespace("http://purl.org/dc/elements/1.1/")
-        DCTERMS = Namespace("http://purl.org/dc/terms/")
-
         predicates = [
             (RDFS.label, "rdfs:label"),
             (RDFS.comment, "rdfs:comment"),
