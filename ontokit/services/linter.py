@@ -213,53 +213,53 @@ class OntologyLinter:
         return issues
 
     async def _check_missing_label(self, graph: Graph) -> list[LintResult]:
-        """Find classes without rdfs:label."""
+        """Find resources without rdfs:label."""
         issues = []
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
+        for subject in set(graph.subjects()):
+            if not isinstance(subject, URIRef):
                 continue
-            if class_uri == OWL.Thing:
+            if subject == OWL.Thing:
                 continue
 
             # Check for any rdfs:label
-            labels = list(graph.objects(class_uri, RDFS.label))
+            labels = list(graph.objects(subject, RDFS.label))
             if not labels:
                 issues.append(
                     LintResult(
                         issue_type=LintIssueType.WARNING.value,
                         rule_id="missing-label",
-                        message="Class has no rdfs:label annotation",
-                        subject_iri=str(class_uri),
-                        details={"local_name": self._get_local_name(class_uri)},
+                        message="Resource has no rdfs:label annotation",
+                        subject_iri=str(subject),
+                        details={"local_name": self._get_local_name(subject)},
                     )
                 )
 
         return issues
 
     async def _check_missing_comment(self, graph: Graph) -> list[LintResult]:
-        """Find classes without rdfs:comment."""
+        """Find resources without rdfs:comment."""
         issues = []
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
+        for subject in set(graph.subjects()):
+            if not isinstance(subject, URIRef):
                 continue
-            if class_uri == OWL.Thing:
+            if subject == OWL.Thing:
                 continue
 
             # Check for any rdfs:comment
-            comments = list(graph.objects(class_uri, RDFS.comment))
+            comments = list(graph.objects(subject, RDFS.comment))
             if not comments:
                 # Get label for better context
-                label = self._get_label(graph, class_uri)
+                label = self._get_label(graph, subject)
                 issues.append(
                     LintResult(
                         issue_type=LintIssueType.INFO.value,
                         rule_id="missing-comment",
-                        message="Class has no rdfs:comment description",
-                        subject_iri=str(class_uri),
+                        message="Resource has no rdfs:comment description",
+                        subject_iri=str(subject),
                         details={
-                            "local_name": self._get_local_name(class_uri),
+                            "local_name": self._get_local_name(subject),
                             "label": label,
                         },
                     )
@@ -409,17 +409,17 @@ class OntologyLinter:
         return issues
 
     async def _check_empty_label(self, graph: Graph) -> list[LintResult]:
-        """Find classes with empty string labels."""
+        """Find resources with empty string labels."""
         issues = []
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
+        for subject in set(graph.subjects()):
+            if not isinstance(subject, URIRef):
                 continue
-            if class_uri == OWL.Thing:
+            if subject == OWL.Thing:
                 continue
 
             # Check each label
-            for label in graph.objects(class_uri, RDFS.label):
+            for label in graph.objects(subject, RDFS.label):
                 if isinstance(label, RDFLiteral):
                     label_str = str(label).strip()
                     if not label_str:
@@ -427,10 +427,10 @@ class OntologyLinter:
                             LintResult(
                                 issue_type=LintIssueType.WARNING.value,
                                 rule_id="empty-label",
-                                message="Class has an empty rdfs:label",
-                                subject_iri=str(class_uri),
+                                message="Resource has an empty rdfs:label",
+                                subject_iri=str(subject),
                                 details={
-                                    "local_name": self._get_local_name(class_uri),
+                                    "local_name": self._get_local_name(subject),
                                     "language": label.language,
                                 },
                             )
@@ -439,45 +439,45 @@ class OntologyLinter:
         return issues
 
     async def _check_duplicate_label(self, graph: Graph) -> list[LintResult]:
-        """Find classes that share the same label."""
+        """Find resources that share the same label."""
         issues = []
 
-        # Build map of label → list of class IRIs
-        label_to_classes: dict[str, list[str]] = defaultdict(list)
+        # Build map of label → list of resource IRIs
+        label_to_resources: dict[str, list[str]] = defaultdict(list)
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
+        for subject in set(graph.subjects()):
+            if not isinstance(subject, URIRef):
                 continue
-            if class_uri == OWL.Thing:
+            if subject == OWL.Thing:
                 continue
 
-            for label in graph.objects(class_uri, RDFS.label):
+            for label in graph.objects(subject, RDFS.label):
                 if isinstance(label, RDFLiteral):
                     label_str = str(label).strip().lower()
                     if label_str:  # Skip empty labels
-                        label_to_classes[label_str].append(str(class_uri))
+                        label_to_resources[label_str].append(str(subject))
 
         # Report duplicates
         reported_iris: set[str] = set()
-        for _label_str, class_iris in label_to_classes.items():
-            if len(class_iris) > 1:
-                for class_iri in class_iris:
-                    if class_iri not in reported_iris:
-                        reported_iris.add(class_iri)
+        for _label_str, resource_iris in label_to_resources.items():
+            if len(resource_iris) > 1:
+                for resource_iri in resource_iris:
+                    if resource_iri not in reported_iris:
+                        reported_iris.add(resource_iri)
                         # Get original (non-lowercased) label
-                        original_label = self._get_label(graph, URIRef(class_iri))
-                        other_classes = [c for c in class_iris if c != class_iri]
+                        original_label = self._get_label(graph, URIRef(resource_iri))
+                        other_resources = [c for c in resource_iris if c != resource_iri]
                         issues.append(
                             LintResult(
                                 issue_type=LintIssueType.WARNING.value,
                                 rule_id="duplicate-label",
-                                message=f"Label '{original_label}' is shared with {len(other_classes)} other class(es)",
-                                subject_iri=class_iri,
+                                message=f"Label '{original_label}' is shared with {len(other_resources)} other resource(s)",
+                                subject_iri=resource_iri,
                                 details={
-                                    "local_name": self._get_local_name(URIRef(class_iri)),
+                                    "local_name": self._get_local_name(URIRef(resource_iri)),
                                     "label": original_label,
-                                    "duplicate_iris": other_classes[:5],  # Limit to 5
-                                    "total_duplicates": len(other_classes),
+                                    "duplicate_iris": other_resources[:5],  # Limit to 5
+                                    "total_duplicates": len(other_resources),
                                 },
                             )
                         )
@@ -503,17 +503,17 @@ class OntologyLinter:
             (SKOS.prefLabel, "skos:prefLabel"),
         ]
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
+        for subject in set(graph.subjects()):
+            if not isinstance(subject, URIRef):
                 continue
-            if class_uri == OWL.Thing:
+            if subject == OWL.Thing:
                 continue
 
             for predicate, pred_name in label_predicates:
                 # Collect labels by language for this specific predicate
                 labels_by_lang: dict[str | None, list[str]] = defaultdict(list)
 
-                for label in graph.objects(class_uri, predicate):
+                for label in graph.objects(subject, predicate):
                     if isinstance(label, RDFLiteral):
                         labels_by_lang[label.language].append(str(label))
 
@@ -530,9 +530,9 @@ class OntologyLinter:
                                     f"Multiple different {pred_name} values "
                                     f"for language '{lang_str}'"
                                 ),
-                                subject_iri=str(class_uri),
+                                subject_iri=str(subject),
                                 details={
-                                    "local_name": self._get_local_name(class_uri),
+                                    "local_name": self._get_local_name(subject),
                                     "predicate": pred_name,
                                     "language": lang_str,
                                     "labels": unique_values,
@@ -950,23 +950,23 @@ class OntologyLinter:
         issues = []
         SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
+        for subject in set(graph.subjects()):
+            if not isinstance(subject, URIRef):
                 continue
-            if class_uri == OWL.Thing:
+            if subject == OWL.Thing:
                 continue
 
             # Collect all labels
             all_labels = []
             has_english = False
 
-            for label in graph.objects(class_uri, RDFS.label):
+            for label in graph.objects(subject, RDFS.label):
                 if isinstance(label, RDFLiteral):
                     all_labels.append(label)
                     if label.language and label.language.lower().startswith("en"):
                         has_english = True
 
-            for label in graph.objects(class_uri, SKOS.prefLabel):
+            for label in graph.objects(subject, SKOS.prefLabel):
                 if isinstance(label, RDFLiteral):
                     all_labels.append(label)
                     if label.language and label.language.lower().startswith("en"):
@@ -980,9 +980,9 @@ class OntologyLinter:
                         issue_type=LintIssueType.WARNING.value,
                         rule_id="missing-english-label",
                         message=f"No English label defined (has labels in: {', '.join(languages)})",
-                        subject_iri=str(class_uri),
+                        subject_iri=str(subject),
                         details={
-                            "local_name": self._get_local_name(class_uri),
+                            "local_name": self._get_local_name(subject),
                             "available_languages": languages,
                         },
                     )
