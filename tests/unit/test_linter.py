@@ -617,9 +617,8 @@ async def test_bnode_subjects_skipped() -> None:
     linter = OntologyLinter(enabled_rules=rules)
     issues = await linter.lint(g, PROJECT_ID)
 
-    # No issue should reference a BNode IRI
-    for issue in issues:
-        assert issue.subject_iri is None or not issue.subject_iri.startswith("_:")
+    # BNode is the only subject, so no issues should be produced at all
+    assert len(issues) == 0
 
 
 async def test_owl_thing_skipped() -> None:
@@ -641,9 +640,8 @@ async def test_owl_thing_skipped() -> None:
     linter = OntologyLinter(enabled_rules=rules)
     issues = await linter.lint(g, PROJECT_ID)
 
-    owl_thing_iri = str(OWL.Thing)
-    for issue in issues:
-        assert issue.subject_iri != owl_thing_iri
+    # OWL.Thing is the only subject, so no issues should be produced at all
+    assert len(issues) == 0
 
 
 # ---------------------------------------------------------------------------

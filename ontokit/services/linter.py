@@ -39,13 +39,13 @@ LINT_RULES: list[LintRuleInfo] = [
     LintRuleInfo(
         rule_id="missing-label",
         name="Missing Label",
-        description="Classes should have at least one rdfs:label annotation",
+        description="Resources should have at least one rdfs:label annotation",
         severity=LintIssueType.WARNING.value,
     ),
     LintRuleInfo(
         rule_id="missing-comment",
         name="Missing Comment",
-        description="Classes should have a description via rdfs:comment",
+        description="Resources should have a description via rdfs:comment",
         severity=LintIssueType.INFO.value,
     ),
     LintRuleInfo(
@@ -69,13 +69,13 @@ LINT_RULES: list[LintRuleInfo] = [
     LintRuleInfo(
         rule_id="empty-label",
         name="Empty Label",
-        description="Class has a label that is an empty string",
+        description="Resource has a label that is an empty string",
         severity=LintIssueType.WARNING.value,
     ),
     LintRuleInfo(
         rule_id="duplicate-label",
         name="Duplicate Label",
-        description="Multiple classes share the same label, which may cause confusion",
+        description="Multiple resources share the same label, which may cause confusion",
         severity=LintIssueType.WARNING.value,
     ),
     LintRuleInfo(
@@ -156,9 +156,8 @@ _LEVEL_3_RULES: set[str] = _LEVEL_2_RULES | {
     "duplicate-label",
     "missing-english-label",
     "missing-language-tag",
-    "missing-comment",
 }
-_LEVEL_4_RULES: set[str] = _LEVEL_3_RULES | {"label-per-language"}
+_LEVEL_4_RULES: set[str] = _LEVEL_3_RULES | {"missing-comment", "label-per-language"}
 _LEVEL_5_RULES: set[str] = {r.rule_id for r in LINT_RULES}
 
 LINT_LEVELS: dict[int, set[str]] = {
