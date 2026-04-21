@@ -98,6 +98,7 @@ ANNOTATION_PROPERTIES = {
     # SKOS
     "skos:prefLabel": SKOS.prefLabel,
     "skos:altLabel": SKOS.altLabel,
+    "skos:hiddenLabel": SKOS.hiddenLabel,
     "skos:definition": SKOS.definition,
     "skos:notation": SKOS.notation,
     "skos:example": SKOS.example,
