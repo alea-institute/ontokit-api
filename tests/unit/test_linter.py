@@ -766,3 +766,57 @@ async def test_redundant_regional_skips_non_literal_and_untagged() -> None:
 
     matches = _results_with_rule(issues, "redundant-regional-label")
     assert len(matches) == 0
+
+
+# ---------------------------------------------------------------------------
+# 22. missing-type-declaration
+# ---------------------------------------------------------------------------
+
+
+async def test_missing_type_declaration_with_ontology_iri() -> None:
+    """A subject in the ontology namespace with no rdf:type triggers the rule."""
+    ONT = Namespace("http://example.org/ontology#")
+    g = Graph()
+    g.add((ONT[""], RDF.type, OWL.Ontology))
+    g.add((ONT.Animal, RDF.type, OWL.Class))
+    # Untyped resource in the same namespace
+    g.add((ONT.mystery, RDFS.label, Literal("Mystery", lang="en")))
+
+    linter = OntologyLinter(enabled_rules={"missing-type-declaration"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-type-declaration")
+    assert len(matches) == 1
+    assert matches[0].subject_iri == str(ONT.mystery)
+
+
+async def test_missing_type_declaration_inferred_namespace() -> None:
+    """Without owl:Ontology, infers namespace from most common prefix."""
+    g = Graph()
+    # No owl:Ontology declaration — must infer namespace
+    g.add((EX.A, RDF.type, OWL.Class))
+    g.add((EX.B, RDF.type, OWL.Class))
+    g.add((EX.C, RDF.type, OWL.Class))
+    # Untyped resource in the same namespace
+    g.add((EX.orphan, RDFS.label, Literal("Orphan", lang="en")))
+
+    linter = OntologyLinter(enabled_rules={"missing-type-declaration"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-type-declaration")
+    assert len(matches) == 1
+    assert matches[0].subject_iri == str(EX.orphan)
+
+
+async def test_no_missing_type_declaration_when_typed() -> None:
+    """A fully typed ontology should not trigger the rule."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Dog, RDF.type, OWL.Class))
+    g.add((EX.Dog, RDFS.subClassOf, EX.Animal))
+
+    linter = OntologyLinter(enabled_rules={"missing-type-declaration"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-type-declaration")
+    assert len(matches) == 0
