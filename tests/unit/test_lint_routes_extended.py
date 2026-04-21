@@ -152,6 +152,7 @@ class TestGetLintIssuesFilters:
         mock_issue.rule_id = "R005"
         mock_issue.message = "Missing comment"
         mock_issue.subject_iri = "http://example.org/Foo"
+        mock_issue.subject_type = "class"
         mock_issue.details = None
         mock_issue.created_at = now
         mock_issue.resolved_at = None
@@ -204,6 +205,7 @@ class TestGetLintIssuesFilters:
         mock_issue.rule_id = "R010"
         mock_issue.message = "Cyclic dependency"
         mock_issue.subject_iri = "http://example.org/SpecificClass"
+        mock_issue.subject_type = "class"
         mock_issue.details = None
         mock_issue.created_at = now
         mock_issue.resolved_at = None

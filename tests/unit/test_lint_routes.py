@@ -25,12 +25,14 @@ class TestLintRules:
                 name="Missing label",
                 description="Class has no label",
                 severity="warning",
+                scope=["class", "property", "individual"],
             ),
             SimpleNamespace(
                 rule_id="R002",
                 name="Orphan class",
                 description="Class has no parent",
                 severity="info",
+                scope=["class"],
             ),
         ]
 
@@ -228,6 +230,7 @@ class TestGetLintRun:
         mock_issue.rule_id = "R001"
         mock_issue.message = "Missing label"
         mock_issue.subject_iri = "http://example.org/Foo"
+        mock_issue.subject_type = "class"
         mock_issue.details = None
         mock_issue.created_at = now
         mock_issue.resolved_at = None
@@ -433,6 +436,7 @@ class TestGetLintIssues:
         mock_issue.rule_id = "R010"
         mock_issue.message = "Cyclic dependency"
         mock_issue.subject_iri = "http://example.org/Bar"
+        mock_issue.subject_type = "class"
         mock_issue.details = None
         mock_issue.created_at = now
         mock_issue.resolved_at = None
