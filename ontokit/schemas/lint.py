@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Type definitions
 LintIssueTypeValue = Literal["error", "warning", "info"]
@@ -162,10 +162,11 @@ class LintConfigResponse(BaseModel):
 class LintConfigUpdate(BaseModel):
     """Request body for updating lint configuration.
 
+    ``lint_level`` and ``enabled_rules`` are mutually exclusive — see ``enforce_xor``.
+
     Set ``lint_level`` to use a preset level (1-5).
     Set ``enabled_rules`` to configure individual rules (can be empty list to disable all).
     Set both to ``None`` to reset to default (all rules).
-    When ``lint_level`` is set, it takes precedence over ``enabled_rules``.
     """
 
     lint_level: int | None = Field(default=None, ge=1, le=5)
@@ -184,3 +185,16 @@ class LintConfigUpdate(BaseModel):
             msg = f"Unknown rule IDs: {', '.join(sorted(invalid))}"
             raise ValueError(msg)
         return v
+
+    @model_validator(mode="after")
+    def enforce_xor(self) -> "LintConfigUpdate":
+        """Reject contradictory bodies that set both a preset level and a custom
+        rule list. Presets are immutable, so the two modes are mutually exclusive
+        and the UI never sends both. Accepting both would persist a self-
+        contradictory row whose response lies about effective rules."""
+        if self.lint_level is not None and self.enabled_rules is not None:
+            msg = (
+                "lint_level and enabled_rules are mutually exclusive — choose preset OR custom mode"
+            )
+            raise ValueError(msg)
+        return self
