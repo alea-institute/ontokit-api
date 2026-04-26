@@ -555,3 +555,51 @@ class TestGetGitHubService:
         """get_github_service returns a GitHubService."""
         svc = get_github_service()
         assert isinstance(svc, GitHubService)
+
+
+class TestUrlEncoding:
+    """Tests for URL encoding of user-controlled segments (issue #113).
+
+    Path segments built from owner / repo / ref / path arguments must be
+    quoted so a malicious value (e.g. an attacker-controlled fork name with
+    ``..`` or ``?``) cannot escape its segment to redirect the GitHub API
+    request to a different endpoint.
+    """
+
+    @pytest.mark.asyncio
+    async def test_get_repo_info_encodes_owner_and_repo(
+        self, github_service: GitHubService
+    ) -> None:
+        """Slashes/spaces/question marks in owner or repo are percent-encoded."""
+        mock_resp = _mock_response(200, {"default_branch": "main"})
+        mock_client = _make_async_client(request_response=mock_resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await github_service.get_repo_info(TOKEN, "evil/owner", "repo?x=1")
+
+        called_url = mock_client.request.await_args.kwargs["url"]
+        # Slash and ? must be encoded so they cannot escape the segment.
+        assert "evil/owner" not in called_url
+        assert "repo?x=1" not in called_url
+        assert "evil%2Fowner" in called_url
+        assert "repo%3Fx%3D1" in called_url
+
+    @pytest.mark.asyncio
+    async def test_get_file_content_keeps_slashes_in_path(
+        self, github_service: GitHubService
+    ) -> None:
+        """``path`` keeps its slashes (allow_slash=True) but the ref query
+        parameter and owner/repo segments are still encoded."""
+        mock_resp = _mock_response(200, content=b"data")
+        mock_client = _make_async_client(get_response=mock_resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await github_service.get_file_content(
+                TOKEN, "octo", "repo", "src/sub dir/onto.ttl", ref="main?evil=1"
+            )
+
+        called_url = mock_client.get.await_args.args[0]
+        # Path slashes preserved; space and ? in ref encoded.
+        assert "src/sub%20dir/onto.ttl" in called_url
+        assert "main?evil=1" not in called_url
+        assert "main%3Fevil%3D1" in called_url
