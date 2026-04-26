@@ -766,5 +766,10 @@ async def lint_websocket(
         if pubsub:
             with contextlib.suppress(Exception):
                 await pubsub.unsubscribe(LINT_UPDATES_CHANNEL)
-            with contextlib.suppress(Exception):
-                await pubsub.aclose()  # type: ignore[no-untyped-call]
+            # aclose() can hang on a half-open connection; bound it so a stuck
+            # Redis socket does not leak the request task.
+            with contextlib.suppress(Exception, TimeoutError):
+                await asyncio.wait_for(
+                    pubsub.aclose(),  # type: ignore[no-untyped-call]
+                    timeout=5.0,
+                )

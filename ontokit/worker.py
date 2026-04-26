@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -263,15 +264,15 @@ async def run_lint_task(
                 project_uuid, branch, filename, git_service
             )
         elif project.source_file_path:
-            graph = await ontology_service.load_from_storage(project_uuid, project.source_file_path)
+            graph = await ontology_service.load_from_storage(
+                project_uuid, project.source_file_path, branch
+            )
         else:
             raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
         # Load per-project lint configuration. Tolerate the table being absent
         # (migration not yet applied) by falling back to all rules; let any
         # other SQL error propagate.
-        from collections.abc import Set as AbstractSet
-
         enabled_rules: AbstractSet[str] | None
         try:
             config_result = await db.execute(
