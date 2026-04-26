@@ -51,6 +51,7 @@ LABEL_PROPERTY_MAP = {
     "rdfs:label": RDFS.label,
     "skos:prefLabel": SKOS.prefLabel,
     "skos:altLabel": SKOS.altLabel,
+    "skos:hiddenLabel": SKOS.hiddenLabel,
     "dcterms:title": URIRef("http://purl.org/dc/terms/title"),
     "dc:title": URIRef("http://purl.org/dc/elements/1.1/title"),
 }
@@ -98,6 +99,7 @@ ANNOTATION_PROPERTIES = {
     # SKOS
     "skos:prefLabel": SKOS.prefLabel,
     "skos:altLabel": SKOS.altLabel,
+    "skos:hiddenLabel": SKOS.hiddenLabel,
     "skos:definition": SKOS.definition,
     "skos:notation": SKOS.notation,
     "skos:example": SKOS.example,

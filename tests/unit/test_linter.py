@@ -2,8 +2,8 @@
 
 from uuid import uuid4
 
-from rdflib import Graph, Literal, Namespace
-from rdflib.namespace import OWL, RDF, RDFS
+from rdflib import BNode, Graph, Literal, Namespace, URIRef
+from rdflib.namespace import OWL, RDF, RDFS, SKOS, XSD
 
 from ontokit.services.linter import (
     LINT_RULES,
@@ -47,6 +47,7 @@ async def test_missing_label() -> None:
     assert len(matches) == 1
     assert matches[0].issue_type == "warning"
     assert matches[0].subject_iri == str(EX.Animal)
+    assert matches[0].subject_type == "class"
 
 
 # ---------------------------------------------------------------------------
@@ -390,6 +391,22 @@ async def test_label_per_language_no_issue_when_same() -> None:
     assert len(matches) == 0
 
 
+async def test_label_per_language_case_insensitive_lang_tag() -> None:
+    """BCP-47 says language tags are case-insensitive — @en-US and @en-us are the
+    same language and conflicting labels under those tags must be flagged."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Animal, RDFS.label, Literal("Apple", lang="en-US")))
+    g.add((EX.Animal, RDFS.label, Literal("Banana", lang="en-us")))
+
+    linter = OntologyLinter(enabled_rules={"label-per-language"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "label-per-language")
+    assert len(matches) == 1
+    assert matches[0].subject_iri == str(EX.Animal)
+
+
 # ---------------------------------------------------------------------------
 # 13. domain-violation
 # ---------------------------------------------------------------------------
@@ -528,3 +545,370 @@ async def test_no_missing_english_label_when_present() -> None:
 
     matches = _results_with_rule(issues, "missing-english-label")
     assert len(matches) == 0
+
+
+# ---------------------------------------------------------------------------
+# 18. missing-language-tag
+# ---------------------------------------------------------------------------
+
+
+async def test_missing_language_tag_plain_literal() -> None:
+    """A plain literal without a language tag triggers missing-language-tag."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Animal, RDFS.label, Literal("Animal")))  # no lang
+
+    linter = OntologyLinter(enabled_rules={"missing-language-tag"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-language-tag")
+    assert len(matches) == 1
+    assert matches[0].issue_type == "warning"
+    assert matches[0].subject_iri == str(EX.Animal)
+
+
+async def test_missing_language_tag_xsd_string() -> None:
+    """An xsd:string typed literal triggers missing-language-tag with datatype note."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Animal, RDFS.label, Literal("Animal", datatype=XSD.string)))
+
+    linter = OntologyLinter(enabled_rules={"missing-language-tag"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-language-tag")
+    assert len(matches) == 1
+    assert "xsd:string" in matches[0].message
+
+
+async def test_no_missing_language_tag_when_present() -> None:
+    """A literal with a language tag does not trigger missing-language-tag."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Animal, RDFS.label, Literal("Animal", lang="en")))
+
+    linter = OntologyLinter(enabled_rules={"missing-language-tag"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-language-tag")
+    assert len(matches) == 0
+
+
+async def test_missing_language_tag_non_literal_object_skipped() -> None:
+    """A URIRef object on a label predicate is silently skipped."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Animal, RDFS.label, EX.SomeURI))  # not a literal
+
+    linter = OntologyLinter(enabled_rules={"missing-language-tag"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-language-tag")
+    assert len(matches) == 0
+
+
+# ---------------------------------------------------------------------------
+# 19. BNode / OWL.Thing skip branches
+# ---------------------------------------------------------------------------
+
+
+async def test_bnode_subjects_skipped() -> None:
+    """BNode subjects are skipped by all annotation lint rules."""
+    g = Graph()
+    bnode = BNode()
+    g.add((bnode, RDF.type, OWL.Class))
+    g.add((bnode, RDFS.label, Literal("Blank", lang="fr")))
+    g.add((bnode, RDFS.label, Literal("Other", lang="fr")))
+
+    rules = {
+        "missing-label",
+        "missing-comment",
+        "empty-label",
+        "duplicate-label",
+        "label-per-language",
+        "missing-english-label",
+        "missing-language-tag",
+        "redundant-regional-label",
+    }
+    linter = OntologyLinter(enabled_rules=rules)
+    issues = await linter.lint(g, PROJECT_ID)
+
+    # BNode is the only subject, so no issues should be produced at all
+    assert len(issues) == 0
+
+
+async def test_owl_thing_skipped() -> None:
+    """OWL.Thing is skipped by all annotation lint rules."""
+    g = Graph()
+    g.add((OWL.Thing, RDF.type, OWL.Class))
+    g.add((OWL.Thing, RDFS.label, Literal("Thing", lang="fr")))
+    g.add((OWL.Thing, RDFS.label, Literal("Chose", lang="fr")))
+
+    rules = {
+        "missing-label",
+        "missing-comment",
+        "empty-label",
+        "duplicate-label",
+        "label-per-language",
+        "missing-english-label",
+        "missing-language-tag",
+        "redundant-regional-label",
+    }
+    linter = OntologyLinter(enabled_rules=rules)
+    issues = await linter.lint(g, PROJECT_ID)
+
+    # OWL.Thing is the only subject, so no issues should be produced at all
+    assert len(issues) == 0
+
+
+# ---------------------------------------------------------------------------
+# 20. missing-english-label with skos:prefLabel
+# ---------------------------------------------------------------------------
+
+
+async def test_missing_english_label_skos_preflabel() -> None:
+    """A resource with only a non-English skos:prefLabel triggers the rule."""
+    g = Graph()
+    g.add((EX.Chose, RDF.type, OWL.Class))
+    g.add((EX.Chose, SKOS.prefLabel, Literal("Chose", lang="fr")))
+
+    linter = OntologyLinter(enabled_rules={"missing-english-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-english-label")
+    assert len(matches) == 1
+
+
+async def test_no_missing_english_label_skos_preflabel_en() -> None:
+    """An English skos:prefLabel satisfies the rule even without rdfs:label."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    g.add((EX.Thing, SKOS.prefLabel, Literal("Thing", lang="en")))
+
+    linter = OntologyLinter(enabled_rules={"missing-english-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-english-label")
+    assert len(matches) == 0
+
+
+# ---------------------------------------------------------------------------
+# 21. redundant-regional-label
+# ---------------------------------------------------------------------------
+
+
+async def test_redundant_regional_label() -> None:
+    """Identical values across regional variants trigger redundant-regional-label."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Asignación", lang="es-es")))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Asignación", lang="es-mx")))
+
+    linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "redundant-regional-label")
+    assert len(matches) == 1
+    assert matches[0].issue_type == "info"
+    assert matches[0].subject_iri == str(EX.Thing)
+    assert matches[0].details is not None
+    assert "@es-es" in matches[0].message
+    assert "@es-mx" in matches[0].message
+    assert matches[0].details["base_language"] == "es"
+    assert sorted(matches[0].details["regional_tags"]) == ["es-es", "es-mx"]
+    assert matches[0].subject_type == "class"
+
+
+async def test_no_redundant_regional_when_values_differ() -> None:
+    """Different values across regional variants do NOT trigger the rule."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Color", lang="en-us")))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Colour", lang="en-gb")))
+
+    linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "redundant-regional-label")
+    assert len(matches) == 0
+
+
+async def test_no_redundant_regional_for_base_language() -> None:
+    """A single regional tag or base-only tags do not trigger the rule."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    g.add((EX.Thing, RDFS.label, Literal("Thing", lang="en")))
+    g.add((EX.Thing, RDFS.label, Literal("Chose", lang="fr")))
+
+    linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "redundant-regional-label")
+    assert len(matches) == 0
+
+
+async def test_redundant_regional_base_and_regional_same_value() -> None:
+    """Base tag @es and regional @es-es with same value triggers the rule."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Cosa", lang="es")))
+    g.add((EX.Thing, SKOS.altLabel, Literal("Cosa", lang="es-es")))
+
+    linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "redundant-regional-label")
+    assert len(matches) == 1
+    assert "@es" in matches[0].message
+    assert "@es-es" in matches[0].message
+    # Base tag is present, so message should suggest removing the regional variant
+    assert "consider removing" in matches[0].message
+    assert matches[0].subject_type == "class"
+
+
+async def test_redundant_regional_skips_non_literal_and_untagged() -> None:
+    """Non-literal objects and literals without language tags are skipped."""
+    g = Graph()
+    g.add((EX.Thing, RDF.type, OWL.Class))
+    # URIRef as label value (not a literal)
+    g.add((EX.Thing, RDFS.label, EX.SomeURI))
+    # Plain literal without language tag
+    g.add((EX.Thing, RDFS.label, Literal("plain")))
+
+    linter = OntologyLinter(enabled_rules={"redundant-regional-label"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "redundant-regional-label")
+    assert len(matches) == 0
+
+
+# ---------------------------------------------------------------------------
+# 22. missing-type-declaration
+# ---------------------------------------------------------------------------
+
+
+async def test_missing_type_declaration_with_ontology_iri() -> None:
+    """A subject in the ontology namespace with no rdf:type triggers the rule."""
+    ONT = Namespace("http://example.org/ontology#")
+    g = Graph()
+    g.add((ONT[""], RDF.type, OWL.Ontology))
+    g.add((ONT.Animal, RDF.type, OWL.Class))
+    # Untyped resource in the same namespace
+    g.add((ONT.mystery, RDFS.label, Literal("Mystery", lang="en")))
+
+    linter = OntologyLinter(enabled_rules={"missing-type-declaration"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-type-declaration")
+    assert len(matches) == 1
+    assert matches[0].subject_iri == str(ONT.mystery)
+
+
+async def test_missing_type_declaration_inferred_namespace() -> None:
+    """Without owl:Ontology, infers namespace from most common prefix."""
+    g = Graph()
+    # No owl:Ontology declaration — must infer namespace
+    g.add((EX.A, RDF.type, OWL.Class))
+    g.add((EX.B, RDF.type, OWL.Class))
+    g.add((EX.C, RDF.type, OWL.Class))
+    # Untyped resource in the same namespace
+    g.add((EX.orphan, RDFS.label, Literal("Orphan", lang="en")))
+
+    linter = OntologyLinter(enabled_rules={"missing-type-declaration"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-type-declaration")
+    assert len(matches) == 1
+    assert matches[0].subject_iri == str(EX.orphan)
+
+
+async def test_no_missing_type_declaration_when_typed() -> None:
+    """A fully typed ontology should not trigger the rule."""
+    g = Graph()
+    g.add((EX.Animal, RDF.type, OWL.Class))
+    g.add((EX.Dog, RDF.type, OWL.Class))
+    g.add((EX.Dog, RDFS.subClassOf, EX.Animal))
+
+    linter = OntologyLinter(enabled_rules={"missing-type-declaration"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-type-declaration")
+    assert len(matches) == 0
+
+
+async def test_missing_type_declaration_slash_namespace_ontology() -> None:
+    """Ontology IRI without a trailing separator and slash-style subjects.
+
+    Exercises the candidate-namespace branch that picks ``base + "/"`` over
+    ``base + "#"`` when the actual subjects use slashes.
+    """
+    g = Graph()
+    onto = "http://example.org/myonto"
+    g.add((URIRef(onto), RDF.type, OWL.Ontology))
+    g.add((URIRef(f"{onto}/Animal"), RDF.type, OWL.Class))
+    # Untyped resource in the same slash-namespace
+    g.add((URIRef(f"{onto}/mystery"), RDFS.label, Literal("Mystery", lang="en")))
+
+    linter = OntologyLinter(enabled_rules={"missing-type-declaration"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-type-declaration")
+    assert len(matches) == 1
+    assert matches[0].subject_iri == f"{onto}/mystery"
+
+
+async def test_missing_type_declaration_inferred_hash_namespace() -> None:
+    """Inferred-namespace branch should pick the ``#``-prefix when subjects use it."""
+    HASH = Namespace("http://example.org/onto#")
+    g = Graph()
+    # No owl:Ontology declaration — namespace must be inferred
+    g.add((HASH.A, RDF.type, OWL.Class))
+    g.add((HASH.B, RDF.type, OWL.Class))
+    # Untyped resource sharing the inferred hash namespace
+    g.add((HASH.orphan, RDFS.label, Literal("Orphan", lang="en")))
+
+    linter = OntologyLinter(enabled_rules={"missing-type-declaration"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-type-declaration")
+    assert len(matches) == 1
+    assert matches[0].subject_iri == str(HASH.orphan)
+
+
+async def test_missing_type_declaration_inferred_deep_slash_namespace() -> None:
+    """Inferred-namespace branch should pick the deepest ``/``-prefix when no ``#``."""
+    base = "http://example.org/vocab/v1/"
+    g = Graph()
+    g.add((URIRef(f"{base}A"), RDF.type, OWL.Class))
+    g.add((URIRef(f"{base}B"), RDF.type, OWL.Class))
+    g.add((URIRef(f"{base}orphan"), RDFS.label, Literal("Orphan", lang="en")))
+
+    linter = OntologyLinter(enabled_rules={"missing-type-declaration"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = _results_with_rule(issues, "missing-type-declaration")
+    assert len(matches) == 1
+    assert matches[0].subject_iri == f"{base}orphan"
+
+
+# ---------------------------------------------------------------------------
+# 23. undefined-prefix subject_type
+# ---------------------------------------------------------------------------
+
+
+async def test_undefined_prefix_subject_type_reflects_entity() -> None:
+    """undefined-prefix issues classify the offending term so the frontend
+    can navigate to the right entity panel."""
+    g = Graph()
+    # A class typed via rdf:type but referencing an undefined prefix in its IRI.
+    bad_class = URIRef("undefined:BadClass")
+    g.add((bad_class, RDF.type, OWL.Class))
+
+    linter = OntologyLinter(enabled_rules={"undefined-prefix"})
+    issues = await linter.lint(g, PROJECT_ID)
+
+    matches = [
+        i for i in _results_with_rule(issues, "undefined-prefix") if i.subject_iri == str(bad_class)
+    ]
+    assert matches, "expected an undefined-prefix issue for the bad class IRI"
+    assert matches[0].subject_type == "class"

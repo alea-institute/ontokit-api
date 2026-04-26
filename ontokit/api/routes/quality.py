@@ -406,4 +406,5 @@ async def quality_websocket(
         if pubsub:
             with contextlib.suppress(Exception):
                 await pubsub.unsubscribe(QUALITY_UPDATES_CHANNEL)
+            with contextlib.suppress(Exception):
                 await pubsub.aclose()  # type: ignore[no-untyped-call]

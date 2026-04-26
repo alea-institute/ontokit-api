@@ -2,6 +2,7 @@
 
 import json
 import logging
+from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -9,6 +10,7 @@ from uuid import UUID
 from arq import ArqRedis, cron, func
 from arq.connections import RedisSettings
 from sqlalchemy import select
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
@@ -23,6 +25,7 @@ from ontokit.core.constants import (
 from ontokit.core.encryption import decrypt_token
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
+from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.models.user_github_token import UserGitHubToken
@@ -197,6 +200,7 @@ async def run_ontology_index_task(
 async def run_lint_task(
     ctx: dict[str, Any],
     project_id: str,
+    branch: str = "main",
 ) -> dict[str, Any]:
     """
     Background task to lint an ontology project.
@@ -204,6 +208,7 @@ async def run_lint_task(
     Args:
         ctx: ARQ context with db session and services
         project_id: The project UUID to lint
+        branch: The git branch to lint (default: "main")
 
     Returns:
         Dict with run_id and issues_found
@@ -215,15 +220,21 @@ async def run_lint_task(
     run: LintRun | None = None
 
     try:
-        # Verify project exists and get its details
-        result = await db.execute(select(Project).where(Project.id == project_uuid))
+        # Verify project exists (eagerly load github_integration for file path)
+        result = await db.execute(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
         project = result.scalar_one_or_none()
 
         if not project:
             raise ValueError(f"Project {project_id} not found")
 
-        if not project.source_file_path:
+        if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
+
+        filename = get_git_ontology_path(project)
 
         # Create lint run record
         run = LintRun(
@@ -243,17 +254,46 @@ async def run_lint_task(
             f'{{"type": "lint_started", "project_id": "{project_id}", "run_id": "{run_id}"}}',
         )
 
-        # Load ontology from storage
+        # Load ontology from git or storage
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
 
-        graph = await ontology_service.load_from_storage(
-            project_uuid,
-            project.source_file_path,
-        )
+        git_service = BareGitRepositoryService()
+        if git_service.repository_exists(project_uuid):
+            graph = await ontology_service.load_from_git(
+                project_uuid, branch, filename, git_service
+            )
+        elif project.source_file_path:
+            graph = await ontology_service.load_from_storage(
+                project_uuid, project.source_file_path, branch
+            )
+        else:
+            raise ValueError(f"Project {project_id} has no git repository and no storage file")
+
+        # Load per-project lint configuration. Tolerate the table being absent
+        # (migration not yet applied) by falling back to all rules; let any
+        # other SQL error propagate.
+        enabled_rules: AbstractSet[str] | None
+        try:
+            config_result = await db.execute(
+                select(ProjectLintConfig).where(ProjectLintConfig.project_id == project_uuid)
+            )
+            lint_config = config_result.scalar_one_or_none()
+            enabled_rules = lint_config.get_enabled_rule_ids() if lint_config else None
+        except ProgrammingError as e:
+            # 42P01 = undefined_table. Re-raise anything else (syntax errors,
+            # missing columns, permission failures, ...) so we don't mask bugs.
+            if getattr(e.orig, "pgcode", None) != "42P01":
+                raise
+            logger.warning(
+                "project_lint_configs table not found; using all lint rules. "
+                "Run `alembic upgrade head` to enable per-project lint configuration."
+            )
+            await db.rollback()
+            enabled_rules = None
 
         # Run linting
-        linter = get_linter()
+        linter = get_linter(enabled_rules=enabled_rules)
         lint_results: list[LintResult] = await linter.lint(graph, project_uuid)
 
         # Save issues to database
@@ -265,6 +305,7 @@ async def run_lint_task(
                 rule_id=lint_result.rule_id,
                 message=lint_result.message,
                 subject_iri=lint_result.subject_iri,
+                subject_type=lint_result.subject_type,
                 details=lint_result.details,
             )
             db.add(issue)

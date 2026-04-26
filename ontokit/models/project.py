@@ -11,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 if TYPE_CHECKING:
     from ontokit.models.join_request import JoinRequest
     from ontokit.models.lint import LintRun
+    from ontokit.models.lint_config import ProjectLintConfig
     from ontokit.models.normalization import NormalizationRun
     from ontokit.models.pull_request import GitHubIntegration, PullRequest
     from ontokit.models.suggestion_session import SuggestionSession
@@ -70,6 +71,9 @@ class Project(Base):
     )
     suggestion_sessions: Mapped[list["SuggestionSession"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
+    )
+    lint_config: Mapped["ProjectLintConfig | None"] = relationship(
+        back_populates="project", cascade="all, delete-orphan", uselist=False
     )
 
     def __repr__(self) -> str:

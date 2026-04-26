@@ -1589,3 +1589,5 @@ async def ontology_index_websocket(
         if pubsub:
             with contextlib.suppress(Exception):
                 await pubsub.unsubscribe(ONTOLOGY_INDEX_UPDATES_CHANNEL)
+            with contextlib.suppress(Exception):
+                await pubsub.aclose()  # type: ignore[no-untyped-call]

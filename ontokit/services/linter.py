@@ -2,15 +2,19 @@
 
 import contextlib
 from collections import defaultdict
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import UUID
 
 from rdflib import Graph, Namespace, URIRef
 from rdflib import Literal as RDFLiteral
-from rdflib.namespace import OWL, RDF, RDFS
+from rdflib.namespace import OWL, RDF, RDFS, SKOS, XSD
 
 from ontokit.models.lint import LintIssueType
+
+DC = Namespace("http://purl.org/dc/elements/1.1/")
+DCTERMS = Namespace("http://purl.org/dc/terms/")
 
 
 @dataclass
@@ -21,6 +25,7 @@ class LintResult:
     rule_id: str
     message: str
     subject_iri: str | None = None
+    subject_type: str | None = None  # "class", "property", "individual", "other"
     details: dict[str, Any] | None = None
 
 
@@ -32,117 +37,240 @@ class LintRuleInfo:
     name: str
     description: str
     severity: str
+    scope: list[str]
 
+
+# Scope constants for rule applicability
+_ALL = ["class", "property", "individual"]
 
 # Available lint rules with their metadata
 LINT_RULES: list[LintRuleInfo] = [
     LintRuleInfo(
         rule_id="missing-label",
         name="Missing Label",
-        description="Classes should have at least one rdfs:label annotation",
+        description="Resources should have at least one rdfs:label annotation",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="missing-comment",
         name="Missing Comment",
-        description="Classes should have a description via rdfs:comment",
+        description="Resources should have a description via rdfs:comment",
         severity=LintIssueType.INFO.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="orphan-class",
         name="Orphan Class",
         description="Classes with no parent (other than owl:Thing) and no children may be misplaced",
         severity=LintIssueType.WARNING.value,
+        scope=["class"],
     ),
     LintRuleInfo(
         rule_id="undefined-parent",
         name="Undefined Parent",
         description="Class references a parent that is not defined in the ontology",
         severity=LintIssueType.ERROR.value,
+        scope=["class"],
     ),
     LintRuleInfo(
         rule_id="circular-hierarchy",
         name="Circular Hierarchy",
         description="Circular inheritance detected in class hierarchy",
         severity=LintIssueType.ERROR.value,
+        scope=["class"],
     ),
     LintRuleInfo(
         rule_id="empty-label",
         name="Empty Label",
-        description="Class has a label that is an empty string",
+        description="Resource has a label that is an empty string",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="duplicate-label",
         name="Duplicate Label",
-        description="Multiple classes share the same label, which may cause confusion",
+        description="Multiple resources share the same label, which may cause confusion",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="label-per-language",
         name="Duplicate Label Per Language",
         description="Resource has multiple different labels for the same language tag",
         severity=LintIssueType.ERROR.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="undefined-prefix",
         name="Undefined Prefix",
         description="IRI uses a prefix that is not defined in the namespace bindings",
         severity=LintIssueType.ERROR.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="duplicate-triple",
         name="Duplicate Triple",
         description="Same predicate-object pair appears multiple times for the same subject",
         severity=LintIssueType.INFO.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="domain-violation",
         name="Domain Violation",
         description="Property used on a subject that is not in its declared domain",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="range-violation",
         name="Range Violation",
         description="Property value is not in the declared range",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
     LintRuleInfo(
         rule_id="cardinality-violation",
         name="Cardinality Violation",
         description="Property usage violates declared cardinality constraints",
         severity=LintIssueType.ERROR.value,
+        scope=["individual"],
     ),
     LintRuleInfo(
         rule_id="disjoint-violation",
         name="Disjoint Class Violation",
         description="Resource is typed with classes declared as disjoint",
         severity=LintIssueType.ERROR.value,
+        scope=["individual"],
     ),
     LintRuleInfo(
         rule_id="inverse-property-inconsistency",
         name="Inverse Property Inconsistency",
         description="Inverse property relationship is not symmetric",
         severity=LintIssueType.WARNING.value,
+        # The flagged subject is the asserter of the property usage (typically
+        # an individual), not a property — keep scope aligned with what the
+        # rule actually reports.
+        scope=["individual"],
     ),
     LintRuleInfo(
         rule_id="missing-english-label",
         name="Missing English Label",
         description="Resource has labels but none in English",
         severity=LintIssueType.WARNING.value,
+        scope=_ALL,
+    ),
+    LintRuleInfo(
+        rule_id="missing-language-tag",
+        name="Missing Language Tag",
+        description="Label or annotation has no language tag (plain literal or xsd:string)",
+        severity=LintIssueType.WARNING.value,
+        scope=_ALL,
+    ),
+    LintRuleInfo(
+        rule_id="redundant-regional-label",
+        name="Redundant Regional Label",
+        description="Regional language variants have identical values and should use the base tag",
+        severity=LintIssueType.INFO.value,
+        scope=_ALL,
+    ),
+    LintRuleInfo(
+        rule_id="missing-type-declaration",
+        name="Missing Type Declaration",
+        description="Resource has no rdf:type declaration (not declared as class, property, or individual)",
+        severity=LintIssueType.WARNING.value,
+        scope=_ALL,
     ),
 ]
 
 # Map rule IDs to their info
 LINT_RULES_MAP: dict[str, LintRuleInfo] = {rule.rule_id: rule for rule in LINT_RULES}
 
+# Progressive lint levels — each level cumulatively includes the previous
+_LEVEL_1_RULES: set[str] = {"undefined-parent", "circular-hierarchy", "undefined-prefix"}
+_LEVEL_2_RULES: set[str] = _LEVEL_1_RULES | {
+    "orphan-class",
+    "duplicate-triple",
+    "disjoint-violation",
+    "missing-type-declaration",
+}
+_LEVEL_3_RULES: set[str] = _LEVEL_2_RULES | {
+    "missing-label",
+    "empty-label",
+    "duplicate-label",
+    "missing-english-label",
+    "missing-language-tag",
+}
+_LEVEL_4_RULES: set[str] = _LEVEL_3_RULES | {
+    "missing-comment",
+    "label-per-language",
+    "redundant-regional-label",
+}
+_LEVEL_5_RULES: set[str] = {r.rule_id for r in LINT_RULES}
+
+LINT_LEVELS: dict[int, frozenset[str]] = {
+    1: frozenset(_LEVEL_1_RULES),
+    2: frozenset(_LEVEL_2_RULES),
+    3: frozenset(_LEVEL_3_RULES),
+    4: frozenset(_LEVEL_4_RULES),
+    5: frozenset(_LEVEL_5_RULES),
+}
+
+ALL_RULE_IDS: frozenset[str] = LINT_LEVELS[5]
+
+
+class LintLevelDefinition(NamedTuple):
+    """Metadata for a progressive lint level."""
+
+    name: str
+    description: str
+    rules: frozenset[str]
+
+
+LINT_LEVEL_DEFINITIONS: dict[int, LintLevelDefinition] = {
+    1: LintLevelDefinition(
+        "Critical",
+        "Undefined parents, circular hierarchies, undefined prefixes",
+        LINT_LEVELS[1],
+    ),
+    2: LintLevelDefinition(
+        "Consistency",
+        "Orphan classes, duplicate triples, and disjointness violations",
+        LINT_LEVELS[2],
+    ),
+    3: LintLevelDefinition(
+        "Labels",
+        "Missing, empty, and duplicate label checks",
+        LINT_LEVELS[3],
+    ),
+    4: LintLevelDefinition(
+        "Quality",
+        "Comments, per-language label checks, and redundant regional variants",
+        LINT_LEVELS[4],
+    ),
+    5: LintLevelDefinition(
+        "All",
+        "All available rules including domain/range and cardinality",
+        LINT_LEVELS[5],
+    ),
+}
+
+
+def get_rules_for_level(level: int) -> frozenset[str]:
+    """Return the immutable set of rule IDs enabled at a given lint level (1-5)."""
+    if level < 1 or level > 5:
+        raise ValueError(f"Lint level must be between 1 and 5, got {level}")
+    return LINT_LEVELS[level]
+
 
 @dataclass
 class OntologyLinter:
     """Service for checking ontology health and finding issues."""
 
-    enabled_rules: set[str] = field(default_factory=lambda: {r.rule_id for r in LINT_RULES})
+    enabled_rules: AbstractSet[str] = field(
+        default_factory=lambda: frozenset(r.rule_id for r in LINT_RULES)
+    )
+    _uri_subjects: set[URIRef] = field(default_factory=set, init=False, repr=False)
 
     def get_enabled_rules(self) -> list[LintRuleInfo]:
         """Get list of enabled lint rules."""
@@ -161,6 +289,11 @@ class OntologyLinter:
         """
         issues: list[LintResult] = []
 
+        # Pre-compute subjects once for all checkers
+        self._uri_subjects: set[URIRef] = {
+            s for s in graph.subjects() if isinstance(s, URIRef) and s != OWL.Thing
+        }
+
         # Run each enabled rule
         for rule_id in self.enabled_rules:
             checker_name = f"_check_{rule_id.replace('-', '_')}"
@@ -172,53 +305,45 @@ class OntologyLinter:
         return issues
 
     async def _check_missing_label(self, graph: Graph) -> list[LintResult]:
-        """Find classes without rdfs:label."""
+        """Find resources without rdfs:label."""
         issues = []
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
-                continue
-            if class_uri == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             # Check for any rdfs:label
-            labels = list(graph.objects(class_uri, RDFS.label))
+            labels = list(graph.objects(subject, RDFS.label))
             if not labels:
                 issues.append(
                     LintResult(
                         issue_type=LintIssueType.WARNING.value,
                         rule_id="missing-label",
-                        message="Class has no rdfs:label annotation",
-                        subject_iri=str(class_uri),
-                        details={"local_name": self._get_local_name(class_uri)},
+                        message="Resource has no rdfs:label annotation",
+                        subject_iri=str(subject),
+                        subject_type=self._determine_entity_type(graph, subject),
+                        details={"local_name": self._get_local_name(subject)},
                     )
                 )
 
         return issues
 
     async def _check_missing_comment(self, graph: Graph) -> list[LintResult]:
-        """Find classes without rdfs:comment."""
+        """Find resources without rdfs:comment."""
         issues = []
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
-                continue
-            if class_uri == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             # Check for any rdfs:comment
-            comments = list(graph.objects(class_uri, RDFS.comment))
+            comments = list(graph.objects(subject, RDFS.comment))
             if not comments:
                 # Get label for better context
-                label = self._get_label(graph, class_uri)
+                label = self._get_label(graph, subject)
                 issues.append(
                     LintResult(
                         issue_type=LintIssueType.INFO.value,
                         rule_id="missing-comment",
-                        message="Class has no rdfs:comment description",
-                        subject_iri=str(class_uri),
+                        message="Resource has no rdfs:comment description",
+                        subject_iri=str(subject),
+                        subject_type=self._determine_entity_type(graph, subject),
                         details={
-                            "local_name": self._get_local_name(class_uri),
+                            "local_name": self._get_local_name(subject),
                             "label": label,
                         },
                     )
@@ -257,6 +382,7 @@ class OntologyLinter:
                         rule_id="orphan-class",
                         message="Class has no parent classes and no children",
                         subject_iri=str(class_uri),
+                        subject_type="class",
                         details={
                             "local_name": self._get_local_name(class_uri),
                             "label": label,
@@ -295,6 +421,7 @@ class OntologyLinter:
                             rule_id="undefined-parent",
                             message="References undefined parent class",
                             subject_iri=str(class_uri),
+                            subject_type="class",
                             details={
                                 "local_name": self._get_local_name(class_uri),
                                 "label": label,
@@ -358,6 +485,7 @@ class OntologyLinter:
                             rule_id="circular-hierarchy",
                             message=f"Circular inheritance: {' → '.join(cycle_labels)} → {cycle_labels[0]}",
                             subject_iri=cycle[0],
+                            subject_type="class",
                             details={
                                 "cycle_iris": cycle,
                                 "cycle_labels": cycle_labels,
@@ -368,17 +496,12 @@ class OntologyLinter:
         return issues
 
     async def _check_empty_label(self, graph: Graph) -> list[LintResult]:
-        """Find classes with empty string labels."""
+        """Find resources with empty string labels."""
         issues = []
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
-                continue
-            if class_uri == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             # Check each label
-            for label in graph.objects(class_uri, RDFS.label):
+            for label in graph.objects(subject, RDFS.label):
                 if isinstance(label, RDFLiteral):
                     label_str = str(label).strip()
                     if not label_str:
@@ -386,10 +509,11 @@ class OntologyLinter:
                             LintResult(
                                 issue_type=LintIssueType.WARNING.value,
                                 rule_id="empty-label",
-                                message="Class has an empty rdfs:label",
-                                subject_iri=str(class_uri),
+                                message="Resource has an empty rdfs:label",
+                                subject_iri=str(subject),
+                                subject_type=self._determine_entity_type(graph, subject),
                                 details={
-                                    "local_name": self._get_local_name(class_uri),
+                                    "local_name": self._get_local_name(subject),
                                     "language": label.language,
                                 },
                             )
@@ -398,45 +522,43 @@ class OntologyLinter:
         return issues
 
     async def _check_duplicate_label(self, graph: Graph) -> list[LintResult]:
-        """Find classes that share the same label."""
+        """Find resources that share the same label."""
         issues = []
 
-        # Build map of label → list of class IRIs
-        label_to_classes: dict[str, list[str]] = defaultdict(list)
+        # Build map of label → list of resource IRIs
+        label_to_resources: dict[str, list[str]] = defaultdict(list)
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
-                continue
-            if class_uri == OWL.Thing:
-                continue
-
-            for label in graph.objects(class_uri, RDFS.label):
+        for subject in self._uri_subjects:
+            for label in graph.objects(subject, RDFS.label):
                 if isinstance(label, RDFLiteral):
                     label_str = str(label).strip().lower()
                     if label_str:  # Skip empty labels
-                        label_to_classes[label_str].append(str(class_uri))
+                        label_to_resources[label_str].append(str(subject))
 
         # Report duplicates
         reported_iris: set[str] = set()
-        for _label_str, class_iris in label_to_classes.items():
-            if len(class_iris) > 1:
-                for class_iri in class_iris:
-                    if class_iri not in reported_iris:
-                        reported_iris.add(class_iri)
+        for _label_str, resource_iris in label_to_resources.items():
+            if len(resource_iris) > 1:
+                for resource_iri in resource_iris:
+                    if resource_iri not in reported_iris:
+                        reported_iris.add(resource_iri)
                         # Get original (non-lowercased) label
-                        original_label = self._get_label(graph, URIRef(class_iri))
-                        other_classes = [c for c in class_iris if c != class_iri]
+                        original_label = self._get_label(graph, URIRef(resource_iri))
+                        other_resources = [c for c in resource_iris if c != resource_iri]
                         issues.append(
                             LintResult(
                                 issue_type=LintIssueType.WARNING.value,
                                 rule_id="duplicate-label",
-                                message=f"Label '{original_label}' is shared with {len(other_classes)} other class(es)",
-                                subject_iri=class_iri,
+                                message=f"Label '{original_label}' is shared with {len(other_resources)} other resource(s)",
+                                subject_iri=resource_iri,
+                                subject_type=self._determine_entity_type(
+                                    graph, URIRef(resource_iri)
+                                ),
                                 details={
-                                    "local_name": self._get_local_name(URIRef(class_iri)),
+                                    "local_name": self._get_local_name(URIRef(resource_iri)),
                                     "label": original_label,
-                                    "duplicate_iris": other_classes[:5],  # Limit to 5
-                                    "total_duplicates": len(other_classes),
+                                    "duplicate_iris": other_resources[:5],  # Limit to 5
+                                    "total_duplicates": len(other_resources),
                                 },
                             )
                         )
@@ -445,52 +567,58 @@ class OntologyLinter:
 
     async def _check_label_per_language(self, graph: Graph) -> list[LintResult]:
         """
-        Find resources with multiple different labels for the same language.
+        Find resources with multiple different labels for the same predicate and language.
 
-        Adapted from skos-ttl-editor's labelCheck.
+        Only checks predicates with cardinality constraints:
+        - rdfs:label: conventionally one per language
+        - skos:prefLabel: at most one per language (SKOS integrity condition S14)
+
+        skos:altLabel and skos:hiddenLabel are explicitly unconstrained —
+        multiple values per language is their intended usage (synonyms, variants).
         """
         issues = []
-        SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
-                continue
-            if class_uri == OWL.Thing:
-                continue
+        label_predicates = [
+            (RDFS.label, "rdfs:label"),
+            (SKOS.prefLabel, "skos:prefLabel"),
+        ]
 
-            # Collect all labels with their language tags
-            labels_by_lang: dict[str | None, list[str]] = defaultdict(list)
+        for subject in self._uri_subjects:
+            for predicate, pred_name in label_predicates:
+                # Collect labels by language for this specific predicate
+                labels_by_lang: dict[str | None, list[str]] = defaultdict(list)
 
-            # Check rdfs:label
-            for label in graph.objects(class_uri, RDFS.label):
-                if isinstance(label, RDFLiteral):
-                    lang = label.language
-                    labels_by_lang[lang].append(str(label))
+                for label in graph.objects(subject, predicate):
+                    if isinstance(label, RDFLiteral):
+                        # Normalize language tag to lowercase for case-insensitive
+                        # comparison (BCP-47: tags are case-insensitive). Matches the
+                        # normalization used by `redundant-regional-label`.
+                        lang_key = label.language.lower() if label.language else None
+                        labels_by_lang[lang_key].append(str(label))
 
-            # Check skos:prefLabel
-            for label in graph.objects(class_uri, SKOS.prefLabel):
-                if isinstance(label, RDFLiteral):
-                    lang = label.language
-                    labels_by_lang[lang].append(str(label))
-
-            # Check for multiple different labels per language
-            for lang, label_values in labels_by_lang.items():
-                unique_values = list(set(label_values))
-                if len(unique_values) > 1:
-                    lang_str = lang or "no language tag"
-                    issues.append(
-                        LintResult(
-                            issue_type=LintIssueType.ERROR.value,
-                            rule_id="label-per-language",
-                            message=f"Multiple different labels for language '{lang_str}'",
-                            subject_iri=str(class_uri),
-                            details={
-                                "local_name": self._get_local_name(class_uri),
-                                "language": lang_str,
-                                "labels": unique_values,
-                            },
+                # Check for multiple different labels per language within this predicate
+                for lang, label_values in labels_by_lang.items():
+                    unique_values = list(set(label_values))
+                    if len(unique_values) > 1:
+                        lang_str = lang or "no language tag"
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.ERROR.value,
+                                rule_id="label-per-language",
+                                message=(
+                                    f"Multiple different {pred_name} values "
+                                    f"for language '{lang_str}'"
+                                ),
+                                subject_iri=str(subject),
+                                subject_type=self._determine_entity_type(graph, subject),
+                                details={
+                                    "local_name": self._get_local_name(subject),
+                                    "predicate": pred_name,
+                                    "language": lang_str,
+                                    "labels": unique_values,
+                                },
+                            )
                         )
-                    )
 
         return issues
 
@@ -529,6 +657,7 @@ class OntologyLinter:
                                 rule_id="undefined-prefix",
                                 message=f"Prefix '{prefix}' is not defined",
                                 subject_iri=iri,
+                                subject_type=self._determine_entity_type(graph, term),
                                 details={
                                     "prefix": prefix,
                                     "iri": iri,
@@ -547,11 +676,12 @@ class OntologyLinter:
         issues = []
 
         # Group triples by subject
+        # Use o.n3() to preserve language tags and datatypes in comparisons
         subject_triples: dict[str, list[tuple[str, str]]] = defaultdict(list)
 
         for s, p, o in graph:
             if isinstance(s, URIRef):
-                po_key = (str(p), str(o))
+                po_key = (str(p), o.n3())
                 subject_triples[str(s)].append(po_key)
 
         # Find duplicates within each subject
@@ -568,6 +698,7 @@ class OntologyLinter:
                             rule_id="duplicate-triple",
                             message=f"Duplicate triple: predicate-object pair appears {count} times",
                             subject_iri=subject_iri,
+                            subject_type=self._determine_entity_type(graph, URIRef(subject_iri)),
                             details={
                                 "predicate": po[0],
                                 "object": po[1],
@@ -630,6 +761,7 @@ class OntologyLinter:
                             rule_id="domain-violation",
                             message="Property used on subject not in declared domain",
                             subject_iri=str(s),
+                            subject_type=self._determine_entity_type(graph, URIRef(str(s))),
                             details={
                                 "property": prop_str,
                                 "expected_domains": list(domains),
@@ -684,6 +816,7 @@ class OntologyLinter:
                             rule_id="range-violation",
                             message="Property value not in declared range",
                             subject_iri=str(s),
+                            subject_type=self._determine_entity_type(graph, URIRef(str(s))),
                             details={
                                 "property": prop_str,
                                 "object": str(o),
@@ -746,6 +879,7 @@ class OntologyLinter:
                                 rule_id="cardinality-violation",
                                 message=f"Cardinality violation: expected exactly {exact_cardinality}, found {value_count}",
                                 subject_iri=str(instance),
+                                subject_type="individual",
                                 details={
                                     "property": str(on_property),
                                     "expected": exact_cardinality,
@@ -761,6 +895,7 @@ class OntologyLinter:
                                 rule_id="cardinality-violation",
                                 message=f"Cardinality violation: max {max_cardinality}, found {value_count}",
                                 subject_iri=str(instance),
+                                subject_type="individual",
                                 details={
                                     "property": str(on_property),
                                     "max": max_cardinality,
@@ -776,6 +911,7 @@ class OntologyLinter:
                                 rule_id="cardinality-violation",
                                 message=f"Cardinality violation: min {min_cardinality}, found {value_count}",
                                 subject_iri=str(instance),
+                                subject_type="individual",
                                 details={
                                     "property": str(on_property),
                                     "min": min_cardinality,
@@ -832,6 +968,7 @@ class OntologyLinter:
                                 rule_id="disjoint-violation",
                                 message="Resource is typed with disjoint classes",
                                 subject_iri=str(instance),
+                                subject_type="individual",
                                 details={
                                     "class1": t1,
                                     "class2": t2,
@@ -881,6 +1018,7 @@ class OntologyLinter:
                                 rule_id="inverse-property-inconsistency",
                                 message="Missing inverse property assertion",
                                 subject_iri=str(s),
+                                subject_type=self._determine_entity_type(graph, s),
                                 details={
                                     "property": prop_str,
                                     "object": str(o),
@@ -899,25 +1037,19 @@ class OntologyLinter:
         Adapted from skos-ttl-editor's labelCheck warning.
         """
         issues = []
-        SKOS = Namespace("http://www.w3.org/2004/02/skos/core#")
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
-                continue
-            if class_uri == OWL.Thing:
-                continue
-
+        for subject in self._uri_subjects:
             # Collect all labels
             all_labels = []
             has_english = False
 
-            for label in graph.objects(class_uri, RDFS.label):
+            for label in graph.objects(subject, RDFS.label):
                 if isinstance(label, RDFLiteral):
                     all_labels.append(label)
                     if label.language and label.language.lower().startswith("en"):
                         has_english = True
 
-            for label in graph.objects(class_uri, SKOS.prefLabel):
+            for label in graph.objects(subject, SKOS.prefLabel):
                 if isinstance(label, RDFLiteral):
                     all_labels.append(label)
                     if label.language and label.language.lower().startswith("en"):
@@ -931,15 +1063,256 @@ class OntologyLinter:
                         issue_type=LintIssueType.WARNING.value,
                         rule_id="missing-english-label",
                         message=f"No English label defined (has labels in: {', '.join(languages)})",
-                        subject_iri=str(class_uri),
+                        subject_iri=str(subject),
+                        subject_type=self._determine_entity_type(graph, subject),
                         details={
-                            "local_name": self._get_local_name(class_uri),
+                            "local_name": self._get_local_name(subject),
                             "available_languages": languages,
                         },
                     )
                 )
 
         return issues
+
+    async def _check_missing_language_tag(self, graph: Graph) -> list[LintResult]:
+        """
+        Find label/annotation predicates with plain literals or xsd:string
+        instead of language-tagged literals.
+        """
+        issues = []
+
+        # Predicates that should typically have language tags
+        lang_predicates = [
+            (RDFS.label, "rdfs:label"),
+            (RDFS.comment, "rdfs:comment"),
+            (SKOS.prefLabel, "skos:prefLabel"),
+            (SKOS.altLabel, "skos:altLabel"),
+            (SKOS.hiddenLabel, "skos:hiddenLabel"),
+            (SKOS.definition, "skos:definition"),
+            (SKOS.note, "skos:note"),
+            (SKOS.scopeNote, "skos:scopeNote"),
+            (SKOS.historyNote, "skos:historyNote"),
+            (SKOS.editorialNote, "skos:editorialNote"),
+            (SKOS.changeNote, "skos:changeNote"),
+            (SKOS.example, "skos:example"),
+            (DC.title, "dc:title"),
+            (DC.description, "dc:description"),
+            (DCTERMS.title, "dcterms:title"),
+            (DCTERMS.description, "dcterms:description"),
+        ]
+
+        for subject in self._uri_subjects:
+            for predicate, pred_name in lang_predicates:
+                for obj in graph.objects(subject, predicate):
+                    if not isinstance(obj, RDFLiteral):
+                        continue
+                    # Flag if no language tag: plain literal or explicit xsd:string
+                    if obj.language is None:
+                        datatype_note = ""
+                        if obj.datatype == XSD.string:
+                            datatype_note = " (typed as xsd:string)"
+                        issues.append(
+                            LintResult(
+                                issue_type=LintIssueType.WARNING.value,
+                                rule_id="missing-language-tag",
+                                message=(f"{pred_name} has no language tag{datatype_note}"),
+                                subject_iri=str(subject),
+                                subject_type=self._determine_entity_type(graph, subject),
+                                details={
+                                    "local_name": self._get_local_name(subject),
+                                    "predicate": pred_name,
+                                    "value": str(obj)[:100],
+                                },
+                            )
+                        )
+
+        return issues
+
+    async def _check_redundant_regional_label(self, graph: Graph) -> list[LintResult]:
+        """
+        Find annotations where regional language variants have identical values.
+
+        When e.g. @es-es and @es-mx carry the same text, the regional qualifier
+        adds no value and the base tag (@es) should be used instead.
+        """
+        issues = []
+
+        predicates = [
+            (RDFS.label, "rdfs:label"),
+            (RDFS.comment, "rdfs:comment"),
+            (SKOS.prefLabel, "skos:prefLabel"),
+            (SKOS.altLabel, "skos:altLabel"),
+            (SKOS.hiddenLabel, "skos:hiddenLabel"),
+            (SKOS.definition, "skos:definition"),
+            (SKOS.note, "skos:note"),
+            (SKOS.scopeNote, "skos:scopeNote"),
+            (SKOS.historyNote, "skos:historyNote"),
+            (SKOS.editorialNote, "skos:editorialNote"),
+            (SKOS.changeNote, "skos:changeNote"),
+            (SKOS.example, "skos:example"),
+            (DC.title, "dc:title"),
+            (DC.description, "dc:description"),
+            (DCTERMS.title, "dcterms:title"),
+            (DCTERMS.description, "dcterms:description"),
+        ]
+
+        for subject in self._uri_subjects:
+            for predicate, pred_name in predicates:
+                # Group literals by (base_language, value)
+                regional_groups: dict[tuple[str, str], list[str]] = defaultdict(list)
+
+                for obj in graph.objects(subject, predicate):
+                    if not isinstance(obj, RDFLiteral) or obj.language is None:
+                        continue
+                    lang = obj.language.lower()
+                    base_lang = lang.split("-")[0]
+                    regional_groups[(base_lang, str(obj))].append(lang)
+
+                for (base_lang, value), tags in regional_groups.items():
+                    if len(tags) < 2:
+                        continue
+                    sorted_tags = sorted(tags)
+                    tag_list = ", ".join(f"@{t}" for t in sorted_tags)
+                    if base_lang in sorted_tags:
+                        # Base tag already present — suggest removing regional variants
+                        regional_only = [t for t in sorted_tags if t != base_lang]
+                        drop_list = ", ".join(f"@{t}" for t in regional_only)
+                        action = f"consider removing {drop_list}"
+                    else:
+                        action = f"consider using @{base_lang} instead"
+                    issues.append(
+                        LintResult(
+                            issue_type=LintIssueType.INFO.value,
+                            rule_id="redundant-regional-label",
+                            message=(
+                                f"Redundant regional variants: {pred_name} "
+                                f'"{value[:80]}" has identical values for '
+                                f"{tag_list} — {action}"
+                            ),
+                            subject_iri=str(subject),
+                            subject_type=self._determine_entity_type(graph, subject),
+                            details={
+                                "local_name": self._get_local_name(subject),
+                                "predicate": pred_name,
+                                "value": value[:100],
+                                "regional_tags": sorted_tags,
+                                "base_language": base_lang,
+                            },
+                        )
+                    )
+
+        return issues
+
+    async def _check_missing_type_declaration(self, graph: Graph) -> list[LintResult]:
+        """
+        Find resources that appear as subjects but have no rdf:type declaration.
+
+        Only checks IRIs in the ontology's own namespace — external vocabulary
+        terms (OWL, RDF, RDFS, XSD, SKOS, DC, etc.) are skipped.
+        """
+        issues: list[LintResult] = []
+
+        # Determine the ontology's base namespace from the graph
+        base_ns_candidates: set[str] = set()
+        for s in graph.subjects(RDF.type, OWL.Ontology):
+            if isinstance(s, URIRef):
+                stripped = str(s).rstrip("/#")
+                base_ns_candidates.add(stripped + "#")
+                base_ns_candidates.add(stripped + "/")
+                break
+
+        base_ns = None
+        if base_ns_candidates:
+            # Pick the candidate that actually contains subjects
+            for candidate in base_ns_candidates:
+                if any(str(subj).startswith(candidate) for subj in self._uri_subjects):
+                    base_ns = candidate
+                    break
+            # Fallback to first candidate if neither matches
+            if not base_ns:
+                base_ns = next(iter(base_ns_candidates))
+
+        # Well-known vocabulary namespaces to skip
+        skip_prefixes = {
+            str(OWL),
+            str(RDF),
+            str(RDFS),
+            str(XSD),
+            str(SKOS),
+            "http://purl.org/dc/elements/1.1/",
+            "http://purl.org/dc/terms/",
+            "http://www.w3.org/ns/prov#",
+            "http://www.w3.org/2006/time#",
+            "http://xmlns.com/foaf/0.1/",
+        }
+
+        # If no owl:Ontology found, infer from most common namespace
+        if not base_ns:
+            from collections import Counter
+
+            ns_counts: Counter[str] = Counter()
+            for s in self._uri_subjects:
+                iri = str(s)
+                if any(iri.startswith(p) for p in skip_prefixes):
+                    continue
+                if "#" in iri:
+                    ns_counts[iri[: iri.rindex("#") + 1]] += 1
+                elif "/" in iri:
+                    ns_counts[iri[: iri.rindex("/") + 1]] += 1
+            if ns_counts:
+                base_ns = ns_counts.most_common(1)[0][0]
+
+        if not base_ns:
+            return issues
+
+        for subject in self._uri_subjects:
+            iri = str(subject)
+
+            # Only check IRIs in the ontology's own namespace
+            if not iri.startswith(base_ns):
+                continue
+
+            # Skip if it's a well-known vocabulary term
+            if any(iri.startswith(prefix) for prefix in skip_prefixes):
+                continue
+
+            # Check for rdf:type
+            types = list(graph.objects(subject, RDF.type))
+            if not types:
+                issues.append(
+                    LintResult(
+                        issue_type=LintIssueType.WARNING.value,
+                        rule_id="missing-type-declaration",
+                        message="Resource has no rdf:type declaration",
+                        subject_iri=iri,
+                        subject_type="other",
+                        details={
+                            "local_name": self._get_local_name(subject),
+                        },
+                    )
+                )
+
+        return issues
+
+    @staticmethod
+    def _determine_entity_type(graph: Graph, uri: URIRef) -> str:
+        """Return 'class', 'property', 'individual', or 'other' for a URI."""
+        types = set(graph.objects(uri, RDF.type))
+        if OWL.Class in types or RDFS.Class in types:
+            return "class"
+        if any(
+            t in types
+            for t in (
+                OWL.ObjectProperty,
+                OWL.DatatypeProperty,
+                OWL.AnnotationProperty,
+                RDF.Property,
+            )
+        ):
+            return "property"
+        if types:
+            return "individual"
+        return "other"
 
     @staticmethod
     def _get_local_name(uri: URIRef) -> str:
@@ -958,7 +1331,7 @@ class OntologyLinter:
         return None
 
 
-def get_linter(enabled_rules: set[str] | None = None) -> OntologyLinter:
+def get_linter(enabled_rules: AbstractSet[str] | None = None) -> OntologyLinter:
     """
     Get an ontology linter instance.
 
