@@ -312,8 +312,8 @@ class TestRunLintTask:
     async def test_lint_falls_back_when_config_table_missing(
         self, mock_ctx: dict[str, Any], project_id: str
     ) -> None:
-        """If project_lint_configs table is absent (migration not run), the
-        worker logs, rolls back, and falls back to all rules."""
+        """If project_lint_configs table is absent (migration not run, pgcode
+        42P01), the worker logs, rolls back, and falls back to all rules."""
         from sqlalchemy.exc import ProgrammingError
 
         project = Mock()
@@ -322,10 +322,14 @@ class TestRunLintTask:
         project_result = Mock()
         project_result.scalar_one_or_none.return_value = project
 
+        # asyncpg's UndefinedTableError carries pgcode "42P01" on .pgcode;
+        # SQLAlchemy exposes that via ProgrammingError.orig.
+        orig = Mock()
+        orig.pgcode = "42P01"
         # First execute() returns the project; second (lint config lookup) raises.
         mock_ctx["db"].execute.side_effect = [
             project_result,
-            ProgrammingError("relation does not exist", None, Exception("undefined table")),
+            ProgrammingError("relation does not exist", None, orig),
         ]
 
         mock_run = MagicMock()
@@ -347,6 +351,41 @@ class TestRunLintTask:
         mock_ctx["db"].rollback.assert_awaited()
         # Linter must be constructed with enabled_rules=None (= all rules).
         mock_get_linter.assert_called_with(enabled_rules=None)
+
+    @pytest.mark.asyncio
+    async def test_lint_propagates_non_undefined_table_programming_error(
+        self, mock_ctx: dict[str, Any], project_id: str
+    ) -> None:
+        """A ProgrammingError that is *not* undefined_table (42P01) — e.g. a
+        syntax error or missing column — must propagate, not be swallowed."""
+        from sqlalchemy.exc import ProgrammingError
+
+        project = Mock()
+        project.source_file_path = "ontokit/test.ttl"
+
+        project_result = Mock()
+        project_result.scalar_one_or_none.return_value = project
+
+        # 42703 = undefined_column. Should NOT be treated as missing-table.
+        orig = Mock()
+        orig.pgcode = "42703"
+        mock_ctx["db"].execute.side_effect = [
+            project_result,
+            ProgrammingError("column does not exist", None, orig),
+        ]
+
+        mock_run = MagicMock()
+        mock_run.id = uuid.uuid4()
+
+        with (
+            patch("ontokit.worker.get_storage_service"),
+            patch("ontokit.worker.get_ontology_service") as mock_onto_svc,
+            patch("ontokit.worker.LintRun", return_value=mock_run),
+        ):
+            mock_onto_svc.return_value.load_from_storage = AsyncMock(return_value=Mock())
+
+            with pytest.raises(ProgrammingError):
+                await run_lint_task(mock_ctx, project_id)
 
 
 # ---------------------------------------------------------------------------

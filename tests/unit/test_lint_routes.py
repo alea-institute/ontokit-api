@@ -86,22 +86,55 @@ class TestTriggerLint:
         assert data["job_id"] == "job-42"
         assert data["status"] == "queued"
 
+    @patch("ontokit.api.routes.lint.BareGitRepositoryService")
     @patch("ontokit.api.routes.lint.verify_project_access", new_callable=AsyncMock)
     def test_trigger_lint_no_ontology_file(
         self,
         mock_access: AsyncMock,
+        mock_git_svc: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        """Returns 400 when project has no source file."""
+        """Returns 400 when project has neither source_file_path nor a git repository."""
         client, _ = authed_client
 
         mock_project = Mock()
         mock_project.source_file_path = None
         mock_access.return_value = mock_project
+        mock_git_svc.return_value.repository_exists.return_value = False
 
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/lint/run")
         assert response.status_code == 400
         assert "no ontology file" in response.json()["detail"].lower()
+
+    @patch("ontokit.api.routes.lint.get_arq_pool")
+    @patch("ontokit.api.routes.lint.BareGitRepositoryService")
+    @patch("ontokit.api.routes.lint.verify_project_access", new_callable=AsyncMock)
+    def test_trigger_lint_git_only_project_accepted(
+        self,
+        mock_access: AsyncMock,
+        mock_git_svc: MagicMock,
+        mock_pool_fn: AsyncMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Git-backed projects without source_file_path are accepted (worker handles loading)."""
+        client, mock_session = authed_client
+
+        mock_project = Mock()
+        mock_project.source_file_path = None
+        mock_access.return_value = mock_project
+        mock_git_svc.return_value.repository_exists.return_value = True
+
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = None
+        mock_session.execute.return_value = mock_result
+
+        mock_pool = AsyncMock()
+        mock_pool.enqueue_job.return_value = Mock(job_id="job-git-1")
+        mock_pool_fn.return_value = mock_pool
+
+        response = client.post(f"/api/v1/projects/{PROJECT_ID}/lint/run")
+        assert response.status_code == 202
+        assert response.json()["job_id"] == "job-git-1"
 
     @patch("ontokit.api.routes.lint.verify_project_access", new_callable=AsyncMock)
     def test_trigger_lint_already_running(

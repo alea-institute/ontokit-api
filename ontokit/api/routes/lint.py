@@ -17,6 +17,7 @@ from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
 from ontokit.core.constants import LINT_UPDATES_CHANNEL
 from ontokit.core.database import get_db
+from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project
@@ -120,7 +121,12 @@ async def trigger_lint(
     """
     project = await verify_project_access(project_id, db, user)
 
-    if not project.source_file_path:
+    # Allow git-only projects: the worker resolves the ontology from the bare
+    # repository when source_file_path is absent. Mirror the worker's loading
+    # logic so the only requests rejected here are those the worker itself
+    # would have to fail.
+    git_service = BareGitRepositoryService()
+    if not project.source_file_path and not git_service.repository_exists(project_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project has no ontology file to lint",
@@ -493,14 +499,21 @@ async def clear_lint_results(
     user: RequiredUser,
 ) -> None:
     """
-    Clear all lint results (runs and issues) for a project.
+    Clear terminal lint results (runs and issues) for a project.
 
-    Requires authentication and admin/owner access.
+    Only completed and failed runs are removed; in-flight runs (pending or
+    running) are preserved so the worker can finish updating them. Requires
+    authentication and admin/owner access.
     """
     await verify_project_access(project_id, db, user, require_manage=True)
 
-    # Delete all lint runs (issues cascade-delete via relationship)
-    await db.execute(delete(LintRun).where(LintRun.project_id == project_id))
+    # Delete only terminal runs; pending/running stay so the worker can finish
+    # updating them (issues cascade-delete via relationship).
+    await db.execute(
+        delete(LintRun)
+        .where(LintRun.project_id == project_id)
+        .where(LintRun.status.in_([LintRunStatus.COMPLETED.value, LintRunStatus.FAILED.value]))
+    )
     await db.commit()
 
 

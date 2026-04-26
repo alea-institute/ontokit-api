@@ -708,6 +708,31 @@ class TestClearLintResults:
         mock_session.commit.assert_awaited()
 
     @patch("ontokit.api.routes.lint.verify_project_access", new_callable=AsyncMock)
+    def test_clear_excludes_in_progress_runs(
+        self,
+        mock_access: AsyncMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """The DELETE statement must filter out pending/running runs so the
+        worker can finish updating them."""
+        from ontokit.models.lint import LintRunStatus
+
+        client, mock_session = authed_client
+        mock_access.return_value = Mock()
+
+        response = client.delete(f"/api/v1/projects/{PROJECT_ID}/lint/results")
+        assert response.status_code == 204
+
+        # Inspect the DELETE statement compiled by SQLAlchemy. Only terminal
+        # statuses should appear in the WHERE clause.
+        executed_stmt = mock_session.execute.await_args.args[0]
+        compiled = str(executed_stmt.compile(compile_kwargs={"literal_binds": True})).lower()
+        assert LintRunStatus.COMPLETED.value in compiled
+        assert LintRunStatus.FAILED.value in compiled
+        assert LintRunStatus.PENDING.value not in compiled
+        assert LintRunStatus.RUNNING.value not in compiled
+
+    @patch("ontokit.api.routes.lint.verify_project_access", new_callable=AsyncMock)
     def test_clear_propagates_403_from_auth(
         self,
         mock_access: AsyncMock,

@@ -268,7 +268,8 @@ async def run_lint_task(
             raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
         # Load per-project lint configuration. Tolerate the table being absent
-        # (migration not yet applied) by falling back to all rules.
+        # (migration not yet applied) by falling back to all rules; let any
+        # other SQL error propagate.
         from collections.abc import Set as AbstractSet
 
         enabled_rules: AbstractSet[str] | None
@@ -278,7 +279,11 @@ async def run_lint_task(
             )
             lint_config = config_result.scalar_one_or_none()
             enabled_rules = lint_config.get_enabled_rule_ids() if lint_config else None
-        except ProgrammingError:
+        except ProgrammingError as e:
+            # 42P01 = undefined_table. Re-raise anything else (syntax errors,
+            # missing columns, permission failures, ...) so we don't mask bugs.
+            if getattr(e.orig, "pgcode", None) != "42P01":
+                raise
             logger.warning(
                 "project_lint_configs table not found; using all lint rules. "
                 "Run `alembic upgrade head` to enable per-project lint configuration."

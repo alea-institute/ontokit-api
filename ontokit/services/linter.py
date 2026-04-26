@@ -148,7 +148,10 @@ LINT_RULES: list[LintRuleInfo] = [
         name="Inverse Property Inconsistency",
         description="Inverse property relationship is not symmetric",
         severity=LintIssueType.WARNING.value,
-        scope=["property"],
+        # The flagged subject is the asserter of the property usage (typically
+        # an individual), not a property — keep scope aligned with what the
+        # rule actually reports.
+        scope=["individual"],
     ),
     LintRuleInfo(
         rule_id="missing-english-label",
@@ -1015,7 +1018,7 @@ class OntologyLinter:
                                 rule_id="inverse-property-inconsistency",
                                 message="Missing inverse property assertion",
                                 subject_iri=str(s),
-                                subject_type="property",
+                                subject_type=self._determine_entity_type(graph, s),
                                 details={
                                     "property": prop_str,
                                     "object": str(o),
