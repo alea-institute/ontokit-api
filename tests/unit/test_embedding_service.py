@@ -284,6 +284,26 @@ class TestHelperUtilities:
         result = _vec_to_str(vec)
         assert result == str(vec)
 
+    def test_vec_to_str_handles_numpy_array(self) -> None:
+        """Regression for #98 (second cause).
+
+        pgvector deserializes ``Vector`` columns into numpy arrays, but
+        ``str(np.ndarray)`` is space-separated (``[0.1 0.2 0.3]``) which
+        pgvector's text input parser then rejects with ``invalid input
+        syntax for type vector``. ``_vec_to_str`` must normalize via
+        ``.tolist()`` so the output is the comma-separated form pgvector
+        expects, regardless of input source.
+        """
+        import numpy as np
+
+        from ontokit.services.embedding_service import _vec_to_str
+
+        arr = np.array([0.1, 0.2, 0.3])
+        result = _vec_to_str(arr)
+        assert "," in result, f"expected comma-separated output, got {result!r}"
+        # Same shape as the list path
+        assert result == str([0.1, 0.2, 0.3])
+
 
 # ---------------------------------------------------------------------------
 # _get_provider

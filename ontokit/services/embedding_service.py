@@ -58,8 +58,18 @@ def _decrypt_secret(ciphertext: str) -> str:
     return _get_fernet().decrypt(ciphertext.encode()).decode()
 
 
-def _vec_to_str(vec: list[float]) -> str:
-    """Convert an embedding vector to a pgvector-compatible string."""
+def _vec_to_str(vec: list[float] | object) -> str:
+    """Convert an embedding vector to a pgvector-compatible string.
+
+    Accepts either a Python ``list[float]`` (newly-embedded queries) or a
+    numpy array (what pgvector deserializes column reads into). pgvector's
+    text input format is ``[v1,v2,...]`` — space-separated values are
+    rejected. ``str(list)`` produces commas; ``str(np.ndarray)`` produces
+    spaces. Normalize via ``.tolist()`` so the output is always pgvector-
+    parseable regardless of the input source.
+    """
+    if hasattr(vec, "tolist"):
+        vec = vec.tolist()
     return str(vec)
 
 
