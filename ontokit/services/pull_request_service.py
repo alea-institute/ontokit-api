@@ -1721,8 +1721,13 @@ class PullRequestService:
         try:
             token = decrypt_token(token_row.encrypted_token)
         except Exception:
+            # The interpolated value is a user_id (int), not a credential. The
+            # message string mentions "credential" only as part of the
+            # human-readable failure context.
+            # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
             logger.warning(
-                "Failed to decrypt GitHub token for user %s", integration.connected_by_user_id
+                "Failed to decrypt GitHub credential for user %s",
+                integration.connected_by_user_id,
             )
             return None
         return integration, token

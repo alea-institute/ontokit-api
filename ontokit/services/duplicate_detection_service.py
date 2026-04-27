@@ -47,7 +47,11 @@ async def find_duplicates_sql(
     similar labels belonging to *other* entities of the same type.  This
     avoids parsing the ontology file and runs in seconds rather than minutes.
     """
-    # Set the similarity threshold for this transaction
+    # Set the similarity threshold for this transaction. Postgres SET does not
+    # accept bind parameters (it's a session-config statement, not a query),
+    # so the value is interpolated — but only after a float() cast that
+    # guarantees no SQL-injectable characters can survive.
+    # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
     await db.execute(text(f"SET LOCAL pg_trgm.similarity_threshold = {float(threshold)}"))
 
     # Step 1: Get one rdfs:label per entity for this project/branch

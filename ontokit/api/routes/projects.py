@@ -289,6 +289,10 @@ async def create_project_from_github(
     default_branch = data.default_branch
     if not default_branch:
         repo_info = await github.get_repo_info(pat, data.repo_owner, data.repo_name)
+        # Taint flow tracking, not a real sink — get_repo_info() URL-encodes
+        # owner/repo via _enc() (PR #116). The branch we extract here is then
+        # passed to get_file_content() which also encodes it.
+        # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
         default_branch = repo_info.get("default_branch") or "main"
 
     # Download the ontology file from GitHub
