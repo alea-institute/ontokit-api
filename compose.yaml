@@ -317,6 +317,16 @@ services:
       - ./ontokit:/home/ontokit/app/ontokit:ro
       # Git repositories (shared with API)
       - git_repos:/data/repos
+    # The worker shares the api image, which bakes in a `curl localhost:8000`
+    # healthcheck. The worker has no HTTP server (it runs ARQ), so that check
+    # always fails. Override with a check that PID 1 is still the arq process —
+    # works without any extra binaries in the slim image.
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q arq /proc/1/cmdline"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     networks:
       - ontokit
     depends_on:
