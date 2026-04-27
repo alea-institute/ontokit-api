@@ -18,6 +18,7 @@ Steps to perform:
 5. **Verify**: Run `docker compose ps` to confirm all services are healthy.
 
 Important:
+- The "no infra changes → restart" branch relies on the `./ontokit:/home/ontokit/app/ontokit:ro` volume mount in `compose.yaml` (api + worker services). If that mount is ever removed, restart will silently keep running the old code baked into the image and you'll need `docker compose up -d --build api worker` instead. Before relying on the restart path, confirm the mount still exists with `grep -A 1 "Mount source code" compose.yaml`.
 - The entrypoint.sh uses a marker file `/tmp/.migrations_done` to skip repeated migrations. This marker lives inside the container filesystem, so `docker compose restart` preserves it and migrations will NOT re-run. Only container recreation (`--build` or `--force-recreate`) clears the marker.
 - Always confirm before deleting a branch if it looks like it might have unmerged changes.
 - Run all commands from the repository root (use `git rev-parse --show-toplevel` to find it).
