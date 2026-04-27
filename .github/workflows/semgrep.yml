@@ -35,19 +35,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # `semgrep ci` is incompatible with explicit --config flags when
+      # SEMGREP_APP_TOKEN is set — semgrep-app expects the rules to come
+      # from the server-side AppSec policy. Worse, it exits 0 with a
+      # warning, so the misconfiguration silently produces a false-pass.
+      # When the token is set, defer to the server policy. When it isn't,
+      # fall back to explicit local rulesets so the scan still runs in
+      # forks / setups without the secret. `--no-suppress-errors` makes
+      # any future misconfiguration fail loudly.
       - name: Run Semgrep
         env:
-          # Optional: when set, `semgrep ci` posts findings to the Semgrep
-          # AppSec Platform. When unset, the scan runs in local-only mode
-          # and prints findings to the job log. Either path is fine.
           SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
         run: |
-          semgrep ci \
-            --config p/default \
-            --config p/owasp-top-ten \
-            --config p/python \
-            --config p/fastapi \
-            --config p/jwt
+          if [ -n "$SEMGREP_APP_TOKEN" ]; then
+            semgrep ci --no-suppress-errors
+          else
+            semgrep ci --no-suppress-errors \
+              --config p/default \
+              --config p/owasp-top-ten \
+              --config p/python \
+              --config p/fastapi \
+              --config p/jwt
+          fi
 
 # Enforcing mode: a failing scan blocks the PR. The baseline was triaged
 # in issue #124 (PR #126) — every false positive carries an inline
