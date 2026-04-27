@@ -274,15 +274,15 @@ class TestValidateToken:
     async def test_validate_token_jwt_error_raises_401(
         self, mock_jwt: MagicMock, mock_get_jwks: AsyncMock, mock_settings: MagicMock
     ) -> None:
-        """JWTError during decode raises 401."""
-        from jose import JWTError
+        """PyJWTError during decode raises 401."""
+        from jwt.exceptions import PyJWTError
 
         mock_settings.zitadel_issuer = "https://issuer.example.com"
         mock_settings.zitadel_client_id = "test-client-id"
 
         mock_get_jwks.return_value = FAKE_JWKS
         mock_jwt.get_unverified_header.return_value = {"kid": "test-key-id", "alg": "RS256"}
-        mock_jwt.decode.side_effect = JWTError("invalid token")
+        mock_jwt.decode.side_effect = PyJWTError("invalid token")
 
         with pytest.raises(HTTPException) as exc_info:
             await validate_token("bad-jwt")

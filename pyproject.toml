@@ -33,7 +33,6 @@ dependencies = [
     "redis>=5.2.0",
     "arq>=0.28.0",
     "httpx>=0.28.0",
-    "python-jose[cryptography]>=3.5.0",
     "passlib[bcrypt]>=1.7.4",
     "python-multipart>=0.0.26",
     "gitpython>=3.1.47",
@@ -56,7 +55,6 @@ dev = [
     "httpx>=0.28.0",
     "ruff>=0.15.10",
     "mypy>=1.20.1",
-    "types-python-jose>=3.5.0.20260408",
     "pre-commit>=4.0.0",
 ]
 
