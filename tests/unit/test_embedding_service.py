@@ -1269,6 +1269,60 @@ class TestSemanticSearch:
         assert result.results[0].iri == "http://example.org/Match"
         assert result.results[0].score == 0.85
 
+    @pytest.mark.asyncio
+    async def test_search_query_has_no_unresolved_bindparams(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """Mirror of the find_similar regression for #98.
+
+        Same SQLAlchemy ``text()`` parser bug as the kNN exclusion query — the
+        semantic_search query template also used ``:query_vec::vector`` and
+        produced the same unparseable wire SQL. Exercises the third execute
+        call (count, provider config, kNN) and asserts the kNN statement
+        compiles without leftover ``:name`` placeholders.
+        """
+        from unittest.mock import patch
+
+        from sqlalchemy import text
+        from sqlalchemy.dialects import postgresql
+
+        count_result = MagicMock()
+        count_result.scalar.return_value = 10
+
+        cfg_result = MagicMock()
+        cfg_result.scalar_one_or_none.return_value = _make_config_row()
+
+        mock_provider = AsyncMock()
+        mock_provider.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        search_result = MagicMock()
+        search_result.__iter__ = Mock(return_value=iter([]))
+
+        mock_db.execute.side_effect = [count_result, cfg_result, search_result]
+
+        with (
+            patch("ontokit.services.embedding_service.Vector", new="not-None"),
+            patch(
+                "ontokit.services.embedding_service.get_embedding_provider",
+                return_value=mock_provider,
+            ),
+        ):
+            await service.semantic_search(PROJECT_ID, BRANCH, "find match")
+
+        # Inspect the kNN query (third execute call: count → provider config →
+        # kNN). Use the public compiled.params API instead of the private
+        # ``_bindparams`` attribute so the assertion stays valid across
+        # SQLAlchemy versions.
+        knn_stmt = mock_db.execute.await_args_list[2].args[0]
+        assert isinstance(knn_stmt, type(text("")))
+        compiled = knn_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+        compiled_sql = str(compiled)
+        assert ":query_vec" not in compiled_sql, (
+            f"Unresolved :query_vec bindparam in compiled SQL — {compiled_sql!r}"
+        )
+        # No self_iri here — semantic_search doesn't exclude any subject.
+        assert set(compiled.params.keys()) == {"query_vec", "pid", "br", "lim"}
+
 
 # ---------------------------------------------------------------------------
 # find_similar
@@ -1376,14 +1430,17 @@ class TestFindSimilar:
 
         # Inspect the kNN query (second execute call) — its compiled SQL must
         # contain zero ``:name`` placeholders and must declare the expected
-        # bindparams.
+        # bindparams. Use the public compiled.params API rather than the
+        # private ``_bindparams`` attribute so the assertion stays valid
+        # across SQLAlchemy versions.
         knn_stmt = mock_db.execute.await_args_list[1].args[0]
         assert isinstance(knn_stmt, type(text("")))
-        compiled = str(knn_stmt.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
-        assert ":query_vec" not in compiled, (
-            f"Unresolved :query_vec bindparam in compiled SQL — {compiled!r}"
+        compiled = knn_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+        compiled_sql = str(compiled)
+        assert ":query_vec" not in compiled_sql, (
+            f"Unresolved :query_vec bindparam in compiled SQL — {compiled_sql!r}"
         )
-        assert set(knn_stmt._bindparams.keys()) == {
+        assert set(compiled.params.keys()) == {
             "query_vec",
             "pid",
             "br",
