@@ -15,6 +15,11 @@ jobs:
   semgrep:
     name: Static analysis
     runs-on: ubuntu-latest
+    # Skip Dependabot PRs: Dependabot's secret scope can't read
+    # SEMGREP_APP_TOKEN (so dashboard upload would silently no-op anyway),
+    # and dependency bumps don't change application code so a full
+    # security scan is wasted CI time.
+    if: github.actor != 'dependabot[bot]'
     # The official Semgrep image ships the CLI, the Pro engine, and all
     # rule packs preloaded. Pinned to a major tag for reproducibility.
     container:
