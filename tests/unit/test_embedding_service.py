@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.elements import TextClause
 
 from ontokit.services.embedding_service import EmbeddingService
 
@@ -1303,9 +1305,6 @@ class TestSemanticSearch:
         """
         from unittest.mock import patch
 
-        from sqlalchemy import text
-        from sqlalchemy.dialects import postgresql
-
         count_result = MagicMock()
         count_result.scalar.return_value = 10
 
@@ -1334,7 +1333,7 @@ class TestSemanticSearch:
         # ``_bindparams`` attribute so the assertion stays valid across
         # SQLAlchemy versions.
         knn_stmt = mock_db.execute.await_args_list[2].args[0]
-        assert isinstance(knn_stmt, type(text("")))
+        assert isinstance(knn_stmt, TextClause)
         compiled = knn_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
         compiled_sql = str(compiled)
         assert ":query_vec" not in compiled_sql, (
@@ -1432,9 +1431,6 @@ class TestFindSimilar:
         """
         from unittest.mock import patch
 
-        from sqlalchemy import text
-        from sqlalchemy.dialects import postgresql
-
         source_emb = MagicMock()
         source_emb.embedding = [0.1, 0.2, 0.3]
         emb_result = MagicMock()
@@ -1454,7 +1450,7 @@ class TestFindSimilar:
         # private ``_bindparams`` attribute so the assertion stays valid
         # across SQLAlchemy versions.
         knn_stmt = mock_db.execute.await_args_list[1].args[0]
-        assert isinstance(knn_stmt, type(text("")))
+        assert isinstance(knn_stmt, TextClause)
         compiled = knn_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
         compiled_sql = str(compiled)
         assert ":query_vec" not in compiled_sql, (

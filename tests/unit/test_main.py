@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
+from unittest.mock import Mock
+
 import pytest
 from fastapi.testclient import TestClient
 
+from ontokit.core.config import settings
 from ontokit.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
-from ontokit.main import app
+from ontokit.main import app, unhandled_exception_handler
 
 
 @pytest.fixture
@@ -134,51 +138,29 @@ class TestUnhandledExceptionHandler:
     """
 
     @pytest.mark.asyncio
-    async def test_returns_json_500_in_production(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """In non-development environments, the handler returns the project's
-        standard error envelope at 500."""
-        import json
-        from unittest.mock import Mock
-
-        from ontokit.core.config import settings
-        from ontokit.main import unhandled_exception_handler
-
-        monkeypatch.setattr(settings, "app_env", "production")
+    @pytest.mark.parametrize("env", ["production", "staging"])
+    async def test_returns_json_500_in_non_development(
+        self, monkeypatch: pytest.MonkeyPatch, env: str
+    ) -> None:
+        """In production and staging, the handler returns the project's
+        standard error envelope at 500. Staging behaves like production so the
+        response shape matches what the frontend will see live."""
+        monkeypatch.setattr(settings, "app_env", env)
 
         response = await unhandled_exception_handler(Mock(), RuntimeError("kaboom"))
 
         assert response.status_code == 500
-        body = json.loads(bytes(response.body))
+        # JSONResponse.body is always bytes at runtime; the assert narrows the
+        # Starlette stub's bytes | memoryview[int] union for json.loads.
+        assert isinstance(response.body, bytes)
+        body = json.loads(response.body)
         assert body["error"]["code"] == "internal_server_error"
         assert body["error"]["message"] == "Internal server error"
-
-    @pytest.mark.asyncio
-    async def test_returns_json_500_in_staging(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Staging behaves like production so the response shape matches what
-        the frontend will see live."""
-        import json
-        from unittest.mock import Mock
-
-        from ontokit.core.config import settings
-        from ontokit.main import unhandled_exception_handler
-
-        monkeypatch.setattr(settings, "app_env", "staging")
-
-        response = await unhandled_exception_handler(Mock(), RuntimeError("kaboom"))
-
-        assert response.status_code == 500
-        body = json.loads(bytes(response.body))
-        assert body["error"]["code"] == "internal_server_error"
 
     @pytest.mark.asyncio
     async def test_reraises_in_development(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """In development the handler re-raises so Starlette's debug page
         still surfaces the traceback for the developer."""
-        from unittest.mock import Mock
-
-        from ontokit.core.config import settings
-        from ontokit.main import unhandled_exception_handler
-
         monkeypatch.setattr(settings, "app_env", "development")
 
         with pytest.raises(RuntimeError, match="kaboom"):
