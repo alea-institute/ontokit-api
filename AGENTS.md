@@ -31,6 +31,18 @@ ruff format ontokit/          # Format code
 mypy ontokit/
 ```
 
+### Security Scanning
+```bash
+# Mirror what CI runs (.github/workflows/semgrep.yml). Excludes from
+# .semgrepignore are honored automatically.
+semgrep --pro \
+  --config p/default \
+  --config p/owasp-top-ten \
+  --config p/python \
+  --config p/fastapi \
+  --config p/jwt
+```
+
 ### Testing
 ```bash
 pytest tests/ -v --cov=ontokit                    # Run all tests with coverage
