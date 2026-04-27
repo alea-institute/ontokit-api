@@ -1165,6 +1165,51 @@ class TestRunLintTaskFailure:
         # Published: start + failed
         assert mock_ctx["redis"].publish.await_count >= 2
 
+    @pytest.mark.asyncio
+    async def test_lint_failure_payload_is_valid_json_with_quoted_error(
+        self, mock_ctx: dict[str, Any], project_id: str
+    ) -> None:
+        """Regression for #111: error messages containing quotes/newlines must
+        produce valid JSON (json.dumps escapes), not the f-string concatenation
+        that previously produced unparseable payloads."""
+        import json
+
+        project = Mock()
+        project.source_file_path = "ontokit/test.ttl"
+        mock_result = Mock()
+        mock_result.scalar_one_or_none.return_value = project
+        mock_ctx["db"].execute.return_value = mock_result
+
+        mock_run = MagicMock()
+        mock_run.id = uuid.uuid4()
+
+        # Realistic Python error message with both " and \n — would have
+        # produced invalid JSON under the old f-string code.
+        nasty_msg = "'foo' has no attribute \"bar\"\nstacktrace line"
+
+        with (
+            patch("ontokit.worker.get_storage_service"),
+            patch("ontokit.worker.get_ontology_service") as mock_onto_svc,
+            patch("ontokit.worker.LintRun", return_value=mock_run),
+        ):
+            mock_onto_svc.return_value.load_from_storage = AsyncMock(
+                side_effect=RuntimeError(nasty_msg)
+            )
+
+            with pytest.raises(RuntimeError):
+                await run_lint_task(mock_ctx, project_id)
+
+        # Find the lint_failed publish call and verify its payload parses.
+        failed_calls = [
+            c.args
+            for c in mock_ctx["redis"].publish.await_args_list
+            if len(c.args) >= 2 and '"lint_failed"' in c.args[1]
+        ]
+        assert failed_calls, "expected a lint_failed publish"
+        payload = json.loads(failed_calls[-1][1])  # must not raise
+        assert payload["type"] == "lint_failed"
+        assert payload["error"] == nasty_msg
+
 
 # ---------------------------------------------------------------------------
 # check_normalization_status_task – exception path
