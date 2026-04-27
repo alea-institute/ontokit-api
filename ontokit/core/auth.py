@@ -230,6 +230,9 @@ async def fetch_userinfo(access_token: str) -> dict[str, Any] | None:
 
     try:
         async with httpx.AsyncClient() as client:
+            # base_url comes from settings (zitadel_internal_url or _issuer);
+            # the path is a literal. No user-controlled URL composition here.
+            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
             response = await client.get(
                 f"{base_url}/oidc/v1/userinfo",
                 headers=headers,

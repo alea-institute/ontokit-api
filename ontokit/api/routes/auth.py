@@ -91,6 +91,12 @@ async def refresh_token(refresh_token: str) -> TokenResponse:
     """Refresh an access token using a refresh token."""
     async with httpx.AsyncClient() as client:
         try:
+            # URL is settings.zitadel_issuer + a literal path; the user-supplied
+            # refresh_token flows into the request *body*, not the URL. The taint
+            # analyzer can't distinguish URL sinks from body params, so it also
+            # flags the response.json() fields that get echoed back into
+            # TokenResponse below — none of those are URL sinks either.
+            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
             resp = await client.post(
                 f"{settings.zitadel_issuer}/oauth/v2/token",
                 data={
@@ -105,7 +111,9 @@ async def refresh_token(refresh_token: str) -> TokenResponse:
                 access_token=data["access_token"],
                 token_type=data["token_type"],
                 expires_in=data["expires_in"],
+                # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
                 refresh_token=data.get("refresh_token"),
+                # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
                 id_token=data.get("id_token"),
             )
         except httpx.HTTPStatusError as e:
