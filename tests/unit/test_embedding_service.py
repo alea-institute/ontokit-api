@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.sql.elements import TextClause
 
 from ontokit.services.embedding_service import EmbeddingService
 
@@ -283,6 +285,26 @@ class TestHelperUtilities:
         vec = [0.1, 0.2, 0.3]
         result = _vec_to_str(vec)
         assert result == str(vec)
+
+    def test_vec_to_str_handles_numpy_array(self) -> None:
+        """Regression for #98 (second cause).
+
+        pgvector deserializes ``Vector`` columns into numpy arrays, but
+        ``str(np.ndarray)`` is space-separated (``[0.1 0.2 0.3]``) which
+        pgvector's text input parser then rejects with ``invalid input
+        syntax for type vector``. ``_vec_to_str`` must normalize via
+        ``.tolist()`` so the output is the comma-separated form pgvector
+        expects, regardless of input source.
+        """
+        import numpy as np
+
+        from ontokit.services.embedding_service import _vec_to_str
+
+        arr = np.array([0.1, 0.2, 0.3])
+        result = _vec_to_str(arr)
+        assert "," in result, f"expected comma-separated output, got {result!r}"
+        # Same shape as the list path
+        assert result == str([0.1, 0.2, 0.3])
 
 
 # ---------------------------------------------------------------------------
@@ -1269,6 +1291,57 @@ class TestSemanticSearch:
         assert result.results[0].iri == "http://example.org/Match"
         assert result.results[0].score == 0.85
 
+    @pytest.mark.asyncio
+    async def test_search_query_has_no_unresolved_bindparams(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """Mirror of the find_similar regression for #98.
+
+        Same SQLAlchemy ``text()`` parser bug as the kNN exclusion query — the
+        semantic_search query template also used ``:query_vec::vector`` and
+        produced the same unparseable wire SQL. Exercises the third execute
+        call (count, provider config, kNN) and asserts the kNN statement
+        compiles without leftover ``:name`` placeholders.
+        """
+        from unittest.mock import patch
+
+        count_result = MagicMock()
+        count_result.scalar.return_value = 10
+
+        cfg_result = MagicMock()
+        cfg_result.scalar_one_or_none.return_value = _make_config_row()
+
+        mock_provider = AsyncMock()
+        mock_provider.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        search_result = MagicMock()
+        search_result.__iter__ = Mock(return_value=iter([]))
+
+        mock_db.execute.side_effect = [count_result, cfg_result, search_result]
+
+        with (
+            patch("ontokit.services.embedding_service.Vector", new="not-None"),
+            patch(
+                "ontokit.services.embedding_service.get_embedding_provider",
+                return_value=mock_provider,
+            ),
+        ):
+            await service.semantic_search(PROJECT_ID, BRANCH, "find match")
+
+        # Inspect the kNN query (third execute call: count → provider config →
+        # kNN). Use the public compiled.params API instead of the private
+        # ``_bindparams`` attribute so the assertion stays valid across
+        # SQLAlchemy versions.
+        knn_stmt = mock_db.execute.await_args_list[2].args[0]
+        assert isinstance(knn_stmt, TextClause)
+        compiled = knn_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+        compiled_sql = str(compiled)
+        assert ":query_vec" not in compiled_sql, (
+            f"Unresolved :query_vec bindparam in compiled SQL — {compiled_sql!r}"
+        )
+        # No self_iri here — semantic_search doesn't exclude any subject.
+        assert set(compiled.params.keys()) == {"query_vec", "pid", "br", "lim"}
+
 
 # ---------------------------------------------------------------------------
 # find_similar
@@ -1342,6 +1415,54 @@ class TestFindSimilar:
         assert len(results) == 1
         assert results[0].iri == "http://example.org/Similar"
         assert results[0].score == 0.92
+
+    @pytest.mark.asyncio
+    async def test_search_query_has_no_unresolved_bindparams(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """Regression for #98.
+
+        SQLAlchemy's ``text()`` parser silently drops ``:name`` bindparams when
+        immediately followed by ``::type`` (Postgres cast). The previous query
+        used ``:query_vec::vector``, which compiled to wire SQL with a literal
+        ``:query_vec`` and produced a 500 (\"syntax error at or near ':'\") on
+        every call. Assert the kNN query bound to find_similar() resolves all
+        named placeholders.
+        """
+        from unittest.mock import patch
+
+        source_emb = MagicMock()
+        source_emb.embedding = [0.1, 0.2, 0.3]
+        emb_result = MagicMock()
+        emb_result.scalar_one_or_none.return_value = source_emb
+
+        search_result = MagicMock()
+        search_result.__iter__ = Mock(return_value=iter([]))
+
+        mock_db.execute.side_effect = [emb_result, search_result]
+
+        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
+            await service.find_similar(PROJECT_ID, BRANCH, "http://example.org/Source")
+
+        # Inspect the kNN query (second execute call) — its compiled SQL must
+        # contain zero ``:name`` placeholders and must declare the expected
+        # bindparams. Use the public compiled.params API rather than the
+        # private ``_bindparams`` attribute so the assertion stays valid
+        # across SQLAlchemy versions.
+        knn_stmt = mock_db.execute.await_args_list[1].args[0]
+        assert isinstance(knn_stmt, TextClause)
+        compiled = knn_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+        compiled_sql = str(compiled)
+        assert ":query_vec" not in compiled_sql, (
+            f"Unresolved :query_vec bindparam in compiled SQL — {compiled_sql!r}"
+        )
+        assert set(compiled.params.keys()) == {
+            "query_vec",
+            "pid",
+            "br",
+            "self_iri",
+            "lim",
+        }
 
 
 # ---------------------------------------------------------------------------

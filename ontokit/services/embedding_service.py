@@ -4,7 +4,7 @@ import base64
 import hashlib
 import logging
 from datetime import UTC, datetime
-from typing import cast
+from typing import Protocol, cast, runtime_checkable
 from uuid import UUID
 
 from cryptography.fernet import Fernet
@@ -58,8 +58,30 @@ def _decrypt_secret(ciphertext: str) -> str:
     return _get_fernet().decrypt(ciphertext.encode()).decode()
 
 
-def _vec_to_str(vec: list[float]) -> str:
-    """Convert an embedding vector to a pgvector-compatible string."""
+@runtime_checkable
+class _HasToList(Protocol):
+    """Anything that exposes a ``tolist()`` method returning a list of floats.
+
+    Matches numpy's ``ndarray.tolist()`` and torch tensors' equivalent
+    without pulling either library into the dependency surface here.
+    """
+
+    def tolist(self) -> list[float]: ...
+
+
+def _vec_to_str(vec: list[float] | _HasToList) -> str:
+    """Convert an embedding vector to a pgvector-compatible string.
+
+    Accepts either a Python ``list[float]`` (newly-embedded queries) or any
+    object exposing ``tolist()`` — typically a numpy array, which is what
+    pgvector deserializes ``Vector`` column reads into. pgvector's text input
+    format is ``[v1,v2,...]``: space-separated values are rejected.
+    ``str(list)`` produces commas; ``str(np.ndarray)`` produces spaces.
+    Normalize via ``.tolist()`` so the output is always pgvector-parseable
+    regardless of the input source.
+    """
+    if isinstance(vec, _HasToList):
+        vec = vec.tolist()
     return str(vec)
 
 
@@ -508,13 +530,16 @@ class EmbeddingService:
         provider = await self._get_provider(project_id)
         query_vec = await provider.embed_text(query)
 
-        # pgvector cosine distance: <=> returns distance (0=identical), score = 1 - distance
+        # pgvector cosine distance: <=> returns distance (0=identical), score = 1 - distance.
+        # NOTE: must use CAST(:query_vec AS vector) — SQLAlchemy's text() parser silently
+        # drops :name bindparams when immediately followed by ::type (Postgres cast syntax),
+        # producing a syntax error at the literal ":" in the wire SQL.
         query_str = text("""
             SELECT entity_iri, label, entity_type, deprecated,
-                   1 - (embedding <=> :query_vec::vector) AS score
+                   1 - (embedding <=> CAST(:query_vec AS vector)) AS score
             FROM entity_embeddings
             WHERE project_id = :pid AND branch = :br
-            ORDER BY embedding <=> :query_vec::vector
+            ORDER BY embedding <=> CAST(:query_vec AS vector)
             LIMIT :lim
         """)
 
@@ -566,13 +591,13 @@ class EmbeddingService:
         if not emb:
             return []
 
-        # kNN search excluding self
+        # kNN search excluding self. See note in semantic_search() above re: CAST() vs ::vector.
         query_str = text("""
             SELECT entity_iri, label, entity_type, deprecated,
-                   1 - (embedding <=> :query_vec::vector) AS score
+                   1 - (embedding <=> CAST(:query_vec AS vector)) AS score
             FROM entity_embeddings
             WHERE project_id = :pid AND branch = :br AND entity_iri != :self_iri
-            ORDER BY embedding <=> :query_vec::vector
+            ORDER BY embedding <=> CAST(:query_vec AS vector)
             LIMIT :lim
         """)
 
