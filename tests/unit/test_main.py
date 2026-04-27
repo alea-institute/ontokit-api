@@ -121,3 +121,65 @@ class TestMiddlewareRegistered:
         response = client.get("/health")
         # SecurityHeadersMiddleware should add common security headers
         assert "x-content-type-options" in response.headers
+
+
+class TestUnhandledExceptionHandler:
+    """Tests for the catch-all Exception handler (issue #98 follow-up).
+
+    Without this handler, an exception escaping every other handler
+    propagates to Starlette's outer ServerErrorMiddleware and the response
+    goes out without CORS headers, so the browser blocks it before the
+    frontend can read the status — masking the underlying bug behind an
+    opaque "CORS error".
+    """
+
+    @pytest.mark.asyncio
+    async def test_returns_json_500_in_production(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """In non-development environments, the handler returns the project's
+        standard error envelope at 500."""
+        import json
+        from unittest.mock import Mock
+
+        from ontokit.core.config import settings
+        from ontokit.main import unhandled_exception_handler
+
+        monkeypatch.setattr(settings, "app_env", "production")
+
+        response = await unhandled_exception_handler(Mock(), RuntimeError("kaboom"))
+
+        assert response.status_code == 500
+        body = json.loads(bytes(response.body))
+        assert body["error"]["code"] == "internal_server_error"
+        assert body["error"]["message"] == "Internal server error"
+
+    @pytest.mark.asyncio
+    async def test_returns_json_500_in_staging(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Staging behaves like production so the response shape matches what
+        the frontend will see live."""
+        import json
+        from unittest.mock import Mock
+
+        from ontokit.core.config import settings
+        from ontokit.main import unhandled_exception_handler
+
+        monkeypatch.setattr(settings, "app_env", "staging")
+
+        response = await unhandled_exception_handler(Mock(), RuntimeError("kaboom"))
+
+        assert response.status_code == 500
+        body = json.loads(bytes(response.body))
+        assert body["error"]["code"] == "internal_server_error"
+
+    @pytest.mark.asyncio
+    async def test_reraises_in_development(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """In development the handler re-raises so Starlette's debug page
+        still surfaces the traceback for the developer."""
+        from unittest.mock import Mock
+
+        from ontokit.core.config import settings
+        from ontokit.main import unhandled_exception_handler
+
+        monkeypatch.setattr(settings, "app_env", "development")
+
+        with pytest.raises(RuntimeError, match="kaboom"):
+            await unhandled_exception_handler(Mock(), RuntimeError("kaboom"))

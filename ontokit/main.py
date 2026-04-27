@@ -334,6 +334,27 @@ async def rate_limit_handler(_request: Request, exc: RateLimitExceeded) -> JSONR
     return response
 
 
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    """Convert any uncaught exception into a CORS-allowed JSON 500.
+
+    Without this, an exception that escapes every other handler propagates to
+    Starlette's ServerErrorMiddleware, which sits *outside* CORSMiddleware. The
+    resulting response goes out without ``Access-Control-Allow-Origin``, so the
+    browser blocks it before the frontend can read the status. The frontend
+    sees an opaque "CORS error" instead of a parseable 500, masking the real
+    cause (and the real bug).
+
+    In development we re-raise so Starlette's debug traceback page still shows;
+    staging and production return a structured JSON envelope matching the rest
+    of the error contract.
+    """
+    logger.exception("Unhandled exception", exc_info=exc)
+    if settings.is_development:
+        raise exc
+    return _error_response(500, "internal_server_error", "Internal server error")
+
+
 # --- Routers ---------------------------------------------------------------
 
 app.include_router(api_router, prefix="/api/v1")
