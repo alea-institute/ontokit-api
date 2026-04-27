@@ -1343,6 +1343,54 @@ class TestFindSimilar:
         assert results[0].iri == "http://example.org/Similar"
         assert results[0].score == 0.92
 
+    @pytest.mark.asyncio
+    async def test_search_query_has_no_unresolved_bindparams(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """Regression for #98.
+
+        SQLAlchemy's ``text()`` parser silently drops ``:name`` bindparams when
+        immediately followed by ``::type`` (Postgres cast). The previous query
+        used ``:query_vec::vector``, which compiled to wire SQL with a literal
+        ``:query_vec`` and produced a 500 (\"syntax error at or near ':'\") on
+        every call. Assert the kNN query bound to find_similar() resolves all
+        named placeholders.
+        """
+        from unittest.mock import patch
+
+        from sqlalchemy import text
+        from sqlalchemy.dialects import postgresql
+
+        source_emb = MagicMock()
+        source_emb.embedding = [0.1, 0.2, 0.3]
+        emb_result = MagicMock()
+        emb_result.scalar_one_or_none.return_value = source_emb
+
+        search_result = MagicMock()
+        search_result.__iter__ = Mock(return_value=iter([]))
+
+        mock_db.execute.side_effect = [emb_result, search_result]
+
+        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
+            await service.find_similar(PROJECT_ID, BRANCH, "http://example.org/Source")
+
+        # Inspect the kNN query (second execute call) — its compiled SQL must
+        # contain zero ``:name`` placeholders and must declare the expected
+        # bindparams.
+        knn_stmt = mock_db.execute.await_args_list[1].args[0]
+        assert isinstance(knn_stmt, type(text("")))
+        compiled = str(knn_stmt.compile(dialect=postgresql.dialect()))  # type: ignore[no-untyped-call]
+        assert ":query_vec" not in compiled, (
+            f"Unresolved :query_vec bindparam in compiled SQL — {compiled!r}"
+        )
+        assert set(knn_stmt._bindparams.keys()) == {
+            "query_vec",
+            "pid",
+            "br",
+            "self_iri",
+            "lim",
+        }
+
 
 # ---------------------------------------------------------------------------
 # rank_suggestions

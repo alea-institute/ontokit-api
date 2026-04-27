@@ -508,13 +508,16 @@ class EmbeddingService:
         provider = await self._get_provider(project_id)
         query_vec = await provider.embed_text(query)
 
-        # pgvector cosine distance: <=> returns distance (0=identical), score = 1 - distance
+        # pgvector cosine distance: <=> returns distance (0=identical), score = 1 - distance.
+        # NOTE: must use CAST(:query_vec AS vector) — SQLAlchemy's text() parser silently
+        # drops :name bindparams when immediately followed by ::type (Postgres cast syntax),
+        # producing a syntax error at the literal ":" in the wire SQL.
         query_str = text("""
             SELECT entity_iri, label, entity_type, deprecated,
-                   1 - (embedding <=> :query_vec::vector) AS score
+                   1 - (embedding <=> CAST(:query_vec AS vector)) AS score
             FROM entity_embeddings
             WHERE project_id = :pid AND branch = :br
-            ORDER BY embedding <=> :query_vec::vector
+            ORDER BY embedding <=> CAST(:query_vec AS vector)
             LIMIT :lim
         """)
 
@@ -566,13 +569,13 @@ class EmbeddingService:
         if not emb:
             return []
 
-        # kNN search excluding self
+        # kNN search excluding self. See note in semantic_search() above re: CAST() vs ::vector.
         query_str = text("""
             SELECT entity_iri, label, entity_type, deprecated,
-                   1 - (embedding <=> :query_vec::vector) AS score
+                   1 - (embedding <=> CAST(:query_vec AS vector)) AS score
             FROM entity_embeddings
             WHERE project_id = :pid AND branch = :br AND entity_iri != :self_iri
-            ORDER BY embedding <=> :query_vec::vector
+            ORDER BY embedding <=> CAST(:query_vec AS vector)
             LIMIT :lim
         """)
 
