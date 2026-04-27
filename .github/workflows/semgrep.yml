@@ -3,8 +3,16 @@ name: Semgrep
 on:
   pull_request:
     branches: [dev]
+  # Catch direct pushes that bypass PR review (e.g. admin overrides on
+  # dev, or merges into main).
   push:
-    branches: [main]
+    branches: [dev, main]
+  # Weekly drift check: Semgrep rule packs get updated upstream, so a
+  # previously-clean repo can grow new findings without any code change.
+  # Monday 06:00 UTC = quiet time across most timezones; results are
+  # ready when the EU work week starts.
+  schedule:
+    - cron: "0 6 * * 1"
   # Manual run for ad-hoc audits.
   workflow_dispatch:
 
