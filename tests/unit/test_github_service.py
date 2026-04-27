@@ -603,3 +603,110 @@ class TestUrlEncoding:
         assert "src/sub%20dir/onto.ttl" in called_url
         assert "main?evil=1" not in called_url
         assert "main%3Fevil%3D1" in called_url
+
+    @pytest.mark.asyncio
+    async def test_update_pull_request_encodes_owner_and_repo(
+        self, github_service: GitHubService
+    ) -> None:
+        """update_pull_request quotes owner/repo so malicious values can't
+        escape the path segment."""
+        pr_data = {
+            "number": 7,
+            "title": "Updated",
+            "body": "",
+            "state": "open",
+            "html_url": "https://github.com/evil%2Fowner/repo/pull/7",
+            "head": {"ref": "feat"},
+            "base": {"ref": "main"},
+            "user": {"login": "u"},
+            "created_at": "2024-01-01T00:00:00Z",
+            "updated_at": "2024-01-02T00:00:00Z",
+        }
+        mock_resp = _mock_response(200, pr_data)
+        mock_client = _make_async_client(request_response=mock_resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            pr = await github_service.update_pull_request(
+                TOKEN, "evil/owner", "repo", 7, title="Updated"
+            )
+
+        called_url = mock_client.request.await_args.kwargs["url"]
+        assert "evil/owner" not in called_url
+        assert "evil%2Fowner" in called_url
+        assert pr.number == 7
+
+    @pytest.mark.asyncio
+    async def test_merge_pull_request_encodes_owner_and_repo(
+        self, github_service: GitHubService
+    ) -> None:
+        """merge_pull_request quotes owner/repo on the merge endpoint."""
+        mock_resp = _mock_response(200, {"sha": "abc123", "merged": True})
+        mock_client = _make_async_client(request_response=mock_resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            result = await github_service.merge_pull_request(
+                TOKEN, "evil/owner", "repo", 9, merge_method="squash"
+            )
+
+        called_url = mock_client.request.await_args.kwargs["url"]
+        assert "evil/owner" not in called_url
+        assert "evil%2Fowner" in called_url
+        assert "/pulls/9/merge" in called_url
+        assert result["merged"] is True
+
+    @pytest.mark.asyncio
+    async def test_list_repo_hooks_encodes_owner_and_repo(
+        self, github_service: GitHubService
+    ) -> None:
+        """list_repo_hooks quotes owner/repo on the hooks endpoint."""
+        mock_resp = _mock_response(200, [{"id": 1, "config": {"url": "https://h"}}])
+        mock_client = _make_async_client(request_response=mock_resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            hooks = await github_service.list_repo_hooks(TOKEN, "evil/owner", "repo")
+
+        called_url = mock_client.request.await_args.kwargs["url"]
+        assert "evil/owner" not in called_url
+        assert "evil%2Fowner" in called_url
+        assert called_url.endswith("/hooks")
+        assert len(hooks) == 1
+
+    @pytest.mark.asyncio
+    async def test_create_repo_hook_encodes_owner_and_repo(
+        self, github_service: GitHubService
+    ) -> None:
+        """create_repo_hook quotes owner/repo on the POST /hooks endpoint."""
+        mock_resp = _mock_response(200, {"id": 42, "config": {"url": "https://h"}})
+        mock_client = _make_async_client(request_response=mock_resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            result = await github_service.create_repo_hook(
+                TOKEN, "evil/owner", "repo", "https://h", "secret"
+            )
+
+        called_url = mock_client.request.await_args.kwargs["url"]
+        assert "evil/owner" not in called_url
+        assert "evil%2Fowner" in called_url
+        assert called_url.endswith("/hooks")
+        assert result["id"] == 42
+
+    @pytest.mark.asyncio
+    async def test_list_pull_requests_encodes_base_query_param(
+        self, github_service: GitHubService
+    ) -> None:
+        """list_pull_requests percent-encodes the optional ``base`` query
+        parameter so a value like ``main&malicious=1`` cannot inject extra
+        query fields."""
+        mock_resp = _mock_response(200, [])
+        mock_client = _make_async_client(request_response=mock_resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            await github_service.list_pull_requests(
+                TOKEN, "octo", "repo", state="open", base="main&malicious=1"
+            )
+
+        called_url = mock_client.request.await_args.kwargs["url"]
+        # Raw form must NOT appear (would inject a second query parameter).
+        assert "base=main&malicious=1" not in called_url
+        # Encoded form must appear.
+        assert "base=main%26malicious%3D1" in called_url
