@@ -5,9 +5,10 @@ import time
 from typing import Annotated, Any
 
 import httpx
+import jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from jose import JWTError, jwt
+from jwt.exceptions import PyJWTError
 from pydantic import BaseModel, Field
 
 from ontokit.core.config import settings
@@ -175,10 +176,13 @@ async def validate_token(token: str) -> TokenPayload:
                 detail="Unable to find appropriate key",
             )
 
+        # PyJWT needs a key object, not a JWK dict — convert via PyJWK.
+        public_key = jwt.PyJWK(rsa_key).key
+
         # Verify and decode the token
         payload = jwt.decode(
             token,
-            rsa_key,
+            public_key,
             algorithms=["RS256"],
             issuer=settings.zitadel_issuer,
             options={"verify_aud": False},  # Audience verified manually below (aud/azp)
@@ -206,7 +210,7 @@ async def validate_token(token: str) -> TokenPayload:
 
         return TokenPayload(**payload, roles=roles)
 
-    except JWTError as e:
+    except PyJWTError as e:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=f"Token validation failed: {e}",
