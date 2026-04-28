@@ -364,6 +364,46 @@ class TestSearchEntities:
         assert result["results"][0]["iri"] == "http://example.org/Person"
 
     @pytest.mark.asyncio
+    async def test_search_entities_property_kind_per_subtype(
+        self, service: OntologyIndexService, mock_db: AsyncMock
+    ) -> None:
+        """Each OWL property subtype maps to its expected property_kind value."""
+        cases = [
+            ("object_property", "object"),
+            ("datatype_property", "data"),
+            ("annotation_property", "annotation"),
+            ("class", None),
+            ("individual", None),
+        ]
+        for stored_type, expected_kind in cases:
+            mock_count_result = MagicMock()
+            mock_count_result.scalar.return_value = 1
+
+            mock_entity_row = MagicMock()
+            mock_entity_row.id = f"entity-{stored_type}"
+            mock_entity_row.iri = f"http://example.org/{stored_type}"
+            mock_entity_row.local_name = stored_type
+            mock_entity_row.entity_type = stored_type
+            mock_entity_row.deprecated = False
+
+            mock_entities_result = MagicMock()
+            mock_entities_result.all.return_value = [mock_entity_row]
+
+            mock_labels_result = MagicMock()
+            mock_labels_result.scalars.return_value.all.return_value = []
+
+            mock_db.execute.side_effect = [
+                mock_count_result,
+                mock_entities_result,
+                mock_labels_result,
+            ]
+
+            result = await service.search_entities(PROJECT_ID, BRANCH, stored_type)
+            assert result["results"][0]["property_kind"] == expected_kind, (
+                f"{stored_type} should map to property_kind={expected_kind!r}"
+            )
+
+    @pytest.mark.asyncio
     async def test_search_entities_no_matches(
         self, service: OntologyIndexService, mock_db: AsyncMock
     ) -> None:

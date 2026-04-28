@@ -114,6 +114,11 @@ class EntitySearchResult(BaseModel):
     iri: str
     label: str
     entity_type: Literal["class", "property", "individual"]
+    # OWL property subtype, populated only when entity_type == "property". None
+    # for class / individual results, and also for properties whose rdf:type
+    # resolves to none of OWL.{Object,Datatype,Annotation}Property (defensive
+    # fallback). Lets clients group properties without IRI-substring guesses.
+    property_kind: Literal["object", "data", "annotation"] | None = None
     deprecated: bool = False
 
 

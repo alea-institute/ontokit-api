@@ -608,3 +608,44 @@ class TestSearchEntities:
         mock_ontology_service.search_entities.assert_awaited_once_with(
             PROJECT_ID, "Person", None, None, 50, BRANCH
         )
+
+    @pytest.mark.asyncio
+    async def test_propagates_property_kind_from_index(
+        self, service: IndexedOntologyService
+    ) -> None:
+        """property_kind from index dicts is forwarded onto EntitySearchResult."""
+        service.index.is_index_ready = AsyncMock(return_value=True)  # type: ignore[method-assign]
+        service.index.search_entities = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "results": [
+                    {
+                        "iri": "http://example.org/hasParent",
+                        "label": "hasParent",
+                        "entity_type": "property",
+                        "property_kind": "object",
+                        "deprecated": False,
+                    },
+                    {
+                        "iri": "http://example.org/age",
+                        "label": "age",
+                        "entity_type": "property",
+                        "property_kind": "data",
+                        "deprecated": False,
+                    },
+                    {
+                        "iri": "http://example.org/Person",
+                        "label": "Person",
+                        "entity_type": "class",
+                        "property_kind": None,
+                        "deprecated": False,
+                    },
+                ],
+                "total": 3,
+            }
+        )
+
+        response = await service.search_entities(PROJECT_ID, "x", branch=BRANCH)
+        kinds = {r.iri: r.property_kind for r in response.results}
+        assert kinds["http://example.org/hasParent"] == "object"
+        assert kinds["http://example.org/age"] == "data"
+        assert kinds["http://example.org/Person"] is None

@@ -522,3 +522,58 @@ class TestSearchEntitiesExtended:
         """Limit restricts number of returned results."""
         result = await loaded_service.search_entities(PROJECT_ID, "*", limit=1)
         assert len(result.results) <= 1
+
+    @pytest.mark.asyncio
+    async def test_search_object_property_kind(self, loaded_service: OntologyService) -> None:
+        """ObjectProperty results carry property_kind='object' (issue #117)."""
+        result = await loaded_service.search_entities(
+            PROJECT_ID, "worksFor", entity_types=["property"]
+        )
+        matches = [r for r in result.results if r.iri.endswith("worksFor")]
+        assert matches, "expected the worksFor property to be in results"
+        assert matches[0].entity_type == "property"
+        assert matches[0].property_kind == "object"
+
+    @pytest.mark.asyncio
+    async def test_search_datatype_property_kind(self, loaded_service: OntologyService) -> None:
+        """DatatypeProperty results carry property_kind='data' (issue #117)."""
+        result = await loaded_service.search_entities(
+            PROJECT_ID, "hasName", entity_types=["property"]
+        )
+        matches = [r for r in result.results if r.iri.endswith("hasName")]
+        assert matches, "expected the hasName property to be in results"
+        assert matches[0].entity_type == "property"
+        assert matches[0].property_kind == "data"
+
+    @pytest.mark.asyncio
+    async def test_search_annotation_property_kind(self, ontology_service: OntologyService) -> None:
+        """AnnotationProperty results carry property_kind='annotation' (issue #117).
+
+        Uses a self-contained graph because the shared sample ontology has no
+        annotation properties and other tests assert on its exact contents.
+        """
+        from rdflib import RDF, Graph, Literal
+        from rdflib.namespace import OWL, RDFS
+
+        g = Graph()
+        ann = URIRef("http://example.org/ontology#status")
+        g.add((ann, RDF.type, OWL.AnnotationProperty))
+        g.add((ann, RDFS.label, Literal("status", lang="en")))
+        ontology_service.set_graph(PROJECT_ID, BRANCH, g)
+
+        result = await ontology_service.search_entities(
+            PROJECT_ID, "status", entity_types=["property"]
+        )
+        matches = [r for r in result.results if r.iri.endswith("status")]
+        assert matches, "expected the status annotation property to be in results"
+        assert matches[0].entity_type == "property"
+        assert matches[0].property_kind == "annotation"
+
+    @pytest.mark.asyncio
+    async def test_search_class_has_no_property_kind(self, loaded_service: OntologyService) -> None:
+        """Class results have property_kind=None (issue #117)."""
+        result = await loaded_service.search_entities(PROJECT_ID, "Person", entity_types=["class"])
+        matches = [r for r in result.results if r.iri.endswith("Person")]
+        assert matches
+        assert matches[0].entity_type == "class"
+        assert matches[0].property_kind is None
