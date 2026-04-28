@@ -73,3 +73,6 @@ Thumbs.db
 *.nt
 !tests/fixtures/*.ttl
 !tests/fixtures/*.owl
+
+# Local git worktrees
+.worktrees/
