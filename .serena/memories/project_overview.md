@@ -27,6 +27,5 @@ Provides a RESTful API for managing ontologies, semantic web knowledge graphs, a
 - **Package Mgmt**: uv
 
 ## Repo Location
-`/home/johnrdorazio/development/CatholicOS_org/ontokit/ontokit-api`
 
 Companion repos in same parent directory: `ontokit-web` (frontend), `folio-api`, `ontokit-api.wiki`.

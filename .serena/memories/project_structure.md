@@ -1,7 +1,7 @@
 # Codebase Structure — ontokit-api
 
 ## Top-level layout
-```
+```text
 ontokit-api/
 ├── ontokit/          # main package
 ├── tests/            # unit + integration tests
@@ -21,7 +21,7 @@ ontokit-api/
 ```
 
 ## ontokit/ package layout (layered architecture)
-```
+```text
 ontokit/
 ├── api/routes/       # REST endpoints (FastAPI routers)
 ├── services/         # Business logic layer
