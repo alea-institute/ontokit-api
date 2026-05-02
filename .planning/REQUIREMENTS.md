@@ -63,4 +63,36 @@
 
 ## Traceability
 
-(filled by roadmap)
+| Requirement | Phase | Status |
+|-------------|-------|--------|
+| AUTH-01 | Phase 1 | Pending (PR #27) |
+| AUTH-02 | Phase 1 | Pending (PR #27) |
+| AUTH-03 | Phase 1 | Pending (PR #27) |
+| AUTH-04 | Phase 1 | Pending (PR #27) |
+| AUTH-05 | Phase 1 | Pending (PR #27) |
+| ANON-01 | Phase 1 | Pending (PR #27) |
+| ANON-02 | Phase 1 | Pending (PR #27) |
+| ANON-03 | Phase 1 | Pending (PR #27) |
+| ANON-04 | Phase 1 | Pending (PR #27) |
+| ANON-05 | Phase 1 | Pending (PR #27) |
+| SEED-CLI-01 | Phase 1 | Pending (PR #27) |
+| SEED-CLI-02 | Phase 1 | Pending (PR #27) |
+| SEED-CLI-03 | Phase 1 | Pending (PR #27) |
+| INDEX-01 | Phase 1 | Pending (PR #27) |
+| INDEX-02 | Phase 1 | Pending (PR #27) |
+| OPS-01 | Phase 2 | Pending (PR #138) |
+| OPS-02 | Phase 2 | Pending (PR #138) |
+| OPS-03 | Phase 2 | Pending (PR #138) |
+| OPS-04 | Phase 2 | Pending (PR #138) |
+| STARTUP-SEED-01 | Phase 3 | Pending |
+| STARTUP-SEED-02 | Phase 3 | Pending |
+| STARTUP-SEED-03 | Phase 3 | Pending |
+| STARTUP-SEED-04 | Phase 3 | Pending |
+| STARTUP-SEED-05 | Phase 3 | Pending |
+| STARTUP-SEED-06 | Phase 3 | Pending |
+| STARTUP-SEED-07 | Phase 3 | Pending |
+| STARTUP-SEED-08 | Phase 3 | Pending |
+| STARTUP-SEED-09 | Phase 3 | Pending |
+| STARTUP-SEED-10 | Phase 3 | Pending |
+
+**Coverage:** 29/29 requirements mapped (100%)
