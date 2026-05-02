@@ -55,7 +55,10 @@
   4. With `SEED_REFERENCE_PROJECTS=false`, startup completes without attempting to seed, and `GET /api/v1/projects` returns an empty list on a fresh database — confirmed by `tests/integration/test_startup_seed.py`
   5. With the source URLs pointed at unreachable hosts (or returning 404), startup logs a `WARNING` per failed source but the API still starts successfully and serves `GET /api/v1/projects` returning whichever sources succeeded (or an empty list if both failed)
   6. Source URLs and project display names are overridable via env vars (`SEED_FOLIO_URL`, `SEED_FOLIO_NAME`, `SEED_CANON_URL`, `SEED_CANON_NAME`) — verified by deploying with a pinned commit-SHA URL and seeing that exact content land in the bare repo
-**Plans**: TBD (will be set by `/gsd-discuss-phase 3` then `/gsd-plan-phase 3`)
+**Plans:** 3 plans
+- [ ] 03-01-PLAN.md — Settings fields + .env.example documentation + test scaffolds (Wave 1)
+- [ ] 03-02-PLAN.md — `seed_service.py` implementation + unit tests for retry/idempotency/parse-failure (Wave 2)
+- [ ] 03-03-PLAN.md — Lifespan integration in `main.py` + Postgres-backed integration tests (Wave 3)
 
 ## Progress
 
@@ -65,7 +68,7 @@
 |-------|-----------|----------------|--------|-----------|
 | 1. Auth Modes, Anonymous Stack & Seed CLI | v0.4.0 | 0/0 | In flight (PR #27) | - |
 | 2. Startup Robustness | v0.4.0 | 0/0 | In flight (PR #138) | - |
-| 3. Seed-on-Startup Public Projects | v0.4.0 | 0/0 | Not started | - |
+| 3. Seed-on-Startup Public Projects | v0.4.0 | 0/3 | Planned     | - |
 
 ## Notes
 
