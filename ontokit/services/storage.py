@@ -1,6 +1,8 @@
 """Storage service for MinIO object storage integration."""
 
+import asyncio
 from io import BytesIO
+from typing import Any
 
 from minio import Minio
 from minio.error import S3Error
@@ -12,6 +14,17 @@ class StorageError(Exception):
     """Exception raised for storage operation errors."""
 
     pass
+
+
+def _read_and_release(response: Any) -> bytes:
+    # urllib3's release_conn() can do socket I/O; combine with read() so the
+    # whole response lifecycle stays off the event loop.
+    try:
+        data: bytes = response.read()
+        return data
+    finally:
+        response.close()
+        response.release_conn()
 
 
 class StorageService:
@@ -29,8 +42,11 @@ class StorageService:
     async def ensure_bucket_exists(self) -> None:
         """Ensure the bucket exists, creating it if necessary."""
         try:
-            if not self.client.bucket_exists(self.bucket):
-                self.client.make_bucket(self.bucket)
+            # MinIO's Python client is synchronous (urllib3); run in a thread
+            # so it never blocks the asyncio event loop.
+            exists = await asyncio.to_thread(self.client.bucket_exists, self.bucket)
+            if not exists:
+                await asyncio.to_thread(self.client.make_bucket, self.bucket)
         except S3Error as e:
             raise StorageError(f"Failed to ensure bucket exists: {e}") from e
 
@@ -51,7 +67,8 @@ class StorageService:
         """
         try:
             await self.ensure_bucket_exists()
-            self.client.put_object(
+            await asyncio.to_thread(
+                self.client.put_object,
                 bucket_name=self.bucket,
                 object_name=object_name,
                 data=BytesIO(data),
@@ -76,15 +93,12 @@ class StorageService:
             StorageError: If the download fails
         """
         try:
-            response = self.client.get_object(
+            response = await asyncio.to_thread(
+                self.client.get_object,
                 bucket_name=self.bucket,
                 object_name=object_name,
             )
-            try:
-                return response.read()
-            finally:
-                response.close()
-                response.release_conn()
+            return await asyncio.to_thread(_read_and_release, response)
         except S3Error as e:
             raise StorageError(f"Failed to download file: {e}") from e
 
@@ -99,7 +113,8 @@ class StorageService:
             StorageError: If the deletion fails
         """
         try:
-            self.client.remove_object(
+            await asyncio.to_thread(
+                self.client.remove_object,
                 bucket_name=self.bucket,
                 object_name=object_name,
             )
@@ -117,7 +132,8 @@ class StorageService:
             True if the file exists, False otherwise
         """
         try:
-            self.client.stat_object(
+            await asyncio.to_thread(
+                self.client.stat_object,
                 bucket_name=self.bucket,
                 object_name=object_name,
             )
