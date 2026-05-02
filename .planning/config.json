@@ -7,6 +7,10 @@
     "plan_checker": true,
     "verifier": true,
     "auto_advance": true,
-    "skip_discuss": false
-  }
+    "skip_discuss": false,
+    "nyquist_validation": true
+  },
+  "granularity": "standard",
+  "model_profile": "quality",
+  "commit_docs": true
 }
