@@ -255,6 +255,10 @@ async def list_lint_runs(
     total = count_result.scalar() or 0
 
     # Get runs
+    # skip/limit are FastAPI Query params typed as int with ge=0 / ge=1,le=100
+    # bounds — they cannot carry SQL. SQLAlchemy .offset()/.limit() bind their
+    # arguments as parameters, so the resulting query is parameterized.
+    # nosemgrep: python.fastapi.db.generic-sql-fastapi.generic-sql-fastapi
     result = await db.execute(
         select(LintRun)
         .where(LintRun.project_id == project_id)
@@ -420,6 +424,11 @@ async def get_lint_issues(
         .limit(limit)
     )
 
+    # skip/limit are FastAPI Query params typed as int with ge=0 / ge=1,le=500
+    # bounds, and the issue_type/rule_id/subject_iri filters reach the query
+    # through SQLAlchemy .where() comparisons that bind as parameters. None of
+    # the user-controlled values are interpolated into SQL text.
+    # nosemgrep: python.fastapi.db.generic-sql-fastapi.generic-sql-fastapi
     result = await db.execute(query)
     issues = result.scalars().all()
 
@@ -588,6 +597,12 @@ async def update_lint_config(
     # Upsert to handle concurrent first-time PUTs safely; RETURNING gives
     # us the persisted row in the same round trip. Wrapping in select(...).from_statement(...)
     # with populate_existing materializes the returned row as an ORM instance.
+    #
+    # body.lint_level / body.enabled_rules are validated by the Pydantic
+    # LintConfigUpdate schema, and pg_insert(...).values(...) plus
+    # on_conflict_do_update(set_=...) bind them as INSERT/UPDATE parameters.
+    # from_statement() below receives a SQLAlchemy Core Insert (not text()),
+    # so the resulting execute() runs a parameterized statement.
     insert_stmt = (
         pg_insert(ProjectLintConfig)
         .values(
@@ -607,9 +622,11 @@ async def update_lint_config(
     )
     orm_stmt = (
         select(ProjectLintConfig)
+        # nosemgrep: python.fastapi.db.sqlalchemy-fastapi.sqlalchemy-fastapi
         .from_statement(insert_stmt)
         .execution_options(populate_existing=True)
     )
+    # nosemgrep: python.fastapi.db.generic-sql-fastapi.generic-sql-fastapi
     result = await db.execute(orm_stmt)
     config = result.scalar_one()
     await db.commit()
