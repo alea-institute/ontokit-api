@@ -1,0 +1,43 @@
+name: OSV-Scanner
+
+on:
+  pull_request:
+    branches: [dev]
+  push:
+    branches: [dev, main]
+  # Weekly drift check: a previously-clean lockfile can grow new findings
+  # when fresh advisories land in the OSV database. Monday 06:00 UTC =
+  # quiet time across most timezones; results are ready at the start of
+  # the EU work week. Mirrors the cadence of semgrep.yml.
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  # Required to upload SARIF to the Code Scanning tab.
+  # See: https://github.com/github/codeql-action/issues/2117
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  # Diff-aware scan on PRs: only flags vulnerabilities the PR introduces.
+  # Pre-existing findings stay visible in the scheduled run but won't
+  # block unrelated PRs.
+  scan-pr:
+    if: ${{ github.event_name == 'pull_request' }}
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@3d5827dbebf8a3f7ba681e730a8a1b116e8ebddd # v2.3.5
+    with:
+      scan-args: |-
+        -r
+        ./
+
+  # Full scan on push / schedule / manual dispatch. Uploads SARIF so
+  # findings show up in the Security tab.
+  scan-full:
+    if: ${{ github.event_name != 'pull_request' }}
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@3d5827dbebf8a3f7ba681e730a8a1b116e8ebddd # v2.3.5
+    with:
+      scan-args: |-
+        -r
+        ./
