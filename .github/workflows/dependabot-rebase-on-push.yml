@@ -1,0 +1,30 @@
+name: Rebase Dependabot PRs on dev push
+
+on:
+  push:
+    branches: [dev]
+
+permissions:
+  pull-requests: write
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request rebase on stale dependabot PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          mapfile -t prs < <(
+            gh pr list --repo "$REPO" \
+              --author 'app/dependabot' \
+              --base dev \
+              --state open \
+              --json number,mergeStateStatus \
+              --jq '.[] | select(.mergeStateStatus == "BEHIND") | .number'
+          )
+          for pr in "${prs[@]}"; do
+            echo "Requesting rebase of PR #$pr"
+            gh pr comment "$pr" --repo "$REPO" --body "@dependabot rebase"
+          done
