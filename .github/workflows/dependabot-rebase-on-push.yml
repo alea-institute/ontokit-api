@@ -1,8 +1,17 @@
-name: Rebase Dependabot PRs on dev push
+name: Rebase stale Dependabot PRs
 
+# Push trigger: catches the common case where dev advances under
+# already-open dependabot PRs.
+# Schedule trigger: catches the race where a fresh dependabot PR is
+# opened against a stale base SHA (e.g., dev got a merge during the
+# few-minute window dependabot took to open the PR). Self-heals
+# within 30 min, no manual `@dependabot rebase` required.
 on:
   push:
     branches: [dev]
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
 
 permissions:
   pull-requests: write
