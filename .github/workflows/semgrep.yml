@@ -1,0 +1,64 @@
+name: Semgrep
+
+on:
+  pull_request:
+    branches: [dev]
+  # Catch direct pushes that bypass PR review (e.g. admin overrides on
+  # dev, or merges into main).
+  push:
+    branches: [dev, main]
+  # Weekly drift check: Semgrep rule packs get updated upstream, so a
+  # previously-clean repo can grow new findings without any code change.
+  # Monday 06:00 UTC = quiet time across most timezones; results are
+  # ready when the EU work week starts.
+  schedule:
+    - cron: "0 6 * * 1"
+  # Manual run for ad-hoc audits.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: Static analysis
+    runs-on: ubuntu-latest
+    # Skip Dependabot PRs: Dependabot's secret scope can't read
+    # SEMGREP_APP_TOKEN (so dashboard upload would silently no-op anyway),
+    # and dependency bumps don't change application code so a full
+    # security scan is wasted CI time.
+    if: github.actor != 'dependabot[bot]'
+    # The official Semgrep image ships the CLI, the Pro engine, and all
+    # rule packs preloaded. Pinned to a major tag for reproducibility.
+    container:
+      image: semgrep/semgrep
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+      # `semgrep ci` is incompatible with explicit --config flags when
+      # SEMGREP_APP_TOKEN is set — semgrep-app expects the rules to come
+      # from the server-side AppSec policy. Worse, it exits 0 with a
+      # warning, so the misconfiguration silently produces a false-pass.
+      # When the token is set, defer to the server policy. When it isn't,
+      # fall back to explicit local rulesets so the scan still runs in
+      # forks / setups without the secret. `--no-suppress-errors` makes
+      # any future misconfiguration fail loudly.
+      - name: Run Semgrep
+        env:
+          SEMGREP_APP_TOKEN: ${{ secrets.SEMGREP_APP_TOKEN }}
+        run: |
+          if [ -n "$SEMGREP_APP_TOKEN" ]; then
+            semgrep ci --no-suppress-errors
+          else
+            semgrep ci --no-suppress-errors \
+              --config p/default \
+              --config p/owasp-top-ten \
+              --config p/python \
+              --config p/fastapi \
+              --config p/jwt
+          fi
+
+# Enforcing mode: a failing scan blocks the PR. The baseline was triaged
+# in issue #124 (PR #126) — every false positive carries an inline
+# `# nosemgrep:` comment with a justification at the call site. New
+# suppressions added later should follow the same form.

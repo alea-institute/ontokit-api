@@ -2,20 +2,31 @@
 
 import json
 import logging
+from collections.abc import Set as AbstractSet
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from arq import ArqRedis, cron
+from arq import ArqRedis, cron, func
 from arq.connections import RedisSettings
 from sqlalchemy import select
+from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import selectinload
 
 from ontokit.core.config import settings
+from ontokit.core.constants import (
+    LINT_UPDATES_CHANNEL,
+    NORMALIZATION_UPDATES_CHANNEL,
+    ONTOLOGY_INDEX_UPDATES_CHANNEL,
+    QUALITY_UPDATES_CHANNEL,
+    REMOTE_SYNC_UPDATES_CHANNEL,
+)
 from ontokit.core.encryption import decrypt_token
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
-from ontokit.models.project import Project
+from ontokit.models.lint_config import ProjectLintConfig
+from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.services.github_sync import sync_github_project
@@ -24,17 +35,44 @@ from ontokit.services.normalization_service import NormalizationService
 from ontokit.services.ontology import get_ontology_service
 from ontokit.services.storage import get_storage_service
 
-# Redis pubsub channels for upstream sync updates
-UPSTREAM_SYNC_UPDATES_CHANNEL = "upstream_sync:updates"
-
 logger = logging.getLogger(__name__)
 
-# Redis pubsub channels for updates
-LINT_UPDATES_CHANNEL = "lint:updates"
-NORMALIZATION_UPDATES_CHANNEL = "normalization:updates"
+# Format map matching ontokit.services.ontology.FORMAT_MAP
+_FORMAT_MAP: dict[str, str] = {
+    ".ttl": "turtle",
+    ".owl": "xml",
+    ".rdf": "xml",
+    ".n3": "n3",
+    ".nt": "nt",
+    ".jsonld": "json-ld",
+    ".json": "json-ld",
+}
 
 
-ONTOLOGY_INDEX_UPDATES_CHANNEL = "ontology_index:updates"
+def _parse_rdf(content_str: str, rdf_format: str) -> Any:
+    """Parse RDF content into a Graph (for use with ProcessPoolExecutor).
+
+    RDFLib's graph.parse() is CPU-bound and holds the GIL, so it must run
+    in a separate process to keep the worker event loop responsive.
+    """
+    from rdflib import Graph
+
+    graph = Graph()
+    graph.parse(data=content_str, format=rdf_format)
+    return graph
+
+
+def _parse_and_run_consistency_check(
+    content_str: str, rdf_format: str, project_id: str, branch: str
+) -> Any:
+    """Parse RDF and run consistency check in a single subprocess.
+
+    Avoids double-pickling the Graph object across process boundaries.
+    """
+    from ontokit.services.consistency_service import run_consistency_check
+
+    graph = _parse_rdf(content_str, rdf_format)
+    return run_consistency_check(graph, project_id, branch)
 
 
 async def run_ontology_index_task(
@@ -61,14 +99,20 @@ async def run_ontology_index_task(
     project_uuid = UUID(project_id)
 
     try:
-        # Verify project exists
-        result = await db.execute(select(Project).where(Project.id == project_uuid))
+        # Verify project exists (eagerly load github_integration for file path)
+        result = await db.execute(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
         project = result.scalar_one_or_none()
 
         if not project:
             raise ValueError(f"Project {project_id} not found")
 
-        if not project.source_file_path:
+        filename = get_git_ontology_path(project)
+
+        if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
 
         logger.info("Starting ontology index for project %s branch %s", project_id, branch)
@@ -80,13 +124,8 @@ async def run_ontology_index_task(
         )
 
         # Load ontology from git or storage
-        import os
-
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
-        filename = getattr(project, "git_ontology_path", None) or os.path.basename(
-            project.source_file_path
-        )
 
         git_service = BareGitRepositoryService()
         if git_service.repository_exists(project_uuid):
@@ -100,12 +139,14 @@ async def run_ontology_index_task(
                     commit_hash = repo.get_branch_commit_hash(branch)
                 except Exception:
                     commit_hash = "unknown"
-        else:
+        elif project.source_file_path:
             graph = await ontology_service.load_from_storage(
                 project_uuid, project.source_file_path, branch
             )
             if commit_hash is None:
                 commit_hash = "storage"
+        else:
+            raise ValueError(f"Project {project_id} has no git repository and no storage file")
 
         # Run indexing
         from ontokit.services.ontology_index import OntologyIndexService
@@ -159,6 +200,7 @@ async def run_ontology_index_task(
 async def run_lint_task(
     ctx: dict[str, Any],
     project_id: str,
+    branch: str = "main",
 ) -> dict[str, Any]:
     """
     Background task to lint an ontology project.
@@ -166,6 +208,7 @@ async def run_lint_task(
     Args:
         ctx: ARQ context with db session and services
         project_id: The project UUID to lint
+        branch: The git branch to lint (default: "main")
 
     Returns:
         Dict with run_id and issues_found
@@ -177,15 +220,21 @@ async def run_lint_task(
     run: LintRun | None = None
 
     try:
-        # Verify project exists and get its details
-        result = await db.execute(select(Project).where(Project.id == project_uuid))
+        # Verify project exists (eagerly load github_integration for file path)
+        result = await db.execute(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
         project = result.scalar_one_or_none()
 
         if not project:
             raise ValueError(f"Project {project_id} not found")
 
-        if not project.source_file_path:
+        if not project.source_file_path and not project.github_integration:
             raise ValueError(f"Project {project_id} has no ontology file")
+
+        filename = get_git_ontology_path(project)
 
         # Create lint run record
         run = LintRun(
@@ -202,20 +251,55 @@ async def run_lint_task(
         # Notify via pubsub that lint has started
         await redis.publish(
             LINT_UPDATES_CHANNEL,
-            f'{{"type": "lint_started", "project_id": "{project_id}", "run_id": "{run_id}"}}',
+            json.dumps(
+                {
+                    "type": "lint_started",
+                    "project_id": project_id,
+                    "run_id": str(run_id),
+                }
+            ),
         )
 
-        # Load ontology from storage
+        # Load ontology from git or storage
         storage = get_storage_service()
         ontology_service = get_ontology_service(storage)
 
-        graph = await ontology_service.load_from_storage(
-            project_uuid,
-            project.source_file_path,
-        )
+        git_service = BareGitRepositoryService()
+        if git_service.repository_exists(project_uuid):
+            graph = await ontology_service.load_from_git(
+                project_uuid, branch, filename, git_service
+            )
+        elif project.source_file_path:
+            graph = await ontology_service.load_from_storage(
+                project_uuid, project.source_file_path, branch
+            )
+        else:
+            raise ValueError(f"Project {project_id} has no git repository and no storage file")
+
+        # Load per-project lint configuration. Tolerate the table being absent
+        # (migration not yet applied) by falling back to all rules; let any
+        # other SQL error propagate.
+        enabled_rules: AbstractSet[str] | None
+        try:
+            config_result = await db.execute(
+                select(ProjectLintConfig).where(ProjectLintConfig.project_id == project_uuid)
+            )
+            lint_config = config_result.scalar_one_or_none()
+            enabled_rules = lint_config.get_enabled_rule_ids() if lint_config else None
+        except ProgrammingError as e:
+            # 42P01 = undefined_table. Re-raise anything else (syntax errors,
+            # missing columns, permission failures, ...) so we don't mask bugs.
+            if getattr(e.orig, "pgcode", None) != "42P01":
+                raise
+            logger.warning(
+                "project_lint_configs table not found; using all lint rules. "
+                "Run `alembic upgrade head` to enable per-project lint configuration."
+            )
+            await db.rollback()
+            enabled_rules = None
 
         # Run linting
-        linter = get_linter()
+        linter = get_linter(enabled_rules=enabled_rules)
         lint_results: list[LintResult] = await linter.lint(graph, project_uuid)
 
         # Save issues to database
@@ -227,6 +311,7 @@ async def run_lint_task(
                 rule_id=lint_result.rule_id,
                 message=lint_result.message,
                 subject_iri=lint_result.subject_iri,
+                subject_type=lint_result.subject_type,
                 details=lint_result.details,
             )
             db.add(issue)
@@ -246,8 +331,14 @@ async def run_lint_task(
         # Notify via pubsub that lint is complete
         await redis.publish(
             LINT_UPDATES_CHANNEL,
-            f'{{"type": "lint_complete", "project_id": "{project_id}", '
-            f'"run_id": "{run_id}", "issues_found": {len(lint_results)}}}',
+            json.dumps(
+                {
+                    "type": "lint_complete",
+                    "project_id": project_id,
+                    "run_id": str(run_id),
+                    "issues_found": len(lint_results),
+                }
+            ),
         )
 
         return {
@@ -269,8 +360,14 @@ async def run_lint_task(
             # Notify via pubsub that lint failed
             await redis.publish(
                 LINT_UPDATES_CHANNEL,
-                f'{{"type": "lint_failed", "project_id": "{project_id}", '
-                f'"run_id": "{run.id}", "error": "{str(e)}"}}',
+                json.dumps(
+                    {
+                        "type": "lint_failed",
+                        "project_id": project_id,
+                        "run_id": str(run.id),
+                        "error": str(e),
+                    }
+                ),
             )
 
         raise
@@ -316,8 +413,13 @@ async def check_normalization_status_task(
         # Publish status update via Redis
         await redis.publish(
             NORMALIZATION_UPDATES_CHANNEL,
-            f'{{"type": "normalization_status", "project_id": "{project_id}", '
-            f'"needs_normalization": {str(status["needs_normalization"]).lower()}}}',
+            json.dumps(
+                {
+                    "type": "normalization_status",
+                    "project_id": project_id,
+                    "needs_normalization": status["needs_normalization"],
+                }
+            ),
         )
 
         logger.info(
@@ -376,8 +478,13 @@ async def run_normalization_task(
         # Notify start
         await redis.publish(
             NORMALIZATION_UPDATES_CHANNEL,
-            f'{{"type": "normalization_started", "project_id": "{project_id}", '
-            f'"dry_run": {str(dry_run).lower()}}}',
+            json.dumps(
+                {
+                    "type": "normalization_started",
+                    "project_id": project_id,
+                    "dry_run": dry_run,
+                }
+            ),
         )
 
         # Get project
@@ -418,9 +525,15 @@ async def run_normalization_task(
         # Notify completion
         await redis.publish(
             NORMALIZATION_UPDATES_CHANNEL,
-            f'{{"type": "normalization_complete", "project_id": "{project_id}", '
-            f'"run_id": "{run.id}", "dry_run": {str(dry_run).lower()}, '
-            f'"commit_hash": "{run.commit_hash or ""}"}}',
+            json.dumps(
+                {
+                    "type": "normalization_complete",
+                    "project_id": project_id,
+                    "run_id": str(run.id),
+                    "dry_run": dry_run,
+                    "commit_hash": run.commit_hash or "",
+                }
+            ),
         )
 
         return {
@@ -437,8 +550,13 @@ async def run_normalization_task(
         # Notify failure
         await redis.publish(
             NORMALIZATION_UPDATES_CHANNEL,
-            f'{{"type": "normalization_failed", "project_id": "{project_id}", '
-            f'"error": "{str(e)}"}}',
+            json.dumps(
+                {
+                    "type": "normalization_failed",
+                    "project_id": project_id,
+                    "error": str(e),
+                }
+            ),
         )
 
         return {
@@ -477,8 +595,13 @@ async def check_all_projects_normalization(ctx: dict[str, Any]) -> dict[str, Any
                     # Publish status update
                     await redis.publish(
                         NORMALIZATION_UPDATES_CHANNEL,
-                        f'{{"type": "normalization_status", "project_id": "{project.id}", '
-                        f'"needs_normalization": true}}',
+                        json.dumps(
+                            {
+                                "type": "normalization_status",
+                                "project_id": str(project.id),
+                                "needs_normalization": True,
+                            }
+                        ),
                     )
             except Exception as e:
                 logger.warning(f"Failed to check normalization for project {project.id}: {e}")
@@ -514,6 +637,249 @@ async def auto_submit_stale_suggestions(ctx: dict[str, Any]) -> dict[str, Any]:
 
     except Exception as e:
         logger.exception(f"Auto-submit stale suggestions failed: {e}")
+        raise
+
+
+async def run_consistency_check_task(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str = "main",
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Background task to run consistency checks on a project ontology.
+
+    Loads the graph, runs all consistency rules, caches the result in Redis,
+    and publishes progress via the QUALITY_UPDATES_CHANNEL.
+    """
+    db: AsyncSession = ctx["db"]
+    redis: ArqRedis = ctx["redis"]
+
+    project_uuid = UUID(project_id)
+
+    try:
+        # Notify start
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "consistency_started",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                }
+            ),
+        )
+
+        # Load project (eagerly load github_integration for file path resolution)
+        result = await db.execute(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
+        project = result.scalar_one_or_none()
+        if not project:
+            raise ValueError(f"Project {project_id} not found")
+        if not project.source_file_path and not project.github_integration:
+            raise ValueError(f"Project {project_id} has no ontology file")
+
+        # Load ontology content and parse in a subprocess (CPU-bound, holds GIL)
+        import asyncio
+        from concurrent.futures import ProcessPoolExecutor
+
+        git_service = BareGitRepositoryService()
+        filename = get_git_ontology_path(project)
+
+        if git_service.repository_exists(project_uuid):
+            content_bytes = git_service.get_file_from_branch(project_uuid, branch, filename)
+            content_str = content_bytes.decode("utf-8")
+        elif project.source_file_path:
+            storage = get_storage_service()
+            content_bytes = await storage.download_file(project.source_file_path)
+            content_str = content_bytes.decode("utf-8")
+        else:
+            raise ValueError(f"Project {project_id} has no git repository and no storage file")
+
+        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        rdf_format = _FORMAT_MAP.get(ext, "turtle")
+
+        # Parse RDF and run consistency check in a single subprocess
+        # (avoids double-pickling the Graph object across process boundaries)
+        loop = asyncio.get_running_loop()
+        with ProcessPoolExecutor(max_workers=1) as pool:
+            check_result = await loop.run_in_executor(
+                pool,
+                _parse_and_run_consistency_check,
+                content_str,
+                rdf_format,
+                project_id,
+                branch,
+            )
+
+        # Cache result in Redis and clear the pending status key
+        result_json = check_result.model_dump_json()
+        cache_key = f"quality:{project_id}:{branch}"
+        if job_id:
+            job_key = f"quality_job:{project_id}:{job_id}"
+            await redis.set(job_key, result_json, ex=600)
+            await redis.delete(f"quality_job_status:{project_id}:{job_id}")
+        await redis.set(cache_key, result_json, ex=600)
+
+        logger.info(
+            "Consistency check completed for project %s branch %s: %d issues",
+            project_id,
+            branch,
+            len(check_result.issues),
+        )
+
+        # Notify completion
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "consistency_complete",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                    "issues_found": len(check_result.issues),
+                }
+            ),
+        )
+
+        return {
+            "job_id": job_id,
+            "issues_found": len(check_result.issues),
+            "status": "completed",
+        }
+
+    except Exception as e:
+        logger.exception(
+            "Consistency check failed for project %s branch %s: %s",
+            project_id,
+            branch,
+            e,
+        )
+        if job_id:
+            # Write a short-lived failed status so polling clients can surface the error
+            await redis.set(
+                f"quality_job_status:{project_id}:{job_id}",
+                json.dumps({"state": "failed", "error": str(e)}),
+                ex=600,
+            )
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "consistency_failed",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                    "error": str(e),
+                }
+            ),
+        )
+        raise
+
+
+async def run_duplicate_detection_task(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str = "main",
+    threshold: float = 0.85,
+    job_id: str | None = None,
+) -> dict[str, Any]:
+    """
+    Background task to detect duplicate entities in a project ontology.
+
+    Uses the PostgreSQL trigram index on indexed_labels for fast fuzzy matching,
+    caches the result in Redis, and publishes progress via QUALITY_UPDATES_CHANNEL.
+    """
+    db: AsyncSession = ctx["db"]
+    redis: ArqRedis = ctx["redis"]
+
+    project_uuid = UUID(project_id)
+
+    try:
+        # Notify start
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "duplicates_started",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                }
+            ),
+        )
+
+        # Run duplicate detection via PostgreSQL trigram similarity
+        from ontokit.services.duplicate_detection_service import find_duplicates_sql
+
+        detection_result = await find_duplicates_sql(db, project_uuid, branch, threshold)
+
+        # Cache result in Redis and clear the pending status key
+        result_json = detection_result.model_dump_json()
+        cache_key = f"duplicates:{project_id}:{branch}"
+        if job_id:
+            job_key = f"duplicates_job:{project_id}:{job_id}"
+            await redis.set(job_key, result_json, ex=600)
+            await redis.delete(f"duplicates_job_status:{project_id}:{job_id}")
+        await redis.set(cache_key, result_json, ex=600)
+
+        logger.info(
+            "Duplicate detection completed for project %s branch %s: %d clusters",
+            project_id,
+            branch,
+            len(detection_result.clusters),
+        )
+
+        # Notify completion
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "duplicates_complete",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                    "clusters_found": len(detection_result.clusters),
+                }
+            ),
+        )
+
+        return {
+            "job_id": job_id,
+            "clusters_found": len(detection_result.clusters),
+            "status": "completed",
+        }
+
+    except Exception as e:
+        logger.exception(
+            "Duplicate detection failed for project %s branch %s: %s",
+            project_id,
+            branch,
+            e,
+        )
+        if job_id:
+            # Write a short-lived failed status so polling clients can surface the error
+            await redis.set(
+                f"duplicates_job_status:{project_id}:{job_id}",
+                json.dumps({"state": "failed", "error": str(e)}),
+                ex=600,
+            )
+        await redis.publish(
+            QUALITY_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "duplicates_failed",
+                    "project_id": project_id,
+                    "branch": branch,
+                    "job_id": job_id,
+                    "error": str(e),
+                }
+            ),
+        )
         raise
 
 
@@ -661,14 +1027,14 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
 
 
-async def run_upstream_check_task(
+async def run_remote_check_task(
     ctx: dict[str, Any],
     project_id: str,
 ) -> dict[str, Any]:
     """
-    Background task to check an upstream GitHub repository for changes.
+    Background task to check a remote GitHub repository for changes.
 
-    Compares the upstream file content with the current project ontology
+    Compares the remote file content with the current project ontology
     and records a SyncEvent with the outcome.
     """
     db: AsyncSession = ctx["db"]
@@ -677,17 +1043,17 @@ async def run_upstream_check_task(
     project_uuid = UUID(project_id)
 
     try:
-        from ontokit.models.upstream_sync import SyncEvent, UpstreamSyncConfig
+        from ontokit.models.remote_sync import RemoteSyncConfig, SyncEvent
         from ontokit.services.github_service import get_github_service
 
         # Get sync config
         config_result = await db.execute(
-            select(UpstreamSyncConfig).where(UpstreamSyncConfig.project_id == project_uuid)
+            select(RemoteSyncConfig).where(RemoteSyncConfig.project_id == project_uuid)
         )
         config = config_result.scalar_one_or_none()
 
         if not config:
-            return {"status": "failed", "error": "Upstream sync not configured"}
+            return {"status": "failed", "error": "Remote sync not configured"}
 
         # Get project
         project_result = await db.execute(select(Project).where(Project.id == project_uuid))
@@ -698,8 +1064,8 @@ async def run_upstream_check_task(
 
         # Notify start
         await redis.publish(
-            UPSTREAM_SYNC_UPDATES_CHANNEL,
-            f'{{"type": "upstream_check_started", "project_id": "{project_id}"}}',
+            REMOTE_SYNC_UPDATES_CHANNEL,
+            json.dumps({"type": "remote_check_started", "project_id": project_id}),
         )
 
         # Get a GitHub token — try the project's connected user first
@@ -721,7 +1087,7 @@ async def run_upstream_check_task(
 
         if not token:
             config.status = "error"
-            config.error_message = "No GitHub token available for upstream check"
+            config.error_message = "No GitHub token available for remote check"
             event = SyncEvent(
                 project_id=project_uuid,
                 config_id=config.id,
@@ -732,9 +1098,9 @@ async def run_upstream_check_task(
             await db.commit()
             return {"status": "failed", "error": "No GitHub token available"}
 
-        # Fetch upstream file content
+        # Fetch remote file content
         github_service = get_github_service()
-        upstream_content = await github_service.get_file_content(
+        remote_content = await github_service.get_file_content(
             token=token,
             owner=config.repo_owner,
             repo=config.repo_name,
@@ -758,12 +1124,12 @@ async def run_upstream_check_task(
                 logger.warning(f"Could not load current ontology for project {project_id}")
 
         # Compare contents
-        has_changes = current_content is None or upstream_content != current_content
+        has_changes = current_content is None or remote_content != current_content
 
         if has_changes:
             event_type = "update_found"
             config.status = "update_available"
-            changes_summary = "Upstream file differs from local ontology"
+            changes_summary = "Remote file differs from local ontology"
         else:
             event_type = "check_no_changes"
             config.status = "up_to_date"
@@ -782,15 +1148,20 @@ async def run_upstream_check_task(
         await db.commit()
 
         logger.info(
-            f"Upstream check for project {project_id}: "
+            f"Remote check for project {project_id}: "
             f"{'changes found' if has_changes else 'up to date'}"
         )
 
         # Notify completion
         await redis.publish(
-            UPSTREAM_SYNC_UPDATES_CHANNEL,
-            f'{{"type": "upstream_check_complete", "project_id": "{project_id}", '
-            f'"has_changes": {str(has_changes).lower()}}}',
+            REMOTE_SYNC_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "remote_check_complete",
+                    "project_id": project_id,
+                    "has_changes": has_changes,
+                }
+            ),
         )
 
         return {
@@ -801,12 +1172,12 @@ async def run_upstream_check_task(
         }
 
     except Exception as e:
-        logger.exception(f"Upstream check failed for project {project_id}: {e}")
+        logger.exception(f"Remote check failed for project {project_id}: {e}")
 
         # Record error event
         try:
             err_result = await db.execute(
-                select(UpstreamSyncConfig).where(UpstreamSyncConfig.project_id == project_uuid)
+                select(RemoteSyncConfig).where(RemoteSyncConfig.project_id == project_uuid)
             )
             config = err_result.scalar_one_or_none()
             if config:
@@ -821,13 +1192,18 @@ async def run_upstream_check_task(
                 db.add(event)
                 await db.commit()
         except Exception:
-            logger.exception("Failed to record upstream check error event")
+            logger.exception("Failed to record remote check error event")
 
         # Notify failure
         await redis.publish(
-            UPSTREAM_SYNC_UPDATES_CHANNEL,
-            f'{{"type": "upstream_check_failed", "project_id": "{project_id}", '
-            f'"error": "{str(e)}"}}',
+            REMOTE_SYNC_UPDATES_CHANNEL,
+            json.dumps(
+                {
+                    "type": "remote_check_failed",
+                    "project_id": project_id,
+                    "error": str(e),
+                }
+            ),
         )
 
         raise
@@ -908,6 +1284,8 @@ class WorkerSettings:
     functions = [
         run_ontology_index_task,
         run_lint_task,
+        func(run_consistency_check_task, timeout=900),  # 15 min for large ontologies
+        func(run_duplicate_detection_task, timeout=900),  # 15 min for large ontologies
         check_normalization_status_task,
         run_normalization_task,
         check_all_projects_normalization,
@@ -916,7 +1294,7 @@ class WorkerSettings:
         run_embedding_generation_task,
         run_single_entity_embed_task,
         run_batch_entity_embed_task,
-        run_upstream_check_task,
+        run_remote_check_task,
     ]
     redis_settings = get_redis_settings()
 

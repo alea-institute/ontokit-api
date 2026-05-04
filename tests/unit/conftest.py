@@ -34,3 +34,5 @@ def mock_duplicate_check_service():
         )
     )
     return svc
+
+# TODO: reconcile with CatholicOS dev — they added authed_client fixture for DB+auth tests

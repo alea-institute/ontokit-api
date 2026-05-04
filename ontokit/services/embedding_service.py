@@ -4,7 +4,7 @@ import base64
 import hashlib
 import logging
 from datetime import UTC, datetime
-from typing import cast
+from typing import Protocol, cast, runtime_checkable
 from uuid import UUID
 
 from cryptography.fernet import Fernet
@@ -59,8 +59,30 @@ def _decrypt_secret(ciphertext: str) -> str:
     return _get_fernet().decrypt(ciphertext.encode()).decode()
 
 
-def _vec_to_str(vec: list[float]) -> str:
-    """Convert an embedding vector to a pgvector-compatible string."""
+@runtime_checkable
+class _HasToList(Protocol):
+    """Anything that exposes a ``tolist()`` method returning a list of floats.
+
+    Matches numpy's ``ndarray.tolist()`` and torch tensors' equivalent
+    without pulling either library into the dependency surface here.
+    """
+
+    def tolist(self) -> list[float]: ...
+
+
+def _vec_to_str(vec: list[float] | _HasToList) -> str:
+    """Convert an embedding vector to a pgvector-compatible string.
+
+    Accepts either a Python ``list[float]`` (newly-embedded queries) or any
+    object exposing ``tolist()`` — typically a numpy array, which is what
+    pgvector deserializes ``Vector`` column reads into. pgvector's text input
+    format is ``[v1,v2,...]``: space-separated values are rejected.
+    ``str(list)`` produces commas; ``str(np.ndarray)`` produces spaces.
+    Normalize via ``.tolist()`` so the output is always pgvector-parseable
+    regardless of the input source.
+    """
+    if isinstance(vec, _HasToList):
+        vec = vec.tolist()
     return str(vec)
 
 
@@ -251,31 +273,37 @@ class EmbeddingService:
 
         try:
             # Load graph
+            from sqlalchemy.orm import selectinload
+
             from ontokit.git.bare_repository import BareGitRepositoryService
-            from ontokit.models.project import Project
+            from ontokit.models.project import Project, get_git_ontology_path
             from ontokit.services.ontology import get_ontology_service
             from ontokit.services.storage import get_storage_service
 
-            proj_result = await self._db.execute(select(Project).where(Project.id == project_id))
+            proj_result = await self._db.execute(
+                select(Project)
+                .options(selectinload(Project.github_integration))
+                .where(Project.id == project_id)
+            )
             project = proj_result.scalar_one_or_none()
-            if not project or not project.source_file_path:
-                raise ValueError("Project not found or has no ontology file")
+            if not project:
+                raise ValueError("Project not found")
+            if not project.source_file_path and not project.github_integration:
+                raise ValueError("Project has no ontology file")
 
             storage = get_storage_service()
             ontology = get_ontology_service(storage)
             git = BareGitRepositoryService()
 
-            import os
-
-            filename = getattr(project, "git_ontology_path", None) or os.path.basename(
-                project.source_file_path
-            )
+            filename = get_git_ontology_path(project)
             try:
                 graph = await ontology.load_from_git(project_id, branch, filename, git)
             except (FileNotFoundError, KeyError, ValueError):
                 # Only fall back to storage for the default branch; a specific
                 # branch that doesn't exist in git should fail the job rather
                 # than silently embedding the storage snapshot under that branch.
+                if not project.source_file_path:
+                    raise
                 default_branch = git.get_default_branch(project_id)
                 if branch and branch != default_branch:
                     raise
@@ -503,13 +531,16 @@ class EmbeddingService:
         provider = await self._get_provider(project_id)
         query_vec = await provider.embed_text(query)
 
-        # pgvector cosine distance: <=> returns distance (0=identical), score = 1 - distance
+        # pgvector cosine distance: <=> returns distance (0=identical), score = 1 - distance.
+        # NOTE: must use CAST(:query_vec AS vector) — SQLAlchemy's text() parser silently
+        # drops :name bindparams when immediately followed by ::type (Postgres cast syntax),
+        # producing a syntax error at the literal ":" in the wire SQL.
         query_str = text("""
             SELECT entity_iri, label, entity_type, deprecated,
-                   1 - (embedding <=> :query_vec::vector) AS score
+                   1 - (embedding <=> CAST(:query_vec AS vector)) AS score
             FROM entity_embeddings
             WHERE project_id = :pid AND branch = :br
-            ORDER BY embedding <=> :query_vec::vector
+            ORDER BY embedding <=> CAST(:query_vec AS vector)
             LIMIT :lim
         """)
 
@@ -647,13 +678,13 @@ class EmbeddingService:
         if not emb:
             return []
 
-        # kNN search excluding self
+        # kNN search excluding self. See note in semantic_search() above re: CAST() vs ::vector.
         query_str = text("""
             SELECT entity_iri, label, entity_type, deprecated,
-                   1 - (embedding <=> :query_vec::vector) AS score
+                   1 - (embedding <=> CAST(:query_vec AS vector)) AS score
             FROM entity_embeddings
             WHERE project_id = :pid AND branch = :br AND entity_iri != :self_iri
-            ORDER BY embedding <=> :query_vec::vector
+            ORDER BY embedding <=> CAST(:query_vec AS vector)
             LIMIT :lim
         """)
 

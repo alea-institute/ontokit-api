@@ -51,6 +51,7 @@ LABEL_PROPERTY_MAP = {
     "rdfs:label": RDFS.label,
     "skos:prefLabel": SKOS.prefLabel,
     "skos:altLabel": SKOS.altLabel,
+    "skos:hiddenLabel": SKOS.hiddenLabel,
     "dcterms:title": URIRef("http://purl.org/dc/terms/title"),
     "dc:title": URIRef("http://purl.org/dc/elements/1.1/title"),
 }
@@ -98,6 +99,7 @@ ANNOTATION_PROPERTIES = {
     # SKOS
     "skos:prefLabel": SKOS.prefLabel,
     "skos:altLabel": SKOS.altLabel,
+    "skos:hiddenLabel": SKOS.hiddenLabel,
     "skos:definition": SKOS.definition,
     "skos:notation": SKOS.notation,
     "skos:example": SKOS.example,
@@ -455,19 +457,21 @@ class OntologyService:
         graph = await self._get_graph(project_id, branch)
         query_lower = query.lower()
 
-        # Map entity type names to (RDF type, result entity_type)
-        type_mapping: dict[str, list[tuple[URIRef, str]]] = {
-            "class": [(OWL.Class, "class")],
+        # Map entity type names to (RDF type, result entity_type, property_kind).
+        # property_kind preserves the OWL subtype so clients can categorize
+        # properties without IRI-substring guesses (see issue #117).
+        type_mapping: dict[str, list[tuple[URIRef, str, str | None]]] = {
+            "class": [(OWL.Class, "class", None)],
             "property": [
-                (OWL.ObjectProperty, "property"),
-                (OWL.DatatypeProperty, "property"),
-                (OWL.AnnotationProperty, "property"),
+                (OWL.ObjectProperty, "property", "object"),
+                (OWL.DatatypeProperty, "property", "data"),
+                (OWL.AnnotationProperty, "property", "annotation"),
             ],
-            "individual": [(OWL.NamedIndividual, "individual")],
+            "individual": [(OWL.NamedIndividual, "individual", None)],
         }
 
         allowed_types = entity_types or ["class", "property", "individual"]
-        rdf_types: list[tuple[URIRef, str]] = []
+        rdf_types: list[tuple[URIRef, str, str | None]] = []
         for t in allowed_types:
             if t in type_mapping:
                 rdf_types.extend(type_mapping[t])
@@ -475,7 +479,7 @@ class OntologyService:
         owl_thing = OWL.Thing
         results: list[EntitySearchResult] = []
 
-        for rdf_type, entity_type in rdf_types:
+        for rdf_type, entity_type, property_kind in rdf_types:
             for subject in graph.subjects(RDF.type, rdf_type):
                 if not isinstance(subject, URIRef):
                     continue
@@ -526,6 +530,10 @@ class OntologyService:
                         label=display_label,
                         entity_type=cast(
                             TypingLiteral["class", "property", "individual"], entity_type
+                        ),
+                        property_kind=cast(
+                            TypingLiteral["object", "data", "annotation"] | None,
+                            property_kind,
                         ),
                         deprecated=deprecated,
                     )

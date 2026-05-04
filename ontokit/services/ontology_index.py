@@ -1031,6 +1031,11 @@ class OntologyIndexService:
             ENTITY_TYPE_ANNOTATION_PROPERTY: "property",
             ENTITY_TYPE_INDIVIDUAL: "individual",
         }
+        property_kind_map = {
+            ENTITY_TYPE_OBJECT_PROPERTY: "object",
+            ENTITY_TYPE_DATATYPE_PROPERTY: "data",
+            ENTITY_TYPE_ANNOTATION_PROPERTY: "annotation",
+        }
 
         prefs = label_preferences or DEFAULT_LABEL_PREFERENCES
         results = []
@@ -1041,6 +1046,7 @@ class OntologyIndexService:
                     "iri": row.iri,
                     "label": label or row.local_name,
                     "entity_type": reverse_type_map.get(row.entity_type, row.entity_type),
+                    "property_kind": property_kind_map.get(row.entity_type),
                     "deprecated": row.deprecated,
                 }
             )

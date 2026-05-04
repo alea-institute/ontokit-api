@@ -50,6 +50,7 @@ htmlcov/
 .env
 .env.local
 .env.*.local
+.env.zitadel-setup
 
 # Logs
 *.log
@@ -72,3 +73,9 @@ Thumbs.db
 *.nt
 !tests/fixtures/*.ttl
 !tests/fixtures/*.owl
+
+# Local git worktrees
+.worktrees/
+
+# Claude Code transient local state (commands/ stays tracked)
+.claude/scheduled_tasks.lock

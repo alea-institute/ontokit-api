@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # Role type for project members
 ProjectRole = Literal["owner", "admin", "editor", "suggester", "viewer"]
@@ -103,8 +103,7 @@ class ProjectResponse(ProjectBase):
             return _validate_iri(v)
         return v
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ExtractedOntologyMetadata(BaseModel):
@@ -142,6 +141,7 @@ class ProjectListResponse(BaseModel):
 
     items: list[ProjectResponse]
     total: int
+    unfiltered_total: int
     skip: int
     limit: int
 
@@ -190,8 +190,7 @@ class MemberResponse(MemberBase):
     user: MemberUser | None = None
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class MemberListResponse(BaseModel):

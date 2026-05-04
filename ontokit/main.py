@@ -1,6 +1,8 @@
 """OntoKit API - Main FastAPI Application."""
 
+import asyncio
 import logging
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -34,23 +36,43 @@ redis_pool: aioredis.Redis | None = None
 limiter = Limiter(key_func=get_remote_address, default_limits=["100/minute"])
 
 
+def _startup_print(message: str) -> None:
+    # Mirror lifespan progress to stderr so it surfaces in Railway/container
+    # deploy logs even when the logging pipeline isn't fully configured yet.
+    print(f"[ontokit] {message}", file=sys.stderr, flush=True)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler for startup/shutdown events."""
     global redis_pool  # noqa: PLW0603
 
+    _startup_print(f"Starting OntoKit API v{__version__} (env={settings.app_env})")
     logger.info("Starting OntoKit API v%s (env=%s)", __version__, settings.app_env)
 
-    # --- Database -----------------------------------------------------------
+    # --- Database (required — fail fast on hang) ----------------------------
+    # asyncio.timeout() bounds the entire connect-and-execute block: a stuck
+    # TCP handshake in engine.connect() needs the same fail-fast behavior as
+    # a stuck query, otherwise startup can hang indefinitely on an unreachable
+    # database.
+    _startup_print("Connecting to database...")
     try:
-        async with engine.connect() as conn:
-            await conn.execute(text("SELECT 1"))
+        async with asyncio.timeout(20.0):
+            async with engine.connect() as conn:
+                await conn.execute(text("SELECT 1"))
+        _startup_print("Database connection verified")
         logger.info("Database connection verified")
+    except TimeoutError:
+        _startup_print("Database connection timed out after 20s")
+        logger.exception("Database connection timed out")
+        raise
     except Exception:
+        _startup_print("Failed to connect to the database")
         logger.exception("Failed to connect to the database")
         raise
 
-    # --- Redis --------------------------------------------------------------
+    # --- Redis (optional) ---------------------------------------------------
+    _startup_print("Connecting to Redis...")
     try:
         pool = aioredis.from_url(  # type: ignore[no-untyped-call]
             str(settings.redis_url),
@@ -60,17 +82,28 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         )
         await pool.ping()
         redis_pool = pool
+        _startup_print("Redis connection verified")
         logger.info("Redis connection verified")
     except Exception:
+        _startup_print("Failed to connect to Redis — continuing startup")
         logger.exception("Failed to connect to Redis — continuing startup")
         redis_pool = None
 
-    # --- MinIO / Object Storage ---------------------------------------------
+    # --- MinIO / Object Storage (optional) ----------------------------------
+    # MinIO's Python client is synchronous; StorageService now wraps it in
+    # asyncio.to_thread, but we still bound the call so a stuck MinIO can't
+    # delay startup beyond 15s.
+    _startup_print("Verifying MinIO bucket...")
     try:
         storage = StorageService()
-        await storage.ensure_bucket_exists()
+        await asyncio.wait_for(storage.ensure_bucket_exists(), timeout=15.0)
+        _startup_print(f"MinIO bucket '{settings.minio_bucket}' is ready")
         logger.info("MinIO bucket '%s' is ready", settings.minio_bucket)
+    except TimeoutError:
+        _startup_print("MinIO bucket check timed out after 15s — continuing startup")
+        logger.exception("MinIO bucket check timed out — continuing startup")
     except Exception:
+        _startup_print("Failed to initialise MinIO storage — continuing startup")
         logger.exception("Failed to initialise MinIO storage — continuing startup")
 
     # --- Embedding Index Freshness Check (D-05) --------------------------
@@ -81,6 +114,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         logger.exception("Startup embedding freshness check failed — continuing")
 
+    _startup_print("Startup complete")
     logger.info("Startup complete")
 
     yield
@@ -340,6 +374,27 @@ async def rate_limit_handler(_request: Request, exc: RateLimitExceeded) -> JSONR
         response.headers["Retry-After"] = str(retry_after)
         response.headers["X-RateLimit-Limit"] = str(exc.limit.limit.amount)
     return response
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
+    """Convert any uncaught exception into a CORS-allowed JSON 500.
+
+    Without this, an exception that escapes every other handler propagates to
+    Starlette's ServerErrorMiddleware, which sits *outside* CORSMiddleware. The
+    resulting response goes out without ``Access-Control-Allow-Origin``, so the
+    browser blocks it before the frontend can read the status. The frontend
+    sees an opaque "CORS error" instead of a parseable 500, masking the real
+    cause (and the real bug).
+
+    In development we re-raise so Starlette's debug traceback page still shows;
+    staging and production return a structured JSON envelope matching the rest
+    of the error contract.
+    """
+    logger.exception("Unhandled exception", exc_info=exc)
+    if settings.is_development:
+        raise exc
+    return _error_response(500, "internal_server_error", "Internal server error")
 
 
 # --- Routers ---------------------------------------------------------------

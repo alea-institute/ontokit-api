@@ -5,8 +5,20 @@ import hmac
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
+from urllib.parse import quote
 
 import httpx
+
+
+def _enc(value: str, *, allow_slash: bool = False) -> str:
+    """URL-encode a path or query segment built from user-supplied input.
+
+    Use ``allow_slash=True`` for in-repo file paths where ``/`` is meaningful
+    (e.g. ``contents/{path}``). The default ``safe=""`` quotes every reserved
+    character so a malicious value like ``foo/../../bar`` cannot escape its
+    segment to redirect the request to a different GitHub endpoint.
+    """
+    return quote(value, safe="/" if allow_slash else "")
 
 
 @dataclass
@@ -78,6 +90,12 @@ class GitHubService:
             JSON response data
         """
         async with httpx.AsyncClient() as client:
+            # endpoint is built by callers using _enc() (see PR #116) so every
+            # user-controlled segment is URL-encoded before reaching this sink.
+            # The taint analyzer doesn't recognize urllib.parse.quote() as a
+            # sanitizer; the same justification covers the other client.* call
+            # sites in this module.
+            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
             response = await client.request(
                 method=method,
                 url=f"{self.GITHUB_API_BASE}{endpoint}",
@@ -173,18 +191,34 @@ class GitHubService:
         Returns:
             List of dicts with path, name, and size for each ontology file found.
         """
+        resolved_ref: str
         if ref is None:
-            repo_info = await self._request("GET", f"/repos/{owner}/{repo}", token)
-            ref = repo_info["default_branch"] if isinstance(repo_info, dict) else "main"
+            repo_info = await self._request("GET", f"/repos/{_enc(owner)}/{_enc(repo)}", token)
+            resolved_ref = (
+                str(repo_info["default_branch"])
+                if isinstance(repo_info, dict) and "default_branch" in repo_info
+                else "main"
+            )
+        else:
+            resolved_ref = ref
 
         data = await self._request(
-            "GET", f"/repos/{owner}/{repo}/git/trees/{ref}?recursive=1", token
+            "GET",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/git/trees/{_enc(resolved_ref)}?recursive=1",
+            token,
         )
+        # The dict accesses below are not HTTP sinks — they extract fields
+        # from the GitHub API response into a local list. Semgrep's taint
+        # tracker flags each access in the flow path, but none of these
+        # values flow back into a request URL.
         files: list[dict[str, Any]] = []
         if isinstance(data, dict):
+            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
             for item in data.get("tree", []):
+                # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
                 if item.get("type") != "blob":
                     continue
+                # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
                 path = item.get("path", "")
                 ext = ("." + path.rsplit(".", 1)[-1]).lower() if "." in path else ""
                 if ext in self.ONTOLOGY_EXTENSIONS:
@@ -192,6 +226,7 @@ class GitHubService:
                         {
                             "path": path,
                             "name": path.rsplit("/", 1)[-1],
+                            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
                             "size": item.get("size", 0),
                         }
                     )
@@ -217,10 +252,13 @@ class GitHubService:
         Returns:
             Raw file content as bytes.
         """
-        endpoint = f"/repos/{owner}/{repo}/contents/{path}"
+        endpoint = f"/repos/{_enc(owner)}/{_enc(repo)}/contents/{_enc(path, allow_slash=True)}"
         if ref:
-            endpoint += f"?ref={ref}"
+            endpoint += f"?ref={_enc(ref)}"
         async with httpx.AsyncClient() as client:
+            # endpoint is composed entirely of _enc()-encoded segments above;
+            # see the central _request() method for the full justification.
+            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
             response = await client.get(
                 f"{self.GITHUB_API_BASE}{endpoint}",
                 headers={
@@ -248,7 +286,7 @@ class GitHubService:
         Returns:
             Repository info dict from GitHub API.
         """
-        data = await self._request("GET", f"/repos/{owner}/{repo}", token)
+        data = await self._request("GET", f"/repos/{_enc(owner)}/{_enc(repo)}", token)
         return data if isinstance(data, dict) else {}
 
     # Pull Request Operations
@@ -266,7 +304,7 @@ class GitHubService:
         """Create a pull request on GitHub."""
         data = await self._request(
             "POST",
-            f"/repos/{owner}/{repo}/pulls",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/pulls",
             token,
             {"title": title, "head": head, "base": base, "body": body or ""},
         )
@@ -283,7 +321,7 @@ class GitHubService:
         """Get a pull request from GitHub."""
         data = await self._request(
             "GET",
-            f"/repos/{owner}/{repo}/pulls/{pr_number}",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/pulls/{pr_number}",
             token,
         )
 
@@ -310,7 +348,7 @@ class GitHubService:
 
         data = await self._request(
             "PATCH",
-            f"/repos/{owner}/{repo}/pulls/{pr_number}",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/pulls/{pr_number}",
             token,
             update_data,
         )
@@ -336,7 +374,7 @@ class GitHubService:
 
         result = await self._request(
             "PUT",
-            f"/repos/{owner}/{repo}/pulls/{pr_number}/merge",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/pulls/{pr_number}/merge",
             token,
             merge_data,
         )
@@ -371,9 +409,9 @@ class GitHubService:
         base: str | None = None,
     ) -> list[GitHubPR]:
         """List pull requests for a repository."""
-        endpoint = f"/repos/{owner}/{repo}/pulls?state={state}"
+        endpoint = f"/repos/{_enc(owner)}/{_enc(repo)}/pulls?state={_enc(state)}"
         if base:
-            endpoint += f"&base={base}"
+            endpoint += f"&base={_enc(base)}"
 
         data = await self._request("GET", endpoint, token)
 
@@ -399,7 +437,7 @@ class GitHubService:
 
         data = await self._request(
             "POST",
-            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/pulls/{pr_number}/reviews",
             token,
             review_data,
         )
@@ -416,7 +454,7 @@ class GitHubService:
         """List reviews for a pull request."""
         data = await self._request(
             "GET",
-            f"/repos/{owner}/{repo}/pulls/{pr_number}/reviews",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/pulls/{pr_number}/reviews",
             token,
         )
 
@@ -437,7 +475,7 @@ class GitHubService:
         """Create a comment on a pull request."""
         data = await self._request(
             "POST",
-            f"/repos/{owner}/{repo}/issues/{pr_number}/comments",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/issues/{pr_number}/comments",
             token,
             {"body": body},
         )
@@ -454,7 +492,7 @@ class GitHubService:
         """List comments on a pull request."""
         data = await self._request(
             "GET",
-            f"/repos/{owner}/{repo}/issues/{pr_number}/comments",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/issues/{pr_number}/comments",
             token,
         )
 
@@ -480,7 +518,7 @@ class GitHubService:
 
     async def list_repo_hooks(self, token: str, owner: str, repo: str) -> list[dict[str, Any]]:
         """List webhooks configured on a GitHub repository."""
-        result = await self._request("GET", f"/repos/{owner}/{repo}/hooks", token)
+        result = await self._request("GET", f"/repos/{_enc(owner)}/{_enc(repo)}/hooks", token)
         return result if isinstance(result, list) else []
 
     async def find_hook_by_url(
@@ -515,7 +553,9 @@ class GitHubService:
                 "insecure_ssl": "0",
             },
         }
-        result = await self._request("POST", f"/repos/{owner}/{repo}/hooks", token, data)
+        result = await self._request(
+            "POST", f"/repos/{_enc(owner)}/{_enc(repo)}/hooks", token, data
+        )
         return result if isinstance(result, dict) else {}
 
     # Webhook Verification

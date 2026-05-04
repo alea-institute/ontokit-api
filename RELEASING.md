@@ -2,6 +2,15 @@
 
 This document describes the full lifecycle of the OntoKit API from local development through release and deployment.
 
+## Branch Model
+
+The repository uses two long-lived branches:
+
+| Branch | Purpose |
+|--------|---------|
+| **`dev`** | Default branch. All feature PRs target `dev`. Carries the `-dev` version suffix. |
+| **`main`** | Release branch. Always reflects the latest tagged release. |
+
 ## Version Management
 
 Version is managed in a single source of truth: `ontokit/version.py`.
@@ -12,8 +21,8 @@ VERSION_BASE = "0.2.0"         # stripped for PyPI / __version__
 TAG_NAME = "ontokit-0.2.0"    # corresponding git tag
 ```
 
-- During development the version carries a `-dev` suffix (e.g. `0.2.0-dev`).
-- At release time the suffix is stripped (e.g. `0.2.0`).
+- During development the version on `dev` carries a `-dev` suffix (e.g. `0.2.0-dev`).
+- At release time the suffix is stripped and the result is merged into `main`.
 - `pyproject.toml` reads the version dynamically via hatch, so there is nothing else to keep in sync.
 
 ## Development
@@ -72,16 +81,21 @@ The GitHub Actions workflow (`.github/workflows/release.yml`) runs on every push
 | **test** | `pytest` with coverage |
 | **build** | `uv build` + `twine check --strict` on the resulting sdist/wheel |
 
-These three jobs run on all pushes (except `renovate/**` branches) and on PRs. The publish jobs described in the next section only run when a release tag is pushed.
+These three jobs run on pushes to `main` and `dev` (and on PRs). The publish jobs described in the next section only run when a release tag is pushed.
 
 ## Releasing
 
 Releases follow a Weblate-inspired workflow. All commands below are run from the `ontokit-api/` directory.
 
-### 1. Prepare the release
+### 1. Prepare the release (on a release branch)
+
+Create a release branch from `dev` and run the prepare script:
 
 ```bash
+git checkout dev && git pull
+git checkout -b release/0.2.0
 python scripts/prepare-release.py
+git push -u origin release/0.2.0
 ```
 
 This script:
@@ -90,19 +104,24 @@ This script:
 3. Writes the updated version back to `ontokit/version.py`.
 4. Creates a git commit: `chore: releasing 0.2.0`.
 
-### 2. Tag the release
+### 2. Open a PR to `main`
 
 ```bash
+gh pr create --base main --title "Release 0.2.0" \
+  --body "Merge release 0.2.0 into main for tagging."
+```
+
+Wait for CI (lint, test, build) to pass and merge the PR.
+
+### 3. Tag the release
+
+```bash
+git checkout main && git pull
 git tag -s ontokit-0.2.0
+git push origin --tags
 ```
 
 Tags must match the pattern `ontokit-*` to trigger the publish pipeline.
-
-### 3. Push
-
-```bash
-git push && git push --tags
-```
 
 ### 4. CI publishes automatically
 
@@ -115,35 +134,43 @@ When the tag reaches GitHub, the CI workflow runs the lint/test/build jobs and t
   - `ghcr.io/<owner>/ontokit:0.2`
   - `ghcr.io/<owner>/ontokit:latest`
 
-### 5. Set the next development version
+### 5. Set the next development version (on `dev`)
+
+Create a branch from `dev`, bump the version, and open a PR:
 
 ```bash
+git checkout dev && git pull
+git checkout -b chore/next-dev-version
 python scripts/set-version.py 0.3.0
+git push -u origin chore/next-dev-version
+gh pr create --base dev --title "chore: set version to 0.3.0-dev" \
+  --body "Start the next development cycle."
 ```
 
 This script:
 1. Updates `ontokit/version.py` to `0.3.0-dev`.
 2. Creates a git commit: `chore: setting version to 0.3.0-dev`.
 
-Push the commit to start the next development cycle.
+Merge the PR to start the next development cycle.
 
 ### Quick reference
 
 ```
-                                                             ┌─ PyPI (sdist + wheel)
-0.2.0-dev ──prepare-release.py──▸ 0.2.0 ──tag & push──▸ CI ─┼─ GitHub Release
-                                                             └─ GHCR (Docker image)
-                                                    │
-                                  set-version.py 0.3.0
-                                          │
-                                      0.3.0-dev  (next cycle)
+dev                                                                       dev
+ │                                                                         │
+ │  release/0.2.0 branch        PR → main        tag                      │
+ │  prepare-release.py           (CI gate)        (push)                   │
+ │       │                          │                │       ┌─ PyPI       │  chore/next-dev-version
+ ▼       ▼                          ▼                ▼       │             │  set-version.py 0.3.0
+0.2.0-dev ──▸ 0.2.0 ──PR──▸ main (merge) ──tag──▸ CI ──────┼─ GitHub     │  PR → dev
+                                                             └─ GHCR      └── 0.3.0-dev
 ```
 
 ## Patch releases
 
-Patch releases are for **backporting critical bug fixes** to an older release line after `main` has already moved to the next development version. New features always ship in the next minor or major release on `main`.
+Patch releases are for **backporting critical bug fixes** to an older release line after `dev` has already moved to the next development version. New features always ship in the next minor or major release on `dev`.
 
-For example, if `main` is at `0.3.0-dev` but a bug is found in `0.2.0`:
+For example, if `dev` is at `0.3.0-dev` but a bug is found in `0.2.0`:
 
 ### 1. Create a release branch from the tag
 
@@ -154,7 +181,7 @@ git checkout -b release/0.2.x ontokit-0.2.0
 ### 2. Cherry-pick the fix
 
 ```bash
-git cherry-pick <commit-sha>    # the fix from main
+git cherry-pick <commit-sha>    # the fix from dev
 ```
 
 ### 3. Bump to the patch version

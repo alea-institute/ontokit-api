@@ -9,18 +9,26 @@ from typing import Annotated, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
-from sqlalchemy import case, func, select
+from sqlalchemy import case, delete, func, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
-from ontokit.core.database import async_session_maker, get_db
+from ontokit.core.constants import LINT_UPDATES_CHANNEL
+from ontokit.core.database import get_db
+from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
+from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project
 from ontokit.schemas.lint import (
+    LintConfigResponse,
+    LintConfigUpdate,
     LintIssueListResponse,
     LintIssueResponse,
     LintIssueTypeValue,
+    LintLevelInfo,
+    LintLevelsResponse,
     LintRuleInfo,
     LintRulesResponse,
     LintRunDetailResponse,
@@ -29,10 +37,10 @@ from ontokit.schemas.lint import (
     LintRunStatusValue,
     LintSummaryResponse,
     LintTriggerResponse,
+    SubjectTypeValue,
 )
-from ontokit.services.linter import get_available_rules
+from ontokit.services.linter import ALL_RULE_IDS, LINT_LEVEL_DEFINITIONS, get_available_rules
 from ontokit.services.project_service import get_project_service
-from ontokit.worker import LINT_UPDATES_CHANNEL
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +52,7 @@ async def verify_project_access(
     db: AsyncSession,
     user: CurrentUser | None,
     require_write: bool = False,
+    require_manage: bool = False,
 ) -> Project:
     """
     Verify user has access to the project.
@@ -53,6 +62,7 @@ async def verify_project_access(
         db: Database session
         user: Current user (from auth)
         require_write: If True, require editor/admin/owner access
+        require_manage: If True, require admin/owner access
 
     Returns:
         The Project model if access is granted
@@ -74,6 +84,12 @@ async def verify_project_access(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found",
+        )
+
+    if require_manage and project_response.user_role not in ("owner", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin access required",
         )
 
     if require_write and project_response.user_role not in ("owner", "admin", "editor"):
@@ -105,7 +121,12 @@ async def trigger_lint(
     """
     project = await verify_project_access(project_id, db, user)
 
-    if not project.source_file_path:
+    # Allow git-only projects: the worker resolves the ontology from the bare
+    # repository when source_file_path is absent. Mirror the worker's loading
+    # logic so the only requests rejected here are those the worker itself
+    # would have to fail.
+    git_service = BareGitRepositoryService()
+    if not project.source_file_path and not git_service.repository_exists(project_id):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Project has no ontology file to lint",
@@ -234,7 +255,11 @@ async def list_lint_runs(
     total = count_result.scalar() or 0
 
     # Get runs
+    # skip/limit are FastAPI Query params typed as int with ge=0 / ge=1,le=100
+    # bounds — they cannot carry SQL. SQLAlchemy .offset()/.limit() bind their
+    # arguments as parameters, so the resulting query is parameterized.
     result = await db.execute(
+        # nosemgrep: python.fastapi.db.generic-sql-fastapi.generic-sql-fastapi
         select(LintRun)
         .where(LintRun.project_id == project_id)
         .order_by(LintRun.started_at.desc())
@@ -319,6 +344,7 @@ async def get_lint_run(
                 rule_id=issue.rule_id,
                 message=issue.message,
                 subject_iri=issue.subject_iri,
+                subject_type=cast("SubjectTypeValue | None", issue.subject_type),
                 details=issue.details,
                 created_at=issue.created_at,
                 resolved_at=issue.resolved_at,
@@ -398,6 +424,11 @@ async def get_lint_issues(
         .limit(limit)
     )
 
+    # skip/limit are FastAPI Query params typed as int with ge=0 / ge=1,le=500
+    # bounds, and the issue_type/rule_id/subject_iri filters reach the query
+    # through SQLAlchemy .where() comparisons that bind as parameters. None of
+    # the user-controlled values are interpolated into SQL text.
+    # nosemgrep: python.fastapi.db.generic-sql-fastapi.generic-sql-fastapi
     result = await db.execute(query)
     issues = result.scalars().all()
 
@@ -411,6 +442,7 @@ async def get_lint_issues(
                 rule_id=issue.rule_id,
                 message=issue.message,
                 subject_iri=issue.subject_iri,
+                subject_type=cast("SubjectTypeValue | None", issue.subject_type),
                 details=issue.details,
                 created_at=issue.created_at,
                 resolved_at=issue.resolved_at,
@@ -466,6 +498,161 @@ async def dismiss_issue(
     await db.commit()
 
 
+@router.delete(
+    "/{project_id}/lint/results",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def clear_lint_results(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> None:
+    """
+    Clear terminal lint results (runs and issues) for a project.
+
+    Only completed and failed runs are removed; in-flight runs (pending or
+    running) are preserved so the worker can finish updating them. Requires
+    authentication and admin/owner access.
+    """
+    await verify_project_access(project_id, db, user, require_manage=True)
+
+    # Delete only terminal runs; pending/running stay so the worker can finish
+    # updating them (issues cascade-delete via relationship).
+    await db.execute(
+        delete(LintRun)
+        .where(LintRun.project_id == project_id)
+        .where(LintRun.status.in_([LintRunStatus.COMPLETED.value, LintRunStatus.FAILED.value]))
+    )
+    await db.commit()
+
+
+def _serialize_lint_config(
+    project_id: UUID, config: ProjectLintConfig | None
+) -> LintConfigResponse:
+    """Build a LintConfigResponse from a ProjectLintConfig (or None for defaults)."""
+    if config is None:
+        return LintConfigResponse(
+            project_id=project_id,
+            effective_rules=sorted(ALL_RULE_IDS),
+        )
+
+    effective = config.get_enabled_rule_ids()
+    enabled_list: list[str] | None = None
+    if config.enabled_rules is not None:
+        enabled_list = sorted(r.strip() for r in config.enabled_rules.split(",") if r.strip())
+
+    return LintConfigResponse(
+        project_id=project_id,
+        lint_level=config.lint_level,
+        enabled_rules=enabled_list,
+        effective_rules=sorted(effective) if effective is not None else sorted(ALL_RULE_IDS),
+        updated_at=config.updated_at,
+    )
+
+
+@router.get("/{project_id}/lint/config", response_model=LintConfigResponse)
+async def get_lint_config(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: OptionalUser,
+) -> LintConfigResponse:
+    """
+    Get the current lint configuration for a project.
+
+    Returns the lint level and/or enabled rules, plus the effective set of
+    rules that will be checked on the next lint run.
+    """
+    await verify_project_access(project_id, db, user)
+
+    result = await db.execute(
+        select(ProjectLintConfig).where(ProjectLintConfig.project_id == project_id)
+    )
+    config = result.scalar_one_or_none()
+    return _serialize_lint_config(project_id, config)
+
+
+@router.put("/{project_id}/lint/config", response_model=LintConfigResponse)
+async def update_lint_config(
+    project_id: UUID,
+    body: LintConfigUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> LintConfigResponse:
+    """
+    Update lint configuration for a project.
+
+    Requires owner or admin role.
+
+    ``lint_level`` and ``enabled_rules`` are mutually exclusive: set exactly one
+    or set both to ``null`` to reset to all rules. Pass ``enabled_rules=[]`` to
+    explicitly disable every rule.
+    """
+    await verify_project_access(project_id, db, user, require_manage=True)
+
+    # enabled_rules=[] is stored as "" to distinguish from None (unset)
+    enabled_rules_str: str | None = None
+    if body.enabled_rules is not None:
+        enabled_rules_str = ",".join(sorted(body.enabled_rules))
+
+    # Upsert to handle concurrent first-time PUTs safely; RETURNING gives
+    # us the persisted row in the same round trip. Wrapping in select(...).from_statement(...)
+    # with populate_existing materializes the returned row as an ORM instance.
+    #
+    # body.lint_level / body.enabled_rules are validated by the Pydantic
+    # LintConfigUpdate schema, and pg_insert(...).values(...) plus
+    # on_conflict_do_update(set_=...) bind them as INSERT/UPDATE parameters.
+    # from_statement() below receives a SQLAlchemy Core Insert (not text()),
+    # so the resulting execute() runs a parameterized statement.
+    insert_stmt = (
+        pg_insert(ProjectLintConfig)
+        .values(
+            project_id=project_id,
+            lint_level=body.lint_level,
+            enabled_rules=enabled_rules_str,
+        )
+        .on_conflict_do_update(
+            index_elements=[ProjectLintConfig.project_id],
+            set_={
+                "lint_level": body.lint_level,
+                "enabled_rules": enabled_rules_str,
+                "updated_at": func.now(),
+            },
+        )
+        .returning(ProjectLintConfig)
+    )
+    orm_stmt = (
+        select(ProjectLintConfig)
+        # nosemgrep: python.fastapi.db.sqlalchemy-fastapi.sqlalchemy-fastapi
+        .from_statement(insert_stmt)
+        .execution_options(populate_existing=True)
+    )
+    # nosemgrep: python.fastapi.db.generic-sql-fastapi.generic-sql-fastapi
+    result = await db.execute(orm_stmt)
+    config = result.scalar_one()
+    await db.commit()
+    return _serialize_lint_config(project_id, config)
+
+
+@router.get("/lint/levels", response_model=LintLevelsResponse)
+async def get_lint_levels() -> LintLevelsResponse:
+    """
+    Get the list of available progressive lint levels.
+
+    Each level includes all rules from the previous level plus additional rules.
+    """
+    return LintLevelsResponse(
+        levels=[
+            LintLevelInfo(
+                level=lvl,
+                name=defn.name,
+                description=defn.description,
+                rule_ids=sorted(defn.rules),
+            )
+            for lvl, defn in sorted(LINT_LEVEL_DEFINITIONS.items())
+        ]
+    )
+
+
 @router.get("/lint/rules", response_model=LintRulesResponse)
 async def get_lint_rules() -> LintRulesResponse:
     """
@@ -482,6 +669,7 @@ async def get_lint_rules() -> LintRulesResponse:
                 name=rule.name,
                 description=rule.description,
                 severity=cast("LintIssueTypeValue", rule.severity),
+                scope=rule.scope,
             )
             for rule in rules
         ]
@@ -496,8 +684,7 @@ class LintConnectionManager:
         self.active_connections: dict[str, list[WebSocket]] = {}
 
     async def connect(self, websocket: WebSocket, project_id: str) -> None:
-        """Accept connection and add to project's connection list."""
-        await websocket.accept()
+        """Add connection to project's connection list."""
         if project_id not in self.active_connections:
             self.active_connections[project_id] = []
         self.active_connections[project_id].append(websocket)
@@ -534,6 +721,7 @@ manager = LintConnectionManager()
 async def lint_websocket(
     websocket: WebSocket,
     project_id: UUID,
+    token: str | None = Query(default=None, description="Bearer token for authentication"),
 ) -> None:
     """
     WebSocket endpoint for real-time lint updates.
@@ -544,16 +732,13 @@ async def lint_websocket(
     - Lint run fails
 
     Messages are JSON objects with a "type" field indicating the event type.
+    Pass ``token`` as a query parameter for authentication.
     """
+    from ontokit.api.utils.ws_auth import authenticate_ws
+
     project_id_str = str(project_id)
 
-    # Verify project exists (basic access check) using manual session
-    async with async_session_maker() as db:
-        result = await db.execute(select(Project).where(Project.id == project_id))
-        project = result.scalar_one_or_none()
-
-    if not project:
-        await websocket.close(code=4004, reason="Project not found")
+    if not await authenticate_ws(websocket, project_id, token):
         return
 
     await manager.connect(websocket, project_id_str)
@@ -591,8 +776,17 @@ async def lint_websocket(
         pass
     except Exception as e:
         logger.exception(f"WebSocket error for project {project_id_str}: {e}")
+        with contextlib.suppress(Exception):
+            await websocket.close(code=1011, reason="Internal server error")
     finally:
         manager.disconnect(websocket, project_id_str)
         if pubsub:
             with contextlib.suppress(Exception):
                 await pubsub.unsubscribe(LINT_UPDATES_CHANNEL)
+            # aclose() can hang on a half-open connection; bound it so a stuck
+            # Redis socket does not leak the request task.
+            with contextlib.suppress(Exception, TimeoutError):
+                await asyncio.wait_for(
+                    pubsub.aclose(),  # type: ignore[no-untyped-call]
+                    timeout=5.0,
+                )

@@ -196,12 +196,18 @@ services:
       NEXT_PUBLIC_BASE_PATH: /ui/v2/login
       ZITADEL_SERVICE_USER_TOKEN_FILE: /zitadel-data/login-client.pat
       EMAIL_VERIFICATION: true
+    # Probe the username form page rather than the login landing. The
+    # form is server-rendered using config the login app fetches from
+    # Zitadel via gRPC, so a stuck gRPC channel produces an error
+    # fallback that lacks the `username-text-input` test-id marker. The
+    # plain landing page returns 200 even with a dead gRPC channel — see
+    # issue #130 for the failure mode this guards against.
     healthcheck:
       test:
         - CMD
         - node
         - -e
-        - "const http = require('http'); const req = http.get('http://localhost:3000/ui/v2/login', (res) => { process.exit(res.statusCode === 200 ? 0 : 1); }); req.on('error', () => process.exit(1)); req.setTimeout(5000, () => { req.destroy(); process.exit(1); });"
+        - "fetch('http://localhost:3000/ui/v2/login/loginname', { signal: AbortSignal.timeout(5000) }).then(async r => { if (!r.ok) process.exit(1); const body = await r.text(); process.exit(body.includes('data-testid=\"username-text-input\"') ? 0 : 1); }).catch(() => process.exit(1));"
       interval: 30s
       timeout: 10s
       retries: 3
@@ -317,6 +323,16 @@ services:
       - ./ontokit:/home/ontokit/app/ontokit:ro
       # Git repositories (shared with API)
       - git_repos:/data/repos
+    # The worker shares the api image, which bakes in a `curl localhost:8000`
+    # healthcheck. The worker has no HTTP server (it runs ARQ), so that check
+    # always fails. Override with a check that PID 1 is still the arq process —
+    # works without any extra binaries in the slim image.
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q arq /proc/1/cmdline"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
     networks:
       - ontokit
     depends_on:

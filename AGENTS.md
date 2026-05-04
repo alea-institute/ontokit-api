@@ -31,6 +31,39 @@ ruff format ontokit/          # Format code
 mypy ontokit/
 ```
 
+### Security Scanning
+
+CI runs `semgrep ci` (diff-aware against the PR baseline). For local one-shot
+scans you have two options depending on whether you've signed up for Semgrep
+Pro:
+
+**With Pro entitlement** — runs the same engine as CI, including taint
+analysis and the curated Pro rule pack. Mirrors what CI runs
+(`.github/workflows/semgrep.yml`); `.semgrepignore` excludes are honored
+automatically.
+
+```bash
+semgrep --pro \
+  --config p/default \
+  --config p/owasp-top-ten \
+  --config p/python \
+  --config p/fastapi \
+  --config p/jwt
+```
+
+**Without Pro (community fallback)** — drop `--pro`. You get the same rule
+packs but only the OSS engine; some advanced cross-file taint findings won't
+surface. Useful for forks and external contributors.
+
+```bash
+semgrep \
+  --config p/default \
+  --config p/owasp-top-ten \
+  --config p/python \
+  --config p/fastapi \
+  --config p/jwt
+```
+
 ### Testing
 ```bash
 pytest tests/ -v --cov=ontokit                    # Run all tests with coverage

@@ -9,9 +9,11 @@ Prerequisites:
     pip install httpx
 """
 
-import json
+from __future__ import annotations
+
 import sys
 import time
+from typing import Any
 
 import httpx
 
@@ -59,7 +61,7 @@ def get_admin_token() -> str:
             text=True,
         )
         if result.returncode == 0:
-            with open("/tmp/admin.pat", "r") as f:
+            with open("/tmp/admin.pat") as f:
                 pat = f.read().strip()
                 if pat:
                     print("  Using PAT from Zitadel container")
@@ -69,15 +71,16 @@ def get_admin_token() -> str:
 
     # Fallback: check environment variable
     import os
-    pat = os.environ.get("ZITADEL_ADMIN_PAT")
-    if pat:
+
+    env_pat = os.environ.get("ZITADEL_ADMIN_PAT")
+    if env_pat:
         print("  Using PAT from environment variable")
-        return pat
+        return env_pat
 
     print("ERROR: Could not get admin PAT.")
     print("You may need to create applications manually in Zitadel console.")
     print(f"Access Zitadel at: {ZITADEL_URL}")
-    print(f"Login with: {ADMIN_USERNAME} / {ADMIN_PASSWORD}")
+    print(f"Login with: {ADMIN_USERNAME} / {ADMIN_PASSWORD}")  # noqa: S106
     sys.exit(1)
 
 
@@ -100,21 +103,25 @@ def create_project(client: httpx.Client, token: str) -> str:
         # List projects to find it
         list_resp = client.post(
             "/management/v1/projects/_search",
-            json={"queries": [{"nameQuery": {"name": "OntoKit", "method": "TEXT_QUERY_METHOD_EQUALS"}}]},
+            json={
+                "queries": [
+                    {"nameQuery": {"name": "OntoKit", "method": "TEXT_QUERY_METHOD_EQUALS"}}
+                ]
+            },
             headers={"Authorization": f"Bearer {token}"},
         )
         projects = list_resp.json().get("result", [])
         if projects:
-            return projects[0]["id"]
+            return str(projects[0]["id"])
         raise Exception("Could not find existing project")
 
     resp.raise_for_status()
-    project_id = resp.json()["id"]
+    project_id: str = resp.json()["id"]
     print(f"  Created project: {project_id}")
     return project_id
 
 
-def create_web_application(client: httpx.Client, token: str, project_id: str) -> dict:
+def create_web_application(client: httpx.Client, token: str, project_id: str) -> dict[str, Any]:
     """Create the web application for Next.js frontend."""
     print("Creating web application...")
 
@@ -150,12 +157,12 @@ def create_web_application(client: httpx.Client, token: str, project_id: str) ->
         return {}
 
     resp.raise_for_status()
-    data = resp.json()
+    data: dict[str, Any] = resp.json()
     print(f"  Created web app - Client ID: {data.get('clientId')}")
     return data
 
 
-def create_native_application(client: httpx.Client, token: str, project_id: str) -> dict:
+def create_native_application(client: httpx.Client, token: str, project_id: str) -> dict[str, Any]:
     """Create the native application for desktop clients (Device Flow)."""
     print("Creating native application for desktop clients...")
 
@@ -191,12 +198,12 @@ def create_native_application(client: httpx.Client, token: str, project_id: str)
         return {}
 
     resp.raise_for_status()
-    data = resp.json()
+    data: dict[str, Any] = resp.json()
     print(f"  Created native app - Client ID: {data.get('clientId')}")
     return data
 
 
-def create_api_application(client: httpx.Client, token: str, project_id: str) -> dict:
+def create_api_application(client: httpx.Client, token: str, project_id: str) -> dict[str, Any]:
     """Create the API application for backend-to-backend auth."""
     print("Creating API application...")
 
@@ -214,12 +221,12 @@ def create_api_application(client: httpx.Client, token: str, project_id: str) ->
         return {}
 
     resp.raise_for_status()
-    data = resp.json()
+    data: dict[str, Any] = resp.json()
     print(f"  Created API app - Client ID: {data.get('clientId')}")
     return data
 
 
-def main():
+def main() -> None:
     """Main setup function."""
     print("=" * 60)
     print("OntoKit Zitadel Setup")
@@ -237,7 +244,7 @@ def main():
         print(f"\nCould not get admin token automatically: {e}")
         print("\nPlease set up Zitadel manually:")
         print(f"1. Open {ZITADEL_URL} in your browser")
-        print(f"2. Login with: {ADMIN_USERNAME} / {ADMIN_PASSWORD}")
+        print(f"2. Login with: {ADMIN_USERNAME} / {ADMIN_PASSWORD}")  # noqa: S106
         print("3. Create a new project called 'OntoKit'")
         print("4. Create applications as described in the documentation")
         sys.exit(1)
@@ -249,9 +256,13 @@ def main():
         # Create applications
         web_app = create_web_application(client, token, project_id)
         native_app = create_native_application(client, token, project_id)
-        api_app = create_api_application(client, token, project_id)
+        create_api_application(client, token, project_id)
 
-    # Print configuration
+    # NOTE: This script is intended for LOCAL DEVELOPMENT ONLY.
+    # Printing credentials to stdout is acceptable here — these are
+    # dev-environment defaults, not production secrets.
+
+    # Print configuration to stdout
     print("\n" + "=" * 60)
     print("Setup Complete!")
     print("=" * 60)
@@ -268,11 +279,33 @@ def main():
     if web_app.get("clientId"):
         print(f"ZITADEL_CLIENT_ID={web_app['clientId']}")
     if web_app.get("clientSecret"):
-        print(f"ZITADEL_CLIENT_SECRET={web_app['clientSecret']}")
+        print(f"ZITADEL_CLIENT_SECRET={web_app['clientSecret']}")  # noqa: S106
     print()
 
     print(f"Zitadel Console: {ZITADEL_URL}")
-    print(f"Login: {ADMIN_USERNAME} / {ADMIN_PASSWORD}")
+    print(f"Login: {ADMIN_USERNAME} / {ADMIN_PASSWORD}")  # noqa: S106
+
+    # Also save to file for convenience
+    env_lines = [
+        "# Generated by setup-zitadel.py (LOCAL DEVELOPMENT ONLY)\n",
+        f"# Zitadel Console: {ZITADEL_URL}\n",
+        f"# Login: {ADMIN_USERNAME} / ********\n\n",
+        "# ontokit-api/.env\n",
+        f"ZITADEL_ISSUER={ZITADEL_URL}\n",
+    ]
+    if native_app.get("clientId"):
+        env_lines.append(f"ZITADEL_CLIENT_ID={native_app['clientId']}\n")
+    env_lines.append("\n# ontokit-web/.env.local\n")
+    env_lines.append(f"ZITADEL_ISSUER={ZITADEL_URL}\n")
+    if web_app.get("clientId"):
+        env_lines.append(f"ZITADEL_CLIENT_ID={web_app['clientId']}\n")
+    if web_app.get("clientSecret"):
+        env_lines.append(f"ZITADEL_CLIENT_SECRET={web_app['clientSecret']}\n")
+
+    env_file = ".env.zitadel-setup"
+    with open(env_file, "w") as f:
+        f.writelines(env_lines)
+    print(f"\nConfiguration also saved to: {env_file}")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl
 
 from ontokit.schemas.ontology import LocalizedString
 
@@ -60,10 +60,19 @@ class OWLClassResponse(OWLClassBase):
         default_factory=dict,
         description="Map of parent IRI to resolved label",
     )
-    equivalent_iris: list[str] | None = Field(default=None)
-    disjoint_iris: list[str] | None = Field(default=None)
+    equivalent_iris: list[str] | None = Field(
+        default=None,
+        description="owl:equivalentClass IRIs. None when served from the PostgreSQL index (not indexed); populated list from the RDFLib fallback path.",
+    )
+    disjoint_iris: list[str] | None = Field(
+        default=None,
+        description="owl:disjointWith IRIs. None when served from the PostgreSQL index (not indexed); populated list from the RDFLib fallback path.",
+    )
     child_count: int = 0
-    instance_count: int | None = None
+    instance_count: int | None = Field(
+        default=None,
+        description="Number of rdf:type instances. None when served from the PostgreSQL index (rdf:type not indexed); computed int from the RDFLib fallback path.",
+    )
     is_defined: bool = True  # vs just declared
     source_ontology: str | None = None  # If imported
     annotations: list[AnnotationProperty] = Field(
@@ -71,8 +80,7 @@ class OWLClassResponse(OWLClassBase):
         description="Additional annotation properties (DC, SKOS, etc.)",
     )
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class OWLClassListResponse(BaseModel):
@@ -90,8 +98,7 @@ class OWLClassTreeNode(BaseModel):
     child_count: int = Field(0, description="Number of direct subclasses")
     deprecated: bool = False
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class OWLClassTreeResponse(BaseModel):
@@ -107,6 +114,11 @@ class EntitySearchResult(BaseModel):
     iri: str
     label: str
     entity_type: Literal["class", "property", "individual"]
+    # OWL property subtype, populated only when entity_type == "property". None
+    # for class / individual results, and also for properties whose rdf:type
+    # resolves to none of OWL.{Object,Datatype,Annotation}Property (defensive
+    # fallback). Lets clients group properties without IRI-substring guesses.
+    property_kind: Literal["object", "data", "annotation"] | None = None
     deprecated: bool = False
 
 

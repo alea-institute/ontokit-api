@@ -1,5 +1,6 @@
 """Project and ProjectMember database models."""
 
+import os
 import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 if TYPE_CHECKING:
     from ontokit.models.join_request import JoinRequest
     from ontokit.models.lint import LintRun
+    from ontokit.models.lint_config import ProjectLintConfig
     from ontokit.models.normalization import NormalizationRun
     from ontokit.models.pull_request import GitHubIntegration, PullRequest
     from ontokit.models.suggestion_session import SuggestionSession
@@ -70,9 +72,30 @@ class Project(Base):
     suggestion_sessions: Mapped[list["SuggestionSession"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
+    lint_config: Mapped["ProjectLintConfig | None"] = relationship(
+        back_populates="project", cascade="all, delete-orphan", uselist=False
+    )
 
     def __repr__(self) -> str:
         return f"<Project(id={self.id}, name={self.name!r}, is_public={self.is_public})>"
+
+
+def get_git_ontology_path(project: Project) -> str:
+    """Get the actual file path within the git repo for a project's ontology.
+
+    Checks the GitHub integration's turtle_file_path / ontology_file_path first,
+    then falls back to basename of source_file_path, and finally "ontology.ttl".
+    """
+    if project.github_integration:
+        path = (
+            project.github_integration.turtle_file_path
+            or project.github_integration.ontology_file_path
+        )
+        if path:
+            return path
+    if project.source_file_path:
+        return os.path.basename(project.source_file_path)
+    return "ontology.ttl"
 
 
 class ProjectMember(Base):

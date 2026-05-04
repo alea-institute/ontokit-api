@@ -271,6 +271,7 @@ class IndexedOntologyService:
                             iri=r["iri"],
                             label=r["label"],
                             entity_type=r["entity_type"],
+                            property_kind=r.get("property_kind"),
                             deprecated=r["deprecated"],
                         )
                         for r in result["results"]

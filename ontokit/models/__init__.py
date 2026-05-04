@@ -12,6 +12,7 @@ from ontokit.models.lint import (
     LintRun,
     LintRunStatus,
 )
+from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.normalization import NormalizationRun
 from ontokit.models.notification import Notification
 from ontokit.models.ontology_index import (
@@ -31,8 +32,8 @@ from ontokit.models.pull_request import (
     PullRequestReview,
     ReviewStatus,
 )
+from ontokit.models.remote_sync import RemoteSyncConfig, SyncEvent
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
-from ontokit.models.upstream_sync import SyncEvent, UpstreamSyncConfig
 from ontokit.models.user_github_token import UserGitHubToken
 
 __all__ = [
@@ -56,6 +57,7 @@ __all__ = [
     "LintIssueType",
     "LintRun",
     "LintRunStatus",
+    "ProjectLintConfig",
     "NormalizationRun",
     "Notification",
     "OntologyIndexStatus",
@@ -70,6 +72,6 @@ __all__ = [
     "SuggestionSession",
     "SuggestionSessionStatus",
     "SyncEvent",
-    "UpstreamSyncConfig",
+    "RemoteSyncConfig",
     "UserGitHubToken",
 ]

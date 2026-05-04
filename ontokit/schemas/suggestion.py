@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SuggestionSessionResponse(BaseModel):
@@ -13,8 +13,7 @@ class SuggestionSessionResponse(BaseModel):
     created_at: datetime
     beacon_token: str
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SuggestionSaveRequest(BaseModel):
@@ -75,8 +74,7 @@ class SuggestionSessionSummary(BaseModel):
     summary: str | None = None
     is_anonymous: bool = False
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class SuggestionSessionListResponse(BaseModel):
