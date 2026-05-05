@@ -2,8 +2,8 @@
 gsd_state_version: 1.0
 milestone: v0.4.0
 milestone_name: Public Onboarding & Operational Readiness
-status: "Phase 3 planned and verified; awaiting PR #27 + PR #138 to land before /gsd-execute-phase 3"
-last_updated: "2026-05-02T22:30:00.000Z"
+status: "Phase 2 (PR #138) merged to catholicos/dev; Phase 3 planned and verified; awaiting PR #27 to land before /gsd-execute-phase 3"
+last_updated: "2026-05-05T00:00:00.000Z"
 progress:
   total_phases: 3
   completed_phases: 0
@@ -34,8 +34,8 @@ progress:
 | # | Phase | Status | Branch / PR | Plan files |
 |---|-------|--------|-------------|------------|
 | 1 | Auth Modes, Anonymous Stack & Seed CLI | In flight | PR #27 (rebased; CI green; awaiting review) | (delivered by PR #27) |
-| 2 | Startup Robustness | In flight | PR #138 (CI green; awaiting review) | (delivered by PR #138) |
-| 3 | Seed-on-Startup Public Projects | Planned, ready to execute | `feat/seed-folio-public-project` (local; not yet pushed) | 03-01, 03-02, 03-03 |
+| 2 | Startup Robustness | **Merged** | PR #138 ✅ on `catholicos/dev` (commit `bac18a5`) | (delivered by PR #138) |
+| 3 | Seed-on-Startup Public Projects | Planned, ready to execute | `feat/seed-folio-public-project` (rebased onto `catholicos/dev`; local; not yet pushed) | 03-01, 03-02, 03-03 |
 
 ## Performance Metrics
 
@@ -75,24 +75,19 @@ All 13 decisions resolved during /gsd-discuss-phase 3:
 
 ## Execution Readiness
 
-**Phase 3 is ready to execute. Prerequisites:**
+**Phase 3 is ready to execute. Status of prerequisites:**
 
-1. **PR #138** lands on `CatholicOS/ontokit-api:main` (startup async-safety + stderr lifespan logs). CI green; awaiting review.
-2. **PR #27** lands on `CatholicOS/ontokit-api:main` (AUTH_MODE + anonymous user + seed-project CLI + translation index). CI green; awaiting review.
-3. After both merge: rebase `feat/seed-folio-public-project` onto the new `upstream/main` to pick up #138 + #27 changes.
+1. ✅ **PR #138** merged to `catholicos/dev` as commit `bac18a5` (startup async-safety + stderr lifespan logs).
+2. ⏳ **PR #27** still open on `catholicos/feat/seed-project-script` (CI green; awaiting human review). Once merged to `catholicos/dev`, Phase 3 is fully unblocked.
+3. After PR #27 merges: pull `catholicos/dev` and re-rebase `feat/seed-folio-public-project` to absorb the new commits.
 4. Then run `/gsd-execute-phase 3` from this directory.
 
-**Why both PRs first:** Phase 3 plans assume:
-- PR #138's stderr-mirrored lifespan logs exist (Plan 03-03 mirrors that pattern).
-- PR #27's AUTH_MODE / anonymous user infra exist (Plan 03-03's STARTUP-SEED-10 anonymous-read variant references it; deferred until landed).
-- PR #27's `scripts/seed-project.py` exists for the planner-noted "share the same service" link (Plan 03-02 reuses the OWL/Turtle → project + bare repo + index pipeline that PR #27 establishes).
-
-**Resume command (once both PRs are merged):**
+**Resume command (once PR #27 merges):**
 ```bash
 cd /home/damienriehl/Coding\ Projects/ontokit-api
-git fetch upstream --prune
+git fetch catholicos dev
 git checkout feat/seed-folio-public-project
-git rebase upstream/main      # absorb #27 + #138
+git rebase catholicos/dev      # absorb PR #27 once merged
 # resolve any conflicts (likely minor — Phase 3 only adds new files + small main.py block)
 # Then:
 /gsd-execute-phase 3
@@ -103,15 +98,30 @@ The executor will run waves sequentially:
 - Wave 2: 03-02-PLAN — `seed_service.py` + unit tests (depends on Wave 1)
 - Wave 3: 03-03-PLAN — lifespan integration + integration tests (depends on Wave 2)
 
-Each wave commits atomically. After all 3 waves succeed, push and open a PR against `CatholicOS/ontokit-api:main`.
+Each wave commits atomically. After all 3 waves succeed, push and open a PR against `catholicos/dev` (per CatholicOS's dev/main branch model — features land on dev, releases promote to main).
+
+## Branching Model (alea fork mirrors CatholicOS)
+
+- **`alea/main` = FOLIO prod** — mirrors `catholicos/main`. Released code only. Force-pushed during sync (alea/main has no unique history).
+- **`alea/dev` = FOLIO staging (Hetzner — pipeline TBD)** — mirrors `catholicos/dev`. Integration branch.
+- **Feature branches** fork from `catholicos/dev` (or `alea/dev`). Local Phase 11/12/13 work saved to `feat/phase-11-llm-abstraction`, `feat/phase-12-duplicate-detection`, `feat/phase-13-validation-suggestion-gen`.
+- **Sync cadence**: manual. `git fetch catholicos && git push origin main` and `git push origin dev` when ready to refresh alea.
+- **Hotfix discipline**: if alea/main breaks in prod, fix forward via a CatholicOS PR; if a same-day fix is required on alea, use a `hotfix/*` branch and port the fix upstream within 48h. Never commit directly to `alea/main` long-term — auto-sync would overwrite it.
 
 ## Session Continuity
 
-**Last action:** Phase 3 plans verified (gsd-plan-checker → PLAN VERIFIED) on 2026-05-02. All blockers and warnings from the first review pass were resolved in revision commit `2d15d98`.
+**Last action:** Branch reorg on 2026-05-05. PR #138 confirmed merged to `catholicos/dev`. Local main reset to `catholicos/main`. Local dev fast-forwarded to `catholicos/dev`. `feat/seed-folio-public-project` rebased onto `catholicos/dev`. Phase 11/12/13 LLM milestone work preserved on per-phase feature branches. `alea/dev` created as a fresh shadow of `catholicos/dev`.
 
-**Next action:** Wait for PR #27 + PR #138 to merge. Then rebase + run `/gsd-execute-phase 3`.
+**Next action:** (1) Force-push alea/main to mirror catholicos/main once user approves. (2) Wait for PR #27 to merge to catholicos/dev. (3) `git fetch catholicos dev && git rebase catholicos/dev` on this branch. (4) Run `/gsd-execute-phase 3`.
 
-**Working branch:** `feat/seed-folio-public-project` (off `upstream/main`; 11 commits ahead consisting of GSD planning artifacts only — no source code changes yet).
+**Working branch:** `feat/seed-folio-public-project` (off `catholicos/dev`; carries GSD planning artifacts).
+
+**Local feature branches with unique work (saved during reorg):**
+- `feat/phase-11-llm-abstraction` (tip `9d1d7ca`) — 5 commits, LLM provider/registry/routes
+- `feat/phase-12-duplicate-detection` (tip `2a07937`) — 9 commits, ANN index + duplicate detection
+- `feat/phase-13-validation-suggestion-gen` (tip `481284a`) — 8 commits, validation + suggestion generation
+- `pr27-rebase` — already pushed to `catholicos/feat/seed-project-script` (PR #27)
+- `fix/startup-async-safety` — already merged to `catholicos/dev` (PR #138 ✅)
 
 ---
-*State updated: 2026-05-02 after Phase 3 plan-checker pass*
+*State updated: 2026-05-05 after branch reorg + alea/dev sync*
