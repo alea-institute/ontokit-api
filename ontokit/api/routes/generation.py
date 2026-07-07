@@ -114,7 +114,7 @@ async def generate_suggestions(
     project_id: UUID,
     request: GenerateSuggestionsRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[RequiredUser, Depends()],
+    user: RequiredUser,
     x_byo_api_key: Annotated[str | None, Header(alias="X-BYO-API-Key")] = None,
 ) -> GenerateSuggestionsResponse:
     """Generate LLM-powered ontology suggestions for a given class.
@@ -285,7 +285,7 @@ async def validate_entity(
     project_id: UUID,
     request: ValidateEntityRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: Annotated[RequiredUser, Depends()],
+    user: RequiredUser,
 ) -> ValidateEntityResponse:
     """Validate a single entity proposal against all VALID-* rules.
 
