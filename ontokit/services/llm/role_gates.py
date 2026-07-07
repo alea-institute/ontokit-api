@@ -15,6 +15,54 @@ from ontokit.services.llm.rate_limiter import RATE_LIMITS
 # Roles that can use LLM features at all
 LLM_ACCESS_ROLES: frozenset[str] = frozenset({"owner", "admin", "editor", "suggester"})
 
+# Static per-role capability descriptors (ROLE-01…05). Module-level constant —
+# pure read-only data, built once rather than reconstructed on every gate call.
+_ROLE_DESCRIPTORS: dict[str, dict[str, bool | int | str | None]] = {
+    "owner": {
+        "can_use_llm": True,
+        "daily_limit": None,  # unlimited
+        "can_self_merge_annotations": True,
+        "can_self_merge_structural": True,  # ROLE-01
+        "display_label": "Owner",
+    },
+    "admin": {
+        "can_use_llm": True,
+        "daily_limit": None,  # unlimited, ROLE-01
+        "can_self_merge_annotations": True,
+        "can_self_merge_structural": True,  # ROLE-01
+        "display_label": "Admin",
+    },
+    "editor": {
+        "can_use_llm": True,
+        "daily_limit": RATE_LIMITS["editor"],  # 500, COST-03
+        "can_self_merge_annotations": True,  # ROLE-02
+        "can_self_merge_structural": False,  # default off; ROLE-03 override per-member
+        "display_label": "Editor",
+    },
+    "suggester": {
+        "can_use_llm": True,
+        "daily_limit": RATE_LIMITS["suggester"],  # 100, COST-04
+        "can_self_merge_annotations": False,
+        "can_self_merge_structural": False,
+        "display_label": "Suggester",
+    },
+    "viewer": {
+        "can_use_llm": False,
+        "daily_limit": 0,
+        "can_self_merge_annotations": False,
+        "can_self_merge_structural": False,
+        "display_label": "Viewer",
+    },
+}
+
+_UNKNOWN_ROLE_DESCRIPTOR: dict[str, bool | int | str | None] = {
+    "can_use_llm": False,
+    "daily_limit": 0,
+    "can_self_merge_annotations": False,
+    "can_self_merge_structural": False,
+    "display_label": "Unknown",
+}
+
 
 def check_llm_access(role: str | None, is_anonymous: bool = False) -> bool:
     """Return True if the user's role grants LLM access.
@@ -50,51 +98,4 @@ def get_role_description(role: str) -> dict[str, bool | int | str | None]:
         - can_self_merge_structural (bool): default value; can be overridden per-member
         - display_label (str)
     """
-    _ROLES: dict[str, dict[str, bool | int | str | None]] = {
-        "owner": {
-            "can_use_llm": True,
-            "daily_limit": None,  # unlimited
-            "can_self_merge_annotations": True,
-            "can_self_merge_structural": True,  # ROLE-01
-            "display_label": "Owner",
-        },
-        "admin": {
-            "can_use_llm": True,
-            "daily_limit": None,  # unlimited, ROLE-01
-            "can_self_merge_annotations": True,
-            "can_self_merge_structural": True,  # ROLE-01
-            "display_label": "Admin",
-        },
-        "editor": {
-            "can_use_llm": True,
-            "daily_limit": RATE_LIMITS["editor"],  # 500, COST-03
-            "can_self_merge_annotations": True,  # ROLE-02
-            "can_self_merge_structural": False,  # default off; ROLE-03 override per-member
-            "display_label": "Editor",
-        },
-        "suggester": {
-            "can_use_llm": True,
-            "daily_limit": RATE_LIMITS["suggester"],  # 100, COST-04
-            "can_self_merge_annotations": False,
-            "can_self_merge_structural": False,
-            "display_label": "Suggester",
-        },
-        "viewer": {
-            "can_use_llm": False,
-            "daily_limit": 0,
-            "can_self_merge_annotations": False,
-            "can_self_merge_structural": False,
-            "display_label": "Viewer",
-        },
-    }
-
-    return _ROLES.get(
-        role,
-        {
-            "can_use_llm": False,
-            "daily_limit": 0,
-            "can_self_merge_annotations": False,
-            "can_self_merge_structural": False,
-            "display_label": "Unknown",
-        },
-    )
+    return _ROLE_DESCRIPTORS.get(role, _UNKNOWN_ROLE_DESCRIPTOR)
