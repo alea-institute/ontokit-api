@@ -64,6 +64,19 @@ class LLMStatusResponse(BaseModel):
     burn_rate_daily_usd: float
 
 
+class MemberFlagsUpdate(BaseModel):
+    """Request body for toggling per-member capability flags (ROLE-03)."""
+
+    can_self_merge_structural: bool
+
+
+class MemberFlagsResponse(BaseModel):
+    """Current per-member capability flags after an update."""
+
+    user_id: str
+    can_self_merge_structural: bool
+
+
 class LLMUserUsage(BaseModel):
     """Per-user aggregated LLM usage for the usage dashboard."""
 

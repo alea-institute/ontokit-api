@@ -5,6 +5,8 @@ Routes:
   PUT  /projects/{project_id}/llm/config       — update LLM config (owner/admin only)
   POST /projects/{project_id}/llm/test-connection — test provider connectivity (owner/admin)
   GET  /projects/{project_id}/llm/usage        — usage dashboard (owner/admin only)
+  GET  /projects/{project_id}/llm/status       — LLM availability/budget status (any member)
+  PATCH /projects/{project_id}/members/{user_id}/flags — toggle member flags (owner/admin)
   GET  /llm/providers                          — static provider list (public)
   GET  /llm/known-models                       — static known-models list (public)
 
@@ -12,10 +14,6 @@ Authorization pattern mirrors embeddings.py:
 - RequiredUser dependency for authenticated routes
 - Role check via ProjectService._get_user_role or direct DB query
 - Owner/admin check: role not in ("owner", "admin") → 403
-
-Note: LLM feature status (`GET /llm/status`), per-role rate/budget gating, and
-the `can_self_merge_structural` member flag ship in the cost-controls slice (PR-4),
-not here.
 """
 
 from __future__ import annotations
@@ -40,15 +38,20 @@ from ontokit.schemas.llm import (
     LLMKnownModel,
     LLMProviderInfo,
     LLMProviderType,
+    LLMStatusResponse,
     LLMUsageResponse,
+    MemberFlagsResponse,
+    MemberFlagsUpdate,
 )
 from ontokit.services.llm import (
     decrypt_secret,
     encrypt_secret,
+    get_budget_status,
     get_provider,
     get_usage_summary,
     validate_base_url,
 )
+from ontokit.services.llm.rate_limiter import RATE_LIMITS
 from ontokit.services.llm.registry import (
     KNOWN_MODELS,
     PROVIDER_DISPLAY_NAMES,
@@ -327,6 +330,115 @@ async def get_llm_usage(
         )
 
     return usage
+
+
+@router.get("/{project_id}/llm/status", response_model=LLMStatusResponse)
+async def get_llm_status(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> LLMStatusResponse:
+    """Return LLM feature availability for the caller's project.
+
+    Accessible to any project member. Combines provider configuration state
+    with budget exhaustion and the caller's per-role daily allowance so the
+    frontend can gate LLM affordances. Advisory only — the dispatch path
+    (PR-5) re-checks budget and rate limits server-side on every call.
+    """
+    role = await _require_project_member(db, project_id, user.id, user.is_superadmin)
+    config = await _get_llm_config(db, project_id)
+
+    configured = False
+    provider_type: LLMProviderType | None = None
+    if config:
+        provider_enum = LLMProviderType(config.provider)
+        provider_type = provider_enum
+        is_local = provider_enum in _LOCAL_PROVIDERS
+        # Local providers (Ollama etc.) don't need an API key to be usable
+        configured = bool(config.api_key_encrypted) or is_local
+
+    budget_exhausted = False
+    monthly_spent_usd = 0.0
+    monthly_budget_usd: float | None = None
+    burn_rate_daily = 0.0
+    if config:
+        budget_status = await get_budget_status(db, str(project_id), config)
+        budget_exhausted = budget_status["budget_exhausted"]
+        monthly_spent_usd = budget_status["monthly_spent_usd"]
+        monthly_budget_usd = budget_status["monthly_budget_usd"]
+        burn_rate_daily = budget_status["burn_rate_daily_usd"]
+
+    # Per-role allowance. RATE_LIMITS encodes access directly: 0 = no LLM
+    # access (viewer/unknown roles), None = unlimited (owner/admin). A
+    # no-access role must report 0 — reporting null here would read as
+    # "uncapped" under the schema's semantics.
+    # None = unlimited (owner/admin). For capped roles this is the static cap,
+    # not a live count: Redis-backed remaining counts arrive with the dispatch
+    # layer (PR-5), which injects Redis here.
+    daily_remaining: int | None = None
+    if configured:
+        daily_remaining = RATE_LIMITS.get(role, 0)
+
+    return LLMStatusResponse(
+        configured=configured,
+        provider=provider_type,
+        budget_exhausted=budget_exhausted,
+        daily_remaining=daily_remaining,
+        monthly_budget_usd=monthly_budget_usd,
+        monthly_spent_usd=monthly_spent_usd,
+        burn_rate_daily_usd=burn_rate_daily,
+    )
+
+
+@router.patch(
+    "/{project_id}/members/{target_user_id}/flags",
+    response_model=MemberFlagsResponse,
+)
+async def update_member_flags(
+    project_id: UUID,
+    target_user_id: str,
+    data: MemberFlagsUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> MemberFlagsResponse:
+    """Toggle per-member capability flags (owner/admin only).
+
+    Currently supports `can_self_merge_structural` (ROLE-03): a per-editor
+    override allowing structural PR self-merge.
+    """
+    await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
+
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == target_user_id,
+        )
+    )
+    member = result.scalar_one_or_none()
+    if member is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Member not found in this project",
+        )
+
+    member.can_self_merge_structural = data.can_self_merge_structural
+    await db.commit()
+    await db.refresh(member)
+
+    # Privilege changes must leave a trace (ROLE-03 grants structural
+    # self-merge). Metadata only — mirrors the LLM audit-log posture.
+    logger.info(
+        "member flags updated: project=%s actor=%s target=%s can_self_merge_structural=%s",
+        project_id,
+        user.id,
+        target_user_id,
+        data.can_self_merge_structural,
+    )
+
+    return MemberFlagsResponse(
+        user_id=member.user_id,
+        can_self_merge_structural=member.can_self_merge_structural,
+    )
 
 
 # ── Public (no-auth) provider/model catalogue routes ─────────────────────────
