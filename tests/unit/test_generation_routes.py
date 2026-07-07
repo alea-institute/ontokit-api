@@ -12,6 +12,7 @@ must work without any LLM configuration.
 
 from __future__ import annotations
 
+import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from fastapi.testclient import TestClient
@@ -197,8 +198,11 @@ def test_generate_429_when_rate_limit_exceeded(authed_client: tuple[TestClient, 
 
 def test_generate_fails_open_when_redis_unavailable(
     authed_client: tuple[TestClient, AsyncMock],
+    caplog,
 ):
-    """No Redis → rate limiting is skipped (fail-open), pipeline continues."""
+    """No Redis → rate limiting is skipped (fail-open), pipeline continues,
+    and the bypass is logged at WARNING so ops can alert on unmetered LLM
+    traffic (PR-4 rate-limiter fail-open follow-up — the alertable path)."""
     client, session = authed_client
     _happy_path_execute(session)
 
@@ -225,11 +229,16 @@ def test_generate_fails_open_when_redis_unavailable(
             new=AsyncMock(return_value=(0.0, 0.0)),
         ),
         patch("ontokit.api.routes.generation.log_llm_call", new=AsyncMock()),
+        caplog.at_level(logging.WARNING, logger="ontokit.api.routes.generation"),
     ):
         resp = client.post(GENERATE_URL, json=GENERATE_BODY)
 
     assert resp.status_code == 200
     rate_mock.assert_not_awaited()
+    assert any(
+        "Rate limiting bypassed" in rec.message and rec.levelname == "WARNING"
+        for rec in caplog.records
+    ), "fail-open Redis bypass must emit an alertable WARNING"
 
 
 def test_generate_402_when_budget_exhausted(authed_client: tuple[TestClient, AsyncMock]):

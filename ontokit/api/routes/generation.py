@@ -59,12 +59,20 @@ router = APIRouter(prefix="/projects/{project_id}/llm", tags=["Generation"])
 
 
 def _get_redis() -> Any:
-    """Get the shared Redis connection pool (fails open if unavailable)."""
+    """Get the shared Redis connection pool, or None if unavailable.
+
+    Returns None when the pool cannot be imported (app not fully initialised).
+    The caller treats None as fail-open for rate limiting, but must log the
+    bypass at WARNING so ops can alert on unmetered LLM traffic (the DB budget
+    layer is the non-fail-open backstop). Narrowed to Import/attribute errors:
+    a mis-wired pool object raising elsewhere should surface, not be swallowed.
+    """
     try:
         from ontokit.main import redis_pool
 
         return redis_pool
-    except Exception:
+    except (ImportError, AttributeError) as exc:
+        logger.warning("Rate-limit Redis pool unavailable (%s) — rate limiting will fail open", exc)
         return None
 
 
@@ -150,7 +158,10 @@ async def generate_suggestions(
             detail="No LLM configuration found for this project. Configure one in project settings.",
         )
 
-    # 4. Rate limit check (fails open if Redis unavailable)
+    # 4. Rate limit check (fails open if Redis unavailable — DB budget in step 5
+    #    is the non-fail-open backstop). Both fail-open paths (pool absent here,
+    #    and Redis infra errors inside check_rate_limit) log at WARNING so ops
+    #    can alert on unmetered LLM traffic — see PR-4 review follow-up.
     redis = _get_redis()
     if redis is not None:
         within_limit = await check_rate_limit(redis, str(project_id), user.id, role)
@@ -159,6 +170,13 @@ async def generate_suggestions(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail=f"Daily LLM call limit reached for your role ({role}). Try again tomorrow.",
             )
+    else:
+        logger.warning(
+            "Rate limiting bypassed (Redis pool absent) for user %s in project %s "
+            "— call allowed, budget cap still enforced",
+            user.id,
+            project_id,
+        )
 
     # 5. Budget check
     within_budget, budget_reason = await check_budget(db, project_id, config)
