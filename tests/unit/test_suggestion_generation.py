@@ -49,11 +49,39 @@ def _make_llm_json(suggestions: list[dict]) -> str:
 
 
 def _suggestion(label: str, confidence: float | None = 0.9) -> dict:
+    """children/siblings/parents-shaped raw suggestion (label + definition)."""
     return {
         "label": label,
         "definition": f"Definition of {label}",
         "confidence": confidence,
-        "parent_iri": CLASS_IRI,
+    }
+
+
+def _parent_suggestion(label: str, iri: str | None = None, confidence: float | None = 0.9) -> dict:
+    """parents-shaped raw suggestion — carries an optional existing-class `iri`."""
+    return {"label": label, "iri": iri, "definition": f"Definition of {label}", "confidence": confidence}
+
+
+def _annotation_suggestion(
+    property_iri: str, value: str, lang: str | None = None, confidence: float | None = 0.9
+) -> dict:
+    """annotations-shaped raw suggestion — matches prompts/annotations.py output."""
+    return {"property_iri": property_iri, "value": value, "lang": lang, "confidence": confidence}
+
+
+def _edge_suggestion(
+    target_label: str,
+    target_iri: str | None = "http://example.org/ontology#Target",
+    relationship_type: str = "seeAlso",
+    confidence: float | None = 0.9,
+) -> dict:
+    """edges-shaped raw suggestion — matches prompts/edges.py output."""
+    return {
+        "target_label": target_label,
+        "target_iri": target_iri,
+        "relationship_type": relationship_type,
+        "explanation": f"Why {target_label} relates",
+        "confidence": confidence,
     }
 
 
@@ -147,7 +175,16 @@ async def test_gen03_generate_annotations(
     mock_validator.validate_entity = AsyncMock(return_value=[])
 
     mock_llm_provider.chat = AsyncMock(
-        return_value=(_make_llm_json([_suggestion("New skos:definition value")]), 80, 40)
+        return_value=(
+            _make_llm_json(
+                [
+                    _annotation_suggestion("skos:altLabel", "Contrato", lang="es"),
+                    _annotation_suggestion("skos:definition", "A binding agreement"),
+                ]
+            ),
+            80,
+            40,
+        )
     )
 
     svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
@@ -161,8 +198,19 @@ async def test_gen03_generate_annotations(
         project_namespace=NAMESPACE,
     )
 
-    assert len(resp.suggestions) >= 1
+    assert len(resp.suggestions) == 2
     assert all(s.suggestion_type == "annotations" for s in resp.suggestions)
+    # The annotation payload must survive — property_iri/value/lang, not dropped.
+    first = resp.suggestions[0]
+    assert first.property_iri == "skos:altLabel"
+    assert first.value == "Contrato"
+    assert first.lang == "es"
+    # An annotation is a value ON the focus class, so it carries the class IRI.
+    assert first.iri == CLASS_IRI
+    # Display label falls back to the value (the web renders value ?? label).
+    assert first.label == "Contrato"
+    # English (untagged) annotation → lang is None.
+    assert resp.suggestions[1].lang is None
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +229,18 @@ async def test_gen04_generate_parents(
     mock_validator = AsyncMock()
     mock_validator.validate_entity = AsyncMock(return_value=[])
 
+    existing_parent = "http://example.org/ontology#ExistingParent"
     mock_llm_provider.chat = AsyncMock(
-        return_value=(_make_llm_json([_suggestion("Alternative Parent")]), 90, 45)
+        return_value=(
+            _make_llm_json(
+                [
+                    _parent_suggestion("Existing Parent", iri=existing_parent),
+                    _parent_suggestion("Brand New Parent", iri=None),
+                ]
+            ),
+            90,
+            45,
+        )
     )
 
     svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
@@ -196,8 +254,13 @@ async def test_gen04_generate_parents(
         project_namespace=NAMESPACE,
     )
 
-    assert len(resp.suggestions) >= 1
+    assert len(resp.suggestions) == 2
     assert all(s.suggestion_type == "parents" for s in resp.suggestions)
+    # An existing parent is LINKED by its IRI, not minted as a duplicate node.
+    assert resp.suggestions[0].iri == existing_parent
+    # A brand-new parent gets a freshly minted IRI in the project namespace.
+    assert resp.suggestions[1].iri.startswith(NAMESPACE)
+    assert resp.suggestions[1].iri != existing_parent
 
 
 # ---------------------------------------------------------------------------
@@ -217,7 +280,19 @@ async def test_gen05_generate_edges(
     mock_validator.validate_entity = AsyncMock(return_value=[])
 
     mock_llm_provider.chat = AsyncMock(
-        return_value=(_make_llm_json([_suggestion("Related Concept")]), 110, 55)
+        return_value=(
+            _make_llm_json(
+                [
+                    _edge_suggestion(
+                        "Related Concept",
+                        target_iri="http://example.org/ontology#Related",
+                        relationship_type="seeAlso",
+                    )
+                ]
+            ),
+            110,
+            55,
+        )
     )
 
     svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
@@ -231,8 +306,53 @@ async def test_gen05_generate_edges(
         project_namespace=NAMESPACE,
     )
 
-    assert len(resp.suggestions) >= 1
-    assert all(s.suggestion_type == "edges" for s in resp.suggestions)
+    assert len(resp.suggestions) == 1
+    edge = resp.suggestions[0]
+    assert edge.suggestion_type == "edges"
+    # The edge payload must survive — target + controlled relationship type.
+    assert edge.target_iri == "http://example.org/ontology#Related"
+    assert edge.relationship_type == "seeAlso"
+    assert edge.label == "Related Concept"  # display label = target_label
+    # A well-formed edge to an existing target has no validation errors.
+    assert edge.validation_errors == []
+
+
+@pytest.mark.asyncio
+async def test_gen05_edges_flag_uncontrolled_type_and_missing_target(
+    mock_llm_provider,
+    mock_duplicate_check_service,
+):
+    """An edge with a non-controlled relationship_type or null target_iri is
+    still returned but carries GEN-05 validation errors (not silently dropped)."""
+    mock_assembler = AsyncMock()
+    mock_assembler.assemble = AsyncMock(return_value=_make_context())
+    mock_validator = AsyncMock()
+    mock_validator.validate_entity = AsyncMock(return_value=[])
+
+    mock_llm_provider.chat = AsyncMock(
+        return_value=(
+            _make_llm_json(
+                [_edge_suggestion("Bad Edge", target_iri=None, relationship_type="sameAs")]
+            ),
+            60,
+            30,
+        )
+    )
+
+    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    resp = await svc.generate(
+        project_id=PROJECT_ID,
+        branch="main",
+        class_iri=CLASS_IRI,
+        suggestion_type="edges",
+        provider=mock_llm_provider,
+        project_namespace=NAMESPACE,
+    )
+
+    assert len(resp.suggestions) == 1
+    codes = {e.field for e in resp.suggestions[0].validation_errors}
+    assert "relationship_type" in codes  # sameAs is explicitly not controlled
+    assert "target_iri" in codes  # null target
 
 
 # ---------------------------------------------------------------------------

@@ -157,6 +157,14 @@ async def generate_suggestions(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No LLM configuration found for this project. Configure one in project settings.",
         )
+    # Provenance completeness (D-08): every suggestion must carry a resolvable
+    # model id. `config.model` is nullable, so refuse to generate without one
+    # rather than stamp `model=None` on the output.
+    if not config.model:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No model selected for this project's LLM configuration. Choose one in project settings.",
+        )
 
     # 4. Rate limit check (fails open if Redis unavailable — DB budget in step 5
     #    is the non-fail-open backstop). Both fail-open paths (pool absent here,
@@ -245,30 +253,50 @@ async def generate_suggestions(
             detail=str(exc),
         ) from exc
     except Exception as exc:
-        # LLM provider auth errors → 502
+        # Redact the resolved key from any error text before it is logged or
+        # (for transient cases) surfaced.
         error_msg = str(exc)
         if api_key and api_key in error_msg:
             error_msg = error_msg.replace(api_key, "[REDACTED]")
-        # Check for auth-like errors
+
+        # Provider auth failures → 502. Return a GENERIC client message; the
+        # (redacted) provider detail is logged server-side only, never echoed to
+        # the caller (avoids leaking provider internals / partial secrets).
         if any(
             keyword in error_msg.lower()
             for keyword in ("unauthorized", "authentication", "api key", "401", "403", "forbidden")
         ):
+            logger.warning(
+                "generate_suggestions: provider auth error for project %s: %s",
+                project_id, error_msg,
+            )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"LLM provider authentication error: {error_msg}",
+                detail="LLM provider rejected the request (authentication failed). "
+                "Verify the project's API key.",
             ) from exc
-        # JSON decode / timeout → return empty suggestions (not 500)
-        logger.warning(
-            "generate_suggestions: non-fatal error for project %s: %s",
-            project_id, error_msg
+
+        # Transient provider/network hiccups → empty suggestions (not a 500), so a
+        # flaky upstream doesn't hard-fail the editor.
+        if isinstance(exc, TimeoutError | ConnectionError):
+            logger.warning(
+                "generate_suggestions: transient provider error for project %s: %s",
+                project_id, error_msg,
+            )
+            return GenerateSuggestionsResponse(
+                suggestions=[],
+                input_tokens=0,
+                output_tokens=0,
+                context_tokens_estimate=None,
+            )
+
+        # Anything else is an unexpected bug — do NOT mask it as an empty 200.
+        # Let it surface as a 500 so regressions are visible (review MEDIUM #5).
+        logger.error(
+            "generate_suggestions: unexpected error for project %s: %s",
+            project_id, error_msg, exc_info=True,
         )
-        return GenerateSuggestionsResponse(
-            suggestions=[],
-            input_tokens=0,
-            output_tokens=0,
-            context_tokens_estimate=None,
-        )
+        raise
 
     # 11. Audit log — metadata only, never prompt/response content (D-08)
     try:

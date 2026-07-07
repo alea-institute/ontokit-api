@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from typing import Any, cast
 from uuid import UUID
@@ -29,9 +30,11 @@ from uuid import UUID
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.schemas.generation import (
+    CONTROLLED_RELATIONSHIP_TYPES,
     GeneratedSuggestion,
     GenerateSuggestionsResponse,
     SuggestionType,
+    ValidationError,
 )
 from ontokit.services.context_assembler import OntologyContextAssembler
 from ontokit.services.duplicate_check_service import DuplicateCheckService
@@ -69,7 +72,7 @@ class SuggestionGenerationService:
         class_iri: str,
         suggestion_type: SuggestionType,
         batch_size: int = 5,
-        provider: LLMProvider = None,  # type: ignore[assignment]
+        provider: LLMProvider | None = None,
         project_namespace: str = "",
         model_id: str | None = None,
     ) -> GenerateSuggestionsResponse:
@@ -92,6 +95,9 @@ class SuggestionGenerationService:
             GenerateSuggestionsResponse with typed, validated suggestions plus
             token usage counts for cost audit logging.
         """
+        if provider is None:
+            raise ValueError("provider is required for suggestion generation")
+
         # ── Step 1: Assemble ontology context (GEN-06) ────────────────────────
         context = await self._assembler.assemble(project_id, branch, class_iri)
 
@@ -105,56 +111,77 @@ class SuggestionGenerationService:
         # ── Step 4: Parse JSON output (handle Pitfall 3 — markdown fences) ────
         raw_suggestions = self._parse_json_safe(text)
 
-        # ── Step 5 + 6 + 7: Normalize, validate, dedup — SEQUENTIAL (Pitfall 5) ─
+        # ── Step 5 + 6 + 7: parse per-type, validate, dedup — SEQUENTIAL (Pitfall 5) ─
+        # Each of the five suggestion types has a distinct LLM output schema and a
+        # distinct ontology semantics, so parsing/validation/dedup must dispatch on
+        # `suggestion_type` — a single generic `raw["label"]` parse silently drops
+        # the payload of edges (target_*/relationship_type) and annotations
+        # (property_iri/value/lang) and inverts the parent IS-A direction.
         results: list[GeneratedSuggestion] = []
+        # Shared parent IRIs of the focus class (siblings share these; a sibling is
+        # NOT a child of the focus class).
+        shared_parent_iris = [
+            p["iri"] for p in context.get("parents", []) if isinstance(p, dict) and p.get("iri")
+        ]
+
         for raw in raw_suggestions:
-            # Normalize confidence (GEN-08 / Pitfall 4)
+            if not isinstance(raw, dict):
+                continue
+            parsed = self._parse_typed(
+                raw, suggestion_type, class_iri, project_namespace, shared_parent_iris
+            )
+            if parsed is None:
+                # Malformed / empty suggestion for this type — skip rather than
+                # emit a blank, validation-failing stub.
+                continue
+
             confidence = self._normalize_confidence(raw.get("confidence"))
 
-            # Mint a new IRI for this suggestion (VALID-06)
-            new_iri = mint_iri(project_namespace)
-
-            # Build entity dict for validation
-            label_value = raw.get("label", "")
-            entity = {
-                "iri": new_iri,
-                "label": label_value,
-                "parent_iris": [class_iri] if raw.get("parent_iri") is None else [raw["parent_iri"]],
-                "labels": [{"lang": "en", "value": label_value}] if label_value else [],
-            }
-
-            # Validate entity (VALID-01..06)
-            try:
-                validation_errors = await self._validator.validate_entity(
-                    project_id, branch, entity, project_namespace
-                )
-            except Exception as exc:
-                logger.warning("Validation failed for suggestion %r: %s", label_value, exc)
-                validation_errors = []
+            # Validate — only for class-like suggestions (children/siblings/parents).
+            # Edges and annotations are not new subclasses, so the new-class rules
+            # (VALID-01 parent-required etc.) don't apply; they carry their own
+            # lightweight checks computed in _parse_typed.
+            validation_errors = list(parsed["validation_errors"])
+            if parsed["validate_entity"] is not None:
+                try:
+                    validation_errors += await self._validator.validate_entity(
+                        project_id, branch, parsed["validate_entity"], project_namespace
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Validation failed for %s suggestion %r: %s",
+                        suggestion_type, parsed["label"], exc,
+                    )
 
             # Duplicate check (D-09) — SEQUENTIAL, one await at a time
-            try:
-                dedup_result = await self._dedup.check(
-                    project_id,
-                    label=label_value,
-                    parent_iri=class_iri,
-                )
-                duplicate_verdict: str = dedup_result.verdict
-                duplicate_candidates: list[dict[str, Any]] = [
-                    {"iri": c.iri, "label": c.label, "score": c.score}
-                    for c in (dedup_result.candidates or [])
-                ]
-            except Exception as exc:
-                logger.warning("Dedup check failed for suggestion %r: %s", label_value, exc)
-                duplicate_verdict = "pass"
-                duplicate_candidates = []
+            duplicate_verdict = "pass"
+            duplicate_candidates: list[dict[str, Any]] = []
+            if parsed["dedup_label"]:
+                try:
+                    dedup_result = await self._dedup.check(
+                        project_id,
+                        label=parsed["dedup_label"],
+                        parent_iri=parsed["dedup_parent"],
+                    )
+                    duplicate_verdict = dedup_result.verdict
+                    duplicate_candidates = [
+                        {"iri": c.iri, "label": c.label, "score": c.score}
+                        for c in (dedup_result.candidates or [])
+                    ]
+                except Exception as exc:
+                    # Dedup infra failure fails soft to "pass" — logged distinctly
+                    # so ops can alert on silently-disabled duplicate blocking.
+                    logger.warning(
+                        "Dedup check unavailable for %s suggestion %r — allowing (verdict=pass): %s",
+                        suggestion_type, parsed["dedup_label"], exc,
+                    )
 
             # Build final suggestion (GEN-09: provenance="llm-proposed")
             results.append(
                 GeneratedSuggestion(
-                    iri=new_iri,
+                    iri=parsed["iri"],
                     suggestion_type=suggestion_type,
-                    label=label_value,
+                    label=parsed["label"],
                     definition=raw.get("definition"),
                     confidence=confidence,
                     provenance="llm-proposed",
@@ -163,6 +190,11 @@ class SuggestionGenerationService:
                     validation_errors=validation_errors,
                     duplicate_verdict=duplicate_verdict,
                     duplicate_candidates=duplicate_candidates,
+                    property_iri=parsed["property_iri"],
+                    value=parsed["value"],
+                    lang=parsed["lang"],
+                    target_iri=parsed["target_iri"],
+                    relationship_type=parsed["relationship_type"],
                 )
             )
 
@@ -177,6 +209,142 @@ class SuggestionGenerationService:
     # ──────────────────────────────────────────────────────────────────────────
     # Internal helpers
     # ──────────────────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _parse_typed(
+        raw: dict[str, Any],
+        suggestion_type: SuggestionType,
+        class_iri: str,
+        project_namespace: str,
+        shared_parent_iris: list[str],
+    ) -> dict[str, Any] | None:
+        """Parse one raw LLM suggestion into a typed payload for the focus class.
+
+        Each suggestion type has its own LLM output schema (see prompts/*.py) and
+        its own ontology semantics, so parsing dispatches on `suggestion_type`.
+        Returns None when a required field for that type is missing/blank (so the
+        pipeline skips it rather than emitting a blank, validation-failing stub).
+
+        The returned dict is uniform:
+          iri, label, definition-less; property_iri/value/lang/target_iri/
+          relationship_type (payload); validate_entity (dict|None — run the
+          new-class VALID-* rules only for class-like types); validation_errors
+          (type-specific, pre-computed); dedup_label/dedup_parent (None ⇒ skip).
+        """
+        base: dict[str, Any] = {
+            "property_iri": None,
+            "value": None,
+            "lang": None,
+            "target_iri": None,
+            "relationship_type": None,
+            "validate_entity": None,
+            "validation_errors": [],
+            "dedup_label": None,
+            "dedup_parent": None,
+        }
+
+        if suggestion_type in ("children", "siblings"):
+            label = str(raw.get("label") or "").strip()
+            if not label:
+                return None
+            new_iri = mint_iri(project_namespace)
+            # A sibling shares the focus class's parents; a child is parented by
+            # the focus class itself.
+            parent_iris = (
+                [class_iri]
+                if suggestion_type == "children"
+                else (shared_parent_iris or [class_iri])
+            )
+            return {
+                **base,
+                "iri": new_iri,
+                "label": label,
+                "validate_entity": {
+                    "iri": new_iri,
+                    "label": label,
+                    "parent_iris": parent_iris,
+                    "labels": [{"lang": "en", "value": label}],
+                },
+                "dedup_label": label,
+                "dedup_parent": parent_iris[0] if parent_iris else class_iri,
+            }
+
+        if suggestion_type == "parents":
+            label = str(raw.get("label") or "").strip()
+            if not label:
+                return None
+            # The LLM may reference an existing parent by IRI — link to it rather
+            # than minting a duplicate node. The IS-A direction (class_iri ⊑ parent)
+            # is realized on accept by the web layer, which reads `iri` as the
+            # parent to link.
+            existing = str(raw.get("iri") or "").strip()
+            parent_iri = existing or mint_iri(project_namespace)
+            return {
+                **base,
+                "iri": parent_iri,
+                "label": label,
+                # No new-class validation: a proposed parent may legitimately be a
+                # root, so VALID-01 (parent-required) does not apply.
+                "dedup_label": label,
+                "dedup_parent": None,
+            }
+
+        if suggestion_type == "edges":
+            target_label = str(raw.get("target_label") or "").strip()
+            if not target_label:
+                return None
+            target_iri = str(raw.get("target_iri") or "").strip() or None
+            rel = str(raw.get("relationship_type") or "").strip() or None
+            errors: list[ValidationError] = []
+            if rel is None or rel not in CONTROLLED_RELATIONSHIP_TYPES:
+                errors.append(
+                    ValidationError(
+                        field="relationship_type",
+                        code="GEN-05",
+                        message=(
+                            "relationship_type must be one of the "
+                            f"{len(CONTROLLED_RELATIONSHIP_TYPES)} controlled types"
+                        ),
+                    )
+                )
+            if target_iri is None:
+                errors.append(
+                    ValidationError(
+                        field="target_iri",
+                        code="GEN-05",
+                        message="edge target must reference an existing entity (target_iri was null)",
+                    )
+                )
+            return {
+                **base,
+                # The edge's identity is its target entity; fall back to a minted
+                # IRI only so `iri` is never blank.
+                "iri": target_iri or mint_iri(project_namespace),
+                "label": target_label,
+                "target_iri": target_iri,
+                "relationship_type": rel,
+                "validation_errors": errors,
+            }
+
+        if suggestion_type == "annotations":
+            property_iri = str(raw.get("property_iri") or "").strip()
+            value = str(raw.get("value") or "").strip()
+            if not property_iri or not value:
+                return None
+            lang_raw = raw.get("lang")
+            lang = str(lang_raw).strip() or None if lang_raw is not None else None
+            return {
+                **base,
+                # An annotation is a property value ON the focus class, not a new
+                # entity — so it carries the focus class's IRI.
+                "iri": class_iri,
+                "label": value,
+                "property_iri": property_iri,
+                "value": value,
+                "lang": lang,
+            }
+
+        return None
 
     @staticmethod
     def _parse_json_safe(text: str) -> list[dict[str, Any]]:
@@ -240,6 +408,11 @@ class SuggestionGenerationService:
         try:
             val = float(raw)
         except (TypeError, ValueError):
+            return None
+
+        # NaN/inf are not valid confidences — clamping would silently promote NaN
+        # to 1.0 (max confidence), so reject them outright.
+        if not math.isfinite(val):
             return None
 
         if val > 1.0:
