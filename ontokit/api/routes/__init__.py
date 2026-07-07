@@ -22,6 +22,9 @@ from ontokit.api.routes import (
     suggestions,
     user_settings,
 )
+from ontokit.api.routes import (
+    llm as llm_routes,
+)
 
 router = APIRouter()
 
@@ -43,3 +46,6 @@ router.include_router(remote_sync.router, prefix="/projects", tags=["Sync from R
 router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])
 router.include_router(search.router, prefix="/search", tags=["Search"])
 router.include_router(user_settings.router, prefix="/users", tags=["User Settings"])
+# LLM: project-scoped routes under /projects; public catalogue routes at root
+router.include_router(llm_routes.router, prefix="/projects", tags=["LLM"])
+router.include_router(llm_routes.public_router, tags=["LLM"])
