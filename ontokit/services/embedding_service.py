@@ -28,6 +28,7 @@ from ontokit.schemas.embeddings import (
     RankSuggestionRequest,
     SemanticSearchResponse,
     SemanticSearchResult,
+    SemanticSearchResultWithBranch,
     SimilarEntity,
 )
 from ontokit.schemas.embeddings import EmbeddingProvider as EmbeddingProviderLiteral
@@ -567,6 +568,73 @@ class EmbeddingService:
                 )
 
         return SemanticSearchResponse(results=results, search_mode="semantic")
+
+    async def semantic_search_all_branches(
+        self,
+        project_id: UUID,
+        query: str,
+        limit: int = 20,
+        threshold: float = 0.3,
+    ) -> list[SemanticSearchResultWithBranch]:
+        """Search across ALL branches for a project (DEDUP-08).
+
+        Unlike semantic_search() which filters by branch, this queries across all
+        branches to catch parallel work collisions between users on different
+        suggestion branches. Used by DuplicateCheckService for cross-branch
+        duplicate detection.
+        """
+        if Vector is None:
+            raise RuntimeError(
+                "pgvector is not installed. Semantic search requires the pgvector extension."
+            )
+
+        # Check if any embeddings exist for this project
+        count_q = (
+            select(func.count())
+            .select_from(EntityEmbedding)
+            .where(EntityEmbedding.project_id == project_id)
+        )
+        count = (await self._db.execute(count_q)).scalar() or 0
+        if count == 0:
+            return []
+
+        # Embed query
+        provider = await self._get_provider(project_id)
+        query_vec = await provider.embed_text(query)
+
+        # pgvector cosine distance across ALL branches (no branch = :br filter).
+        # See note in semantic_search() above re: CAST() vs ::vector.
+        query_str = text("""
+            SELECT entity_iri, label, entity_type, branch, deprecated,
+                   1 - (embedding <=> CAST(:query_vec AS vector)) AS score
+            FROM entity_embeddings
+            WHERE project_id = :pid
+              AND (1 - (embedding <=> CAST(:query_vec AS vector))) >= :threshold
+            ORDER BY embedding <=> CAST(:query_vec AS vector)
+            LIMIT :lim
+        """)
+
+        result = await self._db.execute(
+            query_str,
+            {
+                "query_vec": _vec_to_str(query_vec),
+                "pid": str(project_id),
+                "threshold": threshold,
+                "lim": limit,
+            },
+        )
+
+        return [
+            SemanticSearchResultWithBranch(
+                iri=row.entity_iri,
+                label=row.label or "",
+                entity_type=row.entity_type,
+                score=round(float(row.score), 4),
+                deprecated=row.deprecated,
+                branch=row.branch,
+            )
+            for row in result
+        ]
 
     async def find_similar(
         self,

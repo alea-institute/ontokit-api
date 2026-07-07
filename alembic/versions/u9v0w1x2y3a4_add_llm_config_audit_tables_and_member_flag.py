@@ -1,7 +1,7 @@
 """Add LLM config and audit tables, and can_self_merge_structural to project_members.
 
 Revision ID: u9v0w1x2y3a4
-Revises: t8u9v0w1x2y3
+Revises: 47cc27515626
 Create Date: 2026-04-06
 
 Adds:
@@ -15,7 +15,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = "u9v0w1x2y3a4"
-down_revision = "t8u9v0w1x2y3"
+down_revision = "47cc27515626"
 branch_labels = None
 depends_on = None
 
