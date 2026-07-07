@@ -179,10 +179,18 @@ async def update_llm_config(
     """
     await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
 
-    # Validate base_url if provided
+    config = await _get_llm_config(db, project_id)
+
+    # Validate base_url if provided. The effective provider determines whether
+    # private/local URLs are allowed; on a base_url-only update, fall back to the
+    # stored provider so an existing local (e.g. Ollama) config isn't rejected.
     if data.base_url:
-        provider = data.provider
-        allow_private = provider in _LOCAL_PROVIDERS if provider else False
+        effective_provider = data.provider or (
+            LLMProviderType(config.provider) if config else None
+        )
+        allow_private = (
+            effective_provider in _LOCAL_PROVIDERS if effective_provider else False
+        )
         try:
             validate_base_url(data.base_url, allow_private=allow_private)
         except ValueError as e:
@@ -190,8 +198,6 @@ async def update_llm_config(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=f"Invalid base_url: {e}",
             ) from e
-
-    config = await _get_llm_config(db, project_id)
 
     if config is None:
         # Create new config
@@ -255,6 +261,19 @@ async def test_llm_connection(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="No LLM configuration found for this project",
         )
+
+    # Re-validate base_url immediately before the outbound call. SSRF validation
+    # at config-write time is not sufficient on its own: DNS can be rebound
+    # between write and use (TOCTOU), so we re-resolve and re-check here — the
+    # only outbound call this slice makes to a user-controlled endpoint. (Full
+    # connect-time IP pinning + redirect disabling across provider clients, and
+    # the PR-5 generation path, are tracked as follow-ups.)
+    if config.base_url:
+        allow_private = LLMProviderType(config.provider) in _LOCAL_PROVIDERS
+        try:
+            validate_base_url(config.base_url, allow_private=allow_private)
+        except ValueError as exc:
+            return {"success": False, "error": f"Invalid base_url: {exc}"}
 
     # Resolve API key: BYO header wins over stored key (BYO key is NEVER stored)
     if x_byo_api_key:

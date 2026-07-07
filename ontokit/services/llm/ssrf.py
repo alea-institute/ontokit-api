@@ -29,13 +29,33 @@ _ALLOW_PRIVATE = os.environ.get("ONTOKIT_ALLOW_PRIVATE_URLS", "").lower() in (
 # Providers that run locally — HTTP allowed, private IPs allowed
 _LOCAL_PROVIDER_VALUES = {"ollama", "lmstudio", "custom", "llamafile"}
 
-# The cloud metadata endpoint — always blocked, even for local providers
-_METADATA_IP = "169.254.169.254"
+# Cloud metadata endpoints — always blocked, even for local providers.
+_METADATA_IPS = frozenset(
+    {
+        ipaddress.ip_address("169.254.169.254"),  # AWS/GCP/Azure IMDS (IPv4)
+        ipaddress.ip_address("fd00:ec2::254"),  # AWS IMDS (IPv6)
+    }
+)
+
+
+def _normalize_ip(addr: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address:
+    """Parse an address, unwrapping IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254)."""
+    ip = ipaddress.ip_address(addr)
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    return ip
+
+
+def _is_metadata_ip(addr: str) -> bool:
+    try:
+        return _normalize_ip(addr) in _METADATA_IPS
+    except ValueError:
+        return False
 
 
 def _is_private_ip(addr: str) -> bool:
     try:
-        ip = ipaddress.ip_address(addr)
+        ip = _normalize_ip(addr)
         return ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local
     except ValueError:
         return False
@@ -75,10 +95,10 @@ def validate_base_url(url: str, allow_private: bool = False) -> str:
             proto=socket.IPPROTO_TCP,
         )
         for _family, _type, _proto, _canonname, sockaddr in results:
-            addr = sockaddr[0]
-            if addr == _METADATA_IP or ipaddress.ip_address(addr) == ipaddress.ip_address(_METADATA_IP):
+            addr = str(sockaddr[0])
+            if _is_metadata_ip(addr):
                 raise ValueError(
-                    f"URL resolves to the cloud metadata endpoint ({_METADATA_IP}), "
+                    f"URL resolves to a cloud metadata endpoint ({addr}), "
                     "which is blocked for security."
                 )
     except socket.gaierror:
