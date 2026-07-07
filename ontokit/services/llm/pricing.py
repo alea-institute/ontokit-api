@@ -11,7 +11,8 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 import httpx
 
@@ -43,7 +44,7 @@ async def _fetch_and_cache() -> None:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get(LITELLM_PRICING_URL)
             resp.raise_for_status()
-            raw: dict = resp.json()
+            raw: dict[str, Any] = resp.json()
     except Exception:
         logger.warning("Failed to fetch LiteLLM pricing data; using stale cache", exc_info=True)
         return  # keep existing stale cache (or None on first attempt)
@@ -99,4 +100,4 @@ def get_pricing_cache_age() -> datetime | None:
     """Return the UTC datetime when pricing was last fetched, or None."""
     if _pricing_fetched_at == 0.0:
         return None
-    return datetime.fromtimestamp(_pricing_fetched_at, tz=timezone.utc)
+    return datetime.fromtimestamp(_pricing_fetched_at, tz=UTC)

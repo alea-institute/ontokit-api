@@ -61,7 +61,8 @@ class GoogleProvider(LLMProvider):
                     await asyncio.sleep(delay)
                     continue
                 resp.raise_for_status()
-                return resp.json()
+                data: dict[str, Any] = resp.json()
+                return data
         return {}
 
     async def chat(
