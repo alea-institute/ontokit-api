@@ -49,16 +49,18 @@ def test_config_update_key_is_write_only():
     assert "api_key" not in LLMConfigResponse.model_fields
 
 
-def test_insecure_default_secret_blocked_in_production(monkeypatch):
-    """Encrypting under the shipped default secret in production must hard-fail.
+@pytest.mark.parametrize("app_env", ["production", "staging"])
+def test_insecure_default_secret_blocked_in_deployed_envs(monkeypatch, app_env):
+    """Encrypting under the shipped default secret in ANY deployed env hard-fails.
 
     Otherwise user provider API keys would be encrypted under a publicly-known
-    constant — equivalent to plaintext storage.
+    constant — equivalent to plaintext storage. Staging is deployed and shared,
+    so it must be blocked too (not merely warned).
     """
     from ontokit.core.config import settings
 
     monkeypatch.setattr(settings, "secret_key", _INSECURE_DEFAULT_SECRET)
-    monkeypatch.setattr(settings, "app_env", "production")
+    monkeypatch.setattr(settings, "app_env", app_env)
 
     with pytest.raises(RuntimeError, match="insecure shipped default"):
         encrypt_secret("sk-should-not-encrypt")

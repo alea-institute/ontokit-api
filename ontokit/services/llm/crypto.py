@@ -30,16 +30,20 @@ def _get_fernet() -> Fernet:
     from ontokit.core.config import settings
 
     if settings.secret_key == _INSECURE_DEFAULT_SECRET:
-        if settings.is_production:
+        # Any deployed environment (production OR staging) is shared and
+        # network-reachable and may hold real tenant keys — a log warning is
+        # not a control there. Only local development is allowed to proceed.
+        if not settings.is_development:
             raise RuntimeError(
-                "SECRET_KEY is set to the insecure shipped default in production. "
-                "LLM provider API keys would be encrypted under a publicly-known "
-                "constant (equivalent to plaintext). Set a strong SECRET_KEY."
+                f"SECRET_KEY is the insecure shipped default in a deployed "
+                f"environment (app_env={settings.app_env!r}). LLM provider API "
+                "keys would be encrypted under a publicly-known constant "
+                "(equivalent to plaintext). Set a strong SECRET_KEY."
             )
         logger.warning(
             "SECRET_KEY is the insecure shipped default; LLM API keys are "
             "encrypted under a publicly-known constant. Acceptable for local "
-            "development only — never in a shared or production deployment."
+            "development only — never in a shared or deployed environment."
         )
 
     key = hashlib.sha256(settings.secret_key.encode()).digest()

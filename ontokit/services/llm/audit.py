@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import timedelta
 
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.models.llm_config import LLMAuditLog
@@ -88,9 +89,7 @@ async def get_usage_summary(db: AsyncSession, project_id: str) -> LLMUsageRespon
             func.coalesce(func.sum(LLMAuditLog.cost_estimate_usd), 0.0).label("total_cost"),
         )
         .where(LLMAuditLog.project_id == project_id)
-        .where(
-            LLMAuditLog.created_at >= text("date_trunc('month', NOW() AT TIME ZONE 'UTC')")
-        )
+        .where(LLMAuditLog.created_at >= func.date_trunc("month", func.now(), "UTC"))
     )
     month_row = month_result.one()
     total_calls: int = int(month_row.total_calls)
@@ -101,11 +100,7 @@ async def get_usage_summary(db: AsyncSession, project_id: str) -> LLMUsageRespon
         select(func.coalesce(func.sum(LLMAuditLog.cost_estimate_usd), 0.0))
         .where(LLMAuditLog.project_id == project_id)
         .where(LLMAuditLog.is_byo_key.is_(False))
-        .where(
-            LLMAuditLog.created_at >= text(
-                "(NOW() AT TIME ZONE 'UTC') - INTERVAL '7 days'"
-            )
-        )
+        .where(LLMAuditLog.created_at >= func.now() - timedelta(days=7))
     )
     burn_7d: float = float(burn_result.scalar_one())
     burn_rate_daily = round(burn_7d / 7.0, 6)
@@ -120,9 +115,7 @@ async def get_usage_summary(db: AsyncSession, project_id: str) -> LLMUsageRespon
             func.bool_or(LLMAuditLog.is_byo_key).label("any_byo"),
         )
         .where(LLMAuditLog.project_id == project_id)
-        .where(
-            LLMAuditLog.created_at >= text("date_trunc('month', NOW() AT TIME ZONE 'UTC')")
-        )
+        .where(LLMAuditLog.created_at >= func.date_trunc("month", func.now(), "UTC"))
         .group_by(LLMAuditLog.user_id)
     )
     month_rows = {r.user_id: r for r in per_user_month.all()}
@@ -134,9 +127,7 @@ async def get_usage_summary(db: AsyncSession, project_id: str) -> LLMUsageRespon
             func.count(LLMAuditLog.id).label("calls_today"),
         )
         .where(LLMAuditLog.project_id == project_id)
-        .where(
-            LLMAuditLog.created_at >= text("date_trunc('day', NOW() AT TIME ZONE 'UTC')")
-        )
+        .where(LLMAuditLog.created_at >= func.date_trunc("day", func.now(), "UTC"))
         .group_by(LLMAuditLog.user_id)
     )
     today_rows = {r.user_id: int(r.calls_today) for r in per_user_today.all()}
