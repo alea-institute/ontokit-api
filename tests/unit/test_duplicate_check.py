@@ -1,7 +1,7 @@
 """Unit tests for composite duplicate-check scoring — Plan 04 (DEDUP-04 through DEDUP-08)."""
 
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
@@ -258,10 +258,10 @@ async def test_rejection_history_surfaced():
         rejected_by="user-id-123",
     )
 
-    async def mock_classify_source(project_id, branch):
+    async def mock_classify_source(_project_id, _branch):
         return "rejected"
 
-    async def mock_get_rejection_info(project_id, rejected_iri):
+    async def mock_get_rejection_info(_project_id, _rejected_iri):
         return rej_record
 
     with (

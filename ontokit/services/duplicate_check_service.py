@@ -42,6 +42,7 @@ class DuplicateCheckService:
         self,
         project_id: UUID,
         label: str,
+        entity_type: str = "class",
         parent_iri: str | None = None,
         limit: int = 10,
     ) -> DuplicateCheckResponse:
@@ -52,8 +53,13 @@ class DuplicateCheckService:
           - semantic: 40% — embedding cosine similarity via all-branch ANN search
           - structural: 20% — folio-python Jaccard parent similarity
 
+        ``entity_type`` mirrors ``DuplicateCheckRequest.entity_type``; scoring is
+        currently type-agnostic (candidates come from the shared index), the
+        parameter is accepted for API stability.
+
         Returns verdict (block/warn/pass), composite score, breakdown, and enriched candidates.
         """
+        del entity_type  # accepted for schema parity; scoring is type-agnostic today
         normalized_label = label.lower().strip()
 
         # 1. Semantic search across ALL branches (DEDUP-08)
