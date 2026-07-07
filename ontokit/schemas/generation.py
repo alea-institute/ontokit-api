@@ -127,26 +127,44 @@ class GeneratedSuggestion(BaseModel):
     duplicate_verdict: str = "pass"  # "pass" | "warn" | "block"
     duplicate_candidates: list[dict[str, Any]] = Field(default_factory=list)
 
+    # ── Type-specific payload (flat, all optional) ────────────────────────────
+    # These carry the semantic content for annotation and edge suggestions.
+    # They live on the base type (not on subclasses) because the response is
+    # serialized as list[GeneratedSuggestion] — Pydantic v2 would drop subclass
+    # fields there — and because the web contract (lib/api/generation.ts) reads
+    # them as optional fields off one flat interface, discriminating on presence
+    # (`property_iri` ⇒ annotation, `target_iri`/`relationship_type` ⇒ edge).
+    #
+    # annotations: property_iri + value + lang (GEN-03)
+    property_iri: str | None = None
+    value: str | None = None
+    lang: str | None = None  # BCP-47 language tag; None = English/untagged
+    # edges: target_iri + relationship_type (GEN-05)
+    target_iri: str | None = None
+    relationship_type: str | None = None  # one of CONTROLLED_RELATIONSHIP_TYPES
+
 
 class EdgeSuggestion(GeneratedSuggestion):
     """An edge / relationship suggestion between ontology entities (GEN-05).
 
-    Extends GeneratedSuggestion with target entity and controlled relationship type.
+    Retained for the strict-typed construction/validation path; the wire type is
+    the flat base `GeneratedSuggestion` (target_iri/relationship_type are optional
+    there). Tightens the two edge fields to required.
     """
 
     target_iri: str
-    relationship_type: str  # Should be one of CONTROLLED_RELATIONSHIP_TYPES
+    relationship_type: str  # one of CONTROLLED_RELATIONSHIP_TYPES
 
 
 class AnnotationSuggestion(GeneratedSuggestion):
     """An annotation property value suggestion (GEN-03).
 
-    Extends GeneratedSuggestion with the specific annotation property and value.
+    Retained for strict-typed construction; the wire type is the flat base
+    `GeneratedSuggestion` (property_iri/value optional there).
     """
 
-    property_iri: str  # e.g. "http://www.w3.org/2000/01/rdf-schema#comment"
+    property_iri: str
     value: str
-    lang: str | None = None  # BCP-47 language tag; None = language-untagged
 
 
 # ---------------------------------------------------------------------------
