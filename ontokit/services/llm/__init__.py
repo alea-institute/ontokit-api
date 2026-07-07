@@ -8,14 +8,20 @@ Provides:
 - get_model_pricing(): LiteLLM-backed token cost lookup
 - validate_base_url() / resolve_and_validate() / secure_async_client(): SSRF
   protection for provider URLs (config-time + connect-time)
+- check_rate_limit() / get_remaining_calls(): Redis-based daily rate limiting
+- check_budget() / get_budget_status() / get_monthly_spend(): monthly budget enforcement
+- check_llm_access(): per-role LLM access gate
 - log_llm_call() / get_usage_summary(): audit log writer and usage aggregation
 """
 
 from ontokit.services.llm.audit import get_usage_summary, log_llm_call
 from ontokit.services.llm.base import LLMProvider
+from ontokit.services.llm.budget import check_budget, get_budget_status, get_monthly_spend
 from ontokit.services.llm.crypto import decrypt_secret, encrypt_secret, rotate_secret
 from ontokit.services.llm.pricing import get_model_pricing
+from ontokit.services.llm.rate_limiter import check_rate_limit, get_remaining_calls
 from ontokit.services.llm.registry import get_provider
+from ontokit.services.llm.role_gates import check_llm_access
 from ontokit.services.llm.ssrf import (
     resolve_and_validate,
     secure_async_client,
@@ -24,10 +30,16 @@ from ontokit.services.llm.ssrf import (
 
 __all__ = [
     "LLMProvider",
+    "check_budget",
+    "check_llm_access",
+    "check_rate_limit",
     "decrypt_secret",
     "encrypt_secret",
+    "get_budget_status",
     "get_model_pricing",
+    "get_monthly_spend",
     "get_provider",
+    "get_remaining_calls",
     "get_usage_summary",
     "log_llm_call",
     "resolve_and_validate",
