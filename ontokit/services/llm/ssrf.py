@@ -105,13 +105,15 @@ def validate_base_url(url: str, allow_private: bool = False) -> str:
             parsed.hostname, parsed.port or 443, proto=socket.IPPROTO_TCP
         )
         for _family, _type, _proto, _canonname, sockaddr in results:
-            addr = sockaddr[0]
+            addr = str(sockaddr[0])
             if _is_private_ip(addr):
                 raise ValueError(
                     f"Cloud provider URL resolves to a private IP address ({addr}). "
                     "Set ONTOKIT_ALLOW_PRIVATE_URLS=true to allow (development only)."
                 )
     except socket.gaierror:
-        raise ValueError(f"Cannot resolve hostname: {parsed.hostname!r}")
+        raise ValueError(
+            f"Cannot resolve hostname: {parsed.hostname!r}"
+        ) from None
 
     return url

@@ -31,7 +31,7 @@ class OpenAICompatProvider(LLMProvider):
         model: str | None = None,
     ) -> None:
         super().__init__(api_key=api_key, base_url=base_url, model=model)
-        self._client = None
+        self._client: Any = None
 
     def _get_client(self) -> Any:
         if self._client is None:

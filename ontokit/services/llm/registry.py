@@ -222,8 +222,8 @@ def get_provider(
         except ValueError:
             available = [p.value for p in LLMProviderType]
             raise ValueError(
-                f"Unknown LLM provider: {provider_type!r}. Available: {available}"
-            )
+                f"Unknown LLM provider: {name!r}. Available: {available}"
+            ) from None
 
     # Resolve defaults
     resolved_base_url = base_url or DEFAULT_BASE_URLS.get(provider_type)
