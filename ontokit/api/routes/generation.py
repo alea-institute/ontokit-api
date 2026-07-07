@@ -127,7 +127,9 @@ async def generate_suggestions(
     5. Suggestion generation — context → LLM → parse → validate → dedup
     6. Audit log — token usage recorded without prompt/response content
 
-    Returns typed suggestions with embedded validation status and duplicate verdicts.
+    Returns typed suggestions with embedded validation status, duplicate verdicts,
+    and per-suggestion model + prompt-template provenance (metadata only — the raw
+    prompt text is never persisted, per D-08).
     """
     # 1. Load project + role
     project = await _load_project(db, project_id)
@@ -216,6 +218,7 @@ async def generate_suggestions(
             batch_size=request.batch_size,
             provider=provider,
             project_namespace=project_namespace,
+            model_id=config.model,
         )
     except ValueError as exc:
         # Raised by OntologyContextAssembler when class_iri not found in index

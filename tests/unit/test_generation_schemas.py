@@ -82,6 +82,8 @@ def test_generated_suggestion_defaults():
     assert sug.duplicate_candidates == []
     assert sug.definition is None
     assert sug.confidence is None
+    assert sug.model is None
+    assert sug.prompt_template is None
 
 
 def test_generated_suggestion_accepts_confidence():
@@ -93,6 +95,19 @@ def test_generated_suggestion_accepts_confidence():
         confidence=0.87,
     )
     assert sug.confidence == pytest.approx(0.87)
+
+
+def test_generated_suggestion_carries_model_and_prompt_template():
+    """GeneratedSuggestion carries per-suggestion model + prompt-template provenance (D-08)."""
+    sug = GeneratedSuggestion(
+        iri="http://example.org#NewClass",
+        suggestion_type="children",
+        label="New Child",
+        model="gpt-4o",
+        prompt_template="children",
+    )
+    assert sug.model == "gpt-4o"
+    assert sug.prompt_template == "children"
 
 
 # ---------------------------------------------------------------------------
