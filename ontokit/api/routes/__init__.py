@@ -8,6 +8,7 @@ from ontokit.api.routes import (
     auth,
     classes,
     embeddings,
+    generation,
     join_requests,
     lint,
     normalization,
@@ -53,3 +54,5 @@ router.include_router(user_settings.router, prefix="/users", tags=["User Setting
 # LLM: project-scoped routes under /projects; public catalogue routes at root
 router.include_router(llm_routes.router, prefix="/projects", tags=["LLM"])
 router.include_router(llm_routes.public_router, tags=["LLM"])
+# Generation: LLM suggestion generation + entity validation (Phase 13)
+router.include_router(generation.router, tags=["Generation"])
