@@ -11,6 +11,7 @@ import uuid
 from unittest.mock import AsyncMock, Mock
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.services.llm.budget import (
@@ -37,6 +38,24 @@ def _db(scalars: list[float]) -> AsyncMock:
         result.scalar_one = Mock(return_value=value)
         results.append(result)
     db.execute = AsyncMock(side_effect=results)
+    return db
+
+
+def _db_status(monthly: float, daily: float, week_total: float) -> AsyncMock:
+    """Mock AsyncSession for get_budget_status's single consolidated round-trip.
+
+    get_budget_status issues ONE query with three FILTER'd SUM columns and reads
+    result.one().monthly / .daily / .week (week = 7-day spend total; burn rate is
+    week_total / 7).
+    """
+    db = AsyncMock()
+    row = Mock()
+    row.monthly = monthly
+    row.daily = daily
+    row.week = week_total
+    result = Mock()
+    result.one = Mock(return_value=row)
+    db.execute = AsyncMock(return_value=result)
     return db
 
 
@@ -93,35 +112,62 @@ async def test_within_both_limits_allowed():
 
 @pytest.mark.asyncio
 async def test_budget_status_snapshot():
-    # monthly spend, daily spend, 7d burn total basis
-    db = _db([80.0, 5.0, 3.5])
+    # monthly spend, daily spend, 7d burn total basis (burn_rate = 3.5 / 7 = 0.5)
+    db = _db_status(monthly=80.0, daily=5.0, week_total=3.5)
     status = await get_budget_status(db, "p", _config(monthly=100.0, daily=10.0))
     assert status["monthly_spent_usd"] == 80.0
     assert status["monthly_budget_usd"] == 100.0
-    assert status["budget_consumed_pct"] == pytest.approx(0.8)
+    assert status["budget_consumed_pct"] == pytest.approx(80.0)  # 0–100 scale (matches usage route)
     assert status["budget_exhausted"] is False
     assert status["daily_spent_usd"] == 5.0
     assert status["daily_cap_usd"] == 10.0
+    assert status["burn_rate_daily_usd"] == pytest.approx(0.5)
+    # Consolidated into a single round-trip (member-polled endpoint).
+    assert db.execute.await_count == 1
 
 
 @pytest.mark.asyncio
 async def test_budget_status_exhausted_via_daily_cap():
-    db = _db([10.0, 10.0, 1.0])
+    db = _db_status(monthly=10.0, daily=10.0, week_total=1.0)
     status = await get_budget_status(db, "p", _config(monthly=100.0, daily=10.0))
     assert status["budget_exhausted"] is True
 
 
 @pytest.mark.asyncio
 async def test_budget_status_exhausted_via_monthly():
-    db = _db([100.0, 0.0, 1.0])
+    db = _db_status(monthly=100.0, daily=0.0, week_total=1.0)
     status = await get_budget_status(db, "p", _config(monthly=100.0, daily=None))
     assert status["budget_exhausted"] is True
 
 
 @pytest.mark.asyncio
 async def test_budget_status_unlimited_project_never_exhausts():
-    db = _db([5000.0, 500.0, 70.0])
+    db = _db_status(monthly=5000.0, daily=500.0, week_total=70.0)
     status = await get_budget_status(db, "p", _config(monthly=None, daily=None))
     assert status["budget_exhausted"] is False
     assert status["budget_consumed_pct"] == 0.0
     assert status["monthly_budget_usd"] is None
+
+
+@pytest.mark.asyncio
+async def test_budget_status_query_excludes_byo_and_bounds_utc_windows():
+    """Pin the correctness-sensitive parts of the consolidated single-query
+    get_budget_status against the compiled SQL (mocked results can't see these):
+    - BYO-key calls excluded (is_byo_key = false, D-17)
+    - all three windows are UTC-anchored (date_trunc(..., 'UTC'))
+    - the outer row bound uses LEAST(month_start, week_ago) so no FILTER window
+      is under-covered (burn-rate 7d can predate the month start).
+    """
+    project_uuid = uuid.UUID("22222222-2222-2222-2222-222222222222")
+    db = _db_status(monthly=1.0, daily=1.0, week_total=1.0)
+    await get_budget_status(db, project_uuid, _config(monthly=100.0, daily=10.0))
+    assert db.execute.await_count == 1
+    # Postgres dialect (not literal_binds — the 7d timedelta can't literal-render).
+    compiled = db.execute.await_args.args[0].compile(dialect=postgresql.dialect())
+    sql = str(compiled)
+    assert "is_byo_key" in sql and "false" in sql.lower()  # D-17 BYO exclusion
+    assert "date_trunc" in sql  # UTC-anchored month/day windows
+    assert "UTC" in compiled.params.values()  # tz arg is a bound param
+    assert "least" in sql.lower()  # outer bound covers the widest (7d) window
+    # Three FILTER'd aggregates in one statement (month / day / week).
+    assert sql.upper().count("FILTER") == 3

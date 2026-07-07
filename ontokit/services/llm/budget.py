@@ -10,6 +10,7 @@ Open Question 3 (RESEARCH.md): daily sub-cap is checked BEFORE monthly budget.
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import timedelta
 from typing import TypedDict
 
@@ -33,14 +34,14 @@ class BudgetStatus(TypedDict):
     daily_cap_usd: float | None
 
 
-async def get_monthly_spend(db: AsyncSession, project_id: str) -> float:
+async def get_monthly_spend(db: AsyncSession, project_id: uuid.UUID) -> float:
     """Return total non-BYO LLM spend for the current calendar month (UTC).
 
     Only project-key calls (is_byo_key=False) count against the budget.
 
     Args:
         db: Async SQLAlchemy session.
-        project_id: UUID string for the project.
+        project_id: The project UUID.
 
     Returns:
         Total cost in USD as a float; 0.0 if no calls logged yet.
@@ -55,12 +56,12 @@ async def get_monthly_spend(db: AsyncSession, project_id: str) -> float:
     return float(value)
 
 
-async def get_daily_spend(db: AsyncSession, project_id: str) -> float:
+async def get_daily_spend(db: AsyncSession, project_id: uuid.UUID) -> float:
     """Return total non-BYO LLM spend for the current calendar day (UTC).
 
     Args:
         db: Async SQLAlchemy session.
-        project_id: UUID string for the project.
+        project_id: The project UUID.
 
     Returns:
         Total cost in USD as a float; 0.0 if no calls logged yet.
@@ -75,21 +76,9 @@ async def get_daily_spend(db: AsyncSession, project_id: str) -> float:
     return float(value)
 
 
-async def _get_burn_rate_daily(db: AsyncSession, project_id: str) -> float:
-    """Return average daily non-BYO spend over the last 7 days."""
-    result = await db.execute(
-        select(func.coalesce(func.sum(LLMAuditLog.cost_estimate_usd), 0.0))
-        .where(LLMAuditLog.project_id == project_id)
-        .where(LLMAuditLog.is_byo_key.is_(False))
-        .where(LLMAuditLog.created_at >= func.now() - timedelta(days=7))
-    )
-    total_7d: float = float(result.scalar_one())
-    return round(total_7d / 7.0, 6)
-
-
 async def check_budget(
     db: AsyncSession,
-    project_id: str,
+    project_id: uuid.UUID,
     config: ProjectLLMConfig,
 ) -> tuple[bool, str | None]:
     """Check whether the project is within its budget limits.
@@ -98,7 +87,7 @@ async def check_budget(
 
     Args:
         db: Async SQLAlchemy session.
-        project_id: UUID string for the project.
+        project_id: The project UUID.
         config: The project's LLMConfig row (may have monthly_budget_usd, daily_cap_usd).
 
     Returns:
@@ -127,7 +116,7 @@ async def check_budget(
 
 async def get_budget_status(
     db: AsyncSession,
-    project_id: str,
+    project_id: uuid.UUID,
     config: ProjectLLMConfig,
 ) -> BudgetStatus:
     """Return a full budget status snapshot for the project.
@@ -136,13 +125,49 @@ async def get_budget_status(
         BudgetStatus with monthly/daily spend, budget caps, consumed pct,
         burn rate, and the overall budget_exhausted flag.
     """
-    monthly_spent = await get_monthly_spend(db, project_id)
-    daily_spent = await get_daily_spend(db, project_id)
-    burn_rate = await _get_burn_rate_daily(db, project_id)
+    # One round-trip instead of three: this backs the member-reachable
+    # /llm/status route that every project member's frontend polls. All three
+    # windows share the (project_id, created_at) index; FILTER does the rest.
+    month_start = func.date_trunc("month", func.now(), "UTC")
+    day_start = func.date_trunc("day", func.now(), "UTC")
+    week_ago = func.now() - timedelta(days=7)
+    result = await db.execute(
+        select(
+            func.coalesce(
+                func.sum(LLMAuditLog.cost_estimate_usd).filter(
+                    LLMAuditLog.created_at >= month_start
+                ),
+                0.0,
+            ).label("monthly"),
+            func.coalesce(
+                func.sum(LLMAuditLog.cost_estimate_usd).filter(
+                    LLMAuditLog.created_at >= day_start
+                ),
+                0.0,
+            ).label("daily"),
+            func.coalesce(
+                func.sum(LLMAuditLog.cost_estimate_usd).filter(
+                    LLMAuditLog.created_at >= week_ago
+                ),
+                0.0,
+            ).label("week"),
+        )
+        .where(LLMAuditLog.project_id == project_id)
+        .where(LLMAuditLog.is_byo_key.is_(False))
+        .where(LLMAuditLog.created_at >= func.least(month_start, week_ago))
+    )
+    row = result.one()
+    monthly_spent = float(row.monthly)
+    daily_spent = float(row.daily)
+    burn_rate = round(float(row.week) / 7.0, 6)
 
+    # Percentage on a 0–100 scale, matching LLMUsageResponse.budget_consumed_pct
+    # and get_llm_usage (routes/llm.py) — both use the *100 convention. Keeping
+    # one scale across the two paths avoids a 100x mis-render in the first
+    # consumer that reads this snapshot (e.g. a "budget %" banner or PR-5).
     budget_consumed_pct = 0.0
     if config.monthly_budget_usd and config.monthly_budget_usd > 0:
-        budget_consumed_pct = monthly_spent / config.monthly_budget_usd
+        budget_consumed_pct = round(monthly_spent / config.monthly_budget_usd * 100, 2)
 
     budget_exhausted = False
     if config.daily_cap_usd is not None and daily_spent >= config.daily_cap_usd:

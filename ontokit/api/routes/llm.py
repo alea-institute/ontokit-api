@@ -44,6 +44,7 @@ from ontokit.schemas.llm import (
     MemberFlagsUpdate,
 )
 from ontokit.services.llm import (
+    check_llm_access,
     decrypt_secret,
     encrypt_secret,
     get_budget_status,
@@ -102,7 +103,9 @@ async def _require_project_member(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Not a member of this project",
         )
-    return role or "admin"  # superadmins get admin-level access
+    # Explicit None check: a falsy-but-present role (e.g. "") must NOT
+    # silently escalate to admin.
+    return role if role is not None else "admin"  # superadmin fallback
 
 
 async def _require_owner_or_admin(
@@ -347,37 +350,48 @@ async def get_llm_status(
     """
     role = await _require_project_member(db, project_id, user.id, user.is_superadmin)
     config = await _get_llm_config(db, project_id)
+    has_llm_access = check_llm_access(role)
 
     configured = False
     provider_type: LLMProviderType | None = None
     if config:
-        provider_enum = LLMProviderType(config.provider)
-        provider_type = provider_enum
-        is_local = provider_enum in _LOCAL_PROVIDERS
-        # Local providers (Ollama etc.) don't need an API key to be usable
-        configured = bool(config.api_key_encrypted) or is_local
+        try:
+            provider_enum = LLMProviderType(config.provider)
+        except ValueError:
+            # Legacy/unknown provider string: treat as unconfigured rather
+            # than 500. (The config route shares this pattern — follow-up.)
+            provider_enum = None
+        if provider_enum is not None:
+            provider_type = provider_enum
+            is_local = provider_enum in _LOCAL_PROVIDERS
+            # Local providers (Ollama etc.) don't need an API key to be usable
+            configured = bool(config.api_key_encrypted) or is_local
 
     budget_exhausted = False
     monthly_spent_usd = 0.0
     monthly_budget_usd: float | None = None
     burn_rate_daily = 0.0
     if config:
-        budget_status = await get_budget_status(db, str(project_id), config)
+        budget_status = await get_budget_status(db, project_id, config)
         budget_exhausted = budget_status["budget_exhausted"]
-        monthly_spent_usd = budget_status["monthly_spent_usd"]
         monthly_budget_usd = budget_status["monthly_budget_usd"]
-        burn_rate_daily = budget_status["burn_rate_daily_usd"]
+        # Spend telemetry stays within the sensitivity line the rest of the
+        # module draws: /llm/usage is owner/admin-only, /llm/config (caps) is
+        # member-readable. No-access roles (viewer) get the gating booleans
+        # and the cap, but not actual spend/burn numbers.
+        if has_llm_access:
+            monthly_spent_usd = budget_status["monthly_spent_usd"]
+            burn_rate_daily = budget_status["burn_rate_daily_usd"]
 
     # Per-role allowance. RATE_LIMITS encodes access directly: 0 = no LLM
-    # access (viewer/unknown roles), None = unlimited (owner/admin). A
-    # no-access role must report 0 — reporting null here would read as
-    # "uncapped" under the schema's semantics.
-    # None = unlimited (owner/admin). For capped roles this is the static cap,
-    # not a live count: Redis-backed remaining counts arrive with the dispatch
-    # layer (PR-5), which injects Redis here.
-    daily_remaining: int | None = None
-    if configured:
-        daily_remaining = RATE_LIMITS.get(role, 0)
+    # access (viewer/unknown roles), None = unlimited (owner/admin) — a
+    # no-access role must report 0, since null reads as "uncapped". For capped
+    # roles this is the static cap, not a live count: Redis-backed remaining
+    # counts arrive with the dispatch layer (PR-5), which injects Redis here.
+    # This is a pure static per-role lookup — independent of `configured`, so
+    # a no-access role reports 0 even on an unconfigured project (the null-here
+    # = uncapped invariant must not depend on config state).
+    daily_remaining: int | None = RATE_LIMITS.get(role, 0)
 
     return LLMStatusResponse(
         configured=configured,

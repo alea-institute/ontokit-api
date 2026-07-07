@@ -26,6 +26,17 @@ def _scalar_one(value: object) -> Mock:
     return result
 
 
+def _budget_row(monthly: float, daily: float, week_total: float) -> Mock:
+    """get_budget_status's single consolidated query: result.one().monthly/.daily/.week."""
+    row = Mock()
+    row.monthly = monthly
+    row.daily = daily
+    row.week = week_total
+    result = Mock()
+    result.one = Mock(return_value=row)
+    return result
+
+
 def _member(role: str) -> Mock:
     member = Mock()
     member.role = role
@@ -80,8 +91,29 @@ def test_status_unconfigured_project(authed_client: tuple[TestClient, AsyncMock]
     assert body["configured"] is False
     assert body["provider"] is None
     assert body["budget_exhausted"] is False
-    assert body["daily_remaining"] is None
+    # daily_remaining is a static per-role cap independent of config state:
+    # editor → 500 even when unconfigured (the no-access-role-reports-0 invariant
+    # must not hinge on `configured`; see the viewer test below).
+    assert body["daily_remaining"] == 500
     assert body["monthly_spent_usd"] == 0.0
+
+
+def test_status_viewer_unconfigured_reports_zero_not_null(
+    authed_client: tuple[TestClient, AsyncMock],
+):
+    """L1 invariant: a no-access role reports daily_remaining=0 even when the
+    project is unconfigured — null would read as 'uncapped' regardless of config."""
+    client, session = authed_client
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_one_or_none(_member("viewer")),
+            _scalar_one_or_none(None),  # no LLM config
+        ]
+    )
+
+    resp = client.get(f"/api/v1/projects/{PROJECT_ID}/llm/status")
+    assert resp.status_code == 200
+    assert resp.json()["daily_remaining"] == 0
 
 
 def test_status_editor_gets_static_daily_cap(authed_client: tuple[TestClient, AsyncMock]):
@@ -90,9 +122,7 @@ def test_status_editor_gets_static_daily_cap(authed_client: tuple[TestClient, As
         side_effect=[
             _scalar_one_or_none(_member("editor")),
             _scalar_one_or_none(_llm_config(monthly=100.0)),
-            _scalar_one(20.0),  # monthly spend
-            _scalar_one(1.0),  # daily spend
-            _scalar_one(7.0),  # 7d burn basis
+            _budget_row(monthly=20.0, daily=1.0, week_total=7.0),
         ]
     )
 
@@ -116,9 +146,7 @@ def test_status_viewer_reports_zero_not_unlimited(
         side_effect=[
             _scalar_one_or_none(_member("viewer")),
             _scalar_one_or_none(_llm_config()),
-            _scalar_one(0.0),
-            _scalar_one(0.0),
-            _scalar_one(0.0),
+            _budget_row(monthly=0.0, daily=0.0, week_total=0.0),
         ]
     )
 
@@ -133,9 +161,7 @@ def test_status_owner_unlimited(authed_client: tuple[TestClient, AsyncMock]):
         side_effect=[
             _scalar_one_or_none(_member("owner")),
             _scalar_one_or_none(_llm_config()),
-            _scalar_one(0.0),
-            _scalar_one(0.0),
-            _scalar_one(0.0),
+            _budget_row(monthly=0.0, daily=0.0, week_total=0.0),
         ]
     )
 
@@ -150,9 +176,7 @@ def test_status_reports_budget_exhaustion(authed_client: tuple[TestClient, Async
         side_effect=[
             _scalar_one_or_none(_member("editor")),
             _scalar_one_or_none(_llm_config(monthly=50.0)),
-            _scalar_one(50.0),  # monthly spend == budget
-            _scalar_one(2.0),
-            _scalar_one(10.0),
+            _budget_row(monthly=50.0, daily=2.0, week_total=10.0),  # monthly == budget
         ]
     )
 
@@ -172,9 +196,7 @@ def test_status_local_provider_configured_without_key(
             _scalar_one_or_none(
                 _llm_config(provider="ollama", api_key_encrypted=None, monthly=None)
             ),
-            _scalar_one(0.0),
-            _scalar_one(0.0),
-            _scalar_one(0.0),
+            _budget_row(monthly=0.0, daily=0.0, week_total=0.0),
         ]
     )
 
@@ -191,9 +213,7 @@ def test_status_response_never_leaks_key_material(
         side_effect=[
             _scalar_one_or_none(_member("admin")),
             _scalar_one_or_none(_llm_config()),
-            _scalar_one(0.0),
-            _scalar_one(0.0),
-            _scalar_one(0.0),
+            _budget_row(monthly=0.0, daily=0.0, week_total=0.0),
         ]
     )
 

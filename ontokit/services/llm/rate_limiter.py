@@ -8,8 +8,15 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
+from typing import Protocol
+
+from redis.exceptions import RedisError
 
 logger = logging.getLogger(__name__)
+
+# Infrastructure failures only — a programming error (TypeError/AttributeError
+# from a mis-wired client) must raise, not silently disable metering.
+_REDIS_INFRA_ERRORS = (RedisError, ConnectionError, TimeoutError, OSError)
 
 # Per-role daily call limits. None means unlimited; 0 means no access.
 # COST-03: editors 500/day, COST-04: suggesters 100/day
@@ -20,6 +27,16 @@ RATE_LIMITS: dict[str, int | None] = {
     "suggester": 100,  # COST-04
     "viewer": 0,  # no access
 }
+
+
+class RateLimitRedis(Protocol):
+    """The slice of an async Redis client the rate limiter uses."""
+
+    async def incr(self, name: str) -> int: ...
+
+    async def expire(self, name: str, time: int, nx: bool = ...) -> bool: ...
+
+    async def get(self, name: str) -> bytes | None: ...
 
 
 def _rate_key(project_id: str, user_id: str, today: str | None = None) -> str:
@@ -33,7 +50,7 @@ def _rate_key(project_id: str, user_id: str, today: str | None = None) -> str:
 
 
 async def check_rate_limit(
-    redis: object,
+    redis: RateLimitRedis,
     project_id: str,
     user_id: str,
     role: str,
@@ -63,14 +80,14 @@ async def check_rate_limit(
 
     key = _rate_key(project_id, user_id)
     try:
-        current: int = await redis.incr(key)  # type: ignore[attr-defined]
+        current: int = await redis.incr(key)
         # NX: set the 24h TTL only when the key has none. Unlike the
         # `current == 1` guard, this also repairs keys left TTL-less by a
         # crash between INCR and EXPIRE (which would otherwise rate-limit
         # the user forever once the counter crossed the cap).
-        await redis.expire(key, 86400, nx=True)  # type: ignore[attr-defined]
+        await redis.expire(key, 86400, nx=True)
         return current <= limit
-    except Exception:
+    except _REDIS_INFRA_ERRORS:
         logger.warning(
             "Redis error checking rate limit for user %s in project %s — allowing call",
             user_id,
@@ -81,7 +98,7 @@ async def check_rate_limit(
 
 
 async def get_remaining_calls(
-    redis: object,
+    redis: RateLimitRedis,
     project_id: str,
     user_id: str,
     role: str,
@@ -103,12 +120,12 @@ async def get_remaining_calls(
 
     key = _rate_key(project_id, user_id)
     try:
-        raw = await redis.get(key)  # type: ignore[attr-defined]
+        raw = await redis.get(key)
         if raw is None:
             return limit
         current = int(raw)
         return max(0, limit - current)
-    except Exception:
+    except _REDIS_INFRA_ERRORS:
         logger.warning(
             "Redis error fetching remaining calls for user %s in project %s",
             user_id,
