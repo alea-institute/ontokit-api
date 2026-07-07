@@ -8,7 +8,8 @@ Pipeline (per D-09 / RESEARCH.md Pattern 3):
   5. Normalize confidence values — scales >1.0 by /100 (Pitfall 4 / GEN-08)
   6. Per-suggestion: mint IRI + validate + dedup — SEQUENTIAL to avoid AsyncSession
      concurrent use (Pitfall 5)
-  7. Tag each suggestion provenance="llm-proposed" (GEN-09)
+  7. Tag each suggestion provenance="llm-proposed" (GEN-09) plus model +
+     prompt_template identity (D-08: metadata-only provenance)
   8. Return GenerateSuggestionsResponse with token counts for audit logging
 
 Design notes:
@@ -70,6 +71,7 @@ class SuggestionGenerationService:
         batch_size: int = 5,
         provider: LLMProvider = None,  # type: ignore[assignment]
         project_namespace: str = "",
+        model_id: str | None = None,
     ) -> GenerateSuggestionsResponse:
         """Run the full suggestion generation pipeline.
 
@@ -82,6 +84,9 @@ class SuggestionGenerationService:
             batch_size:         Number of suggestions to request from the LLM (1-10).
             provider:           Instantiated LLMProvider for this call.
             project_namespace:  Canonical namespace for minting new IRIs.
+            model_id:           Model identifier used for this call (e.g. "gpt-4o").
+                                Stamped on each suggestion as provenance metadata
+                                (D-08: metadata only — never raw prompt text).
 
         Returns:
             GenerateSuggestionsResponse with typed, validated suggestions plus
@@ -153,6 +158,8 @@ class SuggestionGenerationService:
                     definition=raw.get("definition"),
                     confidence=confidence,
                     provenance="llm-proposed",
+                    model=model_id,
+                    prompt_template=suggestion_type,
                     validation_errors=validation_errors,
                     duplicate_verdict=duplicate_verdict,
                     duplicate_candidates=duplicate_candidates,

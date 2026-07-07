@@ -114,6 +114,12 @@ class GeneratedSuggestion(BaseModel):
     # Provenance (D-07)
     provenance: Provenance = "llm-proposed"
 
+    # Model / prompt provenance (D-08: metadata only — never raw prompt text).
+    # Carried per-suggestion so reviewers can see exactly which model and which
+    # prompt template produced a proposal without consulting the audit log.
+    model: str | None = None  # Model id used (e.g. "gpt-4o"); None for user-written entries
+    prompt_template: str | None = None  # PROMPT_BUILDERS key (e.g. "children"); None if no LLM
+
     # Embedded validation state (D-09) — populated by the generation pipeline
     validation_errors: list[ValidationError] = Field(default_factory=list)
 

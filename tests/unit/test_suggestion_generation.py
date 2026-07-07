@@ -401,6 +401,82 @@ async def test_gen09_provenance_tagged(
 
 
 # ---------------------------------------------------------------------------
+# D-08: per-suggestion model + prompt-template provenance
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_model_and_prompt_template_provenance(
+    mock_llm_provider,
+    mock_duplicate_check_service,
+):
+    """Every generated suggestion carries provenance, 0-1 confidence, model id, and prompt key (D-08)."""
+    mock_assembler = AsyncMock()
+    mock_assembler.assemble = AsyncMock(return_value=_make_context())
+    mock_validator = AsyncMock()
+    mock_validator.validate_entity = AsyncMock(return_value=[])
+
+    mock_llm_provider.chat = AsyncMock(
+        return_value=(
+            _make_llm_json(
+                [_suggestion("Child A", confidence=0.9), _suggestion("Child B", confidence=85)]
+            ),
+            100, 50,
+        )
+    )
+
+    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    resp = await svc.generate(
+        project_id=PROJECT_ID,
+        branch="main",
+        class_iri=CLASS_IRI,
+        suggestion_type="children",
+        batch_size=5,
+        provider=mock_llm_provider,
+        project_namespace=NAMESPACE,
+        model_id="gpt-4o",
+    )
+
+    assert len(resp.suggestions) == 2
+    for s in resp.suggestions:
+        assert s.provenance == "llm-proposed"
+        assert s.confidence is not None and 0.0 <= s.confidence <= 1.0
+        assert s.model == "gpt-4o"
+        assert s.prompt_template == "children"
+
+
+@pytest.mark.asyncio
+async def test_model_provenance_none_when_model_id_omitted(
+    mock_llm_provider,
+    mock_duplicate_check_service,
+):
+    """model stays None when the caller does not thread a model_id; prompt key is still stamped."""
+    mock_assembler = AsyncMock()
+    mock_assembler.assemble = AsyncMock(return_value=_make_context())
+    mock_validator = AsyncMock()
+    mock_validator.validate_entity = AsyncMock(return_value=[])
+
+    mock_llm_provider.chat = AsyncMock(
+        return_value=(_make_llm_json([_suggestion("Sibling A")]), 100, 50)
+    )
+
+    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    resp = await svc.generate(
+        project_id=PROJECT_ID,
+        branch="main",
+        class_iri=CLASS_IRI,
+        suggestion_type="siblings",
+        batch_size=1,
+        provider=mock_llm_provider,
+        project_namespace=NAMESPACE,
+    )
+
+    assert len(resp.suggestions) == 1
+    assert resp.suggestions[0].model is None
+    assert resp.suggestions[0].prompt_template == "siblings"
+
+
+# ---------------------------------------------------------------------------
 # D-05: batch_size configurable
 # ---------------------------------------------------------------------------
 
