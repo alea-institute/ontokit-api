@@ -124,6 +124,28 @@ def test_request_fields_forwarded_to_service(client: TestClient) -> None:
     assert kwargs["limit"] == 10
 
 
+def test_branch_field_accepted_but_not_forwarded(client: TestClient) -> None:
+    """Pins the current contract: `branch` is accepted by the schema but the
+    service always searches ALL branches (DEDUP-08) and the route does not
+    forward it. If `branch` is ever wired through (or removed from the
+    schema), this test must be updated deliberately."""
+    check = AsyncMock(return_value=_pass_response())
+    with (
+        patch(
+            "ontokit.api.routes.duplicate_check.get_project_service",
+            return_value=_patch_access(allowed=True),
+        ),
+        patch(
+            "ontokit.api.routes.duplicate_check.DuplicateCheckService"
+        ) as service_cls,
+    ):
+        service_cls.return_value.check = check
+        resp = client.post(URL, json={**BODY, "branch": "feature-x"})
+
+    assert resp.status_code == 200
+    assert "branch" not in check.await_args.kwargs
+
+
 def test_422_on_missing_label(client: TestClient) -> None:
     with patch(
         "ontokit.api.routes.duplicate_check.get_project_service",
