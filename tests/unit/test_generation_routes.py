@@ -235,10 +235,15 @@ def test_generate_fails_open_when_redis_unavailable(
 
     assert resp.status_code == 200
     rate_mock.assert_not_awaited()
-    assert any(
-        "Rate limiting bypassed" in rec.message and rec.levelname == "WARNING"
+    from ontokit.services.llm.rate_limiter import FAIL_OPEN_EVENT
+
+    alerts = [
+        rec
         for rec in caplog.records
-    ), "fail-open Redis bypass must emit an alertable WARNING"
+        if getattr(rec, "event", None) == FAIL_OPEN_EVENT and rec.levelname == "WARNING"
+    ]
+    assert alerts, "fail-open Redis bypass must emit the actionable alert marker"
+    assert alerts[0].operation == "route_rate_limit_bypass"
 
 
 def test_generate_402_when_budget_exhausted(authed_client: tuple[TestClient, AsyncMock]):
