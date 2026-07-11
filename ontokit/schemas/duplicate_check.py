@@ -56,12 +56,17 @@ class DuplicateCandidate(BaseModel):
 
 
 class DuplicateCheckRequest(BaseModel):
-    """Request body for POST /projects/{id}/duplicates/check."""
+    """Request body for POST /projects/{id}/duplicates/check.
+
+    Note: there is deliberately no ``branch`` field. Duplicate detection always
+    searches across ALL branches (DEDUP-08) — a duplicate on any branch matters —
+    so a per-request branch scope would be silently ignored. The branch a
+    candidate was found on is reported back on :class:`DuplicateCandidate.branch`.
+    """
 
     label: str
     entity_type: str = "class"
     parent_iri: str | None = None
-    branch: str | None = None
 
 
 class DuplicateCheckResponse(BaseModel):
