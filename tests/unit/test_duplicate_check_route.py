@@ -124,11 +124,16 @@ def test_request_fields_forwarded_to_service(client: TestClient) -> None:
     assert kwargs["limit"] == 10
 
 
-def test_branch_field_accepted_but_not_forwarded(client: TestClient) -> None:
-    """Pins the current contract: `branch` is accepted by the schema but the
-    service always searches ALL branches (DEDUP-08) and the route does not
-    forward it. If `branch` is ever wired through (or removed from the
-    schema), this test must be updated deliberately."""
+def test_branch_field_removed_and_never_forwarded(client: TestClient) -> None:
+    """Pins the contract: `branch` is NOT a request field. Duplicate detection
+    always searches ALL branches (DEDUP-08), so a per-request branch scope would
+    be silently ignored — the field was removed. A stray `branch` in the body is
+    dropped (extra fields ignored) and never reaches the service."""
+    from ontokit.schemas.duplicate_check import DuplicateCheckRequest
+
+    # The request model no longer declares `branch`.
+    assert "branch" not in DuplicateCheckRequest.model_fields
+
     check = AsyncMock(return_value=_pass_response())
     with (
         patch(
@@ -140,6 +145,7 @@ def test_branch_field_accepted_but_not_forwarded(client: TestClient) -> None:
         ) as service_cls,
     ):
         service_cls.return_value.check = check
+        # A stray branch key is ignored by the schema, request still succeeds.
         resp = client.post(URL, json={**BODY, "branch": "feature-x"})
 
     assert resp.status_code == 200
