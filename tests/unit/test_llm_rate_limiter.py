@@ -98,15 +98,27 @@ async def test_suggester_over_limit_blocked():
 
 
 @pytest.mark.asyncio
-async def test_redis_failure_fails_open_by_design():
+async def test_redis_failure_fails_open_by_design(caplog):
     """Documented trade-off: Redis downtime must not block legitimate users.
 
     This is a metering-bypass vector (see PR body); pinned so any change to
-    fail-closed is a conscious decision, not an accident.
+    fail-closed is a conscious decision, not an accident. The fail-open path
+    MUST emit the actionable alert marker so ops can page on it.
     """
+    import logging
+
+    from ontokit.services.llm.rate_limiter import FAIL_OPEN_EVENT
+
     redis = AsyncMock()
     redis.incr = AsyncMock(side_effect=ConnectionError("redis down"))
-    assert await check_rate_limit(redis, "p", "u", "editor") is True
+    with caplog.at_level(logging.WARNING, logger="ontokit.services.llm.rate_limiter"):
+        assert await check_rate_limit(redis, "p", "u", "editor") is True
+
+    records = [r for r in caplog.records if getattr(r, "event", None) == FAIL_OPEN_EVENT]
+    assert len(records) == 1
+    assert records[0].operation == "check_rate_limit"
+    assert records[0].project_id == "p"
+    assert records[0].levelno == logging.WARNING
 
 
 @pytest.mark.asyncio
@@ -124,7 +136,17 @@ async def test_remaining_calls_matrix():
 
 
 @pytest.mark.asyncio
-async def test_remaining_calls_redis_failure_returns_full_limit():
+async def test_remaining_calls_redis_failure_returns_full_limit(caplog):
+    import logging
+
+    from ontokit.services.llm.rate_limiter import FAIL_OPEN_EVENT
+
     redis = AsyncMock()
     redis.get = AsyncMock(side_effect=ConnectionError("redis down"))
-    assert await get_remaining_calls(redis, "p", "u", "suggester") == 100
+    with caplog.at_level(logging.WARNING, logger="ontokit.services.llm.rate_limiter"):
+        assert await get_remaining_calls(redis, "p", "u", "suggester") == 100
+
+    # The remaining-calls path fails open too and must emit the same alert marker.
+    records = [r for r in caplog.records if getattr(r, "event", None) == FAIL_OPEN_EVENT]
+    assert len(records) == 1
+    assert records[0].operation == "get_remaining_calls"
