@@ -17,6 +17,7 @@ from typing import Any
 import httpx
 
 from ontokit.services.llm.base import LLMProvider
+from ontokit.services.llm.ssrf import secure_async_client
 
 logger = logging.getLogger(__name__)
 
@@ -47,7 +48,7 @@ class GoogleProvider(LLMProvider):
         """POST with exponential back-off on 429 / 503."""
         timeout = httpx.Timeout(60.0, connect=10.0)
         for attempt in range(max_retries + 1):
-            async with httpx.AsyncClient(timeout=timeout) as client:
+            async with secure_async_client(timeout=timeout) as client:
                 resp = await client.post(url, headers=self._headers(), json=body)
                 if resp.status_code in (429, 503) and attempt < max_retries:
                     delay = 2**attempt
@@ -118,7 +119,7 @@ class GoogleProvider(LLMProvider):
             "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
             "generationConfig": {"maxOutputTokens": 1},
         }
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with secure_async_client(timeout=30) as client:
             resp = await client.post(url, headers=self._headers(), json=body)
             resp.raise_for_status()
         return True
@@ -126,7 +127,7 @@ class GoogleProvider(LLMProvider):
     async def list_models(self) -> list[str]:
         try:
             url = f"{self._base}/models"
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with secure_async_client(timeout=30) as client:
                 resp = await client.get(url, headers=self._headers())
                 resp.raise_for_status()
                 data = resp.json()

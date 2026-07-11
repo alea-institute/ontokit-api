@@ -22,6 +22,12 @@ class Settings(BaseSettings):
     app_env: Literal["development", "staging", "production"] = "development"
     debug: bool = False
     secret_key: str = Field(default="change-me-in-production")
+    # Retired SECRET_KEY values kept for zero-downtime rotation. Comma-separated;
+    # used for DECRYPTION only (never encryption) via MultiFernet, so ciphertext
+    # written under a previous key still decrypts after SECRET_KEY is rotated.
+    # Migrate stored ciphertext off a retired key with crypto.rotate_secret(),
+    # then drop it from this list. See ontokit/services/llm/crypto.py.
+    secret_key_previous: str = Field(default="")
 
     # Server
     host: str = "0.0.0.0"

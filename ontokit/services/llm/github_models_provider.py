@@ -12,9 +12,8 @@ from __future__ import annotations
 
 import logging
 
-import httpx
-
 from ontokit.services.llm.openai_compat import OpenAICompatProvider
+from ontokit.services.llm.ssrf import secure_async_client
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +25,7 @@ class GitHubModelsProvider(OpenAICompatProvider):
 
     async def list_models(self) -> list[str]:
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with secure_async_client(timeout=30) as client:
                 resp = await client.get(
                     _GITHUB_CATALOG_URL,
                     headers={

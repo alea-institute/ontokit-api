@@ -12,9 +12,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-import httpx
-
 from ontokit.services.llm.base import LLMProvider
+from ontokit.services.llm.ssrf import secure_async_client
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +47,7 @@ class CohereProvider(LLMProvider):
         }
 
         url = f"{self._base}/chat"
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with secure_async_client(timeout=120) as client:
             resp = await client.post(url, headers=self._headers(), json=body)
             resp.raise_for_status()
             data = resp.json()
@@ -80,7 +79,7 @@ class CohereProvider(LLMProvider):
             "max_tokens": 1,
         }
         url = f"{self._base}/chat"
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with secure_async_client(timeout=30) as client:
             resp = await client.post(url, headers=self._headers(), json=body)
             resp.raise_for_status()
         return True
@@ -88,7 +87,7 @@ class CohereProvider(LLMProvider):
     async def list_models(self) -> list[str]:
         try:
             url = f"{self._base}/models"
-            async with httpx.AsyncClient(timeout=30) as client:
+            async with secure_async_client(timeout=30) as client:
                 resp = await client.get(url, headers=self._headers())
                 resp.raise_for_status()
                 data = resp.json()

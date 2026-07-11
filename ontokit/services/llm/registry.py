@@ -258,9 +258,14 @@ def get_provider(
 
     if provider_type in _OPENAI_COMPAT_PROVIDERS:
         from ontokit.services.llm.openai_compat import OpenAICompatProvider
+        from ontokit.services.llm.ssrf import _LOCAL_PROVIDER_VALUES
 
         return OpenAICompatProvider(
-            api_key=api_key, base_url=resolved_base_url, model=resolved_model
+            api_key=api_key,
+            base_url=resolved_base_url,
+            model=resolved_model,
+            # Local providers may point at private/loopback hosts by design.
+            allow_private=provider_type.value in _LOCAL_PROVIDER_VALUES,
         )
 
     raise ValueError(f"No provider implementation for: {provider_type.value!r}")

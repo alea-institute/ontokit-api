@@ -29,18 +29,31 @@ class OpenAICompatProvider(LLMProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        allow_private: bool = False,
     ) -> None:
         super().__init__(api_key=api_key, base_url=base_url, model=model)
+        # Local/self-hosted providers (ollama, lmstudio, custom, llamafile)
+        # legitimately point at private/loopback hosts; cloud providers must not.
+        self._allow_private = allow_private
         self._client: Any = None
 
     def _get_client(self) -> Any:
         if self._client is None:
             import openai
 
+            from ontokit.services.llm.ssrf import secure_async_client
+
             kwargs: dict[str, Any] = {"api_key": self.api_key or "no-key"}
             if self.base_url:
                 kwargs["base_url"] = self.base_url
-            self._client = openai.AsyncOpenAI(**kwargs)
+            # Route the SDK through an SSRF-guarded httpx client: the destination
+            # host is re-validated at connect time (kills the resolve-then-connect
+            # TOCTOU) and redirects are refused. Cloud providers block private IPs;
+            # local providers allow them but the metadata endpoint stays blocked.
+            self._client = openai.AsyncOpenAI(
+                http_client=secure_async_client(allow_private=self._allow_private),
+                **kwargs,
+            )
         return self._client
 
     async def chat(
