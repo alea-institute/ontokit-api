@@ -11,6 +11,7 @@ from ontokit.services.llm.crypto import (
     _INSECURE_DEFAULT_SECRET,
     decrypt_secret,
     encrypt_secret,
+    rotate_secret,
 )
 
 
@@ -24,7 +25,7 @@ def strong_secret(monkeypatch):
     return settings
 
 
-def test_crypto_round_trip(strong_secret):
+def test_crypto_round_trip(strong_secret):  # noqa: ARG001 (pytest fixture applied via side effects)
     """encrypt_secret → decrypt_secret returns the original API key."""
     api_key = "sk-test-1234567890abcdef"
     ciphertext = encrypt_secret(api_key)
@@ -76,3 +77,97 @@ def test_insecure_default_secret_allowed_in_development(monkeypatch):
     # Should not raise; round-trip still works under the (weak) dev secret.
     ciphertext = encrypt_secret("sk-dev-key")
     assert decrypt_secret(ciphertext) == "sk-dev-key"
+
+
+# --- MultiFernet key rotation (SECRET_KEY_PREVIOUS) ---
+
+
+def test_ciphertext_from_previous_key_still_decrypts_after_rotation(monkeypatch):
+    """Rotating SECRET_KEY keeps old ciphertext readable via SECRET_KEY_PREVIOUS."""
+    from ontokit.core.config import settings
+
+    old_secret = "old-" + "a" * 44
+    new_secret = "new-" + "b" * 44
+
+    # Encrypt under the OLD key (no rotation list yet).
+    monkeypatch.setattr(settings, "secret_key", old_secret)
+    monkeypatch.setattr(settings, "app_env", "development")
+    monkeypatch.setattr(settings, "secret_key_previous", "")
+    ciphertext = encrypt_secret("sk-rotate-me")
+
+    # Rotate: new current key, old key retained for decryption only.
+    monkeypatch.setattr(settings, "secret_key", new_secret)
+    monkeypatch.setattr(settings, "secret_key_previous", old_secret)
+
+    # Old ciphertext still decrypts through the retired key.
+    assert decrypt_secret(ciphertext) == "sk-rotate-me"
+
+
+def test_decrypt_fails_when_previous_key_dropped(monkeypatch):
+    """Once the retired key is removed, its ciphertext no longer decrypts."""
+    from cryptography.fernet import InvalidToken
+
+    from ontokit.core.config import settings
+
+    old_secret = "old-" + "a" * 44
+    new_secret = "new-" + "b" * 44
+
+    monkeypatch.setattr(settings, "secret_key", old_secret)
+    monkeypatch.setattr(settings, "app_env", "development")
+    monkeypatch.setattr(settings, "secret_key_previous", "")
+    ciphertext = encrypt_secret("sk-rotate-me")
+
+    # New key only, retired key dropped from the list.
+    monkeypatch.setattr(settings, "secret_key", new_secret)
+    monkeypatch.setattr(settings, "secret_key_previous", "")
+
+    with pytest.raises(InvalidToken):
+        decrypt_secret(ciphertext)
+
+
+def test_rotate_secret_migrates_ciphertext_to_current_key(monkeypatch):
+    """rotate_secret re-encrypts under the current key so the retired key can be retired."""
+    from cryptography.fernet import InvalidToken
+
+    from ontokit.core.config import settings
+
+    old_secret = "old-" + "a" * 44
+    new_secret = "new-" + "b" * 44
+
+    monkeypatch.setattr(settings, "secret_key", old_secret)
+    monkeypatch.setattr(settings, "app_env", "development")
+    monkeypatch.setattr(settings, "secret_key_previous", "")
+    old_ciphertext = encrypt_secret("sk-migrate")
+
+    # Rotate, then migrate the stored ciphertext onto the current key.
+    monkeypatch.setattr(settings, "secret_key", new_secret)
+    monkeypatch.setattr(settings, "secret_key_previous", old_secret)
+    migrated = rotate_secret(old_ciphertext)
+
+    # The migrated ciphertext decrypts with NO retired keys present.
+    monkeypatch.setattr(settings, "secret_key_previous", "")
+    assert decrypt_secret(migrated) == "sk-migrate"
+    # And the original pre-rotation ciphertext no longer decrypts once retired.
+    with pytest.raises(InvalidToken):
+        decrypt_secret(old_ciphertext)
+
+
+def test_shipped_default_never_trusted_as_rotation_key(monkeypatch):
+    """The insecure default is stripped from SECRET_KEY_PREVIOUS, not used to decrypt."""
+    from cryptography.fernet import InvalidToken
+
+    from ontokit.core.config import settings
+
+    # Ciphertext written under the shipped default (dev-tolerated).
+    monkeypatch.setattr(settings, "secret_key", _INSECURE_DEFAULT_SECRET)
+    monkeypatch.setattr(settings, "app_env", "development")
+    monkeypatch.setattr(settings, "secret_key_previous", "")
+    legacy_ciphertext = encrypt_secret("sk-legacy")
+
+    # Move to a strong key but (mistakenly) list the default as a previous key.
+    monkeypatch.setattr(settings, "secret_key", "strong-" + "c" * 44)
+    monkeypatch.setattr(settings, "secret_key_previous", _INSECURE_DEFAULT_SECRET)
+
+    # The default is ignored, so the legacy ciphertext does NOT silently decrypt.
+    with pytest.raises(InvalidToken):
+        decrypt_secret(legacy_ciphertext)
