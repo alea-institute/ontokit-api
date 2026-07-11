@@ -47,6 +47,7 @@ from ontokit.services.llm import (
     get_provider,
     log_llm_call,
 )
+from ontokit.services.llm.rate_limiter import FAIL_OPEN_EVENT
 from ontokit.services.suggestion_generation_service import SuggestionGenerationService
 from ontokit.services.validation_service import ValidationService, detect_project_namespace
 
@@ -179,11 +180,21 @@ async def generate_suggestions(
                 detail=f"Daily LLM call limit reached for your role ({role}). Try again tomorrow.",
             )
     else:
+        # Pool absent → the route-level fail-open. Emit the SAME actionable marker
+        # the limiter-internal fail-open paths use, so ops alert on one signal.
         logger.warning(
-            "Rate limiting bypassed (Redis pool absent) for user %s in project %s "
-            "— call allowed, budget cap still enforced",
-            user.id,
+            "ALERT %s: rate limiter failed open during route_rate_limit_bypass "
+            "(Redis pool absent, call allowed; budget cap still enforced) "
+            "— project=%s user=%s",
+            FAIL_OPEN_EVENT,
             project_id,
+            user.id,
+            extra={
+                "event": FAIL_OPEN_EVENT,
+                "operation": "route_rate_limit_bypass",
+                "project_id": str(project_id),
+                "user_id": user.id,
+            },
         )
 
     # 5. Budget check
