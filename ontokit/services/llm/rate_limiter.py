@@ -18,6 +18,34 @@ logger = logging.getLogger(__name__)
 # from a mis-wired client) must raise, not silently disable metering.
 _REDIS_INFRA_ERRORS = (RedisError, ConnectionError, TimeoutError, OSError)
 
+# Stable, greppable event name for the fail-open path. Every place the rate
+# limiter degrades to "allow" because Redis is unavailable emits this exact
+# marker (message prefix + `event` extra), so ops can alert on ONE signal:
+#   logger name "ontokit.services.llm.rate_limiter", event=llm_rate_limiter_fail_open
+# Sustained volume here means metering is silently disabled — page on it.
+FAIL_OPEN_EVENT = "llm_rate_limiter_fail_open"
+
+
+def _alert_fail_open(
+    operation: str, project_id: str, user_id: str, error: BaseException
+) -> None:
+    """Emit the single actionable fail-open alert shared by every degraded path."""
+    logger.warning(
+        "ALERT %s: rate limiter failed open during %s (metering disabled, call allowed) "
+        "— project=%s user=%s error=%r",
+        FAIL_OPEN_EVENT,
+        operation,
+        project_id,
+        user_id,
+        error,
+        extra={
+            "event": FAIL_OPEN_EVENT,
+            "operation": operation,
+            "project_id": project_id,
+            "user_id": user_id,
+        },
+    )
+
 # Per-role daily call limits. None means unlimited; 0 means no access.
 # COST-03: editors 500/day, COST-04: suggesters 100/day
 RATE_LIMITS: dict[str, int | None] = {
@@ -87,13 +115,10 @@ async def check_rate_limit(
         # the user forever once the counter crossed the cap).
         await redis.expire(key, 86400, nx=True)
         return current <= limit
-    except _REDIS_INFRA_ERRORS:
-        logger.warning(
-            "Redis error checking rate limit for user %s in project %s — allowing call",
-            user_id,
-            project_id,
-        )
-        # Fail open: if Redis is unavailable, don't block legitimate users
+    except _REDIS_INFRA_ERRORS as exc:
+        # Fail open: if Redis is unavailable, don't block legitimate users.
+        # The DB budget layer remains a non-fail-open backstop against runaway spend.
+        _alert_fail_open("check_rate_limit", project_id, user_id, exc)
         return True
 
 
@@ -125,10 +150,7 @@ async def get_remaining_calls(
             return limit
         current = int(raw)
         return max(0, limit - current)
-    except _REDIS_INFRA_ERRORS:
-        logger.warning(
-            "Redis error fetching remaining calls for user %s in project %s",
-            user_id,
-            project_id,
-        )
+    except _REDIS_INFRA_ERRORS as exc:
+        # Fail open: report the full allowance rather than block on infra error.
+        _alert_fail_open("get_remaining_calls", project_id, user_id, exc)
         return limit
