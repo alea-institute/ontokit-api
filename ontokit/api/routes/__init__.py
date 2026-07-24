@@ -23,6 +23,7 @@ from ontokit.api.routes import (
     search,
     semantic_search,
     suggestions,
+    trust,
     user_settings,
 )
 from ontokit.api.routes import (
@@ -45,6 +46,7 @@ router.include_router(ontologies.router, prefix="/ontologies", tags=["Ontologies
 router.include_router(classes.router, tags=["Classes"])
 router.include_router(properties.router, tags=["Properties"])
 router.include_router(suggestions.router, prefix="/projects", tags=["Suggestions"])
+router.include_router(trust.router, prefix="/projects", tags=["Trust Ladder"])
 router.include_router(
     anonymous_suggestions.router, prefix="/projects", tags=["anonymous-suggestions"]
 )
