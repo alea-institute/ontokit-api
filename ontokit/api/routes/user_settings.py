@@ -22,12 +22,15 @@ from ontokit.core.database import get_db
 from ontokit.core.encryption import decrypt_token
 from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.schemas.user_settings import (
+    CommitIdentityResponse,
+    CommitIdentityUpdate,
     GitHubRepoInfo,
     GitHubRepoListResponse,
     GitHubTokenStatus,
     UserSearchResponse,
     UserSearchResult,
 )
+from ontokit.services.commit_identity import CommitIdentityService, noreply_alias
 from ontokit.services.github_service import GitHubService, get_github_service
 from ontokit.services.user_service import UserService, get_user_service
 
@@ -141,3 +144,51 @@ async def search_users(
     ]
 
     return UserSearchResponse(items=items, total=total)
+
+
+@router.get("/me/commit-identity", response_model=CommitIdentityResponse)
+async def get_commit_identity(
+    user: RequiredUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CommitIdentityResponse:
+    """How this contributor's commits are authored (R14, R15).
+
+    The default is a synthetic noreply alias — a real address never enters
+    permanent, publicly mirrored git history unless the contributor explicitly
+    opts in with a verified one.
+    """
+    service = CommitIdentityService(db)
+    preference = await service.get_preference(user.id)
+    _, effective = await service.resolve(user.id, user.name)
+
+    return CommitIdentityResponse(
+        display_name=user.name,
+        noreply_alias=noreply_alias(user.id, user.name),
+        commit_email=preference.commit_email if preference else None,
+        commit_email_verified=bool(preference and preference.commit_email_verified),
+        use_verified_email=bool(preference and preference.use_verified_email),
+        effective_email=effective,
+    )
+
+
+@router.patch("/me/commit-identity", response_model=CommitIdentityResponse)
+async def update_commit_identity(
+    body: CommitIdentityUpdate,
+    user: RequiredUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CommitIdentityResponse:
+    """Set the opt-in authoring address, or toggle its use (R15).
+
+    Changing the address resets verification: an unverified address is never
+    honored, and re-pointing the preference is exactly when someone would try
+    to slip one through.
+    """
+    service = CommitIdentityService(db)
+    await service.set_preference(
+        user.id,
+        commit_email=body.commit_email,
+        use_verified_email=body.use_verified_email,
+    )
+    await db.commit()
+
+    return await get_commit_identity(user, db)

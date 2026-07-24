@@ -169,3 +169,76 @@ class TestSearchUsers:
 
         response = client.get("/api/v1/users/search")
         assert response.status_code == 422
+
+
+class TestCommitIdentityEndpoints:
+    """Commit-authoring identity (R14, R15).
+
+    The contributor-facing half of U9: read the alias that will appear in
+    public git history, and opt in to a verified address instead.
+    """
+
+    def test_get_returns_the_alias_by_default(
+        self, authed_client: tuple[TestClient, AsyncMock]
+    ) -> None:
+        client, session = authed_client
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(return_value=result)
+
+        body = client.get("/api/v1/users/me/commit-identity").json()
+        assert body["noreply_alias"].endswith("@users.noreply.ontokit.local")
+        assert body["effective_email"] == body["noreply_alias"]
+        assert body["use_verified_email"] is False
+        assert "test@example.com" not in body["effective_email"]
+
+    def test_get_returns_the_opted_in_verified_address(
+        self, authed_client: tuple[TestClient, AsyncMock]
+    ) -> None:
+        client, session = authed_client
+        preference = MagicMock()
+        preference.commit_email = "1234+t@users.noreply.github.com"
+        preference.commit_email_verified = True
+        preference.use_verified_email = True
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = preference
+        session.execute = AsyncMock(return_value=result)
+
+        body = client.get("/api/v1/users/me/commit-identity").json()
+        assert body["effective_email"] == "1234+t@users.noreply.github.com"
+
+    def test_unverified_address_is_not_used(
+        self, authed_client: tuple[TestClient, AsyncMock]
+    ) -> None:
+        client, session = authed_client
+        preference = MagicMock()
+        preference.commit_email = "unverified@example.com"
+        preference.commit_email_verified = False
+        preference.use_verified_email = True
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = preference
+        session.execute = AsyncMock(return_value=result)
+
+        body = client.get("/api/v1/users/me/commit-identity").json()
+        assert body["effective_email"] != "unverified@example.com"
+        assert body["commit_email_verified"] is False
+
+    def test_patch_updates_the_preference(
+        self, authed_client: tuple[TestClient, AsyncMock]
+    ) -> None:
+        client, session = authed_client
+        preference = MagicMock()
+        preference.commit_email = None
+        preference.commit_email_verified = False
+        preference.use_verified_email = False
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = preference
+        session.execute = AsyncMock(return_value=result)
+
+        response = client.patch(
+            "/api/v1/users/me/commit-identity",
+            json={"commit_email": "1234+t@users.noreply.github.com"},
+        )
+        assert response.status_code == 200
+        assert preference.commit_email == "1234+t@users.noreply.github.com"
+        assert preference.commit_email_verified is False

@@ -61,3 +61,23 @@ class UserSearchResponse(BaseModel):
 
     items: list[UserSearchResult]
     total: int
+
+
+class CommitIdentityResponse(BaseModel):
+    """How this contributor's commits are authored (R14, R15)."""
+
+    display_name: str | None = None
+    # The synthetic alias used by default. Never a real address.
+    noreply_alias: str
+    commit_email: str | None = None
+    commit_email_verified: bool = False
+    use_verified_email: bool = False
+    # The address that will actually appear in the next commit.
+    effective_email: str
+
+
+class CommitIdentityUpdate(BaseModel):
+    """Opt in to authoring with a verified address instead of the alias."""
+
+    commit_email: str | None = Field(default=None, max_length=320)
+    use_verified_email: bool | None = Field(default=None)
