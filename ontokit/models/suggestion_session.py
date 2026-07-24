@@ -60,6 +60,26 @@ class SuggestionSession(Base):
     submitter_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     client_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
 
+    # --- Trust ladder fields (R10, R11, R12, R13) ---
+    # LLM-generated suggestions are NEVER auto-accepted, at any tier (R13/KD5).
+    is_llm_generated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    # When set, the session is eligible to auto-merge at or after this instant.
+    # NULL means "not scheduled" — never scheduled, or halted by an objection.
+    auto_accept_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # Stamped when a reviewer objection halts the clock (R12).
+    auto_accept_halted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    # First-suggestion human-verification challenge (R10); persisted so a retry
+    # after a network blip does not re-challenge the contributor.
+    verification_passed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     # PR link (set after submit)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pr_id: Mapped[uuid.UUID | None] = mapped_column(

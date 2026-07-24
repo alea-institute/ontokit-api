@@ -33,7 +33,9 @@ from ontokit.models.pull_request import (
     ReviewStatus,
 )
 from ontokit.models.remote_sync import RemoteSyncConfig, SyncEvent
+from ontokit.models.suggestion_outcome import SuggestionOutcome, SuggestionOutcomeType
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
+from ontokit.models.user_commit_identity import UserCommitIdentity
 from ontokit.models.user_github_token import UserGitHubToken
 
 __all__ = [
@@ -69,9 +71,12 @@ __all__ = [
     "PullRequestComment",
     "PullRequestReview",
     "ReviewStatus",
+    "SuggestionOutcome",
+    "SuggestionOutcomeType",
     "SuggestionSession",
     "SuggestionSessionStatus",
     "SyncEvent",
     "RemoteSyncConfig",
+    "UserCommitIdentity",
     "UserGitHubToken",
 ]
