@@ -54,6 +54,7 @@ from ontokit.schemas.suggestion import (
     SuggestionUser,
 )
 from ontokit.schemas.trust import TrustTier
+from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
 from ontokit.services.trust_service import SYSTEM_AUTO_ACCEPT_ACTOR, TrustService
@@ -75,6 +76,7 @@ class SuggestionService:
         self.db = db
         self.git_service = git_service or get_git_service()
         self.trust = TrustService(db)
+        self.commit_identity = CommitIdentityService(db)
 
     # --- Helpers ---
 
@@ -308,6 +310,11 @@ class SuggestionService:
         filename = self._get_git_ontology_path(project)
 
         # Serialize git writes per branch to prevent lost commits
+        # R14: never author with the contributor's real email address.
+        author_name, author_email = await self.commit_identity.resolve(
+            session.user_id, session.user_name
+        )
+
         async with _branch_locks[session.branch]:
             # Commit to the suggestion branch
             commit_message = f"Update {data.entity_label}"
@@ -318,8 +325,8 @@ class SuggestionService:
                     ontology_content=data.content.encode("utf-8"),
                     filename=filename,
                     message=commit_message,
-                    author_name=session.user_name or "Suggester",
-                    author_email=session.user_email or "suggester@ontokit.dev",
+                    author_name=author_name,
+                    author_email=author_email,
                 )
             except Exception as e:
                 logger.error(f"Failed to save suggestion: {e}")
@@ -1134,6 +1141,12 @@ class SuggestionService:
         """Commit a beacon payload to the session branch (fire-and-forget)."""
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
+        author_name, author_email = await self.commit_identity.resolve(
+            session.user_id,
+            session.user_name,
+            is_anonymous=bool(getattr(session, "is_anonymous", False)),
+            session_id=session.session_id,
+        )
 
         # Serialize git writes per branch to prevent lost commits
         async with _branch_locks[session.branch]:
@@ -1145,8 +1158,8 @@ class SuggestionService:
                     ontology_content=data.content.encode("utf-8"),
                     filename=filename,
                     message="Auto-save (beacon)",
-                    author_name=session.user_name or "Suggester",
-                    author_email=session.user_email or "suggester@ontokit.dev",
+                    author_name=author_name,
+                    author_email=author_email,
                 )
             except Exception as e:
                 logger.warning(f"Beacon save failed for session {data.session_id}: {e}")
@@ -1287,6 +1300,15 @@ class SuggestionService:
             self._assert_can_mint(project, None)
         filename = self._get_git_ontology_path(project)
 
+        # R14: the credit name the submitter typed is used for the NAME only —
+        # never for the address, which is a per-session anonymous alias.
+        author_name, author_email = await self.commit_identity.resolve(
+            session.user_id,
+            session.user_name,
+            is_anonymous=True,
+            session_id=session.session_id,
+        )
+
         async with _branch_locks[session.branch]:
             commit_message = f"Update {data.entity_label}"
             try:
@@ -1296,8 +1318,8 @@ class SuggestionService:
                     ontology_content=data.content.encode("utf-8"),
                     filename=filename,
                     message=commit_message,
-                    author_name=session.user_name or "Anonymous",
-                    author_email=session.user_email or "anonymous@ontokit.dev",
+                    author_name=author_name,
+                    author_email=author_email,
                 )
             except Exception as e:
                 logger.error(f"Failed to save anonymous suggestion: {e}")

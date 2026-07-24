@@ -91,6 +91,34 @@ class Settings(BaseSettings):
     # silently falling through to required behavior (/ce:review MEDIUM, PR-2).
     auth_mode: Literal["required", "optional", "disabled"] = "required"
 
+    # --- Contribution trust ladder ---
+    # Domain for the synthetic noreply aliases that author suggestion commits
+    # (R14). Git history is permanent and, once mirrored, public — a real email
+    # address must never enter it. Set this per environment BEFORE the first
+    # suggestion commit lands: the alias is baked into history.
+    commit_noreply_domain: str = "users.noreply.ontokit.local"
+
+    # Human-verification challenge on an untrusted contributor's first
+    # suggestion (R10). "none" is a no-op provider, so a deployment that has
+    # not configured Turnstile is not broken by this feature.
+    verification_provider: Literal["none", "turnstile"] = "none"
+    turnstile_secret_key: str = ""
+
+    # Per-account daily submission cap for the untrusted rung (R10). Anonymous
+    # submissions keep their separate, DB-backed per-IP session limit.
+    untrusted_daily_suggestion_limit: int = 10
+
+    # --- GitHub mirror (R3, R16) ---
+    # System-owned machine identity that pushes the mirror. When empty, sync
+    # falls back to the connecting user's stored PAT with a deprecation
+    # warning, so an in-flight deployment keeps working.
+    github_mirror_token: str = ""
+    github_mirror_username: str = ""
+    # Outbound-only: the system identity pushes canonical history out, and
+    # GitHub-side changes never enter the canonical repository. Set False to
+    # restore the legacy bidirectional behavior.
+    github_mirror_outbound_only: bool = True
+
     # Superadmin - comma-separated list of user IDs with full system access
     superadmin_user_ids: str = ""
 

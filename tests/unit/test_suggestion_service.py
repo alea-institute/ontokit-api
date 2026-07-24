@@ -19,6 +19,19 @@ from ontokit.services.suggestion_service import SuggestionService
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 
 
+def _no_commit_identity_row() -> MagicMock:
+    """Result for the U9 commit-identity preference lookup: no opt-in row.
+
+    Every suggestion commit now resolves its author identity through
+    CommitIdentityService, which reads this table before writing. Without a row
+    the contributor gets the default noreply alias, which is what these tests
+    exercise.
+    """
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    return result
+
+
 def _padded(*results: object, project: object) -> Iterator[object]:
     """Ordered query results, then a trust-aware tail forever.
 
@@ -711,6 +724,7 @@ class TestSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         commit_info = MagicMock()
@@ -786,6 +800,7 @@ class TestSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         mock_git.commit_to_branch = MagicMock(side_effect=RuntimeError("git error"))
@@ -826,6 +841,7 @@ class TestSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         commit_info = MagicMock()
@@ -1514,6 +1530,7 @@ class TestBeaconSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         mock_git.commit_to_branch = MagicMock()
@@ -1619,6 +1636,7 @@ class TestBeaconSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         mock_git.commit_to_branch = MagicMock(side_effect=RuntimeError("disk full"))
