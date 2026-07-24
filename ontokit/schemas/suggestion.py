@@ -1,8 +1,11 @@
 """Suggestion session schemas for request/response validation."""
 
 from datetime import datetime
+from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
+
+from ontokit.schemas.trust import TrustTier
 
 
 class SuggestionSessionResponse(BaseModel):
@@ -22,6 +25,13 @@ class SuggestionSaveRequest(BaseModel):
     content: str = Field(..., description="Full Turtle source content")
     entity_iri: str = Field(..., description="IRI of the entity being modified")
     entity_label: str = Field(..., description="Human-readable label of the entity")
+    mints_entity: bool = Field(
+        default=False,
+        description=(
+            "True when this save introduces a NEW class or property. Minting requires "
+            "trusted status (R8); editing existing entities does not."
+        ),
+    )
 
 
 class SuggestionSaveResponse(BaseModel):
@@ -73,6 +83,11 @@ class SuggestionSessionSummary(BaseModel):
     revision: int | None = None
     summary: str | None = None
     is_anonymous: bool = False
+    # Trust ladder (R9): provenance is self-evident on every review row.
+    submitter_tier: TrustTier | None = None
+    is_llm_generated: bool = False
+    auto_accept_after: datetime | None = None
+    auto_accept_halted_at: datetime | None = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -109,3 +124,56 @@ class SuggestionResubmitRequest(BaseModel):
     """Request body for resubmitting a suggestion session."""
 
     summary: str | None = Field(default=None, description="Updated summary")
+
+
+# --- Triage queue schemas (R9) ---
+
+
+class SuggestionQueue(StrEnum):
+    """Which review queue a listing targets."""
+
+    TRIAGE = "triage"
+    REVIEW = "review"
+
+
+class BulkReviewAction(StrEnum):
+    """What a bulk review pass does to each selected session."""
+
+    ACCEPT = "accept"
+    DISMISS = "dismiss"
+
+
+class BulkReviewRequest(BaseModel):
+    """Bulk accept or dismiss for the triage queue."""
+
+    session_ids: list[str] = Field(..., min_length=1, max_length=100)
+    action: BulkReviewAction
+    note: str | None = Field(default=None, max_length=1000)
+
+
+class BulkReviewFailure(BaseModel):
+    """One session that could not be processed, and why."""
+
+    session_id: str
+    reason: str
+
+
+class BulkReviewResponse(BaseModel):
+    """Partial-success result: one stale session must not abort the batch."""
+
+    action: BulkReviewAction
+    succeeded: list[str]
+    failed: list[BulkReviewFailure]
+
+
+class SuggestionCapabilitiesResponse(BaseModel):
+    """What the caller may do on this project, and how trust is earned."""
+
+    tier: TrustTier
+    can_suggest: bool
+    can_mint_entities: bool
+    promotion_threshold: int
+    accepted_count: int
+    auto_accept_enabled: bool
+    auto_accept_quiet_days: int
+    verification_required: bool = False

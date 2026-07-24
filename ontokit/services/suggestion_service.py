@@ -25,6 +25,7 @@ from ontokit.core.auth import CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.project import Project
+from ontokit.models.suggestion_outcome import SuggestionOutcomeType
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.anonymous_suggestion import (
     AnonymousSessionCreateResponse,
@@ -33,7 +34,13 @@ from ontokit.schemas.anonymous_suggestion import (
 )
 from ontokit.schemas.pull_request import PRCreate
 from ontokit.schemas.suggestion import (
+    BulkReviewAction,
+    BulkReviewFailure,
+    BulkReviewRequest,
+    BulkReviewResponse,
     SuggestionBeaconRequest,
+    SuggestionCapabilitiesResponse,
+    SuggestionQueue,
     SuggestionRejectRequest,
     SuggestionRequestChangesRequest,
     SuggestionResubmitRequest,
@@ -46,8 +53,10 @@ from ontokit.schemas.suggestion import (
     SuggestionSubmitResponse,
     SuggestionUser,
 )
+from ontokit.schemas.trust import TrustTier
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
+from ontokit.services.trust_service import TrustService
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +74,7 @@ class SuggestionService:
     ) -> None:
         self.db = db
         self.git_service = git_service or get_git_service()
+        self.trust = TrustService(db)
 
     # --- Helpers ---
 
@@ -293,6 +303,8 @@ class SuggestionService:
             )
 
         project = await self._get_project(project_id)
+        if data.mints_entity:
+            self._assert_can_mint(project, user)
         filename = self._get_git_ontology_path(project)
 
         # Serialize git writes per branch to prevent lost commits
@@ -422,6 +434,7 @@ class SuggestionService:
             session.pr_number = existing_pr.pr_number
             session.pr_id = existing_pr.id
             session.last_activity = datetime.now(UTC)
+            await self._schedule_auto_accept(project_id, session, user)
             await self.db.commit()
 
             return SuggestionSubmitResponse(
@@ -457,6 +470,10 @@ class SuggestionService:
         session.pr_number = pr_response.pr_number
         session.pr_id = pr_response.id
         session.last_activity = datetime.now(UTC)
+
+        # Start the auto-accept quiet clock if — and only if — this submission
+        # is eligible (R11): trusted human, on a project that opted in.
+        await self._schedule_auto_accept(project_id, session, user)
 
         # Notify project editors/admins about the suggestion
         project = await self._get_project(project_id)
@@ -532,7 +549,22 @@ class SuggestionService:
         # Unreachable, but satisfies type checker
         raise RuntimeError("Failed to allocate PR number")
 
-    async def _build_summary(self, s: SuggestionSession) -> SuggestionSessionSummary:
+    def _summary_tier(self, project: Project | None, s: SuggestionSession) -> TrustTier | None:
+        """Resolve the submitter's tier for a review-queue row.
+
+        Resolved from the project's already-loaded members rather than a
+        per-row query — the triage list is exactly where an N+1 would bite.
+        """
+        if project is None:
+            return None
+        if getattr(s, "is_anonymous", False):
+            return TrustTier.ANONYMOUS
+        submitter = CurrentUser(id=s.user_id, email=s.user_email, name=s.user_name)
+        return self.trust.resolve_tier(project, submitter)
+
+    async def _build_summary(
+        self, s: SuggestionSession, project: Project | None = None
+    ) -> SuggestionSessionSummary:
         """Build a SuggestionSessionSummary from a session model."""
         pr_url = None
         github_pr_url = None
@@ -579,7 +611,134 @@ class SuggestionService:
             revision=s.revision,
             summary=s.summary,
             is_anonymous=is_anonymous,
+            submitter_tier=self._summary_tier(project, s),
+            is_llm_generated=bool(getattr(s, "is_llm_generated", False)),
+            auto_accept_after=getattr(s, "auto_accept_after", None),
+            auto_accept_halted_at=getattr(s, "auto_accept_halted_at", None),
         )
+
+    # --- Trust ladder helpers (R5, R6, R11, R12) ---
+
+    def _assert_can_mint(self, project: Project, user: CurrentUser | None) -> None:
+        """Refuse entity minting below the trusted rung (R8 / KD4).
+
+        Server-side enforcement. The capabilities endpoint is the matching
+        affordance, and both read the same ``resolve_tier``, so the UI and the
+        gate can never disagree.
+        """
+        tier = self.trust.resolve_tier(project, user)
+        if self.trust.can_mint_entities(tier):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "reason": "trust_required_to_mint",
+                "message": (
+                    "Creating new entities requires trusted status on this project. "
+                    "Suggest edits to existing entities to earn it."
+                ),
+                "tier": str(tier),
+            },
+        )
+
+    async def get_capabilities(
+        self, project_id: UUID, user: CurrentUser | None
+    ) -> SuggestionCapabilitiesResponse:
+        """What the caller may do here, and how trust is earned (AE2).
+
+        Private projects disclose nothing to callers without access — a tier
+        readout is itself information about the project.
+        """
+        project = await self._get_project(project_id)
+        if user is None and not project.is_public:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This project is not public",
+            )
+
+        tier = self.trust.resolve_tier(project, user)
+        accepted = 0
+        verification_required = False
+        if user is not None and tier is TrustTier.UNTRUSTED:
+            accepted = await self.trust.count_accepted(project_id, user.id)
+            verification_required = (await self.trust.count_outcomes(project_id, user.id)) == 0
+        elif user is not None and tier is not TrustTier.ANONYMOUS:
+            accepted = await self.trust.count_accepted(project_id, user.id)
+
+        return SuggestionCapabilitiesResponse(
+            tier=tier,
+            can_suggest=self.trust.can_suggest(tier),
+            can_mint_entities=self.trust.can_mint_entities(tier),
+            promotion_threshold=project.trust_promotion_threshold or 5,
+            accepted_count=accepted,
+            auto_accept_enabled=bool(project.auto_accept_enabled),
+            auto_accept_quiet_days=project.auto_accept_quiet_days or 7,
+            verification_required=verification_required,
+        )
+
+    async def _record_terminal_outcome(
+        self,
+        project_id: UUID,
+        session: SuggestionSession,
+        outcome: SuggestionOutcomeType,
+        decided_by: str | None,
+        note: str | None = None,
+    ) -> None:
+        """Append the outcome row and, on acceptance, run auto-promotion.
+
+        Deliberately does NOT commit: the caller commits this together with the
+        session's status change, so a resolved suggestion can never exist
+        without its outcome row (which would silently break promotion counting).
+        """
+        await self.trust.record_outcome(project_id, session, outcome, decided_by, note)
+
+        if outcome is not SuggestionOutcomeType.ACCEPTED:
+            return
+
+        project = await self._get_project(project_id)
+        promoted = await self.trust.evaluate_promotion(project, session.user_id)
+        if not promoted:
+            return
+
+        notif = NotificationService(self.db)
+        await notif.create_notification(
+            user_id=session.user_id,
+            notification_type="trust_promoted",
+            title=f"You are now a trusted contributor on {project.name}",
+            body=(
+                "Your suggestions are now reviewed on the trusted queue, and you can "
+                "create new entities on this project."
+            ),
+            project_id=project_id,
+            project_name=project.name,
+        )
+
+    def _halt_auto_accept(self, session: SuggestionSession) -> None:
+        """Stop the quiet-period clock because a reviewer objected (R12)."""
+        session.auto_accept_after = None
+        session.auto_accept_halted_at = datetime.now(UTC)
+
+    async def _schedule_auto_accept(
+        self, project_id: UUID, session: SuggestionSession, user: CurrentUser
+    ) -> None:
+        """Start (or restart) the quiet-period clock if the session is eligible.
+
+        Every write to ``auto_accept_after`` funnels through the single
+        eligibility predicate on TrustService, so R13's "LLM output never
+        auto-accepts" cannot be bypassed by adding a call site.
+
+        A resolved objection restarts the clock from zero (KTD11) rather than
+        resuming the remainder — a reviewer who objected gets a full fresh
+        window to look at the revision.
+        """
+        project = await self._get_project(project_id)
+        tier = self.trust.resolve_tier(project, user)
+        if not self.trust.is_auto_accept_eligible(project, session, tier):
+            session.auto_accept_after = None
+            return
+        quiet_days = project.auto_accept_quiet_days or 7
+        session.auto_accept_after = datetime.now(UTC) + timedelta(days=quiet_days)
+        session.auto_accept_halted_at = None
 
     def _can_review(self, role: str | None, user: CurrentUser) -> bool:
         """Check if the user's role allows reviewing suggestions."""
@@ -587,8 +746,13 @@ class SuggestionService:
             return True
         return role in ("owner", "admin", "editor")
 
-    async def _verify_reviewer_access(self, project_id: UUID, user: CurrentUser) -> None:
-        """Verify the user has editor/admin/owner role (can review)."""
+    async def _verify_reviewer_access(self, project_id: UUID, user: CurrentUser) -> Project:
+        """Verify the user has editor/admin/owner role, and return the project.
+
+        Returning the loaded project lets callers resolve submitter tiers from
+        its members collection without a second fetch — the triage list is
+        exactly where an extra query per row would bite.
+        """
         project = await self._get_project(project_id)
         role = self._get_user_role(project, user)
         if not self._can_review(role, user):
@@ -596,6 +760,7 @@ class SuggestionService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Editor access or above required to review suggestions",
             )
+        return project
 
     async def list_sessions(
         self, project_id: UUID, user: CurrentUser
@@ -615,10 +780,15 @@ class SuggestionService:
         return SuggestionSessionListResponse(items=items)
 
     async def list_pending(
-        self, project_id: UUID, user: CurrentUser
+        self, project_id: UUID, user: CurrentUser, queue: str | None = None
     ) -> SuggestionSessionListResponse:
-        """List pending suggestion sessions for review (editors/admins)."""
-        await self._verify_reviewer_access(project_id, user)
+        """List pending suggestion sessions for review (editors/admins).
+
+        ``queue`` splits the list by submitter tier (R9): ``triage`` is the
+        anonymous + untrusted rungs, ``review`` is the trusted rung. Omitting it
+        returns everything, which keeps existing clients working unchanged.
+        """
+        project = await self._verify_reviewer_access(project_id, user)
 
         result = await self.db.execute(
             select(SuggestionSession)
@@ -635,11 +805,61 @@ class SuggestionService:
         )
         sessions = result.scalars().all()
 
-        items = [await self._build_summary(s) for s in sessions]
+        items = [await self._build_summary(s, project) for s in sessions]
+        if queue == SuggestionQueue.TRIAGE.value:
+            items = [
+                i for i in items if i.submitter_tier in (TrustTier.ANONYMOUS, TrustTier.UNTRUSTED)
+            ]
+        elif queue == SuggestionQueue.REVIEW.value:
+            items = [
+                i for i in items if i.submitter_tier in (TrustTier.TRUSTED, TrustTier.REVIEWER)
+            ]
         return SuggestionSessionListResponse(items=items)
 
-    async def approve(self, project_id: UUID, session_id: str, user: CurrentUser) -> None:
-        """Approve a suggestion session — merges the PR."""
+    async def bulk_review(
+        self, project_id: UUID, data: BulkReviewRequest, user: CurrentUser
+    ) -> BulkReviewResponse:
+        """Accept or dismiss many suggestions in one pass (R9).
+
+        Partial-success by design: each session is processed independently and
+        failures are reported per item, because one stale session must never
+        abort a forty-item dismissal.
+        """
+        await self._verify_reviewer_access(project_id, user)
+
+        succeeded: list[str] = []
+        failed: list[BulkReviewFailure] = []
+        for session_id in data.session_ids:
+            try:
+                if data.action is BulkReviewAction.ACCEPT:
+                    await self.approve(project_id, session_id, user)
+                else:
+                    await self.dismiss(project_id, session_id, user, data.note)
+                succeeded.append(session_id)
+            except HTTPException as e:
+                await self.db.rollback()
+                failed.append(BulkReviewFailure(session_id=session_id, reason=str(e.detail)))
+            except Exception as e:  # noqa: BLE001 — one bad row must not abort the batch
+                await self.db.rollback()
+                logger.warning("Bulk %s failed for session %s: %s", data.action, session_id, e)
+                failed.append(BulkReviewFailure(session_id=session_id, reason="Unexpected error"))
+
+        return BulkReviewResponse(action=data.action, succeeded=succeeded, failed=failed)
+
+    async def approve(
+        self,
+        project_id: UUID,
+        session_id: str,
+        user: CurrentUser,
+        *,
+        decided_by: str | None = None,
+    ) -> None:
+        """Approve a suggestion session — merges the PR.
+
+        ``decided_by`` overrides the recorded actor so the auto-accept sweep can
+        attribute its own merges to ``system:auto-accept`` while reusing this
+        one path (and therefore the outcome log and promotion evaluation).
+        """
         await self._verify_reviewer_access(project_id, user)
         session = await self._get_session(project_id, session_id)
 
@@ -672,6 +892,43 @@ class SuggestionService:
         session.reviewer_email = user.email
         session.reviewed_at = datetime.now(UTC)
         session.last_activity = datetime.now(UTC)
+        session.auto_accept_after = None
+        await self._record_terminal_outcome(
+            project_id, session, SuggestionOutcomeType.ACCEPTED, decided_by or user.id
+        )
+        await self.db.commit()
+
+    async def dismiss(
+        self, project_id: UUID, session_id: str, user: CurrentUser, note: str | None = None
+    ) -> None:
+        """Dismiss a triage-queue suggestion without merging it (R9).
+
+        Distinct from ``reject``: dismissal is the fast skim verdict on junk and
+        carries no feedback obligation, where rejection is a considered review
+        outcome with a reason the contributor sees.
+        """
+        await self._verify_reviewer_access(project_id, user)
+        session = await self._get_session(project_id, session_id)
+
+        if session.status not in (
+            SuggestionSessionStatus.SUBMITTED.value,
+            SuggestionSessionStatus.AUTO_SUBMITTED.value,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Session is {session.status}, cannot dismiss",
+            )
+
+        session.status = SuggestionSessionStatus.DISCARDED.value
+        session.reviewer_id = user.id
+        session.reviewer_name = user.name
+        session.reviewer_email = user.email
+        session.reviewed_at = datetime.now(UTC)
+        session.last_activity = datetime.now(UTC)
+        self._halt_auto_accept(session)
+        await self._record_terminal_outcome(
+            project_id, session, SuggestionOutcomeType.DISMISSED, user.id, note
+        )
         await self.db.commit()
 
     async def reject(
@@ -697,6 +954,11 @@ class SuggestionService:
         session.reviewer_feedback = data.reason
         session.reviewed_at = datetime.now(UTC)
         session.last_activity = datetime.now(UTC)
+        # An objection halts the quiet-period clock (R12).
+        self._halt_auto_accept(session)
+        await self._record_terminal_outcome(
+            project_id, session, SuggestionOutcomeType.REJECTED, user.id, data.reason
+        )
         await self.db.commit()
 
     async def request_changes(
@@ -726,6 +988,9 @@ class SuggestionService:
         session.reviewer_feedback = data.feedback
         session.reviewed_at = datetime.now(UTC)
         session.last_activity = datetime.now(UTC)
+        # An objection halts the quiet-period clock (R12). No outcome row: the
+        # session has not reached a terminal state, it is being revised.
+        self._halt_auto_accept(session)
         await self.db.commit()
 
     async def resubmit(
@@ -752,6 +1017,8 @@ class SuggestionService:
         session.reviewer_feedback = None
         session.reviewed_at = None
         session.last_activity = datetime.now(UTC)
+        # The objection is resolved: restart the quiet clock from zero (KTD11).
+        await self._schedule_auto_accept(project_id, session, user)
         await self.db.commit()
 
         return SuggestionSubmitResponse(
@@ -1000,6 +1267,9 @@ class SuggestionService:
             )
 
         project = await self._get_project(project_id)
+        if data.mints_entity:
+            # Anonymous callers are below the trusted rung by construction (R8).
+            self._assert_can_mint(project, None)
         filename = self._get_git_ontology_path(project)
 
         async with _branch_locks[session.branch]:

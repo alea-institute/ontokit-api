@@ -6,10 +6,13 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import RequiredUser
+from ontokit.core.auth import OptionalUser, RequiredUser
 from ontokit.core.database import get_db
 from ontokit.schemas.suggestion import (
+    BulkReviewRequest,
+    BulkReviewResponse,
     SuggestionBeaconRequest,
+    SuggestionCapabilitiesResponse,
     SuggestionRejectRequest,
     SuggestionRequestChangesRequest,
     SuggestionResubmitRequest,
@@ -127,9 +130,17 @@ async def list_pending(
     project_id: UUID,
     service: Annotated[SuggestionService, Depends(get_service)],
     user: RequiredUser,
+    queue: str | None = Query(
+        None,
+        pattern="^(triage|review)$",
+        description=(
+            "Split the queue by submitter tier (R9): 'triage' for anonymous and "
+            "untrusted submissions, 'review' for trusted ones. Omit for all."
+        ),
+    ),
 ) -> SuggestionSessionListResponse:
     """List pending suggestion sessions for review (editors/admins only)."""
-    return await service.list_pending(project_id, user)
+    return await service.list_pending(project_id, user, queue)
 
 
 @router.post(
@@ -189,3 +200,54 @@ async def resubmit_session(
 ) -> SuggestionSubmitResponse:
     """Resubmit a suggestion session after addressing requested changes."""
     return await service.resubmit(project_id, session_id, data, user)
+
+
+@router.get(
+    "/{project_id}/suggestions/capabilities",
+    response_model=SuggestionCapabilitiesResponse,
+)
+async def get_capabilities(
+    project_id: UUID,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: OptionalUser,
+) -> SuggestionCapabilitiesResponse:
+    """What the caller may do on this project, and how trust is earned.
+
+    Drives the editor's explained-disabled affordances (AE2). Reads the same
+    tier resolution the server-side gates use, so the UI and the enforcement
+    can never disagree.
+    """
+    return await service.get_capabilities(project_id, user)
+
+
+@router.post(
+    "/{project_id}/suggestions/sessions/{session_id}/dismiss",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def dismiss_session(
+    project_id: UUID,
+    session_id: str,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: RequiredUser,
+    note: str | None = Query(None, max_length=1000),
+) -> None:
+    """Dismiss a triage-queue suggestion without merging it (editors/admins)."""
+    await service.dismiss(project_id, session_id, user, note)
+
+
+@router.post(
+    "/{project_id}/suggestions/bulk-review",
+    response_model=BulkReviewResponse,
+)
+async def bulk_review(
+    project_id: UUID,
+    data: BulkReviewRequest,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: RequiredUser,
+) -> BulkReviewResponse:
+    """Accept or dismiss many suggestions at once (editors/admins only).
+
+    Partial-success: the response reports per-session failures rather than
+    aborting the batch on the first stale row.
+    """
+    return await service.bulk_review(project_id, data, user)
