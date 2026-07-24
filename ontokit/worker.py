@@ -646,6 +646,28 @@ async def auto_submit_stale_suggestions(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
 
 
+async def auto_accept_suggestions(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Merge trusted suggestions whose quiet period has elapsed (R11).
+
+    Anonymous, untrusted and LLM-generated suggestions are excluded at the
+    query, at the atomic claim, and again by the merge-time tier re-check —
+    R13 ("LLM output never auto-accepts, at any tier, ever") is not allowed to
+    depend on a single guard.
+    """
+    db: AsyncSession = ctx["db"]
+
+    try:
+        from ontokit.services.suggestion_service import SuggestionService
+
+        count = await SuggestionService(db).auto_accept_ripe_sessions()
+        logger.info(f"Auto-accept complete: {count} trusted suggestions merged")
+        return {"auto_accepted": count}
+
+    except Exception as e:
+        logger.exception(f"Auto-accept sweep failed: {e}")
+        raise
+
+
 async def run_consistency_check_task(
     ctx: dict[str, Any],
     project_id: str,
@@ -1299,6 +1321,7 @@ class WorkerSettings:
         check_all_projects_normalization,
         sync_github_projects,
         auto_submit_stale_suggestions,
+        auto_accept_suggestions,
         run_embedding_generation_task,
         run_single_entity_embed_task,
         run_batch_entity_embed_task,
@@ -1326,6 +1349,13 @@ class WorkerSettings:
             auto_submit_stale_suggestions,
             hour=None,
             minute={5, 15, 25, 35, 45, 55},
+        ),
+        # Auto-accept ripe trusted suggestions every 15 minutes. The quiet
+        # period is measured in days, so finer granularity buys nothing.
+        cron(
+            auto_accept_suggestions,
+            hour=None,
+            minute={0, 15, 30, 45},
         ),
     ]
 

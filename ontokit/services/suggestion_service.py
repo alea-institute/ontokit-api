@@ -56,7 +56,7 @@ from ontokit.schemas.suggestion import (
 from ontokit.schemas.trust import TrustTier
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
-from ontokit.services.trust_service import TrustService
+from ontokit.services.trust_service import SYSTEM_AUTO_ACCEPT_ACTOR, TrustService
 
 logger = logging.getLogger(__name__)
 
@@ -861,6 +861,21 @@ class SuggestionService:
         one path (and therefore the outcome log and promotion evaluation).
         """
         await self._verify_reviewer_access(project_id, user)
+        await self._approve_unchecked(project_id, session_id, user, decided_by)
+
+    async def _approve_unchecked(
+        self,
+        project_id: UUID,
+        session_id: str,
+        user: CurrentUser,
+        decided_by: str | None = None,
+    ) -> None:
+        """Approve without the reviewer-role gate.
+
+        Internal only. ``approve`` is the authorized entry point; the auto-accept
+        sweep is the sole other caller, and its authorization is the trust tier
+        re-check it performs immediately before calling in.
+        """
         session = await self._get_session(project_id, session_id)
 
         if session.status not in (
@@ -1486,6 +1501,108 @@ class SuggestionService:
                 except Exception as revert_err:
                     logger.error(
                         f"Failed to revert session {session.session_id} to ACTIVE: {revert_err}"
+                    )
+
+        return count
+
+    async def auto_accept_ripe_sessions(self) -> int:
+        """Merge trusted suggestions whose quiet period has elapsed (R11).
+
+        Multi-instance safe: each session is claimed with a conditional UPDATE
+        carrying the full predicate, and only a rowcount of exactly 1 proceeds —
+        the same pattern ``auto_submit_stale_sessions`` uses (R17).
+
+        Tier is re-verified at merge time as well as at scheduling time: a
+        contributor whose trust was revoked while the clock ran must not
+        auto-merge. The clock is the braces; this is the belt.
+
+        Returns the number of sessions auto-merged.
+        """
+        now = datetime.now(UTC)
+
+        result = await self.db.execute(
+            select(SuggestionSession).where(
+                SuggestionSession.status.in_(
+                    [
+                        SuggestionSessionStatus.SUBMITTED.value,
+                        SuggestionSessionStatus.AUTO_SUBMITTED.value,
+                    ]
+                ),
+                SuggestionSession.auto_accept_after.is_not(None),
+                SuggestionSession.auto_accept_after <= now,
+                SuggestionSession.auto_accept_halted_at.is_(None),
+                SuggestionSession.is_anonymous.is_(False),
+                SuggestionSession.is_llm_generated.is_(False),
+            )
+        )
+        ripe = result.scalars().all()
+
+        count = 0
+        for session in ripe:
+            # Atomically claim by clearing the schedule: a second worker's
+            # identical UPDATE then matches zero rows.
+            claim_result = await self.db.execute(
+                update(SuggestionSession)
+                .where(
+                    SuggestionSession.id == session.id,
+                    SuggestionSession.auto_accept_after.is_not(None),
+                    SuggestionSession.auto_accept_after <= now,
+                    SuggestionSession.auto_accept_halted_at.is_(None),
+                    SuggestionSession.is_anonymous.is_(False),
+                    SuggestionSession.is_llm_generated.is_(False),
+                )
+                .values(auto_accept_after=None)
+            )
+            if claim_result.rowcount != 1:  # type: ignore[attr-defined]
+                continue  # Another worker claimed it first
+            await self.db.commit()
+
+            project = await self._get_project(session.project_id)
+            submitter = CurrentUser(
+                id=session.user_id, email=session.user_email, name=session.user_name
+            )
+            if self.trust.resolve_tier(project, submitter) is not TrustTier.TRUSTED:
+                logger.info(
+                    "Skipped auto-accept for session %s: submitter %s is no longer trusted",
+                    session.session_id,
+                    session.user_id,
+                )
+                continue
+
+            # Merge through the normal approve path so the outcome row,
+            # promotion evaluation and PR merge all still happen. The reviewer
+            # gate is skipped deliberately: the tier re-check above IS this
+            # path's authorization.
+            system_actor = CurrentUser(
+                id=SYSTEM_AUTO_ACCEPT_ACTOR,
+                email=None,
+                name="OntoKit auto-accept",
+            )
+            try:
+                await self._approve_unchecked(
+                    session.project_id,
+                    session.session_id,
+                    system_actor,
+                    SYSTEM_AUTO_ACCEPT_ACTOR,
+                )
+                count += 1
+                logger.info(
+                    "Auto-accepted suggestion session %s for project %s after the quiet period",
+                    session.session_id,
+                    session.project_id,
+                )
+            except Exception as e:
+                logger.error("Failed to auto-accept session %s: %s", session.session_id, e)
+                await self.db.rollback()
+                # Revert the claim so the next sweep retries.
+                try:
+                    session.auto_accept_after = now
+                    await self.db.commit()
+                except Exception as revert_err:
+                    logger.error(
+                        "Failed to revert auto-accept claim for session %s: %s",
+                        session.session_id,
+                        revert_err,
                     )
 
         return count
