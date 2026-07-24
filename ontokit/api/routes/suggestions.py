@@ -1,11 +1,13 @@
 """Suggestion session management endpoints."""
 
-from typing import Annotated
+import logging
+from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser
 from ontokit.core.database import get_db
 from ontokit.schemas.suggestion import (
@@ -24,6 +26,9 @@ from ontokit.schemas.suggestion import (
     SuggestionSubmitResponse,
 )
 from ontokit.services.suggestion_service import SuggestionService, get_suggestion_service
+from ontokit.services.trust_rate_limiter import TrustLimiterRedis
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -70,11 +75,34 @@ async def submit_session(
     project_id: UUID,
     session_id: str,
     data: SuggestionSubmitRequest,
+    request: Request,
     service: Annotated[SuggestionService, Depends(get_service)],
     user: RequiredUser,
+    x_verification_token: Annotated[str | None, Header()] = None,
 ) -> SuggestionSubmitResponse:
-    """Submit a suggestion session by creating a pull request."""
-    return await service.submit(project_id, session_id, data, user)
+    """Submit a suggestion session by creating a pull request.
+
+    Untrusted contributors pass a human-verification challenge on their first
+    suggestion and are rate-limited per account thereafter (R10). Both gates run
+    before any git or PR work, so a refused submission leaves nothing behind.
+    """
+    redis = None
+    try:
+        redis = await get_arq_pool()
+    except Exception:  # noqa: BLE001 — the limiter fails closed on a missing client
+        logger.warning("Redis pool unavailable for the trust submission limiter")
+
+    return await service.submit(
+        project_id,
+        session_id,
+        data,
+        user,
+        verification_token=x_verification_token,
+        client_ip=request.client.host if request.client else None,
+        # ArqRedis satisfies TrustLimiterRedis structurally; the protocol
+        # exists so the limiter does not depend on the ARQ client type.
+        redis=cast("TrustLimiterRedis | None", redis),
+    )
 
 
 @router.get(

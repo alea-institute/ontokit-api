@@ -57,7 +57,9 @@ from ontokit.schemas.trust import TrustTier
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
+from ontokit.services.trust_rate_limiter import TrustLimiterRedis, check_and_consume
 from ontokit.services.trust_service import SYSTEM_AUTO_ACCEPT_ACTOR, TrustService
+from ontokit.services.verification import get_verification_provider
 
 logger = logging.getLogger(__name__)
 
@@ -106,8 +108,12 @@ class SuggestionService:
             return True
         return role in ("owner", "admin", "editor", "suggester")
 
-    async def _verify_project_access(self, project_id: UUID, user: CurrentUser) -> None:
-        """Verify the user still has suggest permissions on the project."""
+    async def _verify_project_access(self, project_id: UUID, user: CurrentUser) -> Project:
+        """Verify the user still has suggest permissions, and return the project.
+
+        Returning the loaded project lets callers resolve the trust tier from
+        its members collection without a second fetch.
+        """
         project = await self._get_project(project_id)
         role = self._get_user_role(project, user)
         if not self._can_suggest(role, user):
@@ -115,6 +121,7 @@ class SuggestionService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You no longer have permission to suggest changes",
             )
+        return project
 
     def _get_git_ontology_path(self, project: Project) -> str:
         """Get the ontology file path within the git repo."""
@@ -368,11 +375,15 @@ class SuggestionService:
         session_id: str,
         data: SuggestionSubmitRequest,
         user: CurrentUser,
+        *,
+        verification_token: str | None = None,
+        client_ip: str | None = None,
+        redis: TrustLimiterRedis | None = None,
     ) -> SuggestionSubmitResponse:
         """Submit the suggestion session by creating a PR."""
         session = await self._get_session(project_id, session_id)
         self._verify_ownership(session, user)
-        await self._verify_project_access(project_id, user)
+        project = await self._verify_project_access(project_id, user)
 
         if session.status != SuggestionSessionStatus.ACTIVE.value:
             raise HTTPException(
@@ -386,8 +397,68 @@ class SuggestionService:
                 detail="No changes to submit",
             )
 
+        # R10 gates run BEFORE any git or PR work, so a refused submission
+        # leaves no side effects behind.
+        await self._enforce_untrusted_gates(
+            project, session, user, verification_token, client_ip, redis
+        )
+
         return await self._create_pr_for_session(
             project_id, session, user, data.summary, "submitted"
+        )
+
+    async def _enforce_untrusted_gates(
+        self,
+        project: Project,
+        session: SuggestionSession,
+        user: CurrentUser,
+        verification_token: str | None,
+        client_ip: str | None,
+        redis: TrustLimiterRedis | None,
+    ) -> None:
+        """Human verification and per-account rate limiting for the untrusted rung (R10).
+
+        Only the untrusted rung is gated: trusted contributors have earned their
+        way past it, and reviewers were never subject to it. Anonymous sessions
+        keep their separate, DB-backed per-IP session limit.
+        """
+        if self.trust.resolve_tier(project, user) is not TrustTier.UNTRUSTED:
+            return
+        project_id = project.id
+
+        # First suggestion on this project: challenge once (F2). Persisted on
+        # the session so a retry after a network blip does not re-challenge.
+        if not session.verification_passed:
+            provider = get_verification_provider()
+            is_first_suggestion = (
+                provider.enabled and await self.trust.count_outcomes(project_id, user.id) == 0
+            )
+            if is_first_suggestion and not await provider.verify(verification_token, client_ip):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "reason": "verification_required",
+                        "message": "Please complete the verification challenge to continue.",
+                    },
+                )
+            session.verification_passed = True
+
+        allowed, remaining = await check_and_consume(redis, str(project_id), user.id)
+        if not allowed:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "reason": "daily_limit_reached",
+                    "message": (
+                        "You have reached today's suggestion limit. It resets at midnight UTC."
+                    ),
+                },
+            )
+        logger.debug(
+            "Untrusted submission allowed: project=%s user=%s remaining=%s",
+            project_id,
+            user.id,
+            remaining,
         )
 
     async def _create_pr_for_session(
