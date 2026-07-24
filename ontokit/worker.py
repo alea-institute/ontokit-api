@@ -1288,15 +1288,20 @@ async def on_job_end(ctx: dict[str, Any]) -> None:
 
 
 def get_redis_settings() -> RedisSettings:
-    """Get Redis settings from application config."""
-    # Parse Redis URL
-    redis_url = str(settings.redis_url)
-    # RedisSettings expects host, port, database separately
-    # URL format: redis://host:port/db
+    """Get Redis settings from application config.
 
-    from urllib.parse import urlparse
+    ARQ's RedisSettings takes the URL apart into fields, so every part of the
+    DSN has to be carried across explicitly. Dropping the credentials silently
+    produced a worker that could not authenticate against a password-protected
+    Redis (found on the FOLIO DEV deploy 2026-07-06); the repo's own compose
+    file uses a password-less Redis, which hid it.
 
-    parsed = urlparse(redis_url)
+    Credentials are URL-decoded: a password containing reserved characters is
+    percent-encoded in the DSN and must be decoded before it reaches the wire.
+    """
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(str(settings.redis_url))
     host = parsed.hostname or "localhost"
     port = parsed.port or 6379
     database = int(parsed.path.lstrip("/") or "0")
@@ -1305,6 +1310,10 @@ def get_redis_settings() -> RedisSettings:
         host=host,
         port=port,
         database=database,
+        username=unquote(parsed.username) if parsed.username else None,
+        password=unquote(parsed.password) if parsed.password else None,
+        # rediss:// means TLS; without this the scheme was silently ignored.
+        ssl=parsed.scheme == "rediss",
     )
 
 
