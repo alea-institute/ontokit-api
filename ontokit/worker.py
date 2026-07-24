@@ -22,13 +22,11 @@ from ontokit.core.constants import (
     QUALITY_UPDATES_CHANNEL,
     REMOTE_SYNC_UPDATES_CHANNEL,
 )
-from ontokit.core.encryption import decrypt_token
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
-from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.services.github_sync import sync_github_project
 from ontokit.services.linter import LintResult, get_linter
 from ontokit.services.normalization_service import NormalizationService
@@ -1004,32 +1002,13 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
         errors = 0
 
         for integration in integrations:
-            # Resolve PAT from connected_by_user_id
-            if not integration.connected_by_user_id:
-                logger.debug(
-                    f"Skipping sync for project {integration.project_id}: no connected_by_user_id"
-                )
-                continue
+            # One system-owned identity pushes every mirror (KD6). The
+            # per-user PAT remains a deprecated fallback for one release so an
+            # in-flight deployment keeps syncing.
+            from ontokit.services.mirror_credential import resolve_mirror_credential
 
-            token_result = await db.execute(
-                select(UserGitHubToken).where(
-                    UserGitHubToken.user_id == integration.connected_by_user_id
-                )
-            )
-            token_row = token_result.scalar_one_or_none()
-            if not token_row:
-                logger.warning(
-                    f"Skipping sync for project {integration.project_id}: "
-                    f"no GitHub token for user {integration.connected_by_user_id}"
-                )
-                continue
-
-            try:
-                pat = decrypt_token(token_row.encrypted_token)
-            except Exception:
-                logger.warning(
-                    f"Skipping sync for project {integration.project_id}: failed to decrypt token"
-                )
+            pat = await resolve_mirror_credential(db, integration)
+            if pat is None:
                 continue
 
             try:
@@ -1105,15 +1084,10 @@ async def run_remote_check_task(
         )
         integration = integration_result.scalar_one_or_none()
 
-        if integration and integration.connected_by_user_id:
-            token_result = await db.execute(
-                select(UserGitHubToken).where(
-                    UserGitHubToken.user_id == integration.connected_by_user_id
-                )
-            )
-            token_row = token_result.scalar_one_or_none()
-            if token_row:
-                token = decrypt_token(token_row.encrypted_token)
+        if integration:
+            from ontokit.services.mirror_credential import resolve_mirror_credential
+
+            token = await resolve_mirror_credential(db, integration)
 
         if not token:
             config.status = "error"

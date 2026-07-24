@@ -3,8 +3,6 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
-from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from fastapi.testclient import TestClient
@@ -49,115 +47,34 @@ class TestGetGitHubTokenStatus:
         assert data["github_username"] == "octocat"
 
 
-class TestSaveGitHubToken:
-    """Tests for POST /api/v1/users/me/github-token."""
+class TestRetiredGitHubTokenWriteEndpoints:
+    """The PAT write surface is gone (U11 / R3).
 
-    @patch("ontokit.api.routes.user_settings.encrypt_token", return_value="encrypted-tok")
-    @patch("ontokit.api.routes.user_settings._token_preview", return_value="ghp_...wxyz")
-    def test_save_token_success(
-        self,
-        mock_preview: MagicMock,
-        mock_encrypt: MagicMock,
-        authed_client: tuple[TestClient, AsyncMock],
-    ) -> None:
-        """Saves token and returns 201 with metadata."""
-        client, mock_session = authed_client
+    Per-user PATs are retired: all mirror operations authenticate as the system
+    mirror identity, and a lay contributor should never be asked for a GitHub
+    credential. These pin the removal so the endpoints cannot quietly return.
+    """
 
-        mock_github = AsyncMock(spec=GitHubService)
-        mock_github.get_authenticated_user.return_value = ("octocat", "repo,read:org")
-        app.dependency_overrides[get_github_service] = lambda: mock_github
-
-        try:
-            # No existing token
-            mock_result = MagicMock()
-            mock_result.scalar_one_or_none.return_value = None
-            mock_session.execute.return_value = mock_result
-
-            now = datetime.now(UTC)
-
-            def _fake_refresh(obj: Any) -> None:
-                obj.created_at = now
-                obj.updated_at = now
-
-            mock_session.refresh.side_effect = _fake_refresh
-
-            response = client.post(
-                "/api/v1/users/me/github-token",
-                json={"token": "ghp_testtoken1234567890"},
-            )
-            assert response.status_code == 201
-            data = response.json()
-            assert data["github_username"] == "octocat"
-            assert data["token_scopes"] == "repo,read:org"
-        finally:
-            app.dependency_overrides.pop(get_github_service, None)
-
-    def test_save_token_invalid(self, authed_client: tuple[TestClient, AsyncMock]) -> None:
-        """Returns 400 when GitHub rejects the token."""
+    def test_save_token_route_is_gone(self, authed_client: tuple[TestClient, AsyncMock]) -> None:
         client, _ = authed_client
+        response = client.post("/api/v1/users/me/github-token", json={"token": "ghp_x"})
+        assert response.status_code in (404, 405)
 
-        mock_github = AsyncMock(spec=GitHubService)
-        mock_github.get_authenticated_user.side_effect = Exception("Bad credentials")
-        app.dependency_overrides[get_github_service] = lambda: mock_github
+    def test_delete_token_route_is_gone(self, authed_client: tuple[TestClient, AsyncMock]) -> None:
+        client, _ = authed_client
+        response = client.delete("/api/v1/users/me/github-token")
+        assert response.status_code in (404, 405)
 
-        try:
-            response = client.post(
-                "/api/v1/users/me/github-token",
-                json={"token": "ghp_badtoken"},
-            )
-            assert response.status_code == 400
-            assert "Invalid GitHub token" in response.json()["detail"]
-        finally:
-            app.dependency_overrides.pop(get_github_service, None)
-
-    def test_save_token_missing_repo_scope(
+    def test_openapi_no_longer_advertises_a_write_surface(
         self, authed_client: tuple[TestClient, AsyncMock]
     ) -> None:
-        """Returns 400 when token lacks repo scope."""
         client, _ = authed_client
-
-        mock_github = AsyncMock(spec=GitHubService)
-        mock_github.get_authenticated_user.return_value = ("octocat", "read:org")
-        app.dependency_overrides[get_github_service] = lambda: mock_github
-
-        try:
-            response = client.post(
-                "/api/v1/users/me/github-token",
-                json={"token": "ghp_norepo"},
-            )
-            assert response.status_code == 400
-            assert "repo" in response.json()["detail"].lower()
-        finally:
-            app.dependency_overrides.pop(get_github_service, None)
-
-
-class TestDeleteGitHubToken:
-    """Tests for DELETE /api/v1/users/me/github-token."""
-
-    def test_delete_token_success(self, authed_client: tuple[TestClient, AsyncMock]) -> None:
-        """Returns 204 when token is deleted."""
-        client, mock_session = authed_client
-
-        mock_row = Mock()
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = mock_row
-        mock_session.execute.return_value = mock_result
-
-        response = client.delete("/api/v1/users/me/github-token")
-        assert response.status_code == 204
-        mock_session.delete.assert_called_once_with(mock_row)
-
-    def test_delete_token_not_found(self, authed_client: tuple[TestClient, AsyncMock]) -> None:
-        """Returns 404 when no token exists."""
-        client, mock_session = authed_client
-
-        mock_result = MagicMock()
-        mock_result.scalar_one_or_none.return_value = None
-        mock_session.execute.return_value = mock_result
-
-        response = client.delete("/api/v1/users/me/github-token")
-        assert response.status_code == 404
-        assert "No GitHub token found" in response.json()["detail"]
+        paths = client.get("/openapi.json").json()["paths"]
+        methods = set(paths.get("/api/v1/users/me/github-token", {}))
+        assert "post" not in methods
+        assert "delete" not in methods
+        # The read path stays for one release (KTD15).
+        assert "get" in methods
 
 
 class TestListGitHubRepos:

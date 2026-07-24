@@ -636,7 +636,10 @@ class TestRunRemoteCheckTask:
         ]
 
         with (
-            patch("ontokit.worker.decrypt_token", return_value="decrypted-pat"),
+            patch(
+                "ontokit.services.mirror_credential.decrypt_token",
+                return_value="decrypted-pat",
+            ),
             patch("ontokit.worker.get_storage_service") as mock_storage_fn,
             patch("ontokit.services.github_service.get_github_service") as mock_gh_fn,
         ):
@@ -779,7 +782,10 @@ class TestSyncGithubProjects:
 
         with (
             patch("ontokit.worker.BareGitRepositoryService"),
-            patch("ontokit.worker.decrypt_token", side_effect=RuntimeError("decrypt failed")),
+            patch(
+                "ontokit.services.mirror_credential.decrypt_token",
+                side_effect=RuntimeError("decrypt failed"),
+            ),
         ):
             result = await sync_github_projects(mock_ctx)
 
@@ -805,7 +811,7 @@ class TestSyncGithubProjects:
 
         with (
             patch("ontokit.worker.BareGitRepositoryService"),
-            patch("ontokit.worker.decrypt_token", return_value="pat-123"),
+            patch("ontokit.services.mirror_credential.decrypt_token", return_value="pat-123"),
             patch("ontokit.worker.sync_github_project", new_callable=AsyncMock) as mock_sync,
         ):
             mock_sync.return_value = {"status": "ok"}
@@ -834,7 +840,7 @@ class TestSyncGithubProjects:
 
         with (
             patch("ontokit.worker.BareGitRepositoryService"),
-            patch("ontokit.worker.decrypt_token", return_value="pat-123"),
+            patch("ontokit.services.mirror_credential.decrypt_token", return_value="pat-123"),
             patch(
                 "ontokit.worker.sync_github_project",
                 new_callable=AsyncMock,
@@ -1375,7 +1381,10 @@ class TestRunRemoteCheckTaskAdditional:
         same_content = b"identical content"
 
         with (
-            patch("ontokit.worker.decrypt_token", return_value="decrypted-pat"),
+            patch(
+                "ontokit.services.mirror_credential.decrypt_token",
+                return_value="decrypted-pat",
+            ),
             patch("ontokit.worker.get_storage_service") as mock_storage_fn,
             patch("ontokit.services.github_service.get_github_service") as mock_gh_fn,
         ):
@@ -1433,7 +1442,10 @@ class TestRunRemoteCheckTaskAdditional:
         ]
 
         with (
-            patch("ontokit.worker.decrypt_token", return_value="decrypted-pat"),
+            patch(
+                "ontokit.services.mirror_credential.decrypt_token",
+                return_value="decrypted-pat",
+            ),
             patch("ontokit.worker.get_storage_service") as mock_storage_fn,
             patch("ontokit.services.github_service.get_github_service") as mock_gh_fn,
         ):
@@ -1494,7 +1506,7 @@ class TestRunRemoteCheckTaskAdditional:
         ]
 
         with (
-            patch("ontokit.worker.decrypt_token", return_value="pat"),
+            patch("ontokit.services.mirror_credential.decrypt_token", return_value="pat"),
             patch("ontokit.worker.get_storage_service") as mock_storage_fn,
             patch(
                 "ontokit.services.github_service.get_github_service",
