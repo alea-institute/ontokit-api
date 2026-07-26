@@ -26,16 +26,24 @@ of it is computed from the caller's registry row at read time. That is what
 makes R24 (two reviewers, fully independent state) true by construction rather
 than by two sets of rows kept in sync.
 
-U6's verdict endpoint lands in this module and reuses :data:`RequiredReviewer`
-and :data:`QueueReader` below — the DI helpers are module-level for that reason.
+**4. The verdict endpoint reuses all of it (U6).** ``POST /cards/{id}/actions``
+re-checks readiness, drift, own-vs-counterpart, and lifecycle *from the same
+pure functions the queue projects with* before anything reaches GitHub. The card
+a client rendered is an input, never an authority — and because the rules are
+functions rather than duplicated conditionals, "what the queue showed" and "what
+the server will allow" cannot disagree. The actuation itself — idempotency,
+credentials, the GitHub call — lives in
+:mod:`ontokit.services.pr_party_actions`, which deliberately imports nothing
+from this layer.
 """
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Sequence
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -43,10 +51,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Imported rather than restated: "who may use PR Party" must have one answer
-# across the settings, read, and (later) verdict surfaces. ``_require_reviewer``
-# is private to its module only in the sense that nothing outside PR Party
-# should call it.
-from ontokit.api.routes.pr_party_settings import CredentialService, _require_reviewer
+# across the settings, read, and verdict surfaces. ``_require_reviewer`` is
+# private to its module only in the sense that nothing outside PR Party should
+# call it.
+from ontokit.api.routes.pr_party_settings import (
+    CredentialService,
+    _require_reviewer,
+    get_actions_redis,
+)
 from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
 from ontokit.models.pr_party import (
@@ -59,9 +71,13 @@ from ontokit.models.pr_party import (
     PRPartyReviewer,
 )
 from ontokit.schemas.pr_party import (
+    PR_PARTY_REVIEW_VERDICTS,
     PR_PARTY_UNSETTLED_STATUSES,
     PR_PARTY_VERDICT_APPROVE,
     PR_PARTY_VERDICT_DISCUSS_LIVE,
+    PRPartyActionReceipt,
+    PRPartyActionRequest,
+    PRPartyActionResponse,
     PRPartyActionState,
     PRPartyCardDetail,
     PRPartyOtherReviewerState,
@@ -69,16 +85,33 @@ from ontokit.schemas.pr_party import (
     PRPartyQueueResponse,
     PRPartyReadiness,
 )
+from ontokit.services.pr_party_actions import (
+    ActionRefused,
+    ActionResult,
+    PRPartyActionService,
+    PRPartyActionStore,
+)
+from ontokit.services.pr_party_credentials import PRPartyCredentialService
 from ontokit.services.pr_party_github import ChecksRollup
 from ontokit.services.pr_party_intake import PR_STATE_OPEN, missing_long_enough_to_retire
+from ontokit.services.pr_party_rate_limiter import (
+    ActionLimiterRedis,
+    LimiterOutcome,
+    check_and_consume,
+)
 
 __all__ = [
+    "ActionService",
     "PRPartyQueueReader",
     "QueueReader",
     "RequiredReviewer",
+    "get_action_service",
+    "get_actions_redis",
     "get_queue_reader",
     "router",
 ]
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -181,6 +214,22 @@ def get_queue_reader(db: Annotated[AsyncSession, Depends(get_db)]) -> PRPartyQue
 
 
 QueueReader = Annotated[PRPartyQueueReader, Depends(get_queue_reader)]
+
+
+def get_action_service(db: Annotated[AsyncSession, Depends(get_db)]) -> PRPartyActionService:
+    """Dependency for the PR Party actuation service."""
+    return PRPartyActionService(
+        store=PRPartyActionStore(db),
+        credentials=PRPartyCredentialService(db),
+    )
+
+
+ActionService = Annotated[PRPartyActionService, Depends(get_action_service)]
+
+
+#: Re-exported from the settings module so both PR Party write surfaces share
+#: one dependency (and one test seam) without an import cycle.
+ActionsRedis = Annotated["ActionLimiterRedis | None", Depends(get_actions_redis)]
 
 
 # ---------------------------------------------------------------------------
@@ -469,5 +518,270 @@ async def get_card(
             detail="No such PR Party card.",
         )
 
+    actions = await reader.list_actions([pr.id])
+    return _build_detail(pr, reviewer=reviewer, actions=actions)
+
+
+# ---------------------------------------------------------------------------
+# Verdict endpoint (U6)
+# ---------------------------------------------------------------------------
+
+
+def _refusal(message: str, **extra: Any) -> dict[str, Any]:
+    """Refusal bodies are objects, always.
+
+    ``detail`` as a bare string would mean the drift and retire cases — the two
+    that carry structure a client must act on — have a different body shape from
+    every other refusal. One shape, optional keys.
+    """
+    return {"message": message, **extra}
+
+
+async def _load_card(reader: PRPartyQueueReader, card_id: uuid.UUID) -> PRPartyPR:
+    """The row behind a card id, or 404. Never trusts a client-supplied PR."""
+    pr = await reader.get_pr(card_id)
+    if pr is None or missing_long_enough_to_retire(pr):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=_refusal("No such PR Party card."),
+        )
+    return pr
+
+
+async def _consume_action_budget(redis: ActionLimiterRedis | None, reviewer_id: str) -> None:
+    """Runaway-loop protection, failing closed (R10).
+
+    Actuation is the one PR Party surface that changes something irreversible
+    outside our database, so an unmetered write path is worse than a brief
+    outage. Reads are untouched: the dashboard keeps rendering through a Redis
+    failure, and only the buttons stop working.
+    """
+    outcome, _ = await check_and_consume(redis, reviewer_id)
+    if outcome is LimiterOutcome.UNAVAILABLE:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=_refusal(
+                "PR Party cannot safely record actions right now. Nothing was sent "
+                "to GitHub — try again in a moment."
+            ),
+        )
+    if outcome is LimiterOutcome.OVER_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=_refusal("You have hit today's PR Party action limit."),
+        )
+
+
+def _check_lifecycle(pr: PRPartyPR) -> None:
+    """C7/R25: a PR that is over cannot be acted on, and its card should go.
+
+    ``retire`` is a signal rather than a 404 because the client is holding a
+    card it rendered from a valid read: telling it "gone" leaves a ghost in the
+    queue until the next poll, while telling it "retire this" lets it drop the
+    card immediately and explain why.
+    """
+    if pr.state == PR_STATE_OPEN:
+        return
+    finished = "merged" if pr.state == "merged" else "closed"
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=_refusal(
+            f"This pull request was already {finished} on GitHub, so there is "
+            "nothing left to decide.",
+            retire=True,
+        ),
+    )
+
+
+def _check_head(pr: PRPartyPR, request: PRPartyActionRequest, card: PRPartyCardDetail) -> None:
+    """C1: a verdict belongs to the revision the reviewer actually read."""
+    if request.head_sha == pr.head_sha:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=_refusal(
+            "New commits landed while you were reading. Re-read the current "
+            "revision before deciding.",
+            card=card.model_dump(mode="json"),
+        ),
+    )
+
+
+def _check_actor(pr: PRPartyPR, reviewer: PRPartyReviewer, request: PRPartyActionRequest) -> None:
+    """R18: you cannot review your own pull request.
+
+    Refused here rather than left to GitHub's 422 so the reviewer gets a
+    sentence instead of an API error — and so no row is ever written for an
+    action that could not have succeeded. Merge is deliberately exempt: the
+    author merging their own PR *after* the counterpart approved is the normal
+    ending (R11), and that precondition is checked in the service.
+    """
+    if request.action_kind is not PRPartyActionKind.REVIEW:
+        return
+    if project_author_kind(pr, reviewer) is not PRPartyAuthorKind.OWN:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=_refusal(
+            "This is your own pull request — GitHub does not accept a review from "
+            "its author. Your counterpart decides this one."
+        ),
+    )
+
+
+def _check_readiness(pr: PRPartyPR, request: PRPartyActionRequest) -> None:
+    """R17/R26: verdicts wait for the brief and CI unless explicitly overridden.
+
+    Only *GitHub* verdicts are gated. ``discuss_live`` — and, when U7 lands,
+    questions — stay available on every card: a reviewer who wants to talk about
+    a PR should never be told to wait for a test run first.
+
+    The check is re-run here from the row rather than trusted from the card the
+    client rendered, because a brief can finish (or CI can start failing) between
+    the read and the tap. ``override`` is recorded on the action row, so a
+    decision made early is visible as such forever (C12).
+    """
+    if request.action_kind is not PRPartyActionKind.REVIEW:
+        return
+    if request.verdict not in PR_PARTY_REVIEW_VERDICTS:
+        return
+    if request.override:
+        return
+    readiness = compute_readiness(pr)
+    if readiness.ready:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=_refusal(
+            f"This PR is not ready to decide on yet: {readiness.reason}. "
+            "Send it again with override to decide anyway.",
+            reason=readiness.reason,
+        ),
+    )
+
+
+def _receipt(result: ActionResult) -> PRPartyActionReceipt:
+    action = result.action
+    return PRPartyActionReceipt(
+        action_id=action.id,
+        kind=PRPartyActionKind(action.action_kind),
+        verdict=action.verdict,
+        status=PRPartyActionStatus(action.status),
+        head_sha=action.head_sha,
+        override=action.override,
+        idempotency_key=action.idempotency_key,
+        github_review_id=action.github_review_id,
+        merged=result.merged,
+        created_at=action.created_at,
+    )
+
+
+@router.post("/cards/{card_id}/actions", response_model=PRPartyActionResponse)
+async def create_action(
+    card_id: uuid.UUID,
+    request: PRPartyActionRequest,
+    response: Response,
+    reviewer: RequiredReviewer,
+    reader: QueueReader,
+    service: ActionService,
+    redis: ActionsRedis,
+) -> PRPartyActionResponse:
+    """Cast one verdict, or claim one merge (KTD16, R7/R8/R11/R25).
+
+    The request names a **card**, not a pull request. Repo, number, and the row's
+    own head SHA all come from the server; the only PR fact the client supplies
+    is the ``head_sha`` it *believes* it read, and that exists to be compared and
+    refused on mismatch. There is no reviewer field either — the actor is the
+    authenticated caller, always (R23).
+
+    Gates run cheapest-first and all of them before any row is written:
+    rate limit, card exists, PR still open, head still matches, not your own PR,
+    ready (or explicitly overridden). Only then does
+    :class:`~ontokit.services.pr_party_actions.PRPartyActionService` claim the
+    idempotency fingerprint, commit a ``pending`` row, and call GitHub.
+
+    Three outcomes are all 200:
+
+    - **Actuated** — ``action.status='succeeded'`` with the review id or
+      ``merged: true``.
+    - **Replayed** — the same idempotency key arriving twice returns the stored
+      receipt with ``replayed: true`` and makes no second GitHub call.
+    - **Degraded** — no usable PAT, or one that died mid-call: the verdict is
+      recorded as intent and ``deep_link`` points at where to finish it by hand
+      (R12). The reviewer is not blocked; the reconciler confirms it later.
+
+    Everything else is a refusal with a plain-language ``message``, and nothing
+    reached GitHub.
+    """
+    _no_store(response)
+
+    await _consume_action_budget(redis, reviewer.zitadel_user_id)
+
+    pr = await _load_card(reader, card_id)
+    _check_lifecycle(pr)
+    if request.head_sha != pr.head_sha:
+        _check_head(pr, request, await _fresh_card(reader, pr, reviewer))
+    _check_actor(pr, reviewer, request)
+    _check_readiness(pr, request)
+
+    try:
+        result = await service.actuate(
+            reviewer=reviewer, pr=pr, request=request, pr_url=pr_web_url(pr)
+        )
+    except ActionRefused as e:
+        extra: dict[str, Any] = {}
+        if e.needs_card:
+            card = await _fresh_card(reader, pr, reviewer)
+            extra["card"] = card.model_dump(mode="json")
+        if e.retire:
+            extra["retire"] = True
+        raise HTTPException(status_code=e.status_code, detail=_refusal(e.message, **extra)) from e
+
+    return PRPartyActionResponse(
+        action=_receipt(result),
+        card=await _fresh_card(reader, pr, reviewer),
+        degraded=result.degraded,
+        deep_link=result.deep_link,
+        replayed=result.replayed,
+    )
+
+
+@router.post("/cards/{card_id}/unpark", response_model=PRPartyCardDetail)
+async def unpark_card(
+    card_id: uuid.UUID,
+    response: Response,
+    reviewer: RequiredReviewer,
+    reader: QueueReader,
+    service: ActionService,
+    redis: ActionsRedis,
+) -> PRPartyCardDetail:
+    """Un-park a card the caller parked for live discussion (R9).
+
+    A park is one reviewer's ``discuss_live`` action row at the current head —
+    there is no park column — so un-parking is deleting exactly that row. Only
+    ``discuss_live`` is ever removed: a real verdict has been delivered to GitHub
+    and cannot be un-cast from here.
+
+    Idempotent and 200 either way. "This card is not parked" is the state the
+    caller asked for, and a 404 would make a double-tap look like a failure.
+    """
+    _no_store(response)
+
+    await _consume_action_budget(redis, reviewer.zitadel_user_id)
+
+    pr = await _load_card(reader, card_id)
+    await service.unpark(reviewer=reviewer, pr=pr)
+    return await _fresh_card(reader, pr, reviewer)
+
+
+async def _fresh_card(
+    reader: PRPartyQueueReader, pr: PRPartyPR, reviewer: PRPartyReviewer
+) -> PRPartyCardDetail:
+    """Re-project the card from the rows as they now stand.
+
+    Shipped with every verdict response so the client never renders action state
+    it composed itself — the same reason the read side ships conclusions rather
+    than ingredients (KTD19).
+    """
     actions = await reader.list_actions([pr.id])
     return _build_detail(pr, reviewer=reviewer, actions=actions)

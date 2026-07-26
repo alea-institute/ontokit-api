@@ -26,7 +26,7 @@ import uuid
 from datetime import datetime
 from typing import Any, Final
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from ontokit.models.pr_party import (
     PRPartyActionKind,
@@ -319,3 +319,142 @@ class PRPartyCardDetail(PRPartyQueueCard):
     #: contract does not move when U7 lands: U7 narrows ``Any`` to its entry
     #: model without renaming the field or changing its cardinality.
     qa_thread: list[Any] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Verdict request / response models (U6)
+# ---------------------------------------------------------------------------
+
+#: Verdicts that produce a GitHub review. ``discuss_live`` is deliberately
+#: outside this set: it is a stance recorded locally, never an event GitHub
+#: is told about.
+PR_PARTY_REVIEW_VERDICTS: Final[frozenset[str]] = frozenset(
+    {PR_PARTY_VERDICT_APPROVE, PR_PARTY_VERDICT_REQUEST_CHANGES, PR_PARTY_VERDICT_COMMENT}
+)
+
+#: Every verdict ``action_kind='review'`` may carry.
+PR_PARTY_VERDICTS: Final[frozenset[str]] = PR_PARTY_REVIEW_VERDICTS | {
+    PR_PARTY_VERDICT_DISCUSS_LIVE
+}
+
+#: GitHub's merge strategies. The house default is ``squash``: PR Party merges
+#: branches whose commit history is a working log, and the PR title plus the
+#: brief already carry the narrative that matters. Repositories that disallow
+#: squash answer 405, which surfaces as a plain-language refusal rather than a
+#: silent fallback to a strategy the reviewer did not choose.
+PR_PARTY_MERGE_METHODS: Final[frozenset[str]] = frozenset({"merge", "squash", "rebase"})
+PR_PARTY_DEFAULT_MERGE_METHOD: Final = "squash"
+
+#: Client-minted idempotency keys. Bounded because the column is ``String(64)``,
+#: and alphabet-restricted because the value is logged and compared verbatim.
+IDEMPOTENCY_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
+
+
+class PRPartyActionRequest(BaseModel):
+    """A tap: one reviewer, one PR revision, one action.
+
+    What is *absent* is the load-bearing part. There is no repo, no PR number,
+    and no reviewer id — the PR is whichever row the path's ``card_id`` names,
+    and the actor is always the authenticated caller (R23). A client that has
+    been tricked into posting the wrong body can at worst act on its own card.
+
+    ``head_sha`` is the revision the reviewer was actually looking at. The server
+    compares it to the row and refuses on drift rather than quietly retargeting
+    the verdict at whatever landed since (C1).
+
+    One action per call: merge is its own ``action_kind``, never a flag on a
+    review, so "approve and merge" is two requests with two audit rows.
+    """
+
+    action_kind: PRPartyActionKind
+    verdict: str | None = None
+    body: str | None = None
+    head_sha: str = Field(min_length=1, max_length=40)
+    #: R26/C12: honored only as an explicit flag, and recorded on the row.
+    override: bool = False
+    merge_method: str = PR_PARTY_DEFAULT_MERGE_METHOD
+    idempotency_key: str
+
+    @field_validator("action_kind")
+    @classmethod
+    def _validate_kind(cls, value: PRPartyActionKind) -> PRPartyActionKind:
+        if value is PRPartyActionKind.QUESTION:
+            raise ValueError(
+                "Questions are posted through the Q&A endpoint, not the verdict endpoint."
+            )
+        return value
+
+    @field_validator("verdict")
+    @classmethod
+    def _validate_verdict(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        verdict = value.strip().casefold()
+        if verdict not in PR_PARTY_VERDICTS:
+            raise ValueError(f"Unknown verdict {value!r}.")
+        return verdict
+
+    @field_validator("merge_method")
+    @classmethod
+    def _validate_merge_method(cls, value: str) -> str:
+        method = value.strip().casefold()
+        if method not in PR_PARTY_MERGE_METHODS:
+            raise ValueError(f"Unknown merge method {value!r}.")
+        return method
+
+    @field_validator("idempotency_key")
+    @classmethod
+    def _validate_key(cls, value: str) -> str:
+        key = value.strip()
+        if not IDEMPOTENCY_KEY_PATTERN.match(key):
+            raise ValueError(
+                "An idempotency key must be 8-64 characters of letters, digits, "
+                "hyphens, and underscores."
+            )
+        return key
+
+    @model_validator(mode="after")
+    def _verdict_matches_kind(self) -> PRPartyActionRequest:
+        if self.action_kind is PRPartyActionKind.REVIEW and self.verdict is None:
+            raise ValueError("A review action requires a verdict.")
+        if self.action_kind is PRPartyActionKind.MERGE and self.verdict is not None:
+            raise ValueError("A merge action carries no verdict; merge is its own action kind.")
+        return self
+
+
+class PRPartyActionReceipt(BaseModel):
+    """What the server did, as a durable record the client can show back.
+
+    ``github_review_id`` and ``merged`` are the two proofs that the tap became
+    something real on GitHub. Both are absent/false on a ``degraded_intent``
+    row, which is exactly how the UI tells "recorded" from "delivered".
+    """
+
+    action_id: uuid.UUID
+    kind: PRPartyActionKind
+    verdict: str | None = None
+    status: PRPartyActionStatus
+    head_sha: str
+    override: bool = False
+    idempotency_key: str
+    github_review_id: int | None = None
+    merged: bool = False
+    created_at: datetime | None = None
+
+
+class PRPartyActionResponse(BaseModel):
+    """The receipt plus the card as it now stands.
+
+    The fresh card ships with every success so the client never has to re-fetch
+    to re-render — and so the action state it displays is the server's, not one
+    it optimistically composed.
+    """
+
+    action: PRPartyActionReceipt
+    card: PRPartyCardDetail
+    #: R12: the verdict was recorded but not delivered to GitHub.
+    degraded: bool = False
+    #: Where to go finish it by hand when ``degraded`` is true.
+    deep_link: str | None = None
+    #: The stored receipt for an already-completed request, replayed verbatim.
+    replayed: bool = False

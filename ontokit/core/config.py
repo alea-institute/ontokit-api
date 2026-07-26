@@ -177,6 +177,19 @@ class Settings(BaseSettings):
     # calls plus one (retryable) LLM call.
     pr_party_brief_timeout_seconds: int = 240
 
+    # --- PR Party actuation (KTD16, U6) ---
+    # How long a ``pending`` action row is treated as "in flight" before a new
+    # request may reclaim it. KTD16 commits the pending row BEFORE the GitHub
+    # call, so a process that dies mid-call leaves one behind; without a window
+    # that row would wedge the fingerprint forever. Long enough that a slow
+    # GitHub call is never stolen from, short enough that a reviewer is not
+    # locked out for a working day.
+    pr_party_action_reclaim_minutes: int = 30
+    # Per-reviewer daily actuation cap. Deliberately generous: two humans
+    # reviewing PRs will never approach it, and the control exists to stop a
+    # runaway client retry loop from spraying GitHub, not to throttle people.
+    pr_party_daily_action_limit: int = 200
+
     @property
     def pr_party_reviewer_map(self) -> dict[str, str]:
         """Parsed ``PR_PARTY_REVIEWERS``: zitadel user id -> github login.

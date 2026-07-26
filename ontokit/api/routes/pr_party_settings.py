@@ -21,11 +21,12 @@ surfaces expose only expiry/validation health.
 """
 
 import logging
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import RequiredUser
 from ontokit.core.config import settings
 from ontokit.core.database import get_db
@@ -47,6 +48,11 @@ from ontokit.services.pr_party_credentials import (
     get_generation_token_status,
     is_degraded,
 )
+from ontokit.services.pr_party_rate_limiter import (
+    ActionLimiterRedis,
+    LimiterOutcome,
+    check_and_consume,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +67,26 @@ def get_credential_service(
 
 
 CredentialService = Annotated[PRPartyCredentialService, Depends(get_credential_service)]
+
+
+async def get_actions_redis() -> ActionLimiterRedis | None:
+    """The PR Party limiter's Redis, or ``None`` when it cannot be reached.
+
+    ``None`` is not "no limit": the limiter reports
+    :attr:`LimiterOutcome.UNAVAILABLE` for it and each route decides what that
+    means — actuation refuses, credential submission proceeds. Defined in this
+    module rather than alongside the verdict endpoint only because imports run
+    one way between the two (the verdict module imports this one), and a shared
+    dependency has to live at the bottom of that edge.
+    """
+    try:
+        pool = await get_arq_pool()
+    except Exception:  # noqa: BLE001 — an unreachable pool is a limiter outcome
+        logger.warning("PR Party: Redis unavailable for the action limiter")
+        return None
+    # ArqRedis satisfies the protocol structurally; the protocol exists so the
+    # limiter never depends on the ARQ client type.
+    return cast("ActionLimiterRedis", pool)
 
 
 async def _require_reviewer(user: RequiredUser, service: CredentialService) -> PRPartyReviewer:
@@ -114,6 +140,7 @@ async def save_credential(
     body: PRPartyCredentialUpdate,
     user: RequiredUser,
     service: CredentialService,
+    redis: Annotated["ActionLimiterRedis | None", Depends(get_actions_redis)],
 ) -> PRPartyCredentialHealth:
     """Submit or rotate this reviewer's GitHub write PAT (KTD13).
 
@@ -121,14 +148,26 @@ async def save_credential(
     real read before anything is stored, so a bad rotation leaves the working
     credential untouched. A mismatch is a 400 with nothing written.
 
-    TODO(U6/M2): per-user rate limiting for this route belongs on the shared PR
-    Party limiter U6 introduces. A fail-closed limiter of its own (the
-    ``trust_rate_limiter`` pattern) would be disproportionate here: the caller
-    is one of a handful of config-provisioned reviewers, the global 100/min per
-    IP limit already applies, and failing closed on a Redis blip would lock a
-    reviewer out of connecting the very credential that un-degrades them.
+    Metered on the shared PR Party limiter U6 introduced — but **fail-open**,
+    which is the resolution of U2's open question here rather than an oversight.
+    The cap is runaway-loop protection, and this route cannot change anything on
+    GitHub; failing closed on a Redis blip would lock a reviewer out of
+    connecting the very credential that un-degrades them, which is the one
+    outcome worth designing against. Actuation, where a write is irreversible,
+    fails closed instead.
     """
     reviewer = await _require_reviewer(user, service)
+
+    try:
+        outcome, _ = await check_and_consume(redis, user.id)
+    except Exception:  # noqa: BLE001 — see the fail-open reasoning above
+        logger.warning("PR Party: the action limiter errored on credential submission")
+        outcome = LimiterOutcome.ALLOWED
+    if outcome is LimiterOutcome.OVER_LIMIT:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="You have hit today's PR Party action limit.",
+        )
 
     try:
         credential = await service.save_credential(reviewer, body.token)
