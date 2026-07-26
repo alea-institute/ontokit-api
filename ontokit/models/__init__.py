@@ -24,6 +24,17 @@ from ontokit.models.ontology_index import (
     IndexingStatus,
     OntologyIndexStatus,
 )
+from ontokit.models.pr_party import (
+    PRPartyAction,
+    PRPartyActionKind,
+    PRPartyActionStatus,
+    PRPartyAuthorKind,
+    PRPartyBriefStatus,
+    PRPartyCredential,
+    PRPartyMergeDefault,
+    PRPartyPR,
+    PRPartyReviewer,
+)
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.pull_request import (
     GitHubIntegration,
@@ -65,6 +76,15 @@ __all__ = [
     "NormalizationRun",
     "Notification",
     "OntologyIndexStatus",
+    "PRPartyAction",
+    "PRPartyActionKind",
+    "PRPartyActionStatus",
+    "PRPartyAuthorKind",
+    "PRPartyBriefStatus",
+    "PRPartyCredential",
+    "PRPartyMergeDefault",
+    "PRPartyPR",
+    "PRPartyReviewer",
     "PRStatus",
     "Project",
     "ProjectEmbeddingConfig",
