@@ -15,6 +15,7 @@ from ontokit.api.routes import (
     normalization,
     notifications,
     ontologies,
+    pr_party,
     pr_party_settings,
     pr_party_webhooks,
     projects,
@@ -57,6 +58,10 @@ def include_pr_party_routes(target: APIRouter, auth_mode: str | None = None) -> 
         return False
     target.include_router(pr_party_settings.router, prefix="/pr-party", tags=["PR Party"])
     target.include_router(pr_party_webhooks.router, prefix="/pr-party", tags=["PR Party"])
+    # Queue/card reads (U15) ride the same gate: with AUTH_MODE=disabled there
+    # is no caller to project own-vs-counterpart against, and the cards are
+    # private-repo content, so a 404 is the only honest degraded behavior.
+    target.include_router(pr_party.router, prefix="/pr-party", tags=["PR Party"])
     return True
 
 
