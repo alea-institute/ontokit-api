@@ -81,6 +81,7 @@ def _pr(
     *,
     repo_full_name: str = REPO,
     pr_number: int = 42,
+    title: str | None = "Add the PR Party queue read API",
     state: str = "open",
     head_sha: str = HEAD,
     author_kind: PRPartyAuthorKind = PRPartyAuthorKind.COUNTERPART,
@@ -100,6 +101,7 @@ def _pr(
     row = PRPartyPR(
         repo_full_name=repo_full_name,
         pr_number=pr_number,
+        title=title,
         state=state,
         head_sha=head_sha,
         author_kind=author_kind,
@@ -232,7 +234,10 @@ class TestAccessControl:
 
     def test_non_reviewer_forbidden_with_no_pr_data_in_body(self, wired: Any) -> None:
         client, install = wired
-        pr = _pr(brief_what="Rewrites the private billing pipeline.")
+        pr = _pr(
+            title="Rotate the production signing key",
+            brief_what="Rewrites the private billing pipeline.",
+        )
         install(None, [pr])
 
         response = client.get(f"{BASE}/queue")
@@ -241,6 +246,8 @@ class TestAccessControl:
         # Not a redacted card — no PR data reaches a non-reviewer at all.
         assert REPO not in response.text
         assert "billing" not in response.text
+        # The title is private-repo content too, not a public label.
+        assert "signing key" not in response.text
         assert str(pr.pr_number) not in response.text
         assert "cards" not in response.json()
 
@@ -309,6 +316,42 @@ class TestQueueMembership:
         install(_reviewer(), [_pr(missing_since=datetime.now(UTC) - timedelta(seconds=30))])
 
         assert len(client.get(f"{BASE}/queue").json()["cards"]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Card naming
+# ---------------------------------------------------------------------------
+
+
+class TestCardTitle:
+    def test_title_comes_off_the_row(self, wired: Any) -> None:
+        """GitHub's own title, stored by intake — never synthesized here."""
+        client, install = wired
+        pr = _pr(title="Adds the liturgical calendar importer")
+        install(_reviewer(), [pr])
+
+        card = _only_card(client)
+        detail = client.get(f"{BASE}/cards/{pr.id}").json()
+
+        assert card["title"] == "Adds the liturgical calendar importer"
+        assert detail["title"] == "Adds the liturgical calendar importer"
+
+    def test_a_row_without_a_title_serializes_null(self, wired: Any) -> None:
+        """The pre-title row: ``None``, not brief prose, not an empty string.
+
+        ``repo_full_name`` and ``pr_number`` are always present, so the client
+        has a fallback name — inventing one server-side out of ``brief_what``
+        would put brief text where a PR fact belongs.
+        """
+        client, install = wired
+        pr = _pr(title=None, brief_what="Rewrites the billing pipeline.")
+        install(_reviewer(), [pr])
+
+        card = _only_card(client)
+
+        assert card["title"] is None
+        assert card["repo_full_name"] == REPO
+        assert card["pr_number"] == 42
 
 
 # ---------------------------------------------------------------------------

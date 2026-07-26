@@ -54,6 +54,7 @@ from ontokit.services.pr_party_intake import (
     PR_STATE_DRAFT,
     PR_STATE_MERGED,
     PR_STATE_OPEN,
+    TITLE_MAX_LENGTH,
     ReviewerRegistry,
     apply_brewing_timeout,
     brief_job_id,
@@ -292,11 +293,12 @@ def _detail(
     mergeable_state: str | None = "clean",
     updated_at: datetime | None = None,
     repo: str = REPO,
+    title: str | None = None,
 ) -> PRDetail:
     return PRDetail(
         repo_full_name=repo,
         number=number,
-        title=f"PR {number}",
+        title=title if title is not None else f"PR {number}",
         body="body",
         state=state,
         draft=draft,
@@ -358,12 +360,14 @@ def _existing_pr(
     state: str = PR_STATE_OPEN,
     brief_status: str = PRPartyBriefStatus.READY,
     repo: str = REPO,
+    title: str | None = None,
 ) -> PRPartyPR:
     row = PRPartyPR(
         repo_full_name=repo,
         pr_number=number,
         head_sha=head_sha,
         state=state,
+        title=title,
         author_kind=PRPartyAuthorKind.THIRD_PARTY,
         author_github_login="outsider",
         author_node_id="MDQ6VXNlcjk5",
@@ -508,6 +512,7 @@ class TestUpsert:
         assert pr.brief_status == PRPartyBriefStatus.BREWING
         assert pr.brewing_since == NOW
         assert pr.checks_rollup == "pending"
+        assert pr.title == "PR 7"
         assert pr.author_kind == PRPartyAuthorKind.THIRD_PARTY
         assert pr.author_github_login == "outsider"
         assert pr.author_node_id == "MDQ6VXNlcjk5"
@@ -585,6 +590,48 @@ class TestUpsert:
         assert existing.brief_truncated is True
         assert existing.ready_at == NOW - timedelta(hours=1)
         assert existing.brewing_since == NOW - timedelta(hours=2)
+
+    async def test_title_is_a_poller_owned_fact(self) -> None:
+        """The card names itself with GitHub's title, so intake has to store it.
+
+        Renaming a PR is an ``edited`` event, not a new revision, so the title
+        has to track on a same-head refresh too — otherwise a card keeps a name
+        the PR no longer has until someone pushes.
+        """
+        existing = _existing_pr(title="Old name")
+        db = _FakeSession([existing])
+
+        facts = facts_from_detail(_detail(title="Adds the calendar importer"))
+        await upsert_pr(db, facts, registry=_registry(), now=NOW)  # type: ignore[arg-type]
+
+        assert existing.title == "Adds the calendar importer"
+
+    async def test_a_payload_without_a_title_leaves_the_stored_one_alone(self) -> None:
+        """Same rule as ``pr_node_id``: absent is not empty.
+
+        A malformed or partial envelope must not blank a title the sweep
+        already recorded — the fallback exists for rows that never had one.
+        """
+        existing = _existing_pr(title="Adds the calendar importer")
+        db = _FakeSession([existing])
+
+        payload = _webhook_payload(action="synchronize")
+        del payload["pull_request"]["title"]
+        await upsert_pr(  # type: ignore[arg-type]
+            db, facts_from_webhook_pr(payload), registry=_registry(), now=NOW
+        )
+
+        assert existing.title == "Adds the calendar importer"
+
+    async def test_an_overlong_title_is_truncated_to_the_column_width(self) -> None:
+        """A sweep must never die on a long title; the column is what would raise."""
+        db = _FakeSession()
+
+        facts = facts_from_detail(_detail(title="x" * 900))
+        result = await upsert_pr(db, facts, registry=_registry(), now=NOW)  # type: ignore[arg-type]
+
+        assert result.pr is not None
+        assert result.pr.title == "x" * TITLE_MAX_LENGTH
 
     async def test_seeing_a_pr_clears_missing_since(self) -> None:
         existing = _existing_pr()
@@ -1086,6 +1133,8 @@ class TestWebhookDispatch:
         assert outcome["status"] == "processed"
         prs = [r for r in dispatch.db.rows if isinstance(r, PRPartyPR)]
         assert len(prs) == 1
+        # The webhook is the other title source, so it carries one too.
+        assert prs[0].title == "PR 7"
         # The fast path upserts from the payload — no extra detail call.
         assert dispatch.client.detail_calls == []
 

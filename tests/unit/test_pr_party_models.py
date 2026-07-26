@@ -31,7 +31,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
-from sqlalchemy import Index, Table, UniqueConstraint
+from sqlalchemy import Column, Index, Table, UniqueConstraint
 
 from ontokit.models.llm_config import LLMAuditLog
 from ontokit.models.notification import Notification
@@ -233,6 +233,17 @@ class TestPRPartyPR:
     def test_node_id_is_enrichment_only(self) -> None:
         assert PRPartyPR.__table__.columns["pr_node_id"].nullable is True
 
+    def test_title_is_an_optional_poller_owned_fact(self) -> None:
+        """The card names itself with GitHub's title rather than with brief prose.
+
+        Nullable on purpose: a payload that omitted the title, or a row written
+        before the column existed, leaves the client on the
+        ``{repo}#{number}`` fallback rather than on invented text.
+        """
+        column = PRPartyPR.__table__.columns["title"]
+        assert column.nullable is True
+        assert column.type.length == 512
+
 
 # ── Action rows (KTD15/KTD16, R24, R25) ──────────────────────────────────────
 
@@ -366,6 +377,19 @@ class TestMigration:
             "pr_party_pr",
             "pr_party_action",
         ]
+
+    def test_pr_table_ddl_matches_the_model(self, migration_module: ModuleType) -> None:
+        """The PR row is the table the feature keeps growing columns on.
+
+        There is one PR Party migration and it is amended in place, so a column
+        added to the model and forgotten in the DDL would pass every other test
+        in this file and only fail against a real database.
+        """
+        ops = _recorded_ops(migration_module, "upgrade")
+        args = next(a for name, a in ops if name == "create_table" and a[0] == "pr_party_pr")
+        ddl_columns = {c.name for c in args[1:] if isinstance(c, Column)}
+        assert ddl_columns == set(PRPartyPR.__table__.columns.keys())
+        assert "title" in ddl_columns
 
     def test_upgrade_relaxes_the_three_project_columns(self, migration_module: ModuleType) -> None:
         ops = _recorded_ops(migration_module, "upgrade")
