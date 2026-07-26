@@ -8,6 +8,16 @@ The read paths remain for one release (KTD15) so an in-flight deployment with
 stored tokens does not break: the status endpoint lets an older client render a
 coherent state, and repo listing still works while a project is being migrated
 onto the system identity. A follow-up drops the table.
+
+**PR Party reviewers are the one carve-out, and they are not an exception to
+the above.** A registered PR Party reviewer does hold a personal GitHub write
+PAT, because casting a review *as that human* is the entire point (R8) and no
+system identity can stand in for it. That credential has nothing to do with
+this module: it lives in its own table (``pr_party_credential``), under its own
+MultiFernet key domain, reachable only through ``/pr-party/*``, and the reviewer
+registry is provisioned from configuration rather than self-service (KTD12).
+Contributor PAT retirement stands — a lay contributor is still never asked for
+a GitHub credential, and nothing here comes back.
 """
 
 import logging

@@ -106,6 +106,30 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
         _startup_print("Failed to initialise MinIO storage — continuing startup")
         logger.exception("Failed to initialise MinIO storage — continuing startup")
 
+    # --- PR Party reviewer registry (optional, KTD12) -----------------------
+    # Reviewer identity is environment data, so the registry is reconciled from
+    # PR_PARTY_REVIEWERS at every boot rather than seeded by a migration. This
+    # is best-effort by construction: GitHub node-id resolution degrades to a
+    # WARNING (retried next startup) and any failure here is logged rather than
+    # raised, because a reviewer-registry problem must never keep the whole API
+    # from serving ontology traffic.
+    if settings.pr_party_reviewers:
+        _startup_print("Reconciling PR Party reviewers...")
+        try:
+            from ontokit.core.database import async_session_maker
+            from ontokit.services.pr_party_credentials import reconcile_reviewers
+
+            async with asyncio.timeout(30.0):
+                async with async_session_maker() as session:
+                    outcome = await reconcile_reviewers(session)
+            _startup_print(
+                f"PR Party reviewers reconciled (+{outcome.added} ~{outcome.updated} "
+                f"-{outcome.removed})"
+            )
+        except Exception:
+            _startup_print("PR Party reviewer reconcile failed — continuing startup")
+            logger.exception("PR Party reviewer reconcile failed — continuing startup")
+
     _startup_print("Startup complete")
     logger.info("Startup complete")
 
@@ -254,6 +278,14 @@ openapi_tags: list[dict[str, str]] = [
             "Full-text search across ontologies using PostgreSQL tsvector/tsquery with "
             "ranking. Also provides a read-only SPARQL endpoint supporting SELECT, ASK, "
             "and CONSTRUCT queries."
+        ),
+    },
+    {
+        "name": "PR Party",
+        "description": (
+            "Org-scoped async pull-request review for the CatholicOS GitHub organization. "
+            "Reviewer-only: the registry is provisioned from configuration, and each "
+            "reviewer connects their own GitHub write token, stored encrypted."
         ),
     },
     {

@@ -119,6 +119,43 @@ class Settings(BaseSettings):
     # restore the legacy bidirectional behavior.
     github_mirror_outbound_only: bool = True
 
+    # --- PR Party (KTD12, KTD13) ---
+    # The reviewer registry is provisioned from configuration, not from schema:
+    # comma-separated "zitadel_user_id:github_login" pairs, reconciled into
+    # pr_party_reviewer rows at startup. There is deliberately no seed migration
+    # and no admin mutation endpoint — reviewer identity is environment data, and
+    # an operator with shell access to the env is exactly who should set it.
+    # Leaving this EMPTY does not de-register anyone: reconcile treats an empty
+    # value as "unconfigured" and leaves the registry alone, so a dropped env var
+    # cannot silently delete every reviewer's stored credential.
+    pr_party_reviewers: str = ""
+    # KTD13's privilege split, read side: ONE shared read-only token powering
+    # intake, briefs, and status. It can never actuate — writes go through a
+    # per-reviewer PAT encrypted at rest (see services/pr_party_credentials.py).
+    pr_party_readonly_token: str = ""
+    # Base URL of the ntfy instance reviewers' notification topics live on. The
+    # topic itself is per reviewer and is a secret.
+    pr_party_ntfy_base_url: str = "https://ntfy.sh"
+
+    @property
+    def pr_party_reviewer_map(self) -> dict[str, str]:
+        """Parsed ``PR_PARTY_REVIEWERS``: zitadel user id -> github login.
+
+        Malformed entries (no ``:``, empty side) are dropped rather than
+        crashing boot; ``reconcile_reviewers`` logs the count it discarded so a
+        typo is visible in the startup log instead of silently costing someone
+        their queue.
+        """
+        pairs: dict[str, str] = {}
+        for entry in self.pr_party_reviewers.split(","):
+            zitadel_id, sep, github_login = entry.partition(":")
+            if not sep:
+                continue
+            zitadel_id, github_login = zitadel_id.strip(), github_login.strip()
+            if zitadel_id and github_login:
+                pairs[zitadel_id] = github_login
+        return pairs
+
     # Superadmin - comma-separated list of user IDs with full system access
     superadmin_user_ids: str = ""
 

@@ -15,6 +15,7 @@ from ontokit.api.routes import (
     normalization,
     notifications,
     ontologies,
+    pr_party_settings,
     projects,
     properties,
     pull_requests,
@@ -29,8 +30,28 @@ from ontokit.api.routes import (
 from ontokit.api.routes import (
     llm as llm_routes,
 )
+from ontokit.core.config import settings
 
 router = APIRouter()
+
+
+def include_pr_party_routes(target: APIRouter, auth_mode: str | None = None) -> bool:
+    """Mount PR Party unless authentication is disabled (KTD19).
+
+    Every PR Party route binds to a *named* reviewer: the registry is keyed by
+    Zitadel user id, and the write PAT it stores acts on GitHub as that person.
+    With ``AUTH_MODE=disabled`` every caller is the same anonymous principal, so
+    mounting these routes would let anyone read a reviewer's settings and rotate
+    their credential. There is no safe degraded behavior — the honest answer is
+    a 404, so the router is not mounted at all.
+
+    Returns whether it mounted, so the gate is testable without an app rebuild.
+    """
+    if (auth_mode or settings.auth_mode) == "disabled":
+        return False
+    target.include_router(pr_party_settings.router, prefix="/pr-party", tags=["PR Party"])
+    return True
+
 
 router.include_router(auth.router, prefix="/auth", tags=["Authentication"])
 router.include_router(projects.router, prefix="/projects", tags=["Projects"])
@@ -61,3 +82,5 @@ router.include_router(llm_routes.public_router, tags=["LLM"])
 router.include_router(generation.router, tags=["Generation"])
 # Duplicate check: composite scoring endpoint for pre-submission duplicate detection (DEDUP-04)
 router.include_router(duplicate_check.router, tags=["duplicate-check"])
+# PR Party: org-scoped (not project-scoped), so it mounts at the API root.
+include_pr_party_routes(router)
