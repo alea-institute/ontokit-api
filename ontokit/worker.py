@@ -1057,6 +1057,44 @@ async def sweep_pr_party_prs(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
 
 
+async def generate_pr_brief(
+    ctx: dict[str, Any],
+    pr_id: str,
+    repo_full_name: str,
+    pr_number: int,
+    head_sha: str,
+) -> dict[str, Any]:
+    """Generate the LLM brief for one PR revision (U5).
+
+    Enqueued by name from ``pr_party_intake`` with a revision-scoped job id, so
+    webhook redelivery and a concurrent sweep collapse to one job per head SHA.
+    Registered with ``max_tries=1``: the brief runs a tool-denied LLM call
+    against a fail-closed daily budget, and an automatic retry would either
+    re-spend on a call that already failed deterministically or re-attempt one
+    the budget just refused. When a brief cannot run, the row is left brewing
+    and U4's 90-minute timeout releases the card.
+
+    Everything testable lives in ``pr_party_brief``; this is the arq seam.
+    """
+    db: AsyncSession = ctx["db"]
+
+    try:
+        from ontokit.services.pr_party_brief import generate_brief
+
+        outcome = await generate_brief(
+            db,
+            pr_id=pr_id,
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            redis=ctx.get("redis"),
+        )
+        return outcome.as_dict()
+    except Exception as e:
+        logger.exception(f"PR Party brief job failed for {repo_full_name}#{pr_number}: {e}")
+        raise
+
+
 def _pr_party_sweep_minutes() -> set[int]:
     """Cron minutes for the sweep, derived from ``PR_PARTY_SWEEP_MINUTES``.
 
@@ -1344,6 +1382,13 @@ class WorkerSettings:
         run_batch_entity_embed_task,
         run_remote_check_task,
         sweep_pr_party_prs,
+        # U5: one brief per PR revision. max_tries=1 — see the docstring; the
+        # brewing timeout is the retry mechanism, not arq.
+        func(
+            generate_pr_brief,
+            timeout=settings.pr_party_brief_timeout_seconds,
+            max_tries=1,
+        ),
     ]
     redis_settings = get_redis_settings()
 
