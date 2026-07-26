@@ -151,6 +151,31 @@ class Settings(BaseSettings):
     # arithmetic is measured in (see ``pr_party_intake.MISSING_MISS_THRESHOLD``).
     pr_party_sweep_minutes: int = 5
 
+    # --- PR Party brief generation (KTD17, R21) ---
+    # The brief worker runs a TOOL-DENIED LLM call over adversarial input, so
+    # its provider is configured separately from every project's BYO LLM config
+    # and is checked against an allowlist at task start
+    # (``pr_party_brief.APPROVED_PR_PARTY_PROVIDERS``): PR text is untrusted, and
+    # the set of hosts it may be sent to is an instance-level decision, not a
+    # per-project one. Leaving the API key EMPTY simply disables brief
+    # generation — cards still render from PR facts, and the 90-minute brewing
+    # timeout releases them.
+    pr_party_llm_provider: str = "anthropic"
+    pr_party_llm_model: str = ""
+    pr_party_llm_api_key: str = ""
+    # Optional endpoint override. Must survive the same SSRF guard every other
+    # project-controlled provider URL does (services/llm/ssrf.py).
+    pr_party_llm_base_url: str = ""
+    # Instance-level daily spend cap in USD, enforced fail-closed against a
+    # Redis counter: no counter, no call.
+    pr_party_llm_daily_budget_usd: float = 5.0
+    # Bytes of unified diff sent verbatim before the remainder degrades to
+    # per-file ``path (+adds/-dels)`` summary lines and ``brief_truncated`` is set.
+    pr_party_brief_max_diff_bytes: int = 300_000
+    # arq job timeout for one brief. Generous: the job makes up to three GitHub
+    # calls plus one (retryable) LLM call.
+    pr_party_brief_timeout_seconds: int = 240
+
     @property
     def pr_party_reviewer_map(self) -> dict[str, str]:
         """Parsed ``PR_PARTY_REVIEWERS``: zitadel user id -> github login.

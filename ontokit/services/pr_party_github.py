@@ -40,6 +40,8 @@ Every request carries an explicit timeout — deliberately unlike
 
 from __future__ import annotations
 
+import base64
+import binascii
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -468,20 +470,28 @@ class PRPartyGitHubClient:
         if not self.can_write:
             raise GenerationModeError(operation)
 
-    async def _request(
+    async def _send(
         self,
         method: str,
         endpoint: str,
         *,
         json: dict[str, Any] | None = None,
         op: _Op = _Op.DEFAULT,
-    ) -> dict[str, Any]:
+        accept: str | None = None,
+    ) -> httpx.Response:
         """Issue one authenticated request and map failures to the taxonomy.
 
         Unlike ``github_service._request`` this always sets an explicit timeout
         and never calls ``raise_for_status()`` — the status code has to reach
         :meth:`_map_error`, where PR Party's meaning is attached to it.
+
+        ``accept`` overrides the media type for the surfaces that are not JSON
+        objects (the ``.diff`` representation of a pull request).
         """
+        headers = self._headers()
+        if accept is not None:
+            headers["Accept"] = accept
+
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             # `endpoint` is assembled from _enc()-encoded segments at every call
             # site below (same convention as github_service.py, PR #116), so no
@@ -492,7 +502,7 @@ class PRPartyGitHubClient:
             response = await client.request(
                 method=method,
                 url=f"{self._api_base}{endpoint}",
-                headers=self._headers(),
+                headers=headers,
                 json=json,
             )
 
@@ -503,6 +513,19 @@ class PRPartyGitHubClient:
         if response.status_code >= 400:
             raise self._map_error(response, op)
 
+        return response
+
+    async def _request(
+        self,
+        method: str,
+        endpoint: str,
+        *,
+        json: dict[str, Any] | None = None,
+        op: _Op = _Op.DEFAULT,
+    ) -> dict[str, Any]:
+        """:meth:`_send`, insisting the body is a JSON *object*."""
+        response = await self._send(method, endpoint, json=json, op=op)
+
         if response.status_code == 204:
             return {}
 
@@ -510,6 +533,17 @@ class PRPartyGitHubClient:
         if not isinstance(data, dict):
             raise GitHubAPIError(
                 f"Expected a JSON object from {endpoint}, got {type(data).__name__}.",
+                status_code=response.status_code,
+            )
+        return data
+
+    async def _request_list(self, method: str, endpoint: str) -> list[Any]:
+        """:meth:`_send`, insisting the body is a JSON *array* (collections)."""
+        response = await self._send(method, endpoint)
+        data = _safe_json(response)
+        if not isinstance(data, list):
+            raise GitHubAPIError(
+                f"Expected a JSON array from {endpoint}, got {type(data).__name__}.",
                 status_code=response.status_code,
             )
         return data
@@ -609,6 +643,90 @@ class PRPartyGitHubClient:
         if not isinstance(items, list):
             return []
         return [self._parse_search_item(item) for item in items if isinstance(item, dict)]
+
+    # --- Brief context surfaces (U5; read-only, generation mode uses these) ---
+
+    async def get_pr_diff(self, owner: str, repo: str, number: int) -> str:
+        """``GET /repos/{o}/{r}/pulls/{n}`` under the ``.diff`` media type.
+
+        The unified diff is the single largest piece of *untrusted* context a
+        brief is built from (R21). It is returned verbatim as text; capping and
+        delimiting it is the brief worker's job, not the transport's.
+        """
+        response = await self._send(
+            "GET",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/pulls/{int(number)}",
+            accept="application/vnd.github.v3.diff",
+        )
+        return response.text
+
+    async def get_pr_commit_messages(
+        self, owner: str, repo: str, number: int, *, per_page: int = 100
+    ) -> list[str]:
+        """``GET .../pulls/{n}/commits`` reduced to commit messages.
+
+        Messages only, deliberately: authorship and timestamps are not brief
+        material, and every field that never leaves this method is a field that
+        can never end up in a prompt.
+        """
+        data = await self._request_list(
+            "GET",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/pulls/{int(number)}/commits"
+            f"?per_page={int(per_page)}",
+        )
+        messages: list[str] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            commit = _sub_object(item, "commit")
+            message = commit.get("message")
+            if isinstance(message, str) and message.strip():
+                messages.append(message)
+        return messages
+
+    async def get_repo_file(
+        self, owner: str, repo: str, path: str, ref: str, *, max_bytes: int = 50_000
+    ) -> str | None:
+        """``GET /repos/{o}/{r}/contents/{path}?ref={ref}`` — one file, as text.
+
+        Scoped to a repo the caller names and a path the caller has already
+        validated: ``path`` is encoded with ``allow_slash=True`` because
+        in-repo paths contain meaningful separators, which is exactly why the
+        *caller* must reject ``..`` and absolute forms before calling (the brief
+        worker does, in ``extract_artifact_paths``).
+
+        Returns ``None`` — never raises — when the entry is missing, is not a
+        file, exceeds ``max_bytes``, or does not decode as UTF-8: a linked
+        artifact is a nice-to-have, and no brief is worth failing over one.
+        """
+        try:
+            data = await self._request(
+                "GET",
+                f"/repos/{_enc(owner)}/{_enc(repo)}/contents/{_enc(path, allow_slash=True)}"
+                f"?ref={_enc(ref)}",
+            )
+        except PRPartyGitHubError:
+            return None
+
+        if data.get("type") != "file" or data.get("encoding") != "base64":
+            return None
+        size = _to_int(data.get("size"))
+        if size is not None and size > max_bytes:
+            return None
+
+        raw = data.get("content")
+        if not isinstance(raw, str):
+            return None
+        try:
+            decoded = base64.b64decode(raw)
+        except (ValueError, binascii.Error):
+            return None
+        if len(decoded) > max_bytes:
+            return None
+        try:
+            return decoded.decode("utf-8")
+        except UnicodeDecodeError:
+            return None
 
     # --- Write surfaces (actuation mode only) ---
 

@@ -706,6 +706,117 @@ class TestOrgSearch:
         assert "&q=x" not in url
 
 
+class TestBriefContextSurfaces:
+    """U5's read surfaces: the diff, commit messages, and one in-repo file.
+
+    All three exist to feed a brief, so what is pinned here is *what leaves the
+    method*: the diff must arrive under the ``.diff`` media type (JSON would be
+    a different, useless document), commit listings must reduce to messages
+    (every field that never leaves cannot reach a prompt), and the contents
+    read must degrade to ``None`` on anything unusual rather than raise — no
+    brief is worth failing over a linked planning doc.
+    """
+
+    @pytest.mark.asyncio
+    async def test_diff_requests_the_diff_media_type_and_returns_text(self) -> None:
+        resp = _mock_response(200)
+        resp.text = "diff --git a/x.py b/x.py\n+one\n"
+        mock_client = _make_async_client(resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            diff = await _generator().get_pr_diff("catholicos", "liturgy", 42)
+
+        assert diff.startswith("diff --git ")
+        headers = mock_client.request.call_args.kwargs["headers"]
+        assert headers["Accept"] == "application/vnd.github.v3.diff"
+        assert _called_url(mock_client).endswith("/repos/catholicos/liturgy/pulls/42")
+
+    @pytest.mark.asyncio
+    async def test_commit_listing_reduces_to_messages(self) -> None:
+        # GET /repos/{owner}/{repo}/pulls/{number}/commits
+        # docs: https://docs.github.com/rest/pulls/pulls#list-commits-on-a-pull-request
+        payload = [
+            {"sha": "a" * 40, "commit": {"message": "Add the feast", "author": {"name": "x"}}},
+            {"sha": "b" * 40, "commit": {"message": "  "}},
+            {"sha": "c" * 40, "commit": {"message": "Fix the rank"}},
+        ]
+        mock_client = _make_async_client(_mock_response(200, payload))
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            messages = await _generator().get_pr_commit_messages("catholicos", "liturgy", 42)
+
+        assert messages == ["Add the feast", "Fix the rank"]
+
+    @pytest.mark.asyncio
+    async def test_repo_file_is_base64_decoded_at_the_given_ref(self) -> None:
+        import base64
+
+        # GET /repos/{owner}/{repo}/contents/{path}
+        # docs: https://docs.github.com/rest/repos/contents#get-repository-content
+        payload = {
+            "type": "file",
+            "encoding": "base64",
+            "size": 12,
+            "content": base64.b64encode(b"# Plan\nDo it").decode(),
+        }
+        mock_client = _make_async_client(_mock_response(200, payload))
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            content = await _generator().get_repo_file(
+                "catholicos", "liturgy", "docs/plans/010.md", HEAD_SHA
+            )
+
+        assert content == "# Plan\nDo it"
+        url = _called_url(mock_client)
+        # In-repo separators survive; the ref is pinned to the revision asked for.
+        assert "/contents/docs/plans/010.md" in url
+        assert f"ref={HEAD_SHA}" in url
+
+    @pytest.mark.asyncio
+    async def test_repo_file_returns_none_for_a_directory(self) -> None:
+        mock_client = _make_async_client(_mock_response(200, {"type": "dir"}))
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            content = await _generator().get_repo_file("o", "r", "docs/plans", "ref")
+
+        assert content is None
+
+    @pytest.mark.asyncio
+    async def test_repo_file_returns_none_when_over_the_byte_cap(self) -> None:
+        import base64
+
+        payload = {
+            "type": "file",
+            "encoding": "base64",
+            "size": 999_999,
+            "content": base64.b64encode(b"x" * 100).decode(),
+        }
+        mock_client = _make_async_client(_mock_response(200, payload))
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            content = await _generator().get_repo_file(
+                "o", "r", "docs/plans/a.md", "ref", max_bytes=10
+            )
+
+        assert content is None
+
+    @pytest.mark.asyncio
+    async def test_repo_file_swallows_a_404(self) -> None:
+        mock_client = _make_async_client(_mock_response(404, {"message": "Not Found"}))
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            content = await _generator().get_repo_file("o", "r", "docs/plans/gone.md", "ref")
+
+        assert content is None
+
+    @pytest.mark.asyncio
+    async def test_a_commit_listing_that_is_not_an_array_is_an_error(self) -> None:
+        mock_client = _make_async_client(_mock_response(200, {"message": "unexpected"}))
+
+        with patch("httpx.AsyncClient", return_value=mock_client), pytest.raises(GitHubAPIError):
+            await _generator().get_pr_commit_messages("o", "r", 1)
+
+
 class TestUserLookups:
     """KTD12: logins resolve to rename-proof node ids."""
 
