@@ -135,6 +135,21 @@ class Settings(BaseSettings):
     # Base URL of the ntfy instance reviewers' notification topics live on. The
     # topic itself is per reviewer and is a secret.
     pr_party_ntfy_base_url: str = "https://ntfy.sh"
+    # The GitHub organization the reconciliation sweep enumerates (R1). One
+    # org-scoped search per cycle replaces per-repo iteration (KTD14).
+    pr_party_org: str = "CatholicOS"
+    # Shared secret for the ORG-level webhook (KTD14). One secret, not the
+    # per-project ``GitHubIntegration.webhook_secret`` — this receiver is not
+    # scoped to a project and deliberately does not reuse that path. Leaving it
+    # EMPTY means the receiver is not configured: it answers 503 rather than
+    # accepting unauthenticated deliveries, because the HMAC over the raw body
+    # is the route's only credential.
+    pr_party_webhook_secret: str = ""
+    # Sweep cadence in minutes. The sweep is complete intake on its own (KTD14),
+    # so this is the freshness floor until the org hook exists; once it does,
+    # this can drop to a low-frequency backstop. Also the unit `missing_since`
+    # arithmetic is measured in (see ``pr_party_intake.MISSING_MISS_THRESHOLD``).
+    pr_party_sweep_minutes: int = 5
 
     @property
     def pr_party_reviewer_map(self) -> dict[str, str]:

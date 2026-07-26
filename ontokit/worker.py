@@ -1045,6 +1045,40 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
 
 
+async def sweep_pr_party_prs(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Periodic task: reconcile every open CatholicOS PR into ``pr_party_pr``.
+
+    KTD14's sweep-first intake. This is deliberately thin — discovery, the
+    call-budget gate, author classification, ``missing_since`` bookkeeping and
+    the 90-minute brewing timeout all live in ``pr_party_intake`` so they are
+    testable without arq. Per-item failures are contained there; a failure that
+    reaches here means the cycle itself could not run.
+
+    ``ctx["redis"]`` is the pool the sweep enqueues U5's brief jobs on.
+    """
+    db: AsyncSession = ctx["db"]
+
+    try:
+        from ontokit.services.pr_party_intake import sweep_open_prs
+
+        result = await sweep_open_prs(db, pool=ctx.get("redis"))
+        return result.as_dict()
+    except Exception as e:
+        logger.exception(f"PR Party sweep cron job failed: {e}")
+        raise
+
+
+def _pr_party_sweep_minutes() -> set[int]:
+    """Cron minutes for the sweep, derived from ``PR_PARTY_SWEEP_MINUTES``.
+
+    Clamped to 1–60: a zero or negative interval would fire every minute of
+    every hour and burn the org's search budget, and anything above 60 has no
+    expressible cron form here (use an hourly cron if that is ever wanted).
+    """
+    interval = max(1, min(60, settings.pr_party_sweep_minutes))
+    return {minute for minute in range(60) if minute % interval == 0}
+
+
 async def run_remote_check_task(
     ctx: dict[str, Any],
     project_id: str,
@@ -1320,6 +1354,7 @@ class WorkerSettings:
         run_single_entity_embed_task,
         run_batch_entity_embed_task,
         run_remote_check_task,
+        sweep_pr_party_prs,
     ]
     redis_settings = get_redis_settings()
 
@@ -1350,6 +1385,21 @@ class WorkerSettings:
             auto_accept_suggestions,
             hour=None,
             minute={0, 15, 30, 45},
+        ),
+        # PR Party reconciliation sweep (KTD14). Registered only where the
+        # reviewer registry is configured: on a deployment with no reviewers
+        # there is no queue for the results to land in, and sweeping anyway
+        # would spend the org's GitHub search budget on nothing.
+        *(
+            [
+                cron(
+                    sweep_pr_party_prs,
+                    hour=None,
+                    minute=_pr_party_sweep_minutes(),
+                )
+            ]
+            if settings.pr_party_reviewers
+            else []
         ),
     ]
 
