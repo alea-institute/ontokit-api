@@ -1,19 +1,27 @@
 """Shared ARQ Redis pool for background job enqueueing."""
 
 from arq import ArqRedis, create_pool
-from arq.connections import RedisSettings
-
-from ontokit.core.config import settings
 
 _arq_pool: ArqRedis | None = None
 
 
 async def get_arq_pool() -> ArqRedis:
-    """Get or create the ARQ Redis connection pool."""
+    """Get or create the ARQ Redis connection pool.
+
+    Uses the worker's ``get_redis_settings()`` rather than
+    ``RedisSettings.from_dsn``: the worker's version carries the DSN's
+    credentials (URL-decoded) and the ``rediss://`` TLS flag across, which
+    ``from_dsn`` drops. Both processes talk to the same Redis, so having the API
+    side fail to authenticate where the worker succeeds — the exact shape of the
+    bug fixed in the worker on the FOLIO DEV deploy — is a difference with no
+    justification. Imported lazily so the API does not pull the worker's task
+    modules in at import time.
+    """
     global _arq_pool
     if _arq_pool is None:
-        redis_settings = RedisSettings.from_dsn(str(settings.redis_url))
-        _arq_pool = await create_pool(redis_settings)
+        from ontokit.worker import get_redis_settings
+
+        _arq_pool = await create_pool(get_redis_settings())
     return _arq_pool
 
 

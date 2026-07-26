@@ -16,6 +16,7 @@ from ontokit.api.routes import (
     notifications,
     ontologies,
     pr_party_settings,
+    pr_party_webhooks,
     projects,
     properties,
     pull_requests,
@@ -45,11 +46,17 @@ def include_pr_party_routes(target: APIRouter, auth_mode: str | None = None) -> 
     their credential. There is no safe degraded behavior — the honest answer is
     a 404, so the router is not mounted at all.
 
+    The org webhook receiver rides the same gate even though it authenticates by
+    HMAC rather than by session: with PR Party unmounted there is no queue for a
+    delivery to land in, and leaving the write surface up as the feature's only
+    live endpoint would be strictly worse than a 404.
+
     Returns whether it mounted, so the gate is testable without an app rebuild.
     """
     if (auth_mode or settings.auth_mode) == "disabled":
         return False
     target.include_router(pr_party_settings.router, prefix="/pr-party", tags=["PR Party"])
+    target.include_router(pr_party_webhooks.router, prefix="/pr-party", tags=["PR Party"])
     return True
 
 

@@ -55,10 +55,12 @@ class PRPartyMergeDefault(StrEnum):
 class PRPartyAuthorKind(StrEnum):
     """R19: how a PR's author relates to the reviewer pair.
 
-    This classifies the *PR*, not the reviewer — the same PR is
-    ``counterpart`` for one reviewer's queue and ``own`` for the other's only
-    because the queue projects it per reviewer; the stored kind is the PR's own
-    authorship fact (``own`` = authored by a registered reviewer).
+    The stored kind is the PR's own authorship fact: intake persists
+    ``counterpart`` for ANY registry-member author ("a principal authored
+    this"), alongside ``author_github_login``/``author_node_id``. Own-vs-
+    counterpart is caller-relative and is derived at read time (U15) by
+    comparing the stored author identity to the caller — ``OWN`` exists for
+    that derived, per-caller projection and is never persisted by intake.
     """
 
     COUNTERPART = "counterpart"
