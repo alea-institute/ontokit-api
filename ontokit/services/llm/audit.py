@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 async def log_llm_call(
     db: AsyncSession,
-    project_id: str,
+    project_id: str | None,
     user_id: str,
     model: str,
     provider: str,
@@ -37,7 +37,10 @@ async def log_llm_call(
 
     Args:
         db: Async SQLAlchemy session.
-        project_id: UUID string for the project.
+        project_id: UUID string for the project, or None for instance-level
+            calls with no owning project (KTD20 — e.g. PR Party brief
+            generation). Null-project rows are excluded from every per-project
+            budget query, which filters on ``project_id``.
         user_id: The authenticated user ID.
         model: Model identifier used (e.g. "gpt-4o").
         provider: Provider name (e.g. "openai").

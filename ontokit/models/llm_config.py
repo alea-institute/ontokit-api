@@ -31,9 +31,7 @@ class ProjectLLMConfig(Base):
     # Budget controls — None means unlimited / no cap
     monthly_budget_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
     daily_cap_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), onupdate=func.now()
     )
@@ -56,8 +54,13 @@ class LLMAuditLog(Base):
     __tablename__ = "llm_audit_logs"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    project_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE")
+    # KTD20: nullable so instance-level LLM work with no owning project (PR
+    # Party brief generation, billed against the instance daily cap) is still
+    # audited. Project-scoped calls continue to set it, and the per-project
+    # budget queries filter on project_id, so null rows never consume a
+    # project's budget.
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=True
     )
     user_id: Mapped[str] = mapped_column(String(255))
     model: Mapped[str] = mapped_column(String(200))
@@ -69,11 +72,9 @@ class LLMAuditLog(Base):
     cost_estimate_usd: Mapped[float] = mapped_column(Float)
     # True when the user supplied their own API key; these do NOT count against project budget
     is_byo_key: Mapped[bool] = mapped_column(Boolean, default=False)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
-    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
-    project: Mapped["Project"] = relationship()  # type: ignore[name-defined]  # noqa: F821
+    project: Mapped["Project | None"] = relationship()  # type: ignore[name-defined]  # noqa: F821
 
     __table_args__ = (
         Index("ix_llm_audit_project_date", "project_id", "created_at"),
