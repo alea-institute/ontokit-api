@@ -353,7 +353,7 @@ def _build_card(
         card_id=pr.id,
         repo_full_name=pr.repo_full_name,
         pr_number=pr.pr_number,
-        title=None,
+        title=pr.title,
         author_kind=author_kind,
         author_github_login=pr.author_github_login,
         read_only=author_kind is PRPartyAuthorKind.OWN,

@@ -233,11 +233,10 @@ class PRPartyQueueCard(BaseModel):
     registry-member author, and ``own`` exists only here, derived by matching
     the stored author identity against the caller (R18/R19).
 
-    ``title`` is currently always ``None``: U1's schema has no column for the
-    PR title, and this API refuses to invent one out of brief prose. Clients
-    fall back to ``{repo_full_name}#{pr_number}``, which is always present. When
-    intake starts persisting the title, this field carries it with no shape
-    change.
+    ``title`` is GitHub's own PR title, carried straight off the row — never
+    invented out of brief prose. It is ``None`` only for a row intake wrote
+    before the column existed, or one whose payload omitted it; clients fall
+    back to ``{repo_full_name}#{pr_number}``, which is always present.
     """
 
     card_id: uuid.UUID

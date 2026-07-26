@@ -96,6 +96,9 @@ def upgrade() -> None:
         ),
         sa.Column("author_github_login", sa.String(length=255), nullable=True),
         sa.Column("author_node_id", sa.String(length=255), nullable=True),
+        # GitHub's own PR title (poller-owned). Nullable: clients fall back to
+        # `{repo}#{number}` for any row written before intake carried it.
+        sa.Column("title", sa.String(length=512), nullable=True),
         sa.Column("state", sa.String(length=20), server_default="open", nullable=False),
         sa.Column("head_sha", sa.String(length=40), nullable=False),
         # NULL = GitHub is still computing, not "unmergeable".

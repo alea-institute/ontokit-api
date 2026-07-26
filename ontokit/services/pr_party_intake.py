@@ -17,8 +17,9 @@ against the old revision. Drawing that boundary in exactly one place is what
 lets C1's stale-verdict detection be a comparison rather than a heuristic.
 
 **2. Column ownership (KTD15).** This module writes *poller-owned* columns —
-``pr_node_id``, ``author_*``, ``state``, ``head_sha``, ``mergeable_state``,
-``checks_rollup``, ``missing_since``, ``updated_at_github`` — and nothing else.
+``pr_node_id``, ``title``, ``author_*``, ``state``, ``head_sha``,
+``mergeable_state``, ``checks_rollup``, ``missing_since``,
+``updated_at_github`` — and nothing else.
 The ``brief_*`` columns belong to the brief worker (U5) and survive every
 refresh untouched; that is the DB form of prototype finding B3 and
 ``test_refresh_preserves_brief_columns`` is its guard. There is exactly one
@@ -106,6 +107,7 @@ __all__ = [
     "PR_STATE_DRAFT",
     "PR_STATE_MERGED",
     "PR_STATE_OPEN",
+    "TITLE_MAX_LENGTH",
     "IntakeResult",
     "PRFacts",
     "ReadyTransition",
@@ -149,6 +151,11 @@ DISCOVERY_PAGE_SIZE: Final = 100
 #: GitHub's redelivery window comfortably.
 DELIVERY_DEDUPE_TTL_SECONDS: Final = 24 * 60 * 60
 DELIVERY_KEY_PREFIX: Final = "pr_party:delivery:"
+
+#: Width of ``pr_party_pr.title``. GitHub caps PR titles at 256 characters, so
+#: this is headroom rather than a limit anyone should hit — but the column is
+#: the thing that would raise, and a sweep must never die on a long title.
+TITLE_MAX_LENGTH: Final = 512
 
 # --- Lifecycle states -------------------------------------------------------
 # ``pr_party_pr.state`` is a plain string column (U1). These are its values.
@@ -257,6 +264,10 @@ class PRFacts:
     updated_at_github: datetime | None
     checks_rollup: str | None = None
     checks_known: bool = False
+    #: GitHub's PR title. ``None`` means "this payload did not carry one", which
+    #: the upsert treats as "leave the stored title alone" — a webhook envelope
+    #: that omits it must not blank a title the sweep already recorded.
+    title: str | None = None
 
     @property
     def key(self) -> tuple[str, int]:
@@ -401,6 +412,7 @@ def facts_from_detail(detail: PRDetail, *, rollup: ChecksRollup | None = None) -
         updated_at_github=detail.updated_at,
         checks_rollup=rollup.value if rollup is not None else None,
         checks_known=rollup is not None,
+        title=detail.title or None,
     )
 
 
@@ -445,6 +457,7 @@ def facts_from_webhook_pr(payload: Mapping[str, Any]) -> PRFacts | None:
         updated_at_github=_parse_dt(pr.get("updated_at")),
         # A ``pull_request`` payload carries no check runs; leave the column be.
         checks_known=False,
+        title=_opt_str(pr.get("title")),
     )
 
 
@@ -503,6 +516,8 @@ async def upsert_pr(
         row.pr_node_id = facts.node_id
     if facts.head_sha:
         row.head_sha = facts.head_sha
+    if facts.title:
+        row.title = facts.title[:TITLE_MAX_LENGTH]
     row.state = facts.resolved_state
     row.mergeable_state = facts.mergeable_state
     if facts.checks_known:

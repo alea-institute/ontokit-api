@@ -192,10 +192,13 @@ class PRPartyPR(Base):
 
     Column ownership, which the sweep-after-fold test in U4 enforces:
 
-    - sweep / webhook: ``pr_node_id``, ``author_*``, ``state``, ``head_sha``,
-      ``mergeable_state``, ``checks_rollup``, ``missing_since``,
+    - sweep / webhook: ``pr_node_id``, ``title``, ``author_*``, ``state``,
+      ``head_sha``, ``mergeable_state``, ``checks_rollup``, ``missing_since``,
       ``updated_at_github``
     - brief worker: ``brief_*``, ``ready_at``, ``brewing_since``
+
+    ``title`` is GitHub's own PR title, carried so the queue can name a card
+    without borrowing brief prose — it is a poller fact, never brief content.
     """
 
     __tablename__ = "pr_party_pr"
@@ -219,6 +222,10 @@ class PRPartyPR(Base):
     author_node_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     # --- PR facts (sweep/webhook-owned) ---
+    # GitHub's PR title. Nullable because a row can predate the column and
+    # because intake only writes what a payload actually carried; clients fall
+    # back to ``{repo_full_name}#{pr_number}``, which is never absent.
+    title: Mapped[str | None] = mapped_column(String(512), nullable=True)
     state: Mapped[str] = mapped_column(String(20), nullable=False, server_default="open")
     head_sha: Mapped[str] = mapped_column(String(40), nullable=False)
     # NULL means GitHub is still computing mergeability — not "unmergeable".
