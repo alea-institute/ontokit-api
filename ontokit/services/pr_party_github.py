@@ -306,7 +306,13 @@ class SearchedPR:
 
 @dataclass(frozen=True)
 class PRPartyReview:
-    """A submitted review (R8)."""
+    """A submitted review (R8).
+
+    ``user_node_id`` is the rename-proof identity (KTD12) and is what the
+    reconciler matches a reviewer's hand-cast review by; ``user_login`` is only
+    the fallback for a review whose node id GitHub omitted. It carries a default
+    because a review parsed from a payload without a ``user`` object has neither.
+    """
 
     id: int
     state: str
@@ -315,6 +321,7 @@ class PRPartyReview:
     user_login: str | None
     submitted_at: datetime | None
     html_url: str | None
+    user_node_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -768,15 +775,33 @@ class PRPartyGitHubClient:
         if state.upper() == "PENDING":
             raise ReviewNotSubmittedError(_to_int(data.get("id")), state)
 
-        return PRPartyReview(
-            id=int(data.get("id", 0)),
-            state=state,
-            body=data.get("body"),
-            commit_id=data.get("commit_id"),
-            user_login=_user_field(data, "login"),
-            submitted_at=_parse_dt(data.get("submitted_at")),
-            html_url=data.get("html_url"),
+        return _parse_review(data)
+
+    async def get_pr_reviews(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        *,
+        per_page: int = 100,
+    ) -> list[PRPartyReview]:
+        """``GET .../pulls/{n}/reviews`` — what GitHub says actually happened (U8).
+
+        A *read*, so the sweep's generation token is enough: the reconciler runs
+        on the shared cron, and asking it for a reviewer's write PAT would both
+        spend one principal's rate budget on another's row and put a credential
+        in the reconciliation path for no gain.
+
+        One page, oldest first. Dismissals are visible here as ``state ==
+        "DISMISSED"`` on the review itself, which is why the reconciler does not
+        need a separate dismissal feed.
+        """
+        data = await self._request_list(
+            "GET",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/pulls/{int(number)}/reviews"
+            f"?per_page={int(per_page)}",
         )
+        return [_parse_review(item) for item in data if isinstance(item, dict)]
 
     async def merge_pull_request(
         self,
@@ -932,6 +957,25 @@ def _parse_issue_comment(data: Mapping[str, Any]) -> IssueComment:
         html_url=data.get("html_url"),
         created_at=_parse_dt(data.get("created_at")),
         updated_at=_parse_dt(data.get("updated_at")),
+    )
+
+
+def _parse_review(data: Mapping[str, Any]) -> PRPartyReview:
+    """One review object, however it arrived — posted or listed.
+
+    ``id`` goes through :func:`_to_int` because review ids exceed 32 bits and a
+    payload that omitted one must land as ``0`` rather than raise here; the
+    reconciler treats a zero id as "no id we can match on".
+    """
+    return PRPartyReview(
+        id=_to_int(data.get("id")) or 0,
+        state=str(data.get("state", "")),
+        body=data.get("body"),
+        commit_id=data.get("commit_id"),
+        user_login=_user_field(data, "login"),
+        user_node_id=_user_field(data, "node_id"),
+        submitted_at=_parse_dt(data.get("submitted_at")),
+        html_url=data.get("html_url"),
     )
 
 
