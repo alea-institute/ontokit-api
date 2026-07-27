@@ -24,8 +24,9 @@ from __future__ import annotations
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
@@ -64,6 +65,7 @@ from ontokit.services.pr_party_github import (
     SelfApprovalError,
     StaleCardError,
     TokenExpiredError,
+    actuation_client,
 )
 from ontokit.services.pr_party_rate_limiter import LimiterOutcome, action_key, check_and_consume
 
@@ -282,6 +284,8 @@ class _FakeGitHub:
         merge: MergeResult | None = None,
         review_error: Exception | None = None,
         merge_error: Exception | None = None,
+        reviews: list[PRPartyReview] | None = None,
+        reviews_error: Exception | None = None,
     ) -> None:
         self.review = review or PRPartyReview(
             id=9_000_000_001,
@@ -295,8 +299,19 @@ class _FakeGitHub:
         self.merge = merge or MergeResult(sha="c" * 40, merged=True, message="Pull Request merged")
         self.review_error = review_error
         self.merge_error = merge_error
+        #: What ``GET .../pulls/{n}/reviews`` already holds — the reclaim path's
+        #: duplicate check reads this.
+        self.reviews = list(reviews or [])
+        self.reviews_error = reviews_error
         self.review_calls: list[dict[str, Any]] = []
         self.merge_calls: list[dict[str, Any]] = []
+        self.list_reviews_calls: list[tuple[str, str, int]] = []
+
+    async def get_pr_reviews(self, owner: str, repo: str, number: int) -> list[PRPartyReview]:
+        self.list_reviews_calls.append((owner, repo, number))
+        if self.reviews_error is not None:
+            raise self.reviews_error
+        return list(self.reviews)
 
     async def create_review(
         self, owner: str, repo: str, number: int, **kwargs: Any
@@ -407,6 +422,27 @@ def wired(authed_client: tuple[TestClient, AsyncMock]) -> Any:
         }
 
     return client, install
+
+
+def _gh_review(
+    *,
+    review_id: int = 9_000_000_777,
+    state: str = "APPROVED",
+    commit_id: str | None = HEAD,
+    login: str | None = "damienriehl",
+    node_id: str | None = "MDQ6VXNlcjE=",
+) -> PRPartyReview:
+    """A review GitHub already holds, as ``get_pr_reviews`` would return it."""
+    return PRPartyReview(
+        id=review_id,
+        state=state,
+        body=None,
+        commit_id=commit_id,
+        user_login=login,
+        submitted_at=datetime.now(UTC),
+        html_url=f"https://github.com/{REPO}/pull/42#pullrequestreview-{review_id}",
+        user_node_id=node_id,
+    )
 
 
 def _body(**overrides: Any) -> dict[str, Any]:
@@ -776,6 +812,164 @@ class TestIdempotency:
         assert retry.status_code == 200, retry.text
         assert len(fakes["store"].rows) == 1
 
+    def test_settled_replay_renders_the_stored_row_not_the_new_body(self, wired: Any) -> None:
+        """A same-key replay is the STORED action, whatever the new body says.
+
+        The receipt is projected from the row, and the settled/same-key branch
+        returns before any write — so a client that retries a key with edited
+        prose gets back what actually happened, flagged ``replayed``, and
+        GitHub is not asked a second time.
+        """
+        client, install = wired
+        pr = _pr()
+        fakes = install(_reviewer(), prs=[pr])
+
+        first = _post(client, pr, body="Two suggestions inline; both optional.")
+        assert first.status_code == 200, first.text
+
+        second = _post(client, pr, body="Actually, ship it.")
+        assert second.status_code == 200, second.text
+        payload = second.json()
+
+        assert payload["replayed"] is True
+        assert payload["action"] == first.json()["action"]
+        assert payload["action"]["github_review_id"] == 9_000_000_001
+        assert fakes["store"].rows[0].body == "Two suggestions inline; both optional."
+        assert len(fakes["github"].review_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Reclaim: a dead attempt may already have reached GitHub (KTD16)
+# ---------------------------------------------------------------------------
+
+
+class TestReclaimAdoption:
+    """A reclaimed review row asks GitHub before it posts a second one.
+
+    The row is committed *before* the call that may have killed the process, so
+    its existence proves an attempt happened — not that it failed. Re-actuating
+    on that evidence alone is how one crash becomes two reviews on the PR.
+    """
+
+    @staticmethod
+    def _abandoned(reviewer: PRPartyReviewer, pr: PRPartyPR, **kw: Any) -> PRPartyAction:
+        return _action(
+            reviewer,
+            pr,
+            status=PRPartyActionStatus.PENDING,
+            created_at=datetime.now(UTC) - timedelta(hours=3),
+            **kw,
+        )
+
+    def test_reclaim_adopts_an_existing_review_instead_of_reposting(self, wired: Any) -> None:
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        fakes = install(
+            reviewer,
+            prs=[pr],
+            store=_FakeStore([self._abandoned(reviewer, pr)]),
+            github=_FakeGitHub(reviews=[_gh_review(review_id=9_000_000_777)]),
+        )
+
+        response = _post(client, pr, idempotency_key=OTHER_KEY)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+
+        # Nothing was posted; the review GitHub already holds became this row's.
+        assert fakes["github"].review_calls == []
+        assert fakes["github"].list_reviews_calls == [("catholicos", "ontokit-api", 42)]
+
+        row = fakes["store"].rows[0]
+        assert row.status == PRPartyActionStatus.SUCCEEDED
+        assert row.github_review_id == 9_000_000_777
+        assert payload["action"]["status"] == "succeeded"
+        assert payload["action"]["github_review_id"] == 9_000_000_777
+        assert payload["replayed"] is False
+
+    def test_reclaim_still_actuates_when_the_existing_review_is_another_verdict(
+        self, wired: Any
+    ) -> None:
+        """A ``COMMENTED`` review at this head is not the approval this row cast."""
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        fakes = install(
+            reviewer,
+            prs=[pr],
+            store=_FakeStore([self._abandoned(reviewer, pr)]),
+            github=_FakeGitHub(reviews=[_gh_review(state="COMMENTED")]),
+        )
+
+        response = _post(client, pr, idempotency_key=OTHER_KEY)
+        assert response.status_code == 200, response.text
+        assert len(fakes["github"].review_calls) == 1
+        assert fakes["store"].rows[0].github_review_id == 9_000_000_001
+
+    def test_reclaim_ignores_a_review_of_an_older_revision(self, wired: Any) -> None:
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        fakes = install(
+            reviewer,
+            prs=[pr],
+            store=_FakeStore([self._abandoned(reviewer, pr)]),
+            github=_FakeGitHub(reviews=[_gh_review(commit_id=OLD_HEAD)]),
+        )
+
+        assert _post(client, pr, idempotency_key=OTHER_KEY).status_code == 200
+        assert len(fakes["github"].review_calls) == 1
+
+    def test_reclaim_falls_back_to_actuating_when_the_listing_fails(self, wired: Any) -> None:
+        """A read that is down must not make a verdict impossible to cast."""
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        fakes = install(
+            reviewer,
+            prs=[pr],
+            store=_FakeStore([self._abandoned(reviewer, pr)]),
+            github=_FakeGitHub(
+                reviews_error=GitHubAPIError("reviews unavailable", status_code=503)
+            ),
+        )
+
+        response = _post(client, pr, idempotency_key=OTHER_KEY)
+        assert response.status_code == 200, response.text
+        assert len(fakes["github"].review_calls) == 1
+        assert fakes["store"].rows[0].status == PRPartyActionStatus.SUCCEEDED
+
+    def test_reopened_failed_review_row_also_checks_first(self, wired: Any) -> None:
+        """``failed`` is written *after* the call — it can still have landed."""
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        dead = _action(
+            reviewer,
+            pr,
+            status=PRPartyActionStatus.FAILED,
+            error="GitHubAPIError (HTTP 500)",
+        )
+        fakes = install(
+            reviewer,
+            prs=[pr],
+            store=_FakeStore([dead]),
+            github=_FakeGitHub(reviews=[_gh_review(review_id=9_000_000_778)]),
+        )
+
+        assert _post(client, pr, idempotency_key=OTHER_KEY).status_code == 200
+        assert fakes["github"].review_calls == []
+        assert dead.status == PRPartyActionStatus.SUCCEEDED
+        assert dead.github_review_id == 9_000_000_778
+
+    def test_a_fresh_row_never_pays_for_the_duplicate_check(self, wired: Any) -> None:
+        """The check is the reclaim's cost, not every verdict's."""
+        client, install = wired
+        pr = _pr()
+        fakes = install(_reviewer(), prs=[pr])
+        assert _post(client, pr).status_code == 200
+        assert fakes["github"].list_reviews_calls == []
+
 
 # ---------------------------------------------------------------------------
 # Degradation (R12)
@@ -825,6 +1019,128 @@ class TestDegradation:
         response = _post(client, pr, action_kind="merge", verdict=None)
         assert response.status_code == 200, response.text
         assert response.json()["deep_link"] == f"https://github.com/{REPO}/pull/42"
+
+
+class TestDegradedReplay:
+    """A ``degraded_intent`` row is a *pending* delivery, not a settled one.
+
+    Replaying it unconditionally would strand the reviewer: once the PAT is
+    repaired, the same key — the only key their client has for this tap — would
+    keep echoing the old intent, and there would be no way to actually cast the
+    verdict from the app.
+    """
+
+    @staticmethod
+    def _degraded(reviewer: PRPartyReviewer, pr: PRPartyPR) -> PRPartyAction:
+        return _action(reviewer, pr, status=PRPartyActionStatus.DEGRADED_INTENT)
+
+    def test_replay_with_a_repaired_credential_actuates_for_real(self, wired: Any) -> None:
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        row = self._degraded(reviewer, pr)
+        fakes = install(reviewer, prs=[pr], store=_FakeStore([row]), token="ghp_repaired")
+
+        response = _post(client, pr)  # same idempotency key as the degraded row
+        assert response.status_code == 200, response.text
+        payload = response.json()
+
+        assert len(fakes["github"].review_calls) == 1
+        assert fakes["github"].list_reviews_calls == []
+        assert payload["degraded"] is False
+        assert payload["replayed"] is False
+        assert payload["action"]["status"] == "succeeded"
+        assert payload["action"]["github_review_id"] == 9_000_000_001
+        assert len(fakes["store"].rows) == 1
+        assert row.status == PRPartyActionStatus.SUCCEEDED
+
+    def test_replay_with_a_still_broken_credential_replays_the_intent(self, wired: Any) -> None:
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        row = self._degraded(reviewer, pr)
+        fakes = install(reviewer, prs=[pr], store=_FakeStore([row]), token=None)
+
+        response = _post(client, pr)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+
+        assert payload["replayed"] is True
+        assert payload["degraded"] is True
+        # The replay has to carry the same "finish it here" link the first
+        # degraded response did, or a retry is strictly less useful than it.
+        assert payload["deep_link"] == f"https://github.com/{REPO}/pull/42/files"
+        assert payload["action"]["status"] == "degraded_intent"
+        assert fakes["github"].review_calls == []
+        assert row.status == PRPartyActionStatus.DEGRADED_INTENT
+
+    def test_a_degraded_merge_replay_deep_links_to_the_conversation_tab(self, wired: Any) -> None:
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        approval = _action(_reviewer(zitadel_user_id="counterpart"), pr)
+        stalled = _action(
+            reviewer,
+            pr,
+            kind=PRPartyActionKind.MERGE,
+            verdict=None,
+            status=PRPartyActionStatus.DEGRADED_INTENT,
+        )
+        install(reviewer, prs=[pr], store=_FakeStore([approval, stalled]), token=None)
+
+        response = _post(client, pr, action_kind="merge", verdict=None)
+        assert response.status_code == 200, response.text
+        assert response.json()["replayed"] is True
+        assert response.json()["deep_link"] == f"https://github.com/{REPO}/pull/42"
+
+
+class TestDegradedConfirmed:
+    """A confirmed degraded verdict is a real verdict (R12 + U8).
+
+    The reviewer approved in the app, the PAT was missing, they posted the
+    review on GitHub by hand, and the reconciler matched it back to the row as
+    ``degraded_confirmed``. Anything that treats that as less than an approval
+    would punish the reviewer for our credential outage.
+    """
+
+    def test_it_authorizes_a_merge_and_shows_as_approved_to_the_counterpart(
+        self, wired: Any
+    ) -> None:
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        confirmed = _action(
+            _reviewer(zitadel_user_id="counterpart", node_id="MDQ6VXNlcjc="),
+            pr,
+            status=PRPartyActionStatus.DEGRADED_CONFIRMED,
+            github_review_id=9_000_000_500,
+        )
+        fakes = install(reviewer, prs=[pr], store=_FakeStore([confirmed]))
+
+        response = _post(client, pr, action_kind="merge", verdict=None)
+        assert response.status_code == 200, response.text
+        payload = response.json()
+
+        assert payload["action"]["merged"] is True
+        assert len(fakes["github"].merge_calls) == 1
+        assert payload["card"]["other_reviewer"]["has_approved"] is True
+
+    def test_a_degraded_intent_approval_does_not_authorize_a_merge(self, wired: Any) -> None:
+        """The contrast that makes the case above mean something."""
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        unconfirmed = _action(
+            _reviewer(zitadel_user_id="counterpart", node_id="MDQ6VXNlcjc="),
+            pr,
+            status=PRPartyActionStatus.DEGRADED_INTENT,
+        )
+        fakes = install(reviewer, prs=[pr], store=_FakeStore([unconfirmed]))
+
+        response = _post(client, pr, action_kind="merge", verdict=None)
+        assert response.status_code == 409
+        assert fakes["github"].merge_calls == []
+        assert response.json()["detail"]["card"]["other_reviewer"]["has_approved"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -905,6 +1221,65 @@ class TestGitHubFailures:
         )
         response = _post(client, pr, action_kind="merge", verdict=None)
         assert response.status_code == 409
+
+
+class TestTransportFailureThroughActuation:
+    """GitHub being unreachable takes the 502 path, not an unhandled 500.
+
+    Every other test here arms ``_FakeGitHub``, which can only prove the
+    service handles errors it is *handed*. This one wires the **real**
+    :class:`PRPartyGitHubClient` in as the actuation client and breaks httpx
+    underneath it, so the assertion covers the whole chain: httpx raises a
+    transport error, the client folds it into the taxonomy, and the service's
+    ``except GitHubAPIError`` is the thing that catches it. Before the client
+    wrapped transport errors, this request raised out of the route.
+    """
+
+    @staticmethod
+    def _dead_transport() -> AsyncMock:
+        transport = AsyncMock()
+        transport.request = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+        transport.__aenter__ = AsyncMock(return_value=transport)
+        transport.__aexit__ = AsyncMock(return_value=False)
+        return transport
+
+    def test_connect_error_during_a_review_is_a_502_and_a_failed_row(self, wired: Any) -> None:
+        client, install = wired
+        pr = _pr()
+        fakes = install(
+            _reviewer(),
+            prs=[pr],
+            github=actuation_client("ghp_actuation_token"),  # the real client
+        )
+
+        with patch("httpx.AsyncClient", return_value=self._dead_transport()):
+            response = _post(client, pr)
+
+        assert response.status_code == 502
+        row = fakes["store"].rows[0]
+        assert row.status == PRPartyActionStatus.FAILED
+        # No HTTP status exists for a transport failure; scrub_error must not
+        # render one, and httpx's prose must not be persisted.
+        assert row.error == "GitHubAPIError"
+        assert "connection refused" not in response.text
+
+    def test_connect_error_during_a_merge_is_a_502_and_a_failed_row(self, wired: Any) -> None:
+        client, install = wired
+        pr = _pr()
+        approval = _action(_reviewer(zitadel_user_id="counterpart"), pr)
+        fakes = install(
+            _reviewer(),
+            prs=[pr],
+            store=_FakeStore([approval]),
+            github=actuation_client("ghp_actuation_token"),
+        )
+
+        with patch("httpx.AsyncClient", return_value=self._dead_transport()):
+            response = _post(client, pr, action_kind="merge", verdict=None)
+
+        assert response.status_code == 502
+        mine = [r for r in fakes["store"].rows if r.action_kind == PRPartyActionKind.MERGE]
+        assert mine[0].status == PRPartyActionStatus.FAILED
 
 
 # ---------------------------------------------------------------------------

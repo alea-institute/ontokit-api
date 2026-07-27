@@ -49,6 +49,7 @@ from ontokit.services.pr_party_github import ChecksRollup, Mergeability, PRDetai
 from ontokit.services.pr_party_intake import (
     BREWING_TIMEOUT,
     BRIEF_TASK_NAME,
+    MAX_DISCOVERY_PAGES,
     MISSING_MISS_THRESHOLD,
     PR_STATE_CLOSED,
     PR_STATE_DRAFT,
@@ -540,6 +541,72 @@ class TestUpsert:
         assert existing.brewing_since == NOW - timedelta(hours=5)
         assert existing.ready_at == NOW - timedelta(hours=4)
 
+    async def test_an_older_snapshot_never_rolls_the_row_backwards(self) -> None:
+        """A late webhook or a lost sweep race must not un-do a newer revision.
+
+        Rolling ``head_sha`` back reads as a head-SHA *change*, which would also
+        re-open the brewing lifecycle on a revision that is already behind.
+        """
+        existing = _existing_pr(head_sha="a" * 40, updated_at=NOW - timedelta(minutes=30))
+        db = _FakeSession([existing])
+        pool = _FakePool()
+
+        newer = facts_from_detail(
+            _detail(head_sha="b" * 40, updated_at=NOW - timedelta(minutes=5)),
+            rollup=ChecksRollup.SUCCESS,
+        )
+        await upsert_pr(db, newer, registry=_registry(), now=NOW, pool=pool)  # type: ignore[arg-type]
+        assert existing.head_sha == "b" * 40
+        assert existing.brief_status == PRPartyBriefStatus.BREWING
+        brewing_since = existing.brewing_since
+        assert len(pool.jobs) == 1
+
+        stale = facts_from_detail(
+            _detail(head_sha="a" * 40, updated_at=NOW - timedelta(minutes=20)),
+            rollup=ChecksRollup.FAILURE,
+        )
+        result = await upsert_pr(db, stale, registry=_registry(), now=NOW, pool=pool)  # type: ignore[arg-type]
+
+        assert result.skipped_reason == "stale"
+        assert result.created is False
+        assert result.new_revision is False
+        assert existing.head_sha == "b" * 40
+        assert existing.updated_at_github == NOW - timedelta(minutes=5)
+        assert existing.brief_status == PRPartyBriefStatus.BREWING
+        assert existing.brewing_since == brewing_since
+        # No second brief: the stale replay never reached the enqueue path.
+        assert len(pool.jobs) == 1
+
+    async def test_an_equally_timestamped_replay_still_applies(self) -> None:
+        """KTD14's idempotence rests on re-applying the same snapshot, not skipping it."""
+        existing = _existing_pr(head_sha="a" * 40, updated_at=NOW - timedelta(minutes=10))
+        existing.checks_rollup = "pending"
+        db = _FakeSession([existing])
+
+        facts = facts_from_detail(
+            _detail(head_sha="a" * 40, updated_at=NOW - timedelta(minutes=10)),
+            rollup=ChecksRollup.SUCCESS,
+        )
+        result = await upsert_pr(db, facts, registry=_registry(), now=NOW)  # type: ignore[arg-type]
+
+        assert result.skipped_reason is None
+        assert existing.checks_rollup == "success"
+
+    async def test_an_unorderable_snapshot_is_not_treated_as_stale(self) -> None:
+        """No timestamp on either side means no ordering — write rather than drop facts."""
+        existing = _existing_pr(head_sha="a" * 40)
+        existing.updated_at_github = None
+        db = _FakeSession([existing])
+
+        facts = facts_from_detail(
+            _detail(head_sha="b" * 40, updated_at=NOW - timedelta(hours=9)),
+            rollup=ChecksRollup.SUCCESS,
+        )
+        result = await upsert_pr(db, facts, registry=_registry(), now=NOW)  # type: ignore[arg-type]
+
+        assert result.skipped_reason is None
+        assert existing.head_sha == "b" * 40
+
     async def test_force_push_supersedes_and_rebrews(self) -> None:
         existing = _existing_pr(head_sha="a" * 40, brief_status=PRPartyBriefStatus.READY)
         existing.ready_at = NOW - timedelta(hours=4)
@@ -1002,6 +1069,50 @@ class TestSweep:
         assert result.discovery_complete is False
         assert result.errors == 1
 
+    async def test_hitting_the_page_cap_reports_discovery_incomplete(self) -> None:
+        """A capped pass saw *some* of GitHub, so it is not evidence of absence.
+
+        Reporting it complete let ``_reconcile_missing`` stamp ``missing_since``
+        on every row that sorted past the last page the sweep read.
+        """
+        pages = [
+            [
+                _searched(number=page * 100 + n, updated_at=NOW - timedelta(minutes=30))
+                for n in range(100)
+            ]
+            for page in range(MAX_DISCOVERY_PAGES)
+        ]
+        rows = [
+            _existing_pr(number=item.number, updated_at=NOW - timedelta(minutes=30))
+            for page in pages
+            for item in page
+        ]
+        beyond_the_cap = _existing_pr(number=99_999)
+        db = _FakeSession([*rows, beyond_the_cap])
+        client = _FakeClient(pages=pages)
+
+        result = await sweep_open_prs(  # type: ignore[arg-type]
+            db, client=client, org="CatholicOS", now=NOW
+        )
+
+        assert client.search_calls == MAX_DISCOVERY_PAGES
+        assert result.discovery_complete is False
+        assert result.discovery_cap_hit is True
+        assert result.as_dict()["discovery_cap_hit"] is True
+        assert beyond_the_cap.missing_since is None
+        assert result.missing_stamped == 0
+
+    async def test_a_short_page_reports_the_cap_untouched(self) -> None:
+        db = _FakeSession([_existing_pr(number=7, updated_at=NOW - timedelta(minutes=30))])
+        client = _FakeClient(pages=[[_searched(number=7, updated_at=NOW - timedelta(minutes=30))]])
+
+        result = await sweep_open_prs(  # type: ignore[arg-type]
+            db, client=client, org="CatholicOS", now=NOW
+        )
+
+        assert result.discovery_complete is True
+        assert result.discovery_cap_hit is False
+
     async def test_missing_threshold_needs_three_consecutive_misses(self) -> None:
         row = _existing_pr(number=9)
         row.missing_since = NOW - timedelta(minutes=10)
@@ -1278,3 +1389,53 @@ class TestWebhookDispatch:
 
         assert outcome["status"] == "processed"
         assert len([r for r in db.rows if isinstance(r, PRPartyPR)]) == 1
+
+
+# ---------------------------------------------------------------------------
+# Worker registration (the U4 cron seam)
+# ---------------------------------------------------------------------------
+
+
+class TestSweepWorkerRegistration:
+    def test_the_sweep_carries_an_explicit_timeout(self) -> None:
+        """Inheriting the 300s worker default left the bound unstated at the seam."""
+        from ontokit.core.config import settings
+        from ontokit.worker import WorkerSettings, sweep_pr_party_prs
+
+        registered = {
+            getattr(f, "name", getattr(f, "__name__", "")): f for f in WorkerSettings.functions
+        }
+        entry = registered[sweep_pr_party_prs.__qualname__]
+
+        assert entry.timeout_s == settings.pr_party_sweep_timeout_seconds
+        # Under the worker default and under the sweep cadence, so a wedged run
+        # can neither outlive the job budget nor overlap the next tick.
+        assert entry.timeout_s < WorkerSettings.job_timeout
+        assert entry.timeout_s < settings.pr_party_sweep_minutes * 60
+
+    def test_the_cron_entry_is_bounded_too(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The cron path runs the sweep from its own CronJob, not from ``functions``.
+
+        ``cron_jobs`` is built at class-definition time and the sweep is only
+        registered where reviewers are configured, so the setting has to be in
+        place before the module body runs.
+        """
+        import importlib
+
+        import ontokit.worker as worker_module
+        from ontokit.core.config import settings
+
+        monkeypatch.setattr(settings, "pr_party_reviewers", "damienriehl", raising=False)
+        try:
+            reloaded = importlib.reload(worker_module)
+            jobs = [
+                job
+                for job in reloaded.WorkerSettings.cron_jobs
+                if "sweep_pr_party_prs" in getattr(job, "name", "")
+            ]
+
+            assert len(jobs) == 1, "the sweep cron is registered exactly once"
+            assert jobs[0].timeout_s == settings.pr_party_sweep_timeout_seconds
+        finally:
+            monkeypatch.undo()
+            importlib.reload(worker_module)

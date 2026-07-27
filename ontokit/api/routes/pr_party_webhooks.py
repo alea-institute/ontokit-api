@@ -22,7 +22,10 @@ Three deliberate choices:
   Redis ``SETNX`` under a 24h TTL; a repeat is a 200 no-op. If Redis is down the
   event is processed anyway and a warning is logged: the upsert path is
   idempotent by construction (KTD14), so processing twice is harmless, whereas
-  dropping a delivery loses a fact GitHub will not resend.
+  dropping a delivery loses a fact GitHub will not resend. For the same reason
+  a handler that raises *releases* its claim: the claim is taken before
+  processing, and a failed pass that kept it would turn GitHub's redelivery —
+  the last copy of that fact — into a 200 no-op.
 
 This receiver mounts inside ``include_pr_party_routes`` — under
 ``AUTH_MODE=disabled`` PR Party is not mounted at all (KTD19), and the webhook
@@ -56,9 +59,17 @@ router = APIRouter()
 
 
 def _signature_matches(secret: str, body: bytes, provided: str) -> bool:
-    """Constant-time compare against ``sha256=<hexdigest>`` over the raw bytes."""
-    expected = "sha256=" + hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(provided, expected)
+    """Constant-time compare against ``sha256=<hexdigest>`` over the raw bytes.
+
+    Compared as *bytes*: ``hmac.compare_digest`` rejects str operands that are
+    not ASCII-only with a TypeError, and the header is attacker-controlled, so
+    a str compare turns one non-ASCII byte in ``X-Hub-Signature-256`` into a
+    500 instead of the 401 it deserves.
+    """
+    expected = b"sha256=" + hmac.new(
+        secret.encode("utf-8"), body, hashlib.sha256
+    ).hexdigest().encode("ascii")
+    return hmac.compare_digest(provided.encode("utf-8", "replace"), expected)
 
 
 async def _claim_delivery(delivery_id: str) -> bool:
@@ -85,6 +96,26 @@ async def _claim_delivery(delivery_id: str) -> bool:
         )
         return True
     return bool(claimed)
+
+
+async def _release_delivery(delivery_id: str) -> None:
+    """Un-claim a delivery id so GitHub's redelivery is not swallowed.
+
+    The claim is taken *before* processing, so a handler that blows up leaves
+    behind a key that makes the redelivery — the only copy of that fact we will
+    ever be offered again — look like a duplicate. Best-effort by design: if the
+    release itself fails there is nothing further to do, and the 24h TTL is the
+    backstop.
+    """
+    if not delivery_id:
+        return
+    try:
+        pool = await get_arq_pool()
+        await pool.delete(f"{DELIVERY_KEY_PREFIX}{delivery_id}")
+    except Exception as exc:  # noqa: BLE001 — the TTL still expires the claim
+        logger.warning(
+            "PR Party webhook: could not release delivery claim %s: %s", delivery_id, exc
+        )
 
 
 @router.post("/webhooks/github")
@@ -120,7 +151,8 @@ async def receive_github_webhook(
         # turns the hook green in the org settings UI.
         return {"status": "pong"}
 
-    if not await _claim_delivery((x_github_delivery or "").strip()):
+    delivery_id = (x_github_delivery or "").strip()
+    if not await _claim_delivery(delivery_id):
         logger.info("PR Party webhook: duplicate delivery %s ignored", x_github_delivery)
         return {"status": "duplicate", "event": event}
 
@@ -143,4 +175,10 @@ async def receive_github_webhook(
     except Exception as exc:  # noqa: BLE001 — briefs can wait; the row cannot
         logger.warning("PR Party webhook: brief queue unavailable: %s", exc)
 
-    return await handle_webhook_event(db, event, payload, pool=pool)
+    try:
+        return await handle_webhook_event(db, event, payload, pool=pool)
+    except Exception:
+        # The claim was taken before processing; a failed pass must give it back
+        # so GitHub's redelivery is treated as new work rather than a duplicate.
+        await _release_delivery(delivery_id)
+        raise

@@ -76,8 +76,8 @@ from ontokit.services.llm.pricing import get_model_pricing
 from ontokit.services.llm.prompts import pr_party_brief as brief_prompt
 from ontokit.services.llm.registry import get_provider
 from ontokit.services.llm.ssrf import validate_base_url
-from ontokit.services.pr_party_github import PRPartyGitHubClient, generation_client
-from ontokit.services.pr_party_intake import ReadyTransition, ready_transition_hooks
+from ontokit.services.pr_party_github import PRPartyGitHubClient, default_generation_client
+from ontokit.services.pr_party_intake import ReadyTransition, emit_ready_transition
 
 logger = logging.getLogger(__name__)
 
@@ -658,7 +658,7 @@ async def generate_brief(
     """
     moment = now or datetime.now(UTC)
 
-    active_client = client if client is not None else _generation_client()
+    active_client = client if client is not None else default_generation_client()
     if active_client is None:
         logger.warning(
             "PR Party brief skipped for %s#%s: no generation token.", repo_full_name, pr_number
@@ -929,25 +929,21 @@ async def _emit_ready(row: PRPartyPR, *, reason: str) -> None:
     never fire for it. Without this the reviewer would simply never be told
     about that revision. U9 can distinguish the two from ``brief_status`` and
     from ``reason``.
+
+    Only the projection from row to transition lives here; the hook loop (and
+    its "a notifier cannot undo a commit" swallow) is U4's
+    :func:`~ontokit.services.pr_party_intake.emit_ready_transition`.
     """
-    transition = ReadyTransition(
-        pr_id=row.id,
-        repo_full_name=row.repo_full_name,
-        pr_number=row.pr_number,
-        head_sha=row.head_sha,
-        brief_status=row.brief_status,
-        reason=reason,
+    await emit_ready_transition(
+        ReadyTransition(
+            pr_id=row.id,
+            repo_full_name=row.repo_full_name,
+            pr_number=row.pr_number,
+            head_sha=row.head_sha,
+            brief_status=row.brief_status,
+            reason=reason,
+        )
     )
-    for hook in list(ready_transition_hooks):
-        try:
-            await hook(transition)
-        except Exception as exc:  # noqa: BLE001 — a notifier cannot undo a commit
-            logger.warning(
-                "PR Party ready hook failed for %s#%s: %s",
-                transition.repo_full_name,
-                transition.pr_number,
-                exc,
-            )
 
 
 async def _audit(
@@ -1052,9 +1048,3 @@ async def _resolve_title_body(
         title if title is not None else detail.title,
         body if body is not None else (detail.body or ""),
     )
-
-
-def _generation_client() -> PRPartyGitHubClient | None:
-    """The shared read-only client (KTD13), or ``None`` if unconfigured."""
-    token = settings.pr_party_readonly_token
-    return generation_client(token) if token else None

@@ -58,7 +58,7 @@ import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, Protocol
 
 from cryptography.fernet import Fernet, MultiFernet
 from sqlalchemy import select
@@ -74,6 +74,7 @@ from ontokit.services.pr_party_github import (
     TokenExpiredError,
     actuation_client,
     generation_client,
+    scrub_error,
 )
 
 logger = logging.getLogger(__name__)
@@ -84,15 +85,17 @@ __all__ = [
     "GITHUB_TOKEN_SETTINGS_URL",
     "LOGIN_CHANGED_ERROR",
     "CredentialRejected",
+    "CredentialResolver",
     "CredentialValidationUnavailable",
     "PRPartyCredentialError",
     "PRPartyCredentialService",
-    "ReconcileResult",
+    "ReviewerReconcileResult",
     "credential_health",
     "decrypt_reviewer_token",
     "encrypt_reviewer_token",
     "get_generation_token_status",
     "is_degraded",
+    "mark_credential_dead",
     "reconcile_reviewers",
     "reset_generation_token_cache",
     "rotate_reviewer_token",
@@ -281,8 +284,11 @@ async def get_generation_token_status(
         identity = await client_factory(token).get_authenticated_user()
         status = PRPartyGenerationTokenStatus(expires_at=identity.token_expires_at, last_error=None)
     except Exception as e:  # noqa: BLE001 — status surface, never a raise path
-        logger.warning("PR Party generation token check failed: %r", e)
-        status = PRPartyGenerationTokenStatus(expires_at=None, last_error=str(e) or repr(e))
+        logger.warning("PR Party generation token check failed: %s", scrub_error(e))
+        # ``last_error`` is rendered on the settings page and is derived from a
+        # GitHub error body, which quotes the request. Only the class name and
+        # the status survive (see :func:`~...pr_party_github.scrub_error`).
+        status = PRPartyGenerationTokenStatus(expires_at=None, last_error=scrub_error(e))
 
     _generation_status_cache = _GenerationStatusCache(token=token, checked_at=moment, status=status)
     return status
@@ -292,7 +298,7 @@ async def get_generation_token_status(
 
 
 @dataclass(frozen=True)
-class ReconcileResult:
+class ReviewerReconcileResult:
     """What one reconciliation pass did, for the startup log and for tests."""
 
     added: int = 0
@@ -308,7 +314,7 @@ async def reconcile_reviewers(
     db: AsyncSession,
     *,
     client_factory: GenerationClientFactory = generation_client,
-) -> ReconcileResult:
+) -> ReviewerReconcileResult:
     """Make ``pr_party_reviewer`` match ``PR_PARTY_REVIEWERS`` (KTD12).
 
     See the module docstring for the three deliberate behaviors: a renamed login
@@ -321,7 +327,7 @@ async def reconcile_reviewers(
             "PR_PARTY_REVIEWERS is unset — leaving the PR Party reviewer registry "
             "untouched. Set it to 'zitadel_id:github_login,...' to provision reviewers."
         )
-        return ReconcileResult(skipped=True)
+        return ReviewerReconcileResult(skipped=True)
 
     declared = len([entry for entry in settings.pr_party_reviewers.split(",") if entry.strip()])
     if declared > len(configured):
@@ -380,7 +386,7 @@ async def reconcile_reviewers(
         resolved,
         unresolved,
     )
-    return ReconcileResult(
+    return ReviewerReconcileResult(
         added=added,
         updated=updated,
         removed=removed,
@@ -440,6 +446,61 @@ async def _resolve_node_ids(
             unresolved += 1
 
     return (resolved, unresolved)
+
+
+# --- The actuation-side view of a credential --------------------------------
+
+
+class CredentialResolver(Protocol):
+    """The slice of :class:`PRPartyCredentialService` the actuating services need.
+
+    Declared here, next to the service that satisfies it, so U6's verdict path
+    and U7's Q&A path depend on one description of the credential instead of
+    two that can drift apart.
+    """
+
+    async def resolve_token(self, reviewer: PRPartyReviewer) -> str | None: ...
+
+    async def get_credential(self, reviewer_id: uuid.UUID) -> Any: ...
+
+    async def save(self) -> None: ...
+
+
+async def mark_credential_dead(
+    credentials: CredentialResolver,
+    reviewer: PRPartyReviewer,
+    error: BaseException,
+    *,
+    message: str,
+) -> bool:
+    """Record that a stored PAT was rejected mid-flight (401). Returns whether one existed.
+
+    Actuation is the only thing that ever learns a stored PAT died — validation
+    runs at submission and nothing re-checks it afterwards — so this is the one
+    transition from "healthy credential" to "visibly broken". Clearing
+    ``last_validated_at`` is what makes the settings surface stop showing a
+    green check on a token that just failed.
+
+    Deliberately does **not** commit: the caller owns the unit of work (U6
+    commits through its action store, U7 through :meth:`
+    PRPartyCredentialService.save`), and the boolean is how it knows whether
+    there is anything to commit.
+
+    ``message`` is caller-supplied because it names the operation the reviewer
+    was performing; the GitHub error itself never reaches storage, only its
+    :func:`~ontokit.services.pr_party_github.scrub_error` form in the log.
+    """
+    credential = await credentials.get_credential(reviewer.id)
+    if credential is None:  # pragma: no cover — a token came from somewhere
+        return False
+    credential.last_error = message
+    credential.last_validated_at = None
+    logger.warning(
+        "PR Party: reviewer %s has a dead PAT (%s)",
+        reviewer.zitadel_user_id,
+        scrub_error(error),
+    )
+    return True
 
 
 # --- Credential service -----------------------------------------------------
@@ -595,11 +656,11 @@ class PRPartyCredentialService:
             ) from e
         except PRPartyGitHubError as e:
             raise CredentialValidationUnavailable(
-                f"Could not verify the token with GitHub: {e}"
+                f"Could not verify the token with GitHub: {scrub_error(e)}"
             ) from e
         except Exception as e:  # noqa: BLE001 — network faults are not user error
             raise CredentialValidationUnavailable(
-                f"Could not reach GitHub to verify the token: {e!r}"
+                f"Could not reach GitHub to verify the token: {scrub_error(e)}"
             ) from e
 
     async def _probe_capability(self, client: PRPartyGitHubClient, login: str) -> None:
@@ -617,9 +678,9 @@ class PRPartyCredentialService:
             ) from e
         except PRPartyGitHubError as e:
             raise CredentialValidationUnavailable(
-                f"Could not complete the GitHub capability check: {e}"
+                f"Could not complete the GitHub capability check: {scrub_error(e)}"
             ) from e
         except Exception as e:  # noqa: BLE001 — network faults are not user error
             raise CredentialValidationUnavailable(
-                f"Could not reach GitHub for the capability check: {e!r}"
+                f"Could not reach GitHub for the capability check: {scrub_error(e)}"
             ) from e

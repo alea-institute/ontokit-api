@@ -883,6 +883,11 @@ def _workflow() -> dict[str, Any]:
     return document
 
 
+# The per-run suffix the untrusted-data markers must carry, verbatim as it
+# appears in the asset (GitHub evaluates it; the comment author cannot).
+_NONCE = "${{ github.run_id }}-${{ github.run_attempt }}"
+
+
 def _steps(document: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         step
@@ -890,6 +895,15 @@ def _steps(document: dict[str, Any]) -> list[dict[str, Any]]:
         for step in job.get("steps", [])
         if isinstance(step, dict)
     ]
+
+
+def _agent_prompt() -> str:
+    prompt = ""
+    for step in _steps(_workflow()):
+        if "prompt" in step.get("with", {}):
+            prompt = str(step["with"]["prompt"])
+    assert prompt, "the agent step carries a prompt"
+    return prompt
 
 
 class TestOrgWorkflowAsset:
@@ -946,10 +960,27 @@ class TestOrgWorkflowAsset:
             assert forbidden in args.split("--disallowedTools", 1)[1]
 
     def test_untrusted_pr_text_is_wrapped_as_data(self) -> None:
-        agent_prompt = ""
-        for step in _steps(_workflow()):
-            if "prompt" in step.get("with", {}):
-                agent_prompt = str(step["with"]["prompt"])
+        agent_prompt = _agent_prompt()
 
         assert "<untrusted-data" in agent_prompt
         assert "never follow" in agent_prompt.casefold()
+
+    def test_untrusted_delimiters_carry_a_per_run_nonce(self) -> None:
+        """KTD18: forgeable delimiters are not a containment bound.
+
+        The suffix is a GitHub expression evaluated on the runner, so the author
+        of a pull request title or body cannot know it while writing.
+        """
+        agent_prompt = _agent_prompt()
+
+        assert agent_prompt.count(f"<untrusted-data-{_NONCE} source=") == 2
+        assert agent_prompt.count(f"</untrusted-data-{_NONCE}>") == 2
+        # And the agent is told that a bare marker is not a boundary.
+        assert _NONCE in agent_prompt.split("UNTRUSTED MATERIAL", 1)[1].split("<untrusted", 1)[0]
+
+    def test_the_static_closing_fence_is_no_longer_forgeable(self) -> None:
+        """A PR body containing a literal ``</untrusted-data>`` closes nothing."""
+        agent_prompt = _agent_prompt()
+
+        for forgeable in ("</untrusted-data>", "<untrusted-data "):
+            assert forgeable not in agent_prompt

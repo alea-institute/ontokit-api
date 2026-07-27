@@ -29,9 +29,9 @@ policy over two I/O surfaces, and the policy is the thing under test.
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -43,7 +43,12 @@ from ontokit.models.pr_party import (
     PRPartyPR,
     PRPartyReviewer,
 )
-from ontokit.schemas.pr_party import PR_PARTY_VERDICT_APPROVE, PR_PARTY_VERDICT_COMMENT
+from ontokit.schemas.pr_party import (
+    PR_PARTY_VERDICT_APPROVE,
+    PR_PARTY_VERDICT_COMMENT,
+    PR_PARTY_VERDICT_DISCUSS_LIVE,
+    PR_PARTY_VERDICT_REQUEST_CHANGES,
+)
 from ontokit.services.pr_party_actions import merge_is_authorized
 from ontokit.services.pr_party_github import (
     GitHubAPIError,
@@ -58,6 +63,7 @@ from ontokit.services.pr_party_reconcile import (
     NAG_SWEEP_THRESHOLD,
     ActionContext,
     ReconcileResult,
+    find_matching_review,
     is_nagging,
     reconcile_pass,
     review_matches_reviewer,
@@ -706,6 +712,230 @@ async def test_dismissed_review_never_backfills_a_pending_row() -> None:
 
     assert action.status == PRPartyActionStatus.PENDING
     assert result.backfilled == 0
+
+
+# ---------------------------------------------------------------------------
+# Verdict ↔ review state — a row is only settled by its *own* verdict
+#
+# Head and identity are not enough. The reviews feed at one head holds every
+# review anybody left there, so a pending ``approve`` sitting next to the
+# reviewer's own drive-by ``COMMENTED`` would otherwise be marked delivered —
+# reporting an approval nobody cast, and (via merge_is_authorized) lighting the
+# merge button on it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_approve_row_is_not_backfilled_by_a_commented_review() -> None:
+    """The bug: same head, same person, different verdict — must not settle."""
+    reviewer, pr = _reviewer(), _pr()
+    action = _action(
+        reviewer,
+        pr,
+        status=PRPartyActionStatus.PENDING,
+        verdict=PR_PARTY_VERDICT_APPROVE,
+        age_minutes=90,
+    )
+    store = _FakeStore(unsettled=[ActionContext(action=action, pr=pr, reviewer=reviewer)])
+    client = _FakeClient(reviews={("CatholicOS/ontokit-api", 42): [_review(state="COMMENTED")]})
+
+    result = await _run(store, client)
+
+    assert action.status == PRPartyActionStatus.PENDING
+    assert action.github_review_id is None
+    assert result.backfilled == 0
+    # Unchanged path for "no matching review": U6's reclaim still owns the row.
+    assert result.reclaimable == 1
+
+
+@pytest.mark.asyncio
+async def test_approve_row_is_backfilled_by_an_approved_review() -> None:
+    """Positive control for the case above — the same fixtures, right state."""
+    reviewer, pr = _reviewer(), _pr()
+    action = _action(
+        reviewer,
+        pr,
+        status=PRPartyActionStatus.PENDING,
+        verdict=PR_PARTY_VERDICT_APPROVE,
+        age_minutes=90,
+    )
+    store = _FakeStore(unsettled=[ActionContext(action=action, pr=pr, reviewer=reviewer)])
+    client = _FakeClient(reviews={("CatholicOS/ontokit-api", 42): [_review(state="APPROVED")]})
+
+    result = await _run(store, client)
+
+    assert action.status == PRPartyActionStatus.SUCCEEDED
+    assert action.github_review_id == 9001
+    assert result.backfilled == 1
+    assert result.reclaimable == 0
+
+
+@pytest.mark.asyncio
+async def test_request_changes_row_is_not_backfilled_by_an_approval() -> None:
+    """The mirror image, and the more dangerous direction."""
+    reviewer, pr = _reviewer(), _pr()
+    action = _action(
+        reviewer,
+        pr,
+        status=PRPartyActionStatus.PENDING,
+        verdict=PR_PARTY_VERDICT_REQUEST_CHANGES,
+        age_minutes=90,
+    )
+    store = _FakeStore(unsettled=[ActionContext(action=action, pr=pr, reviewer=reviewer)])
+    client = _FakeClient(reviews={("CatholicOS/ontokit-api", 42): [_review(state="APPROVED")]})
+
+    result = await _run(store, client)
+
+    assert action.status == PRPartyActionStatus.PENDING
+    assert result.backfilled == 0
+
+
+@pytest.mark.asyncio
+async def test_degraded_approve_intent_is_not_confirmed_by_a_commented_review() -> None:
+    """ "I'll approve it by hand" is not discharged by leaving a comment."""
+    reviewer, pr = _reviewer(), _pr()
+    action = _action(
+        reviewer,
+        pr,
+        status=PRPartyActionStatus.DEGRADED_INTENT,
+        verdict=PR_PARTY_VERDICT_APPROVE,
+    )
+    store = _FakeStore(unsettled=[ActionContext(action=action, pr=pr, reviewer=reviewer)])
+    client = _FakeClient(reviews={("CatholicOS/ontokit-api", 42): [_review(state="COMMENTED")]})
+
+    result = await _run(store, client)
+
+    assert action.status == PRPartyActionStatus.DEGRADED_INTENT
+    assert action.github_review_id is None
+    assert result.confirmed == 0
+
+
+@pytest.mark.asyncio
+async def test_degraded_approve_intent_is_confirmed_by_an_approval() -> None:
+    """Positive control for the degraded path."""
+    reviewer, pr = _reviewer(), _pr()
+    action = _action(
+        reviewer,
+        pr,
+        status=PRPartyActionStatus.DEGRADED_INTENT,
+        verdict=PR_PARTY_VERDICT_APPROVE,
+    )
+    store = _FakeStore(unsettled=[ActionContext(action=action, pr=pr, reviewer=reviewer)])
+    client = _FakeClient(reviews={("CatholicOS/ontokit-api", 42): [_review(state="APPROVED")]})
+
+    result = await _run(store, client)
+
+    assert action.status == PRPartyActionStatus.DEGRADED_CONFIRMED
+    assert result.confirmed == 1
+
+
+def test_find_matching_review_filters_on_verdict() -> None:
+    """The unit behind the pass, including the states that never match."""
+    reviewer = _reviewer()
+    approved = _review(state="APPROVED")
+    commented = _review(review_id=9002, state="COMMENTED")
+
+    assert (
+        find_matching_review(
+            [commented, approved],
+            reviewer=reviewer,
+            head_sha=HEAD,
+            verdict=PR_PARTY_VERDICT_APPROVE,
+        )
+        is approved
+    )
+    assert (
+        find_matching_review(
+            [commented], reviewer=reviewer, head_sha=HEAD, verdict=PR_PARTY_VERDICT_APPROVE
+        )
+        is None
+    )
+    # Head scoping still wins over a state that would otherwise match.
+    assert (
+        find_matching_review(
+            [_review(state="APPROVED", commit_id=OLD_HEAD)],
+            reviewer=reviewer,
+            head_sha=HEAD,
+            verdict=PR_PARTY_VERDICT_APPROVE,
+        )
+        is None
+    )
+
+
+def test_find_matching_review_tolerates_payload_casing_and_missing_state() -> None:
+    """GitHub sends upper-case, but neither casing nor a null state may crash."""
+    reviewer = _reviewer()
+    lowercased = _review(state="approved")
+    assert (
+        find_matching_review(
+            [lowercased], reviewer=reviewer, head_sha=HEAD, verdict=PR_PARTY_VERDICT_APPROVE
+        )
+        is lowercased
+    )
+
+    stateless = replace(_review(), state=cast(str, None))
+    assert (
+        find_matching_review(
+            [stateless], reviewer=reviewer, head_sha=HEAD, verdict=PR_PARTY_VERDICT_APPROVE
+        )
+        is None
+    )
+    # And with no verdict filter at all it is still not a crash.
+    assert find_matching_review([stateless], reviewer=reviewer, head_sha=HEAD) is stateless
+
+
+def test_find_matching_review_never_matches_a_pending_draft() -> None:
+    """An unsubmitted review is not a cast verdict, filter or no filter."""
+    reviewer = _reviewer()
+    draft = _review(state="PENDING")
+
+    assert (
+        find_matching_review(
+            [draft], reviewer=reviewer, head_sha=HEAD, verdict=PR_PARTY_VERDICT_APPROVE
+        )
+        is None
+    )
+    assert find_matching_review([draft], reviewer=reviewer, head_sha=HEAD) is None
+    assert (
+        find_matching_review([draft], reviewer=reviewer, head_sha=HEAD, include_dismissed=True)
+        is None
+    )
+
+
+def test_find_matching_review_refuses_an_undeliverable_verdict() -> None:
+    """``discuss_live`` is not a review, so no review can ever settle it."""
+    reviewer = _reviewer()
+    reviews = [_review(state="APPROVED")]
+
+    assert (
+        find_matching_review(
+            reviews, reviewer=reviewer, head_sha=HEAD, verdict=PR_PARTY_VERDICT_DISCUSS_LIVE
+        )
+        is None
+    )
+    assert find_matching_review(reviews, reviewer=reviewer, head_sha=HEAD, verdict="") is None
+    # verdict=None is the explicit "any state" opt-out the dismissal detector uses.
+    assert find_matching_review(reviews, reviewer=reviewer, head_sha=HEAD) is reviews[0]
+
+
+@pytest.mark.asyncio
+async def test_dismissal_detection_still_matches_across_verdicts() -> None:
+    """The dismissal detector must keep finding a DISMISSED review by identity."""
+    reviewer, pr = _reviewer(), _pr()
+    action = _action(
+        reviewer,
+        pr,
+        status=PRPartyActionStatus.DEGRADED_CONFIRMED,
+        verdict=PR_PARTY_VERDICT_APPROVE,
+    )
+    store = _FakeStore(standing=[ActionContext(action=action, pr=pr, reviewer=reviewer)])
+    client = _FakeClient(reviews={("CatholicOS/ontokit-api", 42): [_review(state="DISMISSED")]})
+
+    result = await _run(store, client)
+
+    assert action.status == PRPartyActionStatus.FAILED
+    assert action.error == ERROR_REVIEW_DISMISSED
+    assert result.dismissed == 1
 
 
 # ---------------------------------------------------------------------------

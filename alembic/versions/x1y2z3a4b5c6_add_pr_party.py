@@ -152,6 +152,10 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["pr_id"], ["pr_party_pr.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
+    # Card reads fan out from one PR to its actions, and the ON DELETE CASCADE
+    # has to find the same rows — the FK column gets its own index (Postgres
+    # does not create one for a foreign key the way it does for a PK).
+    op.create_index("ix_pr_party_action_pr_id", "pr_party_action", ["pr_id"])
     # KTD16: at most ONE live action per (reviewer, PR, revision, kind).
     # `failed` rows fall outside the predicate so a dead attempt never wedges a
     # retry (C6). R24: leading with reviewer_id means reviewers never
@@ -202,6 +206,7 @@ def downgrade() -> None:
 
     op.drop_index("ix_pr_party_action_idempotency_key", table_name="pr_party_action")
     op.drop_index("uq_pr_party_action_live_fingerprint", table_name="pr_party_action")
+    op.drop_index("ix_pr_party_action_pr_id", table_name="pr_party_action")
     op.drop_table("pr_party_action")
 
     op.drop_index("ix_pr_party_pr_brief_status", table_name="pr_party_pr")

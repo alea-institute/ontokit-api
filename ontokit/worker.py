@@ -1389,7 +1389,9 @@ class WorkerSettings:
         run_single_entity_embed_task,
         run_batch_entity_embed_task,
         run_remote_check_task,
-        sweep_pr_party_prs,
+        # KTD14: bounded under both the 300s worker default and the 5-minute
+        # cadence, so a wedged sweep cannot overlap the next one.
+        func(sweep_pr_party_prs, timeout=settings.pr_party_sweep_timeout_seconds),
         # U5: one brief per PR revision. max_tries=1 — see the docstring; the
         # brewing timeout is the retry mechanism, not arq.
         func(
@@ -1438,6 +1440,7 @@ class WorkerSettings:
                     sweep_pr_party_prs,
                     hour=None,
                     minute=_pr_party_sweep_minutes(),
+                    timeout=settings.pr_party_sweep_timeout_seconds,
                 )
             ]
             if settings.pr_party_reviewers

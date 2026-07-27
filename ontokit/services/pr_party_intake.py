@@ -98,7 +98,9 @@ from ontokit.services.pr_party_github import (
     PRDetail,
     PRPartyGitHubClient,
     SearchedPR,
-    generation_client,
+    default_generation_client,
+    parse_dt,
+    to_int,
 )
 
 if TYPE_CHECKING:  # Import-cycle-free: see _run_reconcile for why it is deferred.
@@ -123,6 +125,7 @@ __all__ = [
     "apply_brewing_timeout",
     "brief_job_id",
     "classify_author",
+    "emit_ready_transition",
     "facts_from_detail",
     "facts_from_webhook_pr",
     "handle_webhook_event",
@@ -336,6 +339,9 @@ class SweepResult:
     missing_cleared: int = 0
     timed_out: int = 0
     discovery_complete: bool = True
+    # True when discovery stopped because it ran out of pages rather than
+    # because it ran out of results. Implies ``discovery_complete`` is False.
+    discovery_cap_hit: bool = False
     skipped_reason: str | None = None
     transitions: list[ReadyTransition] = field(default_factory=list)
     # U8's counters, nested rather than flattened so the two stages stay legible
@@ -355,6 +361,7 @@ class SweepResult:
             "missing_cleared": self.missing_cleared,
             "timed_out": self.timed_out,
             "discovery_complete": self.discovery_complete,
+            "discovery_cap_hit": self.discovery_cap_hit,
             "skipped_reason": self.skipped_reason,
             "reconcile": self.reconcile.as_dict() if self.reconcile is not None else None,
         }
@@ -441,7 +448,7 @@ def facts_from_webhook_pr(payload: Mapping[str, Any]) -> PRFacts | None:
         return None
 
     repo_full_name = _repo_full_name(payload, pr)
-    number = _to_int(pr.get("number"))
+    number = to_int(pr.get("number"))
     if not repo_full_name or number is None:
         return None
 
@@ -468,7 +475,7 @@ def facts_from_webhook_pr(payload: Mapping[str, Any]) -> PRFacts | None:
         author_type=_opt_str(user.get("type")),
         node_id=_opt_str(pr.get("node_id")),
         mergeable_state=mergeable_state,
-        updated_at_github=_parse_dt(pr.get("updated_at")),
+        updated_at_github=parse_dt(pr.get("updated_at")),
         # A ``pull_request`` payload carries no check runs; leave the column be.
         checks_known=False,
         title=_opt_str(pr.get("title")),
@@ -520,6 +527,13 @@ async def upsert_pr(
         created = True
         new_revision = True
     else:
+        if _is_stale_snapshot(facts, row):
+            # An older snapshot of the same PR — a delayed webhook, a retried
+            # delivery, or a sweep item that lost the race with a hook. Writing
+            # it would roll ``head_sha`` backwards and, because the rollback
+            # reads as a head-SHA *change*, re-open the brewing lifecycle on a
+            # revision that is already behind. Nothing here is worth a write.
+            return IntakeResult(pr=row, skipped_reason="stale")
         created = False
         new_revision = bool(facts.head_sha) and facts.head_sha != row.head_sha
 
@@ -569,6 +583,26 @@ async def upsert_pr(
         result.enqueued = await _enqueue_brief(pool, row)
 
     return result
+
+
+def _is_stale_snapshot(facts: PRFacts, row: PRPartyPR) -> bool:
+    """True when ``facts`` is strictly older than what the row already holds.
+
+    Only decidable when *both* sides carry ``updated_at_github``; an unknown
+    timestamp on either side proceeds, because refusing a write we cannot order
+    would lose facts far more often than it would protect them. Equal
+    timestamps proceed too — that is the idempotent double-delivery case
+    (KTD14), and re-applying an identical snapshot is a no-op by construction.
+    """
+    incoming = facts.updated_at_github
+    stored = row.updated_at_github
+    if incoming is None or stored is None:
+        return False
+    if incoming.tzinfo is None:
+        incoming = incoming.replace(tzinfo=UTC)
+    if stored.tzinfo is None:
+        stored = stored.replace(tzinfo=UTC)
+    return incoming < stored
 
 
 async def _enqueue_brief(pool: _EnqueuePool, row: PRPartyPR) -> bool:
@@ -690,14 +724,20 @@ async def apply_brewing_timeout(
     await db.commit()
 
     for transition in transitions:
-        await _emit_ready(transition)
+        await emit_ready_transition(transition)
 
     logger.info("PR Party: %d card(s) timed out of brewing to ready-with-warning", len(rows))
     return transitions
 
 
-async def _emit_ready(transition: ReadyTransition) -> None:
-    """Fire U9's seam. A broken notifier must not undo a committed transition."""
+async def emit_ready_transition(transition: ReadyTransition) -> None:
+    """Fire U9's seam. A broken notifier must not undo a committed transition.
+
+    Public because the brief worker (U5) reaches the same seam from the other
+    side — a card becomes actionable either because its brief landed or because
+    brewing timed out here — and one loop means one swallow-and-log policy for
+    both.
+    """
     for hook in list(ready_transition_hooks):
         try:
             await hook(transition)
@@ -757,7 +797,7 @@ async def sweep_open_prs(
     target_org = org or settings.pr_party_org
     result = SweepResult()
 
-    active_client = client or _generation_client()
+    active_client = client or default_generation_client()
     if active_client is None:
         result.skipped_reason = "no_generation_token"
         logger.info("PR Party sweep skipped: no generation token configured.")
@@ -845,7 +885,9 @@ async def _discover(
 
     A page that raises aborts discovery and reports it incomplete — whatever was
     collected is still worth upserting, but it is *not* evidence about what is
-    missing (C7).
+    missing (C7). Exhausting ``MAX_DISCOVERY_PAGES`` without a short page is the
+    same situation and reports the same way, with ``discovery_cap_hit`` set so
+    the cron log distinguishes "GitHub errored" from "there is simply more".
     """
     items: list[SearchedPR] = []
     for page in range(1, MAX_DISCOVERY_PAGES + 1):
@@ -859,7 +901,12 @@ async def _discover(
         if len(batch) < DISCOVERY_PAGE_SIZE:
             return items, True
     logger.warning("PR Party discovery hit the %d-page cap for org %s", MAX_DISCOVERY_PAGES, org)
-    return items, True
+    # Cap-hit is exactly the exception case: there is more on GitHub than we
+    # looked at, so this pass is not evidence about what is missing (C7). Saying
+    # "complete" here would let ``_reconcile_missing`` stamp ``missing_since``
+    # on every PR that happened to sort past the last page we read.
+    result.discovery_cap_hit = True
+    return items, False
 
 
 async def _load_known_prs(db: AsyncSession) -> dict[tuple[str, int], PRPartyPR]:
@@ -976,7 +1023,7 @@ async def handle_webhook_event(
     hook disabled.
     """
     known_registry = registry if registry is not None else await load_reviewer_registry(db)
-    active_client = client if client is not None else _generation_client()
+    active_client = client if client is not None else default_generation_client()
 
     if event == "pull_request":
         action = str(payload.get("action") or "")
@@ -1034,7 +1081,7 @@ async def _refresh_from_envelope(
     """
     pr = payload.get("pull_request")
     repo_full_name = _repo_full_name(payload, pr if isinstance(pr, Mapping) else {})
-    number = _to_int(pr.get("number")) if isinstance(pr, Mapping) else None
+    number = to_int(pr.get("number")) if isinstance(pr, Mapping) else None
 
     if client is not None and repo_full_name and number is not None:
         return await refresh_pull_request(
@@ -1064,7 +1111,7 @@ async def _handle_check_suite(
     numbers = [
         n
         for n in (
-            _to_int(p.get("number"))
+            to_int(p.get("number"))
             for p in (prs if isinstance(prs, list) else [])
             if isinstance(p, Mapping)
         )
@@ -1100,12 +1147,6 @@ def _outcome_payload(event: str, outcome: IntakeResult, **extra: Any) -> dict[st
 # --- Module helpers ---------------------------------------------------------
 
 
-def _generation_client() -> PRPartyGitHubClient | None:
-    """The shared read-only client (KTD13), or ``None`` if unconfigured."""
-    token = settings.pr_party_readonly_token
-    return generation_client(token) if token else None
-
-
 def _repo_full_name(payload: Mapping[str, Any], pr: Mapping[str, Any]) -> str:
     """``owner/repo`` from the envelope, falling back to the PR's base repo."""
     repository = payload.get("repository")
@@ -1131,20 +1172,3 @@ def _sub_mapping(data: Mapping[str, Any], key: str) -> Mapping[str, Any]:
 
 def _opt_str(value: Any) -> str | None:
     return str(value) if isinstance(value, str) and value else None
-
-
-def _to_int(value: Any) -> int | None:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _parse_dt(value: Any) -> datetime | None:
-    if not isinstance(value, str) or not value:
-        return None
-    try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)

@@ -69,8 +69,17 @@ from ontokit.models.pr_party import (
     PRPartyPR,
     PRPartyReviewer,
 )
-from ontokit.schemas.pr_party import PR_PARTY_VERDICT_APPROVE
-from ontokit.services.pr_party_github import GitHubAPIError, PRDetail, PRPartyReview
+from ontokit.schemas.pr_party import (
+    PR_PARTY_VERDICT_APPROVE,
+    PR_PARTY_VERDICT_COMMENT,
+    PR_PARTY_VERDICT_REQUEST_CHANGES,
+)
+from ontokit.services.pr_party_github import (
+    GitHubAPIError,
+    PRDetail,
+    PRPartyReview,
+    split_repo,
+)
 from ontokit.services.pr_party_intake import (
     PR_STATE_CLOSED,
     PR_STATE_MERGED,
@@ -82,6 +91,7 @@ __all__ = [
     "ERROR_REVIEW_DISMISSED",
     "NAG_SWEEP_THRESHOLD",
     "ActionContext",
+    "REVIEW_STATE_FOR_VERDICT",
     "PRPartyReconcileStore",
     "ReconcileClient",
     "ReconcileResult",
@@ -110,6 +120,24 @@ ARCHIVE_AFTER_DAYS: Final = 14
 ERROR_REVIEW_DISMISSED: Final = "ReviewDismissed"
 
 REVIEW_STATE_DISMISSED: Final = "DISMISSED"
+
+# An unsubmitted draft review. It is not a verdict anybody cast, so it is never
+# evidence — not for back-fill, not for confirmation, not for dismissal.
+REVIEW_STATE_PENDING: Final = "PENDING"
+
+# The GitHub review state each verdict *becomes* once delivered. This is the
+# other half of ``pr_party_actions._REVIEW_EVENTS`` (verdict → the event we
+# POST); a row is only settled by a review whose state is what its own verdict
+# would have produced. Without it a pending ``approve`` is settled by whatever
+# review happens to sit at the same head — a stray ``COMMENTED`` would mark the
+# approval delivered and light the merge button on a verdict nobody cast.
+# Verdicts absent from this map (``discuss_live``) are not deliverable as a
+# review at all, so nothing can ever match them.
+REVIEW_STATE_FOR_VERDICT: Final[dict[str, str]] = {
+    PR_PARTY_VERDICT_APPROVE: "APPROVED",
+    PR_PARTY_VERDICT_REQUEST_CHANGES: "CHANGES_REQUESTED",
+    PR_PARTY_VERDICT_COMMENT: "COMMENTED",
+}
 
 # Statuses whose GitHub-side truth this module re-checks on every pass.
 _UNSETTLED: Final[frozenset[str]] = frozenset(
@@ -245,26 +273,60 @@ def _review_at_head(review: PRPartyReview, head_sha: str) -> bool:
     return bool(review.commit_id) and review.commit_id == head_sha
 
 
+def _review_state(review: PRPartyReview) -> str:
+    """GitHub's state, upper-cased and None-safe (the payload can omit it)."""
+    return (review.state or "").upper()
+
+
 def find_matching_review(
     reviews: Sequence[PRPartyReview],
     *,
     reviewer: PRPartyReviewer,
     head_sha: str,
+    verdict: str | None = None,
     include_dismissed: bool = False,
 ) -> PRPartyReview | None:
     """The reviewer's own submitted review at this revision, if GitHub has one.
 
-    Dismissed reviews are excluded by default: a dismissed review is not evidence
-    that a verdict stands, so it must never back-fill or confirm a row. The
-    dismissal *detector* passes ``include_dismissed=True`` because for it the
+    Three filters, each closing a different way a row gets settled by something
+    that is not its own verdict:
+
+    * **Revision** (``head_sha``) — see :func:`_review_at_head`.
+    * **Identity** (``reviewer``) — see :func:`review_matches_reviewer`.
+    * **Verdict** (``verdict``) — when given, only a review whose state is what
+      that verdict would have produced matches (see
+      :data:`REVIEW_STATE_FOR_VERDICT`). A pending ``approve`` row and a
+      ``COMMENTED`` review at the same head are *not* the same event, and
+      adopting one as the other would report an approval nobody cast. A verdict
+      with no deliverable state (``discuss_live``, or a row with none recorded)
+      matches nothing, which leaves the row exactly where it was.
+
+    Pass ``verdict=None`` only when the caller genuinely wants any state — the
+    dismissal detector does, because the state it is hunting for (``DISMISSED``)
+    is by definition not the row's verdict.
+
+    ``PENDING`` reviews are never matched: an unsubmitted draft is not a cast
+    verdict. Dismissed reviews are excluded by default for the same reason — a
+    dismissed review is not evidence a verdict stands — and the dismissal
+    detector opts back in with ``include_dismissed=True`` because for it the
     dismissal is the whole finding.
     """
+    wanted = (
+        REVIEW_STATE_FOR_VERDICT.get(verdict.strip().casefold()) if verdict is not None else None
+    )
+    if verdict is not None and wanted is None:
+        return None
     for review in reviews:
         if not _review_at_head(review, head_sha):
             continue
         if not review_matches_reviewer(review, reviewer):
             continue
-        if not include_dismissed and review.state.upper() == REVIEW_STATE_DISMISSED:
+        state = _review_state(review)
+        if state == REVIEW_STATE_PENDING:
+            continue
+        if not include_dismissed and state == REVIEW_STATE_DISMISSED:
+            continue
+        if wanted is not None and state != wanted:
             continue
         return review
     return None
@@ -324,13 +386,6 @@ def should_archive(
     if stamp is None:
         return False
     return (now or datetime.now(UTC)) - stamp >= timedelta(days=days)
-
-
-def _split_repo(repo_full_name: str) -> tuple[str, str]:
-    owner, _, repo = repo_full_name.strip("/").partition("/")
-    if not owner or not repo:
-        raise ValueError(f"Malformed repository name: {repo_full_name!r}")
-    return owner, repo
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +483,7 @@ async def reconcile_pass(
         """One reviews call per PR per pass, however many rows reference it."""
         key = (pr.repo_full_name, pr.pr_number)
         if key not in reviews_cache:
-            owner, repo = _split_repo(pr.repo_full_name)
+            owner, repo = split_repo(pr.repo_full_name)
             reviews_cache[key] = await client.get_pr_reviews(owner, repo, pr.pr_number)
         return reviews_cache[key]
 
@@ -515,7 +570,10 @@ async def _reconcile_one_unsettled(
         if not is_abandoned(action, now=moment, reclaim_minutes=reclaim_minutes):
             return  # An attempt may still be in flight; it owns the row.
         match = find_matching_review(
-            await reviews_for(ctx.pr), reviewer=ctx.reviewer, head_sha=action.head_sha
+            await reviews_for(ctx.pr),
+            reviewer=ctx.reviewer,
+            head_sha=action.head_sha,
+            verdict=action.verdict,
         )
         if match is None:
             # The attempt really did die before GitHub saw it. U6 reclaims the
@@ -529,9 +587,14 @@ async def _reconcile_one_unsettled(
         logger.info("PR Party back-filled abandoned action %s from review %s", action.id, match.id)
         return
 
-    # degraded_intent: confirmation is the review appearing under the reviewer.
+    # degraded_intent: confirmation is the review appearing under the reviewer,
+    # carrying the verdict they said they would cast by hand. Someone who said
+    # "I'll approve this myself" has not done so by leaving a comment.
     match = find_matching_review(
-        await reviews_for(ctx.pr), reviewer=ctx.reviewer, head_sha=action.head_sha
+        await reviews_for(ctx.pr),
+        reviewer=ctx.reviewer,
+        head_sha=action.head_sha,
+        verdict=action.verdict,
     )
     if match is not None:
         action.github_review_id = match.id or None
@@ -591,15 +654,17 @@ def _approval_was_dismissed(ctx: ActionContext, reviews: Sequence[PRPartyReview]
     if review_id:
         for review in reviews:
             if review.id == review_id:
-                return review.state.upper() == REVIEW_STATE_DISMISSED
+                return _review_state(review) == REVIEW_STATE_DISMISSED
         return False
+    # No verdict filter here on purpose: the state this is hunting for is
+    # DISMISSED, which is precisely *not* the state the row's verdict produced.
     match = find_matching_review(
         reviews,
         reviewer=ctx.reviewer,
         head_sha=ctx.action.head_sha,
         include_dismissed=True,
     )
-    return match is not None and match.state.upper() == REVIEW_STATE_DISMISSED
+    return match is not None and _review_state(match) == REVIEW_STATE_DISMISSED
 
 
 async def _verify_missing(
@@ -626,7 +691,7 @@ async def _verify_missing(
         if not missing_long_enough_to_retire(pr, now=moment):
             continue
         try:
-            owner, repo = _split_repo(pr.repo_full_name)
+            owner, repo = split_repo(pr.repo_full_name)
             detail = await client.get_pull_request(owner, repo, pr.pr_number)
         except GitHubAPIError as exc:
             if exc.status_code != 404:
