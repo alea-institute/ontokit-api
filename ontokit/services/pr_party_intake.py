@@ -63,7 +63,11 @@ Seams left for later units:
   ready notification (R22). Transitions are also returned in
   :class:`SweepResult` so a caller can observe them without installing a hook.
 - **U7** appends to :data:`issue_comment_hooks` for the Q&A thread; this module
-  deliberately stores nothing from ``issue_comment`` events.
+  deliberately stores nothing from ``issue_comment`` events — and neither does
+  U7, which projects a card's thread live from GitHub's comments on read
+  (``pr_party_qa.build_qa_thread``). The delivery status stays ``deferred``
+  because that is still what it means: the event was handed to the hooks and no
+  row of ours changed.
 - **U8** consumes :func:`missing_long_enough_to_retire` and the single-PR
   refresh (:func:`refresh_pull_request`) that ``pull_request_review`` events
   trigger — review state itself is never stored here.
@@ -194,7 +198,10 @@ IssueCommentHook = Callable[[dict[str, Any]], Awaitable[None]]
 #: roll back a lifecycle transition that already happened in the database.
 ready_transition_hooks: list[ReadyHook] = []
 
-#: U7 appends here. This module stores nothing from ``issue_comment``.
+#: U7's ``pr_party_qa.register_qa_hook`` appends here. This module stores
+#: nothing from ``issue_comment``, and neither does the hook: the Q&A thread is
+#: projected live from GitHub's comments when a card is opened, so GitHub stays
+#: the system of record for the conversation (KD5/R13).
 issue_comment_hooks: list[IssueCommentHook] = []
 
 

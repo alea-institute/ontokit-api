@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -80,7 +80,11 @@ from ontokit.schemas.pr_party import (
     PRPartyActionResponse,
     PRPartyActionState,
     PRPartyCardDetail,
+    PRPartyCommentResponse,
+    PRPartyNoteRequest,
     PRPartyOtherReviewerState,
+    PRPartyQAEntry,
+    PRPartyQuestionRequest,
     PRPartyQueueCard,
     PRPartyQueueResponse,
     PRPartyReadiness,
@@ -94,6 +98,7 @@ from ontokit.services.pr_party_actions import (
 from ontokit.services.pr_party_credentials import PRPartyCredentialService
 from ontokit.services.pr_party_github import ChecksRollup
 from ontokit.services.pr_party_intake import PR_STATE_OPEN, missing_long_enough_to_retire
+from ontokit.services.pr_party_qa import PRPartyQAService, QARefused, QAResult
 from ontokit.services.pr_party_rate_limiter import (
     ActionLimiterRedis,
     LimiterOutcome,
@@ -103,10 +108,12 @@ from ontokit.services.pr_party_rate_limiter import (
 __all__ = [
     "ActionService",
     "PRPartyQueueReader",
+    "QAService",
     "QueueReader",
     "RequiredReviewer",
     "get_action_service",
     "get_actions_redis",
+    "get_qa_service",
     "get_queue_reader",
     "router",
 ]
@@ -225,6 +232,19 @@ def get_action_service(db: Annotated[AsyncSession, Depends(get_db)]) -> PRPartyA
 
 
 ActionService = Annotated[PRPartyActionService, Depends(get_action_service)]
+
+
+def get_qa_service(db: Annotated[AsyncSession, Depends(get_db)]) -> PRPartyQAService:
+    """Dependency for the PR Party Q&A service (U7).
+
+    Takes a session only to hand the credential service one: the Q&A service
+    itself writes no rows, because GitHub is the system of record for the
+    thread (KD5).
+    """
+    return PRPartyQAService(credentials=PRPartyCredentialService(db))
+
+
+QAService = Annotated[PRPartyQAService, Depends(get_qa_service)]
 
 
 #: Re-exported from the settings module so both PR Party write surfaces share
@@ -433,7 +453,15 @@ def _build_detail(
     *,
     reviewer: PRPartyReviewer,
     actions: Sequence[PRPartyAction],
+    qa_thread: Sequence[PRPartyQAEntry] = (),
 ) -> PRPartyCardDetail:
+    """The card, opened. ``qa_thread`` is passed in rather than fetched here.
+
+    Projection stays pure and synchronous: the thread is a GitHub read (U7), and
+    burying it in this function would put a network call behind every response
+    that re-projects a card — including the verdict endpoint's fresh card, which
+    has no business paying for one.
+    """
     card = _build_card(pr, reviewer=reviewer, actions=actions)
     return PRPartyCardDetail(
         **card.model_dump(),
@@ -445,7 +473,7 @@ def _build_detail(
         brewing_since=pr.brewing_since,
         created_at=pr.created_at,
         updated_at=pr.updated_at,
-        qa_thread=[],
+        qa_thread=list(qa_thread),
     )
 
 
@@ -498,6 +526,7 @@ async def get_card(
     response: Response,
     reviewer: RequiredReviewer,
     reader: QueueReader,
+    qa: QAService,
 ) -> PRPartyCardDetail:
     """One card, opened — the queue payload plus the brief itself.
 
@@ -508,6 +537,11 @@ async def get_card(
 
     A row that is not a live card — retired, closed, merged, or a draft — is a
     404 rather than a stale read: the same visibility gate the queue applies.
+
+    ``qa_thread`` is read live from GitHub on every open (U7). There is no Q&A
+    table: the conversation belongs to the pull request, and a copy of it here
+    could only be a staler second opinion (KD5/R13). The read is best-effort —
+    a card without its Q&A panel is worth rendering; a 500 is not.
     """
     _no_store(response)
 
@@ -519,7 +553,9 @@ async def get_card(
         )
 
     actions = await reader.list_actions([pr.id])
-    return _build_detail(pr, reviewer=reviewer, actions=actions)
+    return _build_detail(
+        pr, reviewer=reviewer, actions=actions, qa_thread=await qa.load_thread(pr=pr)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -772,6 +808,148 @@ async def unpark_card(
     pr = await _load_card(reader, card_id)
     await service.unpark(reviewer=reviewer, pr=pr)
     return await _fresh_card(reader, pr, reviewer)
+
+
+# ---------------------------------------------------------------------------
+# Q&A and re-trigger (U7)
+# ---------------------------------------------------------------------------
+
+
+async def _post_comment(
+    *,
+    result_factory: Callable[[PRPartyPR], Awaitable[QAResult]],
+    reader: PRPartyQueueReader,
+    reviewer: PRPartyReviewer,
+    card_id: uuid.UUID,
+    redis: ActionLimiterRedis | None,
+) -> PRPartyCommentResponse:
+    """The shape all three comment surfaces share.
+
+    Same gates as a verdict, minus the two that would be wrong here. There is no
+    readiness gate — a reviewer most wants to ask while the brief is still
+    brewing (R17 governs verdicts only) — and no own-PR gate: asking a question
+    about your own pull request, or recording what a call concluded, is
+    something an author does all the time. The lifecycle gate stays: a closed PR
+    is over, and a comment on it helps nobody.
+    """
+    await _consume_action_budget(redis, reviewer.zitadel_user_id)
+
+    pr = await _load_card(reader, card_id)
+    _check_lifecycle(pr)
+
+    try:
+        result: QAResult = await result_factory(pr)
+    except QARefused as e:
+        raise HTTPException(status_code=e.status_code, detail=_refusal(e.message)) from e
+
+    return PRPartyCommentResponse(
+        posted=result.posted,
+        degraded=result.degraded,
+        body=result.body,
+        comment_id=result.comment_id,
+        comment_url=result.comment_url,
+        deep_link=result.deep_link,
+        card=await _fresh_card(reader, pr, reviewer),
+    )
+
+
+@router.post("/cards/{card_id}/questions", response_model=PRPartyCommentResponse)
+async def ask_question(
+    card_id: uuid.UUID,
+    request: PRPartyQuestionRequest,
+    response: Response,
+    reviewer: RequiredReviewer,
+    reader: QueueReader,
+    qa: QAService,
+    redis: ActionsRedis,
+) -> PRPartyCommentResponse:
+    """Put a question to the AI reviewer on this card (R13, KTD18).
+
+    The comment is authored by the **asking reviewer's own PAT**, which is
+    load-bearing rather than incidental: GitHub does not run Actions workflows
+    for events triggered by ``GITHUB_TOKEN``, so a question posted by the app
+    would summon nobody. It carries the ``@claude`` mention the org answerer
+    triggers on and an attribution line naming the human who asked.
+
+    Nothing is stored. The question and its answer live on the pull request,
+    where the reviewer can already see them and where the answerer reads them
+    (KD5) — ``GET /cards/{id}`` projects the thread back out of GitHub's
+    comments on every open.
+
+    Degraded (R12) is a 200, not a failure: with no usable PAT the response
+    carries ``posted=false``, the exact comment text in ``body``, and a
+    ``deep_link`` to paste it. Nothing reached GitHub.
+    """
+    _no_store(response)
+
+    return await _post_comment(
+        result_factory=lambda pr: qa.ask(
+            reviewer=reviewer, pr=pr, question=request.question, pr_url=pr_web_url(pr)
+        ),
+        reader=reader,
+        reviewer=reviewer,
+        card_id=card_id,
+        redis=redis,
+    )
+
+
+@router.post("/cards/{card_id}/notes", response_model=PRPartyCommentResponse)
+async def record_note(
+    card_id: uuid.UUID,
+    request: PRPartyNoteRequest,
+    response: Response,
+    reviewer: RequiredReviewer,
+    reader: QueueReader,
+    qa: QAService,
+    redis: ActionsRedis,
+) -> PRPartyCommentResponse:
+    """Post the outcome of a live discussion back to the PR (R14).
+
+    What a call concluded otherwise evaporates with the call. This puts it where
+    the next reader — human or model — will find it, as a structured comment
+    that deliberately does *not* mention ``@claude``: a decision already made
+    does not need an answer.
+    """
+    _no_store(response)
+
+    return await _post_comment(
+        result_factory=lambda pr: qa.record_note(
+            reviewer=reviewer, pr=pr, note=request.note, pr_url=pr_web_url(pr)
+        ),
+        reader=reader,
+        reviewer=reviewer,
+        card_id=card_id,
+        redis=redis,
+    )
+
+
+@router.post("/cards/{card_id}/rerun-review", response_model=PRPartyCommentResponse)
+async def rerun_review(
+    card_id: uuid.UUID,
+    response: Response,
+    reviewer: RequiredReviewer,
+    reader: QueueReader,
+    qa: QAService,
+    redis: ActionsRedis,
+) -> PRPartyCommentResponse:
+    """Ask the AI reviewer to review again (R3).
+
+    The control a card carries when its brief timed out brewing, or when the
+    branch moved on after the review landed. Posts ``@coderabbitai review`` as
+    the reviewer — same reason a question is posted as them — and degrades to
+    compose-for-copy exactly like every other comment surface.
+
+    No body: there is nothing about a re-trigger for a client to supply.
+    """
+    _no_store(response)
+
+    return await _post_comment(
+        result_factory=lambda pr: qa.rerun_review(reviewer=reviewer, pr=pr, pr_url=pr_web_url(pr)),
+        reader=reader,
+        reviewer=reviewer,
+        card_id=card_id,
+        redis=redis,
+    )
 
 
 async def _fresh_card(
