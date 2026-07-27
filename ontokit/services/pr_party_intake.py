@@ -80,7 +80,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final, Protocol
+from typing import TYPE_CHECKING, Any, Final, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -100,6 +100,9 @@ from ontokit.services.pr_party_github import (
     SearchedPR,
     generation_client,
 )
+
+if TYPE_CHECKING:  # Import-cycle-free: see _run_reconcile for why it is deferred.
+    from ontokit.services.pr_party_reconcile import ReconcileResult
 
 logger = logging.getLogger(__name__)
 
@@ -335,6 +338,9 @@ class SweepResult:
     discovery_complete: bool = True
     skipped_reason: str | None = None
     transitions: list[ReadyTransition] = field(default_factory=list)
+    # U8's counters, nested rather than flattened so the two stages stay legible
+    # in the cron log. ``None`` means the reconcile pass did not complete.
+    reconcile: ReconcileResult | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -350,6 +356,7 @@ class SweepResult:
             "timed_out": self.timed_out,
             "discovery_complete": self.discovery_complete,
             "skipped_reason": self.skipped_reason,
+            "reconcile": self.reconcile.as_dict() if self.reconcile is not None else None,
         }
 
 
@@ -784,6 +791,8 @@ async def sweep_open_prs(
         _reconcile_missing(known, items=items, moment=moment, result=result)
         await db.commit()
 
+    result.reconcile = await _run_reconcile(db, active_client, moment=moment, result=result)
+
     result.transitions = await apply_brewing_timeout(db, now=moment)
     result.timed_out = len(result.transitions)
 
@@ -795,6 +804,38 @@ async def sweep_open_prs(
         result.detail_fetches,
     )
     return result
+
+
+async def _run_reconcile(
+    db: AsyncSession,
+    client: PRPartyGitHubClient,
+    *,
+    moment: datetime,
+    result: SweepResult,
+) -> ReconcileResult | None:
+    """Stage 3: converge the verdict record with GitHub's (U8, R20).
+
+    Imported inside the call because ``pr_party_reconcile`` imports this module
+    for the missing-since arithmetic and the PR-state vocabulary; the dependency
+    runs one way at import time and the other way at call time, which is the
+    smaller of the two awkwardnesses (the alternative is a third module holding
+    four constants).
+
+    Guarded whole: reconciliation is a *repair* pass, and a broken repair must
+    never cost the facts refresh that already committed above.
+    """
+    from ontokit.services.pr_party_reconcile import PRPartyReconcileStore, reconcile_pass
+
+    try:
+        return await reconcile_pass(
+            client=client,
+            store=PRPartyReconcileStore(db),
+            now=moment,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result.errors += 1
+        logger.exception("PR Party reconcile pass failed: %s", exc)
+        return None
 
 
 async def _discover(
