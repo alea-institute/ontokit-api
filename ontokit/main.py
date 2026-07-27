@@ -130,6 +130,16 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             _startup_print("PR Party reviewer reconcile failed — continuing startup")
             logger.exception("PR Party reviewer reconcile failed — continuing startup")
 
+    # --- PR Party ready notifications (U9, R22) -----------------------------
+    # The hook seam lives in pr_party_intake, and the arq worker registers the
+    # same hook in its own process. Registration is unconditional and idempotent
+    # on purpose: it costs nothing where no reviewer is registered (the fan-out
+    # finds no recipients), and doing it here means an API-side transition — a
+    # webhook that releases a card — is never the one that goes unannounced.
+    from ontokit.services.pr_party_notifications import register_ready_hook
+
+    register_ready_hook()
+
     _startup_print("Startup complete")
     logger.info("Startup complete")
 

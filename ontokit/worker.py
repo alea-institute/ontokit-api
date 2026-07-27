@@ -1316,6 +1316,14 @@ async def startup(ctx: dict[str, Any]) -> None:
     ctx["engine"] = engine
     ctx["session_factory"] = session_factory
 
+    # PR Party ready notifications (U9, R22). The sweep's brewing timeout and the
+    # brief worker both fire the intake hook seam from *this* process, so the
+    # notifier has to be attached here as well as in the API lifespan — the two
+    # processes share no imports. register_ready_hook() is idempotent.
+    from ontokit.services.pr_party_notifications import register_ready_hook
+
+    register_ready_hook()
+
     logger.info("ARQ worker started successfully")
 
 

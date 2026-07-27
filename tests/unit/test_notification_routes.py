@@ -72,6 +72,43 @@ class TestListNotifications:
         assert data["unread_count"] == 1
         assert len(data["items"]) == 1
 
+    def test_list_notifications_serializes_a_null_project_row(
+        self,
+        authed_client: tuple[TestClient, AsyncMock],
+        mock_notification_service: AsyncMock,
+    ) -> None:
+        """A PR Party row (no project) must not 500 the page it shares (KTD20).
+
+        ``pr_party_ready`` notifications belong to no OntoKit project. Response
+        validation runs over the whole list, so a required ``project_id`` here
+        would take every project notification on the page down with it.
+        """
+        client, _ = authed_client
+
+        mock_notification_service.list_notifications.return_value = NotificationListResponse(
+            items=[
+                _make_notification_response(
+                    type="pr_party_ready",
+                    title="A PR is ready for your review",
+                    project_id=None,
+                    project_name=None,
+                    target_id="CatholicOS/liturgy#42:" + "a" * 40,
+                    target_url=f"/pr-party?card={uuid4()}",
+                ),
+                _make_notification_response(),
+            ],
+            total=2,
+            unread_count=2,
+        )
+
+        response = client.get("/api/v1/notifications")
+        assert response.status_code == 200
+        items = response.json()["items"]
+        assert items[0]["project_id"] is None
+        assert items[0]["project_name"] is None
+        assert items[0]["target_url"].startswith("/pr-party?card=")
+        assert items[1]["project_id"] == str(PROJECT_ID)
+
     def test_list_notifications_empty(
         self,
         authed_client: tuple[TestClient, AsyncMock],
