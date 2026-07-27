@@ -29,7 +29,8 @@ Existing row                          What a new request does
 ``pending``, inside reclaim window    409 — an attempt is in flight
 ``pending``, past the window          reclaims the row and proceeds
 ``failed`` (any key)                  re-opens the row and proceeds
-``degraded_intent``, same key         replays the recorded intent
+``degraded_intent``, same key         retries if the credential is now usable,
+                                      else replays the recorded intent
 ``degraded_intent``, different key    re-opens the row and proceeds
 ===================================  ==========================================
 
@@ -38,6 +39,15 @@ rows *outside* its predicate so a dead attempt cannot wedge a retry — but that
 freedom would let a retry storm accumulate one dead row per attempt. One row per
 fingerprint, whatever its history, keeps the audit trail readable and keeps the
 "has this reviewer decided?" question answerable with a single row.
+
+**A reclaimed review asks GitHub before it posts.** A ``pending`` row past the
+window, or a ``failed`` one, may have died *after* GitHub accepted the review —
+the row is evidence an attempt happened, not evidence it failed. Re-actuating
+blindly is how one crash becomes two reviews on the pull request, so the reclaim
+path lists the PR's reviews first and adopts a match (same reviewer, same head,
+same verdict) instead of posting a second one. The degraded paths are excluded
+on purpose: nothing was ever sent from here, and a hand-cast review at that
+fingerprint is the reconciler's to confirm.
 
 **Refusals are decided from the row, not from the card the client rendered.**
 Readiness (R17/R26), drift, lifecycle, own-PR, and merge authorization are all
@@ -52,7 +62,7 @@ import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Protocol
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -71,6 +81,7 @@ from ontokit.schemas.pr_party import (
     PR_PARTY_VERDICT_DISCUSS_LIVE,
     PRPartyActionRequest,
 )
+from ontokit.services.pr_party_credentials import CredentialResolver, mark_credential_dead
 from ontokit.services.pr_party_github import (
     GitHubAPIError,
     MergeNotAllowedError,
@@ -82,7 +93,10 @@ from ontokit.services.pr_party_github import (
     StaleCardError,
     TokenExpiredError,
     actuation_client,
+    scrub_error,
+    split_repo,
 )
+from ontokit.services.pr_party_reconcile import find_matching_review
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +107,6 @@ __all__ = [
     "PRPartyActionStore",
     "merge_is_authorized",
     "review_deep_link",
-    "scrub_error",
 ]
 
 #: Statuses that count as "this reviewer's stance stands" — a settled row.
@@ -106,6 +119,11 @@ _SETTLED: frozenset[PRPartyActionStatus] = frozenset(
 #: ``mergeable_state`` string and falls back to our :class:`Mergeability` enum
 #: (``pr_party_intake.resolve_mergeable_state``), so the guard has to know both.
 _UNMERGEABLE_STATES: frozenset[str] = frozenset({"dirty", "not_mergeable"})
+
+#: Written to a credential's ``last_error`` when GitHub rejects the reviewer's
+#: PAT mid-verdict. Names the operation, so the settings surface can say what
+#: the reviewer was doing when it broke.
+_DEAD_PAT_DURING_VERDICT = "GitHub rejected this token during a verdict (401). Submit a fresh PAT."
 
 _VERDICT_EVENTS: dict[str, ReviewEvent] = {
     "approve": ReviewEvent.APPROVE,
@@ -149,12 +167,23 @@ class ActionResult:
     merged: bool = False
 
 
-class CredentialResolver(Protocol):
-    """The slice of :class:`PRPartyCredentialService` actuation depends on."""
+@dataclass
+class _ClaimedRow:
+    """What :meth:`PRPartyActionService._claim_row` decided about a fingerprint.
 
-    async def resolve_token(self, reviewer: PRPartyReviewer) -> str | None: ...
+    ``replay`` short-circuits everything downstream; the other two fields only
+    matter when it is ``None``.
+    """
 
-    async def get_credential(self, reviewer_id: uuid.UUID) -> Any: ...
+    action: PRPartyAction
+    #: A finished receipt to hand straight back — no credential, no GitHub call.
+    replay: ActionResult | None = None
+    #: The row was taken over from a dead attempt (``pending`` past the window,
+    #: or ``failed``), so GitHub may already hold this row's review.
+    reclaimed: bool = False
+    #: Resolved while claiming (degraded takeover) so ``actuate`` does not pay
+    #: for a second credential lookup.
+    token: str | None = None
 
 
 class ActionStore(Protocol):
@@ -181,20 +210,6 @@ class ActionStore(Protocol):
 # ---------------------------------------------------------------------------
 # Pure helpers
 # ---------------------------------------------------------------------------
-
-
-def scrub_error(error: BaseException) -> str:
-    """What is safe to persist about a failed GitHub call.
-
-    The exception *class* and the HTTP status, never the message. GitHub error
-    bodies quote the request — which for these calls contains the reviewer's
-    prose and, on a misconfiguration, can echo header material. ``error`` is
-    read back by the reconciler and rendered in a settings surface, so the rule
-    is that nothing GitHub said in prose is ever stored.
-    """
-    name = type(error).__name__
-    status_code = getattr(error, "status_code", None)
-    return f"{name} (HTTP {status_code})" if status_code is not None else name
 
 
 def review_deep_link(pr_url: str, kind: PRPartyActionKind) -> str:
@@ -230,10 +245,11 @@ def merge_is_authorized(actions: Sequence[PRPartyAction]) -> bool:
 
 
 def _split_repo(repo_full_name: str) -> tuple[str, str]:
-    owner, _, repo = repo_full_name.strip("/").partition("/")
-    if not owner or not repo:
-        raise ActionRefused(500, "This card's repository name is malformed.")
-    return owner, repo
+    """:func:`~ontokit.services.pr_party_github.split_repo` in this module's refusal type."""
+    try:
+        return split_repo(repo_full_name)
+    except ValueError as e:
+        raise ActionRefused(500, "This card's repository name is malformed.") from e
 
 
 # ---------------------------------------------------------------------------
@@ -348,9 +364,10 @@ class PRPartyActionService:
         kind = request.action_kind
         await self._check_merge_preconditions(pr=pr, request=request)
 
-        action, replayed = await self._claim_row(reviewer=reviewer, pr=pr, request=request)
-        if replayed is not None:
-            return replayed
+        claim = await self._claim_row(reviewer=reviewer, pr=pr, request=request, pr_url=pr_url)
+        if claim.replay is not None:
+            return claim.replay
+        action = claim.action
 
         # Discuss-live is a stance, not a delivery: no credential is consulted
         # and no call is made, so parking a card keeps working while degraded.
@@ -360,12 +377,21 @@ class PRPartyActionService:
             await self._store.save()
             return ActionResult(action=action)
 
-        token = await self._credentials.resolve_token(reviewer)
+        token = claim.token or await self._credentials.resolve_token(reviewer)
         if token is None:
             return await self._degrade(action, pr_url=pr_url, kind=kind)
 
+        client = self._actuation_factory(token)
+
+        if claim.reclaimed and kind is PRPartyActionKind.REVIEW:
+            adopted = await self._adopt_existing_review(
+                client=client, reviewer=reviewer, pr=pr, request=request, action=action
+            )
+            if adopted is not None:
+                return adopted
+
         return await self._call_github(
-            reviewer=reviewer, pr=pr, request=request, action=action, token=token, pr_url=pr_url
+            reviewer=reviewer, pr=pr, request=request, action=action, client=client, pr_url=pr_url
         )
 
     async def unpark(self, *, reviewer: PRPartyReviewer, pr: PRPartyPR) -> bool:
@@ -423,8 +449,13 @@ class PRPartyActionService:
     # --- Idempotency ---
 
     async def _claim_row(
-        self, *, reviewer: PRPartyReviewer, pr: PRPartyPR, request: PRPartyActionRequest
-    ) -> tuple[PRPartyAction, ActionResult | None]:
+        self,
+        *,
+        reviewer: PRPartyReviewer,
+        pr: PRPartyPR,
+        request: PRPartyActionRequest,
+        pr_url: str,
+    ) -> _ClaimedRow:
         """Take ownership of this fingerprint, or hand back a replayed receipt."""
         existing = await self._store.find_action(
             reviewer_id=reviewer.id,
@@ -453,14 +484,15 @@ class PRPartyActionService:
             # Committed BEFORE any GitHub call: a crash from here on leaves a
             # row that says an attempt happened (KTD16).
             await self._store.persist(action)
-            return (action, None)
+            return _ClaimedRow(action=action)
 
         status = PRPartyActionStatus(existing.status)
         same_key = existing.idempotency_key == request.idempotency_key
+        token: str | None = None
 
         if status in _SETTLED:
             if same_key:
-                return (existing, self._replay(existing))
+                return _ClaimedRow(action=existing, replay=self._replay(existing, pr_url=pr_url))
             raise ActionRefused(
                 409,
                 "You have already recorded this action at this revision. Push a new "
@@ -469,9 +501,17 @@ class PRPartyActionService:
             )
 
         if status is PRPartyActionStatus.DEGRADED_INTENT and same_key:
-            # The reviewer already got the deep link for this exact request;
-            # handing it back is more useful than a second no-op degrade.
-            return (existing, self._replay(existing))
+            # A degraded row is a *pending* delivery, so replaying it forever
+            # would make a repaired credential unusable: the only way back to a
+            # real review would be a new key the client has no reason to mint.
+            # Ask the credential first — if one now resolves, this request takes
+            # the row over and actuates for real.
+            token = await self._credentials.resolve_token(reviewer)
+            if token is None:
+                # Still nothing to deliver with. Hand back the same intent *and*
+                # the same deep link the first degrade gave (R12) — a replay the
+                # client cannot act on is worse than the original response.
+                return _ClaimedRow(action=existing, replay=self._replay(existing, pr_url=pr_url))
 
         if status is PRPartyActionStatus.PENDING and self._in_flight(existing):
             raise ActionRefused(
@@ -481,8 +521,14 @@ class PRPartyActionService:
             )
 
         # Reclaim (abandoned pending), re-open (failed), or retry a degraded
-        # intent under a new key. All three are the same write: this request now
-        # owns the row, and its history is cleared so the receipt is unambiguous.
+        # intent. All are the same write: this request now owns the row, and its
+        # history is cleared so the receipt is unambiguous.
+        #
+        # Only the first two are *reclaims* in the sense the adoption check
+        # cares about — a dead attempt that may already have reached GitHub. A
+        # degraded row never sent anything from here, so there is nothing of
+        # ours to adopt.
+        reclaimed = status in (PRPartyActionStatus.PENDING, PRPartyActionStatus.FAILED)
         existing.idempotency_key = request.idempotency_key
         existing.verdict = request.verdict
         existing.override = request.override
@@ -491,7 +537,7 @@ class PRPartyActionService:
         existing.error = None
         existing.github_review_id = None
         await self._store.persist(existing)
-        return (existing, None)
+        return _ClaimedRow(action=existing, reclaimed=reclaimed, token=token)
 
     def _in_flight(self, action: PRPartyAction) -> bool:
         """Has a ``pending`` row been pending for less than the reclaim window?
@@ -507,16 +553,24 @@ class PRPartyActionService:
             stamp = stamp.replace(tzinfo=UTC)
         return datetime.now(UTC) - stamp < timedelta(minutes=self._reclaim_minutes)
 
-    def _replay(self, action: PRPartyAction) -> ActionResult:
+    def _replay(self, action: PRPartyAction, *, pr_url: str) -> ActionResult:
+        """The stored row's receipt, verbatim.
+
+        Everything here reads off ``action`` and nothing off the new request:
+        the stored row is what actually happened, so a replay whose body differs
+        from the stored one still renders the stored one.
+        """
         status = PRPartyActionStatus(action.status)
+        kind = PRPartyActionKind(action.action_kind)
+        degraded = status is PRPartyActionStatus.DEGRADED_INTENT
         return ActionResult(
             action=action,
-            degraded=status is PRPartyActionStatus.DEGRADED_INTENT,
+            degraded=degraded,
+            # A degraded replay is still an undelivered verdict, so it needs the
+            # same "finish it here" link its first response carried.
+            deep_link=review_deep_link(pr_url, kind) if degraded else None,
             replayed=True,
-            merged=(
-                PRPartyActionKind(action.action_kind) is PRPartyActionKind.MERGE
-                and status in _SETTLED
-            ),
+            merged=(kind is PRPartyActionKind.MERGE and status in _SETTLED),
         )
 
     # --- Delivery ---
@@ -533,6 +587,67 @@ class PRPartyActionService:
             deep_link=review_deep_link(pr_url, kind),
         )
 
+    async def _adopt_existing_review(
+        self,
+        *,
+        client: PRPartyGitHubClient,
+        reviewer: PRPartyReviewer,
+        pr: PRPartyPR,
+        request: PRPartyActionRequest,
+        action: PRPartyAction,
+    ) -> ActionResult | None:
+        """Did the attempt this row is reclaiming already reach GitHub? (KTD16)
+
+        The row was committed *before* the call that may have killed the
+        process, so "there is a row" says an attempt happened — not that it
+        failed. Posting again on the strength of that row is precisely how a
+        crash turns into a duplicate review on the pull request, and GitHub will
+        happily accept the second one.
+
+        So the reclaim asks. A review by this reviewer, at this head, in the
+        state this row's verdict would have produced, *is* this row's review:
+        it is adopted (``succeeded`` plus the real ``github_review_id``) and
+        nothing is posted. Anything weaker — a different verdict, a review of
+        another revision, somebody else's — is not this row and does not stop
+        the actuation; :func:`~ontokit.services.pr_party_reconcile.find_matching_review`
+        is the single place that judgement lives, shared with the reconciler.
+
+        Returning ``None`` means "carry on and actuate", which is also the
+        answer when the listing itself fails: a GitHub read that is down must
+        not make a verdict impossible to cast. That trades a rare duplicate for
+        never blocking the reviewer, and the duplicate is visible and
+        reversible where a swallowed verdict is neither.
+        """
+        owner, repo = _split_repo(pr.repo_full_name)
+        try:
+            reviews = await client.get_pr_reviews(owner, repo, pr.pr_number)
+        except (GitHubAPIError, PRPartyGitHubError) as e:
+            logger.warning(
+                "PR Party: could not list reviews while reclaiming action %s (%s); "
+                "actuating without the duplicate check",
+                action.id,
+                scrub_error(e),
+            )
+            return None
+
+        match = find_matching_review(
+            reviews,
+            reviewer=reviewer,
+            head_sha=request.head_sha,
+            verdict=request.verdict,
+        )
+        if match is None:
+            return None
+
+        logger.info(
+            "PR Party: adopted existing review %s for reclaimed action %s", match.id, action.id
+        )
+        action.github_review_id = match.id
+        action.status = PRPartyActionStatus.SUCCEEDED
+        action.error = None
+        await self._store.save()
+        return ActionResult(action=action)
+
     async def _call_github(
         self,
         *,
@@ -540,11 +655,10 @@ class PRPartyActionService:
         pr: PRPartyPR,
         request: PRPartyActionRequest,
         action: PRPartyAction,
-        token: str,
+        client: PRPartyGitHubClient,
         pr_url: str,
     ) -> ActionResult:
         owner, repo = _split_repo(pr.repo_full_name)
-        client = self._actuation_factory(token)
 
         try:
             if request.action_kind is PRPartyActionKind.REVIEW:
@@ -617,19 +731,9 @@ class PRPartyActionService:
         await self._store.save()
 
     async def _mark_credential_dead(self, reviewer: PRPartyReviewer, error: BaseException) -> None:
-        credential = await self._credentials.get_credential(reviewer.id)
-        if credential is None:  # pragma: no cover — a token came from somewhere
-            return
-        credential.last_error = (
-            "GitHub rejected this token during a verdict (401). Submit a fresh PAT."
-        )
-        # Clearing the validation stamp is what makes the settings surface stop
-        # claiming the credential is healthy; leaving it would show a green
-        # check on a token that just failed.
-        credential.last_validated_at = None
-        logger.warning(
-            "PR Party: reviewer %s has a dead PAT (%s)",
-            reviewer.zitadel_user_id,
-            scrub_error(error),
-        )
-        await self._store.save()
+        # The shared helper mutates but never commits, so the write rides this
+        # service's own unit of work — the action store's session.
+        if await mark_credential_dead(
+            self._credentials, reviewer, error, message=_DEAD_PAT_DURING_VERDICT
+        ):
+            await self._store.save()

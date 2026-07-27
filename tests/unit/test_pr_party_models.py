@@ -25,14 +25,18 @@ to assert here is the DDL the migration will emit. The live round-trip
 from __future__ import annotations
 
 import importlib.util
+from collections.abc import Iterator
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
-from sqlalchemy import Column, Index, Table, UniqueConstraint
+from sqlalchemy import Column, Index, Table, UniqueConstraint, create_engine, event, select
+from sqlalchemy.engine import Engine
+from sqlalchemy.orm import Session
 
+from ontokit.core.database import Base
 from ontokit.models.llm_config import LLMAuditLog
 from ontokit.models.notification import Notification
 from ontokit.models.pr_party import (
@@ -79,6 +83,53 @@ def _where_text(index: Index) -> str:
     where = index.dialect_options["postgresql"]["where"]
     assert where is not None, f"{index.name} is not a partial index"
     return str(where)
+
+
+@pytest.fixture
+def pr_party_session() -> Iterator[Session]:
+    """A throwaway SQLite database holding just the four PR Party tables.
+
+    Cascade behaviour is the one guarantee in this file that metadata cannot
+    show: whether the ORM defers a parent delete to the database depends on the
+    relationship's ``passive_deletes``, and the consequence only appears in the
+    SQL actually emitted. SQLite enforces ``ON DELETE CASCADE`` once
+    ``PRAGMA foreign_keys`` is on, which is enough to observe it.
+    """
+    engine = create_engine("sqlite://")
+
+    @event.listens_for(engine, "connect")
+    def _enforce_foreign_keys(dbapi_connection: Any, _record: Any) -> None:
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    Base.metadata.create_all(
+        engine,
+        tables=[
+            PRPartyReviewer.__table__,
+            PRPartyCredential.__table__,
+            PRPartyPR.__table__,
+            PRPartyAction.__table__,
+        ],
+    )
+    with Session(engine) as session:
+        yield session
+    engine.dispose()
+
+
+def _record_sql(engine: Engine, statements: list[str]) -> Any:
+    """Append every statement the engine executes to ``statements``."""
+
+    def _before_cursor_execute(
+        _conn: Any,
+        _cursor: Any,
+        statement: str,
+        _parameters: Any,
+        _context: Any,
+        _executemany: bool,
+    ) -> None:
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _before_cursor_execute)
+    return _before_cursor_execute
 
 
 @pytest.fixture(scope="module")
@@ -318,6 +369,90 @@ class TestPRPartyAction:
             fk = next(iter(table.columns[column].foreign_keys))
             assert fk.ondelete == "CASCADE", column
 
+    def test_actions_are_indexed_by_pr(self) -> None:
+        """The card read (and the FK cascade) walks pr_id — Postgres indexes no FK on its own."""
+        index = _index(PRPartyAction.__table__, "ix_pr_party_action_pr_id")
+        assert index.unique is False
+        assert [c.name for c in index.columns] == ["pr_id"]
+
+    def test_both_parents_defer_deletion_to_the_database(self) -> None:
+        """``passive_deletes`` is what makes the FK's ON DELETE CASCADE authoritative.
+
+        Without it the ORM would load the children and UPDATE their parent FK to
+        NULL — and both FK columns are NOT NULL, so that is an IntegrityError.
+        """
+        assert PRPartyPR.actions.property.passive_deletes is True
+        assert PRPartyReviewer.actions.property.passive_deletes is True
+
+    def test_deleting_a_pr_cascades_its_actions_in_the_database(
+        self, pr_party_session: Session
+    ) -> None:
+        """The parent delete emits no UPDATE-to-NULL, and the rows still go."""
+        reviewer = PRPartyReviewer(zitadel_user_id="z1", github_login="octocat")
+        pr = PRPartyPR(repo_full_name="catholicos/ontokit-api", pr_number=7, head_sha="a" * 40)
+        pr_party_session.add_all([reviewer, pr])
+        pr_party_session.flush()
+        pr_party_session.add(
+            PRPartyAction(
+                reviewer_id=reviewer.id,
+                pr_id=pr.id,
+                head_sha="a" * 40,
+                action_kind=PRPartyActionKind.REVIEW,
+                idempotency_key="idem-1",
+            )
+        )
+        pr_party_session.commit()
+
+        engine = pr_party_session.get_bind()
+        assert isinstance(engine, Engine)
+        statements: list[str] = []
+        listener = _record_sql(engine, statements)
+        try:
+            pr_party_session.delete(pr)
+            pr_party_session.commit()
+        finally:
+            event.remove(engine, "before_cursor_execute", listener)
+
+        assert not [s for s in statements if "UPDATE pr_party_action" in s], statements
+        assert pr_party_session.scalars(select(PRPartyAction)).all() == []
+        # The other parent is untouched: a PR going away is not a de-registration.
+        assert pr_party_session.scalars(select(PRPartyReviewer)).all() == [reviewer]
+
+    def test_deleting_a_reviewer_cascades_actions_and_credential(
+        self, pr_party_session: Session
+    ) -> None:
+        reviewer = PRPartyReviewer(zitadel_user_id="z2", github_login="hubot")
+        reviewer.credential = PRPartyCredential(encrypted_token="gAAAAAB-not-a-real-token")
+        pr = PRPartyPR(repo_full_name="catholicos/ontokit-api", pr_number=8, head_sha="b" * 40)
+        pr_party_session.add_all([reviewer, pr])
+        pr_party_session.flush()
+        pr_party_session.add(
+            PRPartyAction(
+                reviewer_id=reviewer.id,
+                pr_id=pr.id,
+                head_sha="b" * 40,
+                action_kind=PRPartyActionKind.MERGE,
+                idempotency_key="idem-2",
+            )
+        )
+        pr_party_session.commit()
+
+        engine = pr_party_session.get_bind()
+        assert isinstance(engine, Engine)
+        statements: list[str] = []
+        listener = _record_sql(engine, statements)
+        try:
+            pr_party_session.delete(reviewer)
+            pr_party_session.commit()
+        finally:
+            event.remove(engine, "before_cursor_execute", listener)
+
+        assert not [s for s in statements if "UPDATE pr_party_action" in s], statements
+        assert pr_party_session.scalars(select(PRPartyAction)).all() == []
+        # KTD13: de-registering a reviewer never leaves the secret behind.
+        assert pr_party_session.scalars(select(PRPartyCredential)).all() == []
+        assert pr_party_session.scalars(select(PRPartyPR)).all() == [pr]
+
 
 # ── Nullable project columns (KTD20) ─────────────────────────────────────────
 
@@ -390,6 +525,19 @@ class TestMigration:
         ddl_columns = {c.name for c in args[1:] if isinstance(c, Column)}
         assert ddl_columns == set(PRPartyPR.__table__.columns.keys())
         assert "title" in ddl_columns
+
+    def test_action_ddl_indexes_match_the_model(self, migration_module: ModuleType) -> None:
+        """Same trap as the column test: this migration is amended in place.
+
+        An index added to ``__table_args__`` and forgotten in the DDL would pass
+        every metadata assertion above and only fail against a real database.
+        """
+        ops = _recorded_ops(migration_module, "upgrade")
+        ddl_indexes = {
+            args[0] for name, args in ops if name == "create_index" and args[1] == "pr_party_action"
+        }
+        assert ddl_indexes == {ix.name for ix in PRPartyAction.__table__.indexes}
+        assert "ix_pr_party_action_pr_id" in ddl_indexes
 
     def test_upgrade_relaxes_the_three_project_columns(self, migration_module: ModuleType) -> None:
         ops = _recorded_ops(migration_module, "upgrade")

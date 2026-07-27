@@ -17,8 +17,10 @@ do not belong anywhere else:
   exhausted rate-limit budget ``-> RateLimitedError`` carrying the reset time,
   ``422`` on review-create ``-> SelfApprovalError`` (R18's own-PR guard as
   GitHub enforces it), and merge ``409 -> StaleCardError`` (the head moved out
-  from under the card). Mapping in one place is what keeps "expired PAT" from
-  reaching a caller as an anonymous 500.
+  from under the card). A transport failure that never reaches a status at all
+  becomes a ``GitHubAPIError`` with ``status_code=None``, so "GitHub was
+  unreachable" is inside the taxonomy rather than beside it. Mapping in one
+  place is what keeps "expired PAT" from reaching a caller as an anonymous 500.
 - **The surfaces ontokit-api has never touched.** Check-run rollups and
   mergeability-with-a-computing-state (R4), and the org-scoped PR search that
   feeds the sweep (R1). Observing the AI reviewer's own review (R3) reads the
@@ -50,6 +52,7 @@ from typing import Any, Final
 
 import httpx
 
+from ontokit.core.config import settings
 from ontokit.services.github_service import _enc
 
 __all__ = [
@@ -74,7 +77,12 @@ __all__ = [
     "StaleCardError",
     "TokenExpiredError",
     "actuation_client",
+    "default_generation_client",
     "generation_client",
+    "parse_dt",
+    "scrub_error",
+    "split_repo",
+    "to_int",
 ]
 
 GITHUB_API_BASE: Final = "https://api.github.com"
@@ -174,9 +182,16 @@ class GenerationModeError(PRPartyGitHubError):
 
 
 class GitHubAPIError(PRPartyGitHubError):
-    """An unmapped non-2xx response from GitHub."""
+    """An unmapped non-2xx response from GitHub, or a transport-level failure.
 
-    def __init__(self, message: str, *, status_code: int) -> None:
+    ``status_code`` is ``None`` when the request never produced an HTTP
+    response at all — a connect failure, a read timeout, a broken TLS or
+    protocol exchange. Callers that branch on the status must treat ``None`` as
+    "no status, and certainly not the one you were hoping for" rather than
+    assuming an int.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None) -> None:
         self.status_code = status_code
         super().__init__(message)
 
@@ -228,6 +243,25 @@ class ReviewNotSubmittedError(PRPartyGitHubError):
             f"GitHub returned review state {state!r} (id={review_id}); a PENDING review "
             "was never submitted and must not be recorded as a verdict."
         )
+
+
+def scrub_error(error: BaseException) -> str:
+    """What is safe to persist or surface about a failed GitHub call.
+
+    The exception *class* and the HTTP status, never the message. GitHub error
+    bodies quote the request — which for these calls contains the reviewer's
+    prose and, on a misconfiguration, can echo header material. The scrubbed
+    form is read back by the reconciler, stored as a credential's
+    ``last_error``, and rendered in a settings surface, so the rule is that
+    nothing GitHub said in prose is ever kept.
+
+    Lives beside the taxonomy it scrubs: ``status_code`` is this module's
+    attribute, and ``getattr`` keeps the function total for exceptions (a
+    transport failure, a stdlib error) that never carried one.
+    """
+    name = type(error).__name__
+    status_code = getattr(error, "status_code", None)
+    return f"{name} (HTTP {status_code})" if status_code is not None else name
 
 
 # --- Result shapes ----------------------------------------------------------
@@ -348,7 +382,20 @@ class IssueComment:
 # --- Parsing helpers --------------------------------------------------------
 
 
-def _parse_dt(value: Any) -> datetime | None:
+def split_repo(repo_full_name: str) -> tuple[str, str]:
+    """``owner/repo`` -> ``(owner, repo)``, the shape every endpoint here wants.
+
+    Raises :class:`ValueError` on a malformed name rather than a service's own
+    refusal type: this module has no opinion about how a caller reports it, and
+    each caller converts to the refusal its own API contract promises.
+    """
+    owner, _, repo = repo_full_name.strip("/").partition("/")
+    if not owner or not repo:
+        raise ValueError(f"Malformed repository name: {repo_full_name!r}")
+    return owner, repo
+
+
+def parse_dt(value: Any) -> datetime | None:
     """Parse a GitHub ISO-8601 timestamp (``2026-07-25T18:30:00Z``)."""
     if not isinstance(value, str) or not value:
         return None
@@ -375,7 +422,7 @@ def parse_token_expiration(raw: str | None) -> datetime | None:
         return None
     if value.upper().endswith("UTC"):
         value = value[:-3].strip() + "+00:00"
-    return _parse_dt(value)
+    return parse_dt(value)
 
 
 def _repo_full_name_from_url(repository_url: Any) -> str:
@@ -494,24 +541,42 @@ class PRPartyGitHubClient:
 
         ``accept`` overrides the media type for the surfaces that are not JSON
         objects (the ``.diff`` representation of a pull request).
+
+        A failure that never reaches an HTTP status — connect refused, read
+        timeout, protocol error — is folded into the same taxonomy as a
+        ``GitHubAPIError`` with ``status_code=None``. Letting a raw
+        ``httpx.TransportError`` out would walk straight past every caller's
+        ``except GitHubAPIError`` and turn a degradable actuation into an
+        unhandled 500. The ``try`` covers only the transport; status mapping
+        happens below it, so :meth:`_map_error`'s work is never re-wrapped.
         """
         headers = self._headers()
         if accept is not None:
             headers["Accept"] = accept
 
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            # `endpoint` is assembled from _enc()-encoded segments at every call
-            # site below (same convention as github_service.py, PR #116), so no
-            # user-controlled value can escape its path segment. The taint
-            # analyzer does not recognize urllib.parse.quote() as a sanitizer;
-            # this justification covers the single request sink in this module.
-            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
-            response = await client.request(
-                method=method,
-                url=f"{self._api_base}{endpoint}",
-                headers=headers,
-                json=json,
-            )
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as client:
+                # `endpoint` is assembled from _enc()-encoded segments at every
+                # call site below (same convention as github_service.py, PR
+                # #116), so no user-controlled value can escape its path
+                # segment. The taint analyzer does not recognize
+                # urllib.parse.quote() as a sanitizer; this justification covers
+                # the single request sink in this module.
+                # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+                response = await client.request(
+                    method=method,
+                    url=f"{self._api_base}{endpoint}",
+                    headers=headers,
+                    json=json,
+                )
+        except httpx.HTTPError as exc:
+            # Class name only: httpx messages can quote the URL and, on a proxy
+            # misconfiguration, connection material. Same rule as
+            # :func:`scrub_error` applies to what gets persisted.
+            raise GitHubAPIError(
+                f"GitHub request failed before any response ({type(exc).__name__}).",
+                status_code=None,
+            ) from exc
 
         self.last_token_expires_at = parse_token_expiration(
             response.headers.get(TOKEN_EXPIRATION_HEADER)
@@ -569,7 +634,7 @@ class PRPartyGitHubClient:
                 message,
                 status_code=status,
                 reset_at=_epoch_to_datetime(headers.get("x-ratelimit-reset")),
-                retry_after_seconds=_to_int(headers.get("retry-after")),
+                retry_after_seconds=to_int(headers.get("retry-after")),
             )
 
         if status == 422 and op is _Op.REVIEW_CREATE:
@@ -717,7 +782,7 @@ class PRPartyGitHubClient:
 
         if data.get("type") != "file" or data.get("encoding") != "base64":
             return None
-        size = _to_int(data.get("size"))
+        size = to_int(data.get("size"))
         if size is not None and size > max_bytes:
             return None
 
@@ -773,7 +838,7 @@ class PRPartyGitHubClient:
 
         state = str(data.get("state", ""))
         if state.upper() == "PENDING":
-            raise ReviewNotSubmittedError(_to_int(data.get("id")), state)
+            raise ReviewNotSubmittedError(to_int(data.get("id")), state)
 
         return _parse_review(data)
 
@@ -924,8 +989,8 @@ class PRPartyGitHubClient:
             mergeability=mergeability,
             mergeable_state=data.get("mergeable_state"),
             html_url=str(data.get("html_url", "")),
-            created_at=_parse_dt(data.get("created_at")),
-            updated_at=_parse_dt(data.get("updated_at")),
+            created_at=parse_dt(data.get("created_at")),
+            updated_at=parse_dt(data.get("updated_at")),
         )
 
     def _parse_search_item(self, item: dict[str, Any]) -> SearchedPR:
@@ -934,8 +999,8 @@ class PRPartyGitHubClient:
             number=int(item.get("number", 0)),
             title=str(item.get("title", "")),
             state=str(item.get("state", "")),
-            updated_at=_parse_dt(item.get("updated_at")),
-            created_at=_parse_dt(item.get("created_at")),
+            updated_at=parse_dt(item.get("updated_at")),
+            created_at=parse_dt(item.get("created_at")),
             author_login=_user_field(item, "login"),
             author_node_id=_user_field(item, "node_id"),
             author_type=_user_field(item, "type"),
@@ -955,26 +1020,26 @@ def _parse_issue_comment(data: Mapping[str, Any]) -> IssueComment:
         body=str(data.get("body", "")),
         user_login=_user_field(data, "login"),
         html_url=data.get("html_url"),
-        created_at=_parse_dt(data.get("created_at")),
-        updated_at=_parse_dt(data.get("updated_at")),
+        created_at=parse_dt(data.get("created_at")),
+        updated_at=parse_dt(data.get("updated_at")),
     )
 
 
 def _parse_review(data: Mapping[str, Any]) -> PRPartyReview:
     """One review object, however it arrived — posted or listed.
 
-    ``id`` goes through :func:`_to_int` because review ids exceed 32 bits and a
+    ``id`` goes through :func:`to_int` because review ids exceed 32 bits and a
     payload that omitted one must land as ``0`` rather than raise here; the
     reconciler treats a zero id as "no id we can match on".
     """
     return PRPartyReview(
-        id=_to_int(data.get("id")) or 0,
+        id=to_int(data.get("id")) or 0,
         state=str(data.get("state", "")),
         body=data.get("body"),
         commit_id=data.get("commit_id"),
         user_login=_user_field(data, "login"),
         user_node_id=_user_field(data, "node_id"),
-        submitted_at=_parse_dt(data.get("submitted_at")),
+        submitted_at=parse_dt(data.get("submitted_at")),
         html_url=data.get("html_url"),
     )
 
@@ -1021,7 +1086,7 @@ def _error_message(response: httpx.Response) -> str:
     return message
 
 
-def _to_int(value: Any) -> int | None:
+def to_int(value: Any) -> int | None:
     try:
         return int(value)
     except (TypeError, ValueError):
@@ -1029,7 +1094,7 @@ def _to_int(value: Any) -> int | None:
 
 
 def _epoch_to_datetime(value: Any) -> datetime | None:
-    epoch = _to_int(value)
+    epoch = to_int(value)
     if epoch is None:
         return None
     try:
@@ -1046,3 +1111,15 @@ def generation_client(token: str, **kwargs: Any) -> PRPartyGitHubClient:
 def actuation_client(token: str, **kwargs: Any) -> PRPartyGitHubClient:
     """Write client bound to one reviewer's PAT (R8, R11)."""
     return PRPartyGitHubClient(token, PRPartyClientMode.ACTUATION, **kwargs)
+
+
+def default_generation_client() -> PRPartyGitHubClient | None:
+    """The shared read-only client (KTD13), or ``None`` if unconfigured.
+
+    The single definition behind intake's sweep and webhook paths, the brief
+    worker, and the Q&A thread read: an unset ``PR_PARTY_READONLY_TOKEN`` must
+    mean "skip" identically everywhere, which it cannot if each caller decides
+    for itself.
+    """
+    token = settings.pr_party_readonly_token
+    return generation_client(token) if token else None

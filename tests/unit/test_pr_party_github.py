@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from ontokit.services.pr_party_github import (
@@ -24,6 +25,7 @@ from ontokit.services.pr_party_github import (
     MergeNotAllowedError,
     PRPartyClientMode,
     PRPartyGitHubClient,
+    PRPartyGitHubError,
     RateLimitedError,
     ReviewEvent,
     ReviewNotSubmittedError,
@@ -334,9 +336,14 @@ class TestGenerationModeRefusesWrites:
         assert ctor.called is False
 
     def test_refusal_error_is_a_dedicated_type(self) -> None:
-        assert issubclass(GenerationModeError, PermissionError) or issubclass(
-            GenerationModeError, Exception
-        )
+        """A privilege refusal is a PR Party error, never an HTTP-shaped one.
+
+        ``GitHubAPIError`` means GitHub answered (or failed to). A generation
+        client refuses *before* any call, so a caller that maps
+        ``GitHubAPIError`` to a 502 must never catch this one.
+        """
+        assert issubclass(GenerationModeError, PRPartyGitHubError)
+        assert not issubclass(GenerationModeError, GitHubAPIError)
         assert not issubclass(GenerationModeError, TokenExpiredError)
 
     @pytest.mark.asyncio
@@ -957,8 +964,6 @@ class TestErrorTaxonomy:
     """All PR Party GitHub failures share one root so callers can catch broadly."""
 
     def test_all_errors_share_a_root(self) -> None:
-        from ontokit.services.pr_party_github import PRPartyGitHubError
-
         for exc_type in (
             TokenExpiredError,
             RateLimitedError,
@@ -993,3 +998,96 @@ class TestErrorTaxonomy:
             pytest.raises(TokenExpiredError),
         ):
             await _generator().get_check_runs_rollup("catholicos", "liturgy", HEAD_SHA)
+
+
+class TestTransportFailures:
+    """A request that never reaches a status is still inside the taxonomy.
+
+    Every caller guards actuation with ``except GitHubAPIError``. If a raw
+    ``httpx.TransportError`` escaped, a GitHub outage would land as an
+    unhandled exception rather than the documented 502 / ``failed`` row.
+    """
+
+    @pytest.mark.asyncio
+    async def test_connect_error_surfaces_as_a_github_api_error(self) -> None:
+        mock_client = _make_async_client()
+        mock_client.request = AsyncMock(side_effect=httpx.ConnectError("connection refused"))
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            pytest.raises(GitHubAPIError) as exc,
+        ):
+            await _generator().get_pull_request("catholicos", "liturgy", 42)
+
+        assert exc.value.status_code is None
+        assert isinstance(exc.value.__cause__, httpx.ConnectError)
+
+    @pytest.mark.asyncio
+    async def test_read_timeout_surfaces_as_a_github_api_error(self) -> None:
+        mock_client = _make_async_client()
+        mock_client.request = AsyncMock(side_effect=httpx.ReadTimeout("timed out"))
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            pytest.raises(GitHubAPIError) as exc,
+        ):
+            await _actuator().create_review(
+                "catholicos", "liturgy", 42, commit_id=HEAD_SHA, event=ReviewEvent.APPROVE
+            )
+
+        assert exc.value.status_code is None
+
+    @pytest.mark.asyncio
+    async def test_transport_failure_on_a_non_json_surface_is_mapped_too(self) -> None:
+        """``get_pr_diff`` calls ``_send`` directly, so it needs the same wrap."""
+        mock_client = _make_async_client()
+        mock_client.request = AsyncMock(side_effect=httpx.RemoteProtocolError("bad chunk"))
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            pytest.raises(GitHubAPIError) as exc,
+        ):
+            await _generator().get_pr_diff("catholicos", "liturgy", 42)
+
+        assert exc.value.status_code is None
+
+    @pytest.mark.asyncio
+    async def test_transport_message_names_the_class_and_nothing_else(self) -> None:
+        """Same rule as ``scrub_error``: the class name, never httpx's prose."""
+        secret = "https://api.github.com/... proxy user=hunter2"
+        mock_client = _make_async_client()
+        mock_client.request = AsyncMock(side_effect=httpx.ConnectError(secret))
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            pytest.raises(GitHubAPIError) as exc,
+        ):
+            await _generator().get_pull_request("catholicos", "liturgy", 42)
+
+        assert "ConnectError" in str(exc.value)
+        assert secret not in str(exc.value)
+        assert "hunter2" not in str(exc.value)
+
+    @pytest.mark.asyncio
+    async def test_status_mapping_is_not_double_wrapped(self) -> None:
+        """The transport wrap must not re-wrap a mapped status error."""
+        mock_client = _make_async_client(_mock_response(401, UNAUTHORIZED_RESPONSE))
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            pytest.raises(TokenExpiredError) as exc,
+        ):
+            await _generator().get_pull_request("catholicos", "liturgy", 42)
+
+        assert exc.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_a_transport_failure_is_catchable_as_the_root_error(self) -> None:
+        mock_client = _make_async_client()
+        mock_client.request = AsyncMock(side_effect=httpx.ConnectTimeout("no route"))
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            pytest.raises(PRPartyGitHubError),
+        ):
+            await _generator().search_org_open_prs("catholicos")

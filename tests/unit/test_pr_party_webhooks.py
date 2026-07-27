@@ -33,6 +33,7 @@ from ontokit.api.routes import include_pr_party_routes
 from ontokit.core.config import settings
 from ontokit.core.database import get_db
 from ontokit.main import app
+from ontokit.services.pr_party_intake import DELIVERY_KEY_PREFIX
 
 URL = "/api/v1/pr-party/webhooks/github"
 SECRET = "org-webhook-secret"
@@ -71,6 +72,11 @@ class _FakePool:
             return None
         self.keys[key] = value
         return True
+
+    async def delete(self, key: str) -> int:
+        if self.fail:
+            raise RuntimeError("redis is down")
+        return 1 if self.keys.pop(key, None) is not None else 0
 
 
 @pytest.fixture
@@ -167,6 +173,31 @@ class TestSignature:
         assert response.status_code == 401
         assert spy.calls == []
 
+    def test_a_non_ascii_signature_header_is_401_not_500(self, receiver: Any) -> None:
+        """The header is attacker-controlled; a str compare raises TypeError on it.
+
+        ``hmac.compare_digest`` refuses non-ASCII str operands, so comparing the
+        raw header as text turned one stray byte into a 500 — an unauthenticated
+        caller's crash oracle — instead of the 401 it earns.
+        """
+        client, spy, _pool = receiver
+        body = json.dumps({"action": "opened"}).encode()
+        response = client.post(
+            URL,
+            content=body,
+            headers={
+                # Sent as raw bytes: httpx will not encode a non-ASCII str, but
+                # GitHub's transport is bytes and Starlette hands the route a
+                # latin-1 decode of whatever arrived.
+                "x-hub-signature-256": "sha256=café".encode("latin-1") + b"0" * 60,
+                "x-github-event": "pull_request",
+                "x-github-delivery": "d",
+                "content-type": "application/json",
+            },
+        )
+        assert response.status_code == 401
+        assert spy.calls == []
+
     def test_unset_secret_is_503_not_open(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(settings, "pr_party_webhook_secret", "", raising=False)
         spy = _Spy()
@@ -231,6 +262,58 @@ class TestDeliveryDedupe:
         response = _post(client, delivery=None)
         assert response.status_code == 200
         assert len(spy.calls) == 1
+
+    def test_a_failed_handler_releases_the_claim_for_the_redelivery(
+        self, receiver: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The claim is taken before processing, so a crash must give it back.
+
+        GitHub's redelivery is the only further copy of that fact; a claim left
+        behind by a failed pass makes the retry look like a duplicate and the
+        event is lost for the 24h TTL.
+        """
+        client, _spy, pool = receiver
+        calls: list[str] = []
+
+        async def _explode(_db: Any, event: str, _payload: dict[str, Any], **_kw: Any) -> Any:
+            calls.append(event)
+            raise RuntimeError("intake blew up")
+
+        monkeypatch.setattr("ontokit.api.routes.pr_party_webhooks.handle_webhook_event", _explode)
+        first = _post(client, delivery="boom-1")
+
+        assert first.status_code == 500
+        assert calls == ["pull_request"]
+        assert f"{DELIVERY_KEY_PREFIX}boom-1" not in pool.keys
+
+        # The redelivery is new work, not a duplicate.
+        good = _Spy()
+        monkeypatch.setattr("ontokit.api.routes.pr_party_webhooks.handle_webhook_event", good)
+        second = _post(client, delivery="boom-1")
+
+        assert second.status_code == 200
+        assert second.json() == {"status": "processed"}
+        assert len(good.calls) == 1
+
+    def test_a_release_failure_does_not_mask_the_original_error(
+        self, receiver: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Best-effort release: the 24h TTL is the backstop, not a second crash."""
+        client, _spy, pool = receiver
+
+        async def _explode(*_args: Any, **_kw: Any) -> Any:
+            raise RuntimeError("intake blew up")
+
+        async def _refuse(_key: str) -> int:
+            raise RuntimeError("redis went away mid-request")
+
+        monkeypatch.setattr("ontokit.api.routes.pr_party_webhooks.handle_webhook_event", _explode)
+        monkeypatch.setattr(pool, "delete", _refuse)
+        response = _post(client, delivery="boom-2")
+
+        # The handler's failure surfaces; the release attempt is swallowed.
+        assert response.status_code == 500
+        assert f"{DELIVERY_KEY_PREFIX}boom-2" in pool.keys
 
 
 # ---------------------------------------------------------------------------

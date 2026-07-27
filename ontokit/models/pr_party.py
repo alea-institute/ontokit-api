@@ -139,7 +139,12 @@ class PRPartyReviewer(Base):
     credential: Mapped["PRPartyCredential | None"] = relationship(
         back_populates="reviewer", uselist=False, cascade="all, delete-orphan"
     )
-    actions: Mapped[list["PRPartyAction"]] = relationship(back_populates="reviewer")
+    # ``passive_deletes`` hands the delete to the FK's ON DELETE CASCADE. Without
+    # it the ORM loads every action row and UPDATEs its ``reviewer_id`` to NULL —
+    # a NOT NULL column, so that path is an IntegrityError, not a slow success.
+    actions: Mapped[list["PRPartyAction"]] = relationship(
+        back_populates="reviewer", passive_deletes=True
+    )
 
     def __repr__(self) -> str:
         return (
@@ -259,7 +264,9 @@ class PRPartyPR(Base):
         DateTime(timezone=True), onupdate=func.now()
     )
 
-    actions: Mapped[list["PRPartyAction"]] = relationship(back_populates="pr")
+    # Same reasoning as PRPartyReviewer.actions: the database's ON DELETE CASCADE
+    # owns this deletion, not an ORM null-out of a NOT NULL ``pr_id``.
+    actions: Mapped[list["PRPartyAction"]] = relationship(back_populates="pr", passive_deletes=True)
 
     __table_args__ = (
         UniqueConstraint("repo_full_name", "pr_number", name="uq_pr_party_pr_repo_number"),
@@ -321,6 +328,9 @@ class PRPartyAction(Base):
     pr: Mapped["PRPartyPR"] = relationship(back_populates="actions")
 
     __table_args__ = (
+        # Every card read fans out from one PR to its action rows, and the FK's
+        # ON DELETE CASCADE has to find them too — neither should seq-scan.
+        Index("ix_pr_party_action_pr_id", "pr_id"),
         # KTD16: at most ONE live action per (reviewer, PR, revision, kind).
         # ``failed`` rows fall outside the predicate so a dead attempt never
         # wedges a retry (C6); re-opening a failed row rather than inserting a

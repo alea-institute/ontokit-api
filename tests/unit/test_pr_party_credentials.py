@@ -615,3 +615,90 @@ class TestGenerationTokenStatus:
         await get_generation_token_status(client_factory=_factory(client))
 
         assert client.identity_calls == 2
+
+
+# ---------------------------------------------------------------------------
+# Error scrubbing (Fix 6)
+# ---------------------------------------------------------------------------
+
+
+#: A GitHub error body quotes the request, so it can carry both the reviewer's
+#: prose and — on a misconfiguration — the credential that was just submitted.
+_LEAKY_PROSE = (
+    "Bad credentials for request Authorization: Bearer "
+    "github_pat_11SUPERSECRETVALUE — see the PR description: 'ship the liturgy fix'"
+)
+_SECRET_FRAGMENT = "github_pat_11SUPERSECRETVALUE"
+
+
+def _assert_scrubbed(text: str, *, expected: str) -> None:
+    """Exactly the class name and status; no GitHub prose, no secret."""
+    assert expected in text
+    assert _SECRET_FRAGMENT not in text
+    assert "Bad credentials" not in text
+    assert "ship the liturgy fix" not in text
+
+
+class TestGitHubErrorProseIsScrubbed:
+    """Nothing GitHub said in prose may reach storage or a response (Fix 6).
+
+    ``scrub_error`` is the single rule — class name plus HTTP status — and these
+    are the three credential-service paths that used to interpolate the raw
+    exception instead.
+    """
+
+    async def test_generation_status_last_error_is_scrubbed(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The one ``last_error`` this module *stores* from a live GitHub failure."""
+        monkeypatch.setattr(settings, "pr_party_readonly_token", "ghp_readonly")
+        client = _FakeClient(identity_error=TokenExpiredError(_LEAKY_PROSE, status_code=401))
+
+        status = await get_generation_token_status(client_factory=_factory(client))
+
+        assert status is not None
+        assert status.last_error == "TokenExpiredError (HTTP 401)"
+        _assert_scrubbed(status.last_error, expected="TokenExpiredError (HTTP 401)")
+
+    async def test_authenticate_failure_carries_no_prose(self) -> None:
+        reviewer = _reviewer()
+        db = _FakeSession([reviewer])
+        client = _FakeClient(identity_error=GitHubAPIError(_LEAKY_PROSE, status_code=502))
+        service = PRPartyCredentialService(db, actuation_factory=_factory(client))  # type: ignore[arg-type]
+
+        with pytest.raises(CredentialValidationUnavailable) as excinfo:
+            await service.save_credential(reviewer, "github_pat_11SUPERSECRETVALUE")
+
+        _assert_scrubbed(str(excinfo.value), expected="GitHubAPIError (HTTP 502)")
+        assert db.commits == 0
+
+    async def test_capability_probe_failure_carries_no_prose(self) -> None:
+        reviewer = _reviewer(github_login="octocat")
+        db = _FakeSession([reviewer])
+        client = _FakeClient(
+            identity=AuthenticatedIdentity(login="octocat", node_id="N", token_expires_at=None),
+            user_error=GitHubAPIError(_LEAKY_PROSE, status_code=403),
+        )
+        service = PRPartyCredentialService(db, actuation_factory=_factory(client))  # type: ignore[arg-type]
+
+        with pytest.raises(CredentialValidationUnavailable) as excinfo:
+            await service.save_credential(reviewer, "github_pat_11SUPERSECRETVALUE")
+
+        _assert_scrubbed(str(excinfo.value), expected="GitHubAPIError (HTTP 403)")
+        # The probe failed, so nothing was stored.
+        assert db.added == []
+        assert db.commits == 0
+
+    async def test_transport_failure_scrubs_without_a_status(self) -> None:
+        """No HTTP status exists for a transport fault; the rule stays total."""
+        reviewer = _reviewer()
+        db = _FakeSession([reviewer])
+        client = _FakeClient(identity_error=RuntimeError(_LEAKY_PROSE))
+        service = PRPartyCredentialService(db, actuation_factory=_factory(client))  # type: ignore[arg-type]
+
+        with pytest.raises(CredentialValidationUnavailable) as excinfo:
+            await service.save_credential(reviewer, "github_pat_11SUPERSECRETVALUE")
+
+        message = str(excinfo.value)
+        _assert_scrubbed(message, expected="RuntimeError")
+        assert "HTTP" not in message

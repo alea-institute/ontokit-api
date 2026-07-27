@@ -150,6 +150,10 @@ class Settings(BaseSettings):
     # this can drop to a low-frequency backstop. Also the unit `missing_since`
     # arithmetic is measured in (see ``pr_party_intake.MISSING_MISS_THRESHOLD``).
     pr_party_sweep_minutes: int = 5
+    # arq job timeout for one sweep. Explicit rather than inherited from the
+    # 300s worker default so the bound is stated where the cadence is: a sweep
+    # that outlives its own interval would stack on the next tick.
+    pr_party_sweep_timeout_seconds: int = 240
 
     # --- PR Party brief generation (KTD17, R21) ---
     # The brief worker runs a TOOL-DENIED LLM call over adversarial input, so

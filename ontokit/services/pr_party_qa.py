@@ -46,23 +46,23 @@ from __future__ import annotations
 
 import logging
 import re
-import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Final, Protocol
+from typing import Any, Final
 
-from ontokit.core.config import settings
 from ontokit.models.pr_party import PRPartyPR, PRPartyReviewer
 from ontokit.schemas.pr_party import PRPartyQAEntry
+from ontokit.services.pr_party_credentials import CredentialResolver, mark_credential_dead
 from ontokit.services.pr_party_github import (
     IssueComment,
     PRPartyGitHubClient,
     PRPartyGitHubError,
     TokenExpiredError,
     actuation_client,
-    generation_client,
+    default_generation_client,
+    split_repo,
 )
 
 logger = logging.getLogger(__name__)
@@ -101,6 +101,12 @@ CODERABBIT_REVIEW_COMMAND: Final = "@coderabbitai review"
 #: :func:`parse_attribution`, which is how the thread knows who to look for an
 #: @-mention of.
 ATTRIBUTION_PREFIX: Final = "asked via PR Party by "
+
+#: Written to a credential's ``last_error`` when GitHub rejects the reviewer's
+#: PAT while posting a comment — the only signal U2 ever gets that it died.
+_DEAD_PAT_POSTING_COMMENT = (
+    "GitHub rejected this token while posting a comment (401). Submit a fresh PAT."
+)
 
 #: R14. Distinct from a question so the answerer is not summoned by a decision
 #: that has already been made.
@@ -181,16 +187,6 @@ class QAIngestion:
     #: webhook payload holds one comment, so mention- and quote-linkage cannot
     #: be resolved here — the card's live thread does that with full context.
     question_comment_id: int | None = None
-
-
-class CredentialResolver(Protocol):
-    """The slice of :class:`PRPartyCredentialService` this service depends on."""
-
-    async def resolve_token(self, reviewer: PRPartyReviewer) -> str | None: ...
-
-    async def get_credential(self, reviewer_id: uuid.UUID) -> Any: ...
-
-    async def save(self) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -386,16 +382,11 @@ def build_qa_thread(comments: Sequence[IssueComment]) -> list[PRPartyQAEntry]:
 
 
 def _split_repo(repo_full_name: str) -> tuple[str, str]:
-    owner, _, repo = repo_full_name.strip("/").partition("/")
-    if not owner or not repo:
-        raise QARefused(500, "This card's repository name is malformed.")
-    return owner, repo
-
-
-def _default_generation_client() -> PRPartyGitHubClient | None:
-    """The shared read-only client (KTD13), or ``None`` if unconfigured."""
-    token = settings.pr_party_readonly_token
-    return generation_client(token) if token else None
+    """:func:`~ontokit.services.pr_party_github.split_repo` in this module's refusal type."""
+    try:
+        return split_repo(repo_full_name)
+    except ValueError as e:
+        raise QARefused(500, "This card's repository name is malformed.") from e
 
 
 class PRPartyQAService:
@@ -412,7 +403,7 @@ class PRPartyQAService:
         *,
         credentials: CredentialResolver,
         actuation_factory: Callable[[str], PRPartyGitHubClient] = actuation_client,
-        generation_factory: Callable[[], PRPartyGitHubClient | None] = _default_generation_client,
+        generation_factory: Callable[[], PRPartyGitHubClient | None] = default_generation_client,
     ) -> None:
         self._credentials = credentials
         self._actuation_factory = actuation_factory
@@ -482,19 +473,12 @@ class PRPartyQAService:
         )
 
     async def _mark_credential_dead(self, reviewer: PRPartyReviewer, error: BaseException) -> None:
-        credential = await self._credentials.get_credential(reviewer.id)
-        if credential is None:  # pragma: no cover — a token came from somewhere
-            return
-        credential.last_error = (
-            "GitHub rejected this token while posting a comment (401). Submit a fresh PAT."
-        )
-        credential.last_validated_at = None
-        logger.warning(
-            "PR Party: reviewer %s has a dead PAT (%s)",
-            reviewer.zitadel_user_id,
-            type(error).__name__,
-        )
-        await self._credentials.save()
+        # This service holds no session of its own (see the class docstring), so
+        # the commit is the credential service's.
+        if await mark_credential_dead(
+            self._credentials, reviewer, error, message=_DEAD_PAT_POSTING_COMMENT
+        ):
+            await self._credentials.save()
 
     # --- Reads ---
 

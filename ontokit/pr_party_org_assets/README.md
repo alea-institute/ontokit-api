@@ -50,6 +50,20 @@ one of them fails the API suite as well:
   conversation, not the code; checking out a fork's head would put
   attacker-controlled files on a runner holding an API key.
 
+**Untrusted-data delimiters are nonce-suffixed.** The prompt quotes the comment
+body and the PR title inside markers suffixed with
+`${{ github.run_id }}-${{ github.run_attempt }}`, and the surrounding paragraph
+tells the agent that *only* markers carrying that exact suffix delimit untrusted
+data. Without the nonce the delimiters were forgeable: a PR title or body
+containing a literal `</untrusted-data>` closed the fence early, and everything
+after it read as prompt rather than as quoted material.
+
+*Assumption stated deliberately:* the tool-denial posture is unchanged — the
+allowlist is still the one comment-update tool and the denylist still names
+`Bash`, `Edit`, `Write`, `WebFetch`, and friends. Nonce delimiting is the
+containment fix for delimiter forgery specifically; it is not a substitute for
+the capability bound, and neither one alone is the whole defense.
+
 **Answer binding.** The prompt instructs the agent to open its comment with
 `> Replying to <comment url>`. That line is the linkage signal PR Party binds the
 answer to the question with — the card's Q&A thread never treats "a comment by
