@@ -493,6 +493,16 @@ class PRPartyCredentialService:
             )
             return None
 
+    async def save(self) -> None:
+        """Commit a mutation made directly on a credential row.
+
+        U6 marks a dead PAT through its action store, which already owns a
+        commit; U7 writes no rows of its own and so has no store to borrow one
+        from. Rather than let the Q&A service reach into ``self.db``, the
+        credential's owner exposes the one commit it needs.
+        """
+        await self.db.commit()
+
     # --- Credential lifecycle ---
 
     async def save_credential(self, reviewer: PRPartyReviewer, token: str) -> PRPartyCredential:

@@ -24,7 +24,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import datetime
-from typing import Any, Final
+from typing import Final
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
@@ -289,6 +289,35 @@ class PRPartyQueueResponse(BaseModel):
     cards: list[PRPartyQueueCard] = Field(default_factory=list)
 
 
+class PRPartyQAEntry(BaseModel):
+    """One question on a card and the answer bound to it, if one has arrived.
+
+    A question is a PR comment carrying the ``@claude`` mention; the answer is a
+    later comment that carries a **linkage signal** back to it — a reference to
+    the question's comment id, a quote of it, or an @-mention of the asker.
+    Author identity alone never binds one comment to another (C4): the answerer
+    bot posting *something* after a question is not the answerer answering it.
+
+    ``answer_*`` fields are all ``None`` together, which is the "no answer yet"
+    state the card renders a re-ask affordance for. Bodies are GitHub's markdown
+    verbatim and are untrusted text (R21) — render them as text nodes.
+    """
+
+    question_comment_id: int
+    question_body: str
+    #: The human who asked, recovered from the PR Party attribution line when
+    #: present and otherwise the comment's author.
+    question_author: str | None = None
+    question_url: str | None = None
+    asked_at: datetime | None = None
+
+    answer_comment_id: int | None = None
+    answer_body: str | None = None
+    answer_author: str | None = None
+    answer_url: str | None = None
+    answered_at: datetime | None = None
+
+
 class PRPartyCardDetail(PRPartyQueueCard):
     """One card opened: everything the queue carries, plus the brief itself.
 
@@ -315,10 +344,12 @@ class PRPartyCardDetail(PRPartyQueueCard):
     created_at: datetime | None = None
     updated_at: datetime | None = None
 
-    #: Placeholder for U7's Q&A thread. Present now — and empty — so the UI
-    #: contract does not move when U7 lands: U7 narrows ``Any`` to its entry
-    #: model without renaming the field or changing its cardinality.
-    qa_thread: list[Any] = Field(default_factory=list)
+    #: The card's ``@claude`` exchange, newest question last. Served **live**
+    #: from GitHub's issue comments on every card read (U7) — there is no Q&A
+    #: table, because GitHub is the system of record for the thread (KD5/R13).
+    #: Empty when the shared generation token is unset or GitHub is unreachable:
+    #: a card must stay readable through a Q&A outage.
+    qa_thread: list[PRPartyQAEntry] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -458,3 +489,76 @@ class PRPartyActionResponse(BaseModel):
     deep_link: str | None = None
     #: The stored receipt for an already-completed request, replayed verbatim.
     replayed: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Q&A request / response models (U7)
+# ---------------------------------------------------------------------------
+
+#: Long enough for a real question about a diff, short enough that a runaway
+#: client cannot post a novel to a pull request.
+QUESTION_MAX_LENGTH: Final = 4000
+NOTE_MAX_LENGTH: Final = 8000
+
+
+class PRPartyQuestionRequest(BaseModel):
+    """A question to put to the AI reviewer on this card (R13).
+
+    Carries no reviewer and no revision. The asker is the authenticated caller
+    (R23), and a question is not scoped to a head SHA the way a verdict is —
+    asking about a PR stays sensible across a push, so there is nothing here to
+    drift against.
+    """
+
+    question: str = Field(min_length=1, max_length=QUESTION_MAX_LENGTH)
+
+    @field_validator("question")
+    @classmethod
+    def _validate_question(cls, value: str) -> str:
+        question = value.strip()
+        if not question:
+            raise ValueError("A question cannot be empty.")
+        return question
+
+
+class PRPartyNoteRequest(BaseModel):
+    """The outcome of a live discussion, posted back to the PR (R14).
+
+    Deliberation that only ever happened in a call evaporates with the call.
+    This is the affordance that puts the conclusion where the next reader —
+    human or model — will actually find it.
+    """
+
+    note: str = Field(min_length=1, max_length=NOTE_MAX_LENGTH)
+
+    @field_validator("note")
+    @classmethod
+    def _validate_note(cls, value: str) -> str:
+        note = value.strip()
+        if not note:
+            raise ValueError("A note cannot be empty.")
+        return note
+
+
+class PRPartyCommentResponse(BaseModel):
+    """What became of one comment PR Party tried to post on the reviewer's behalf.
+
+    One shape for all three comment surfaces — question, deliberation note, and
+    the CodeRabbit re-trigger — so a client writes the degraded path once.
+
+    ``body`` is always the exact text that was posted *or* that the reviewer
+    should paste. That is what makes R12's degraded mode a real affordance
+    rather than an apology: ``posted=false`` plus ``body`` plus ``deep_link`` is
+    a copy button and a link, not a dead end.
+    """
+
+    posted: bool
+    #: R12: no usable PAT, or one that died mid-call. Nothing reached GitHub.
+    degraded: bool = False
+    body: str
+    comment_id: int | None = None
+    comment_url: str | None = None
+    #: Where to paste it by hand when ``degraded`` is true.
+    deep_link: str | None = None
+    #: The card as it now stands, so the client never re-fetches to re-render.
+    card: PRPartyCardDetail

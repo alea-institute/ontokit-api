@@ -838,14 +838,33 @@ class PRPartyGitHubClient:
             json={"body": body},
         )
 
-        return IssueComment(
-            id=int(data.get("id", 0)),
-            body=str(data.get("body", "")),
-            user_login=_user_field(data, "login"),
-            html_url=data.get("html_url"),
-            created_at=_parse_dt(data.get("created_at")),
-            updated_at=_parse_dt(data.get("updated_at")),
+        return _parse_issue_comment(data)
+
+    async def get_issue_comments(
+        self,
+        owner: str,
+        repo: str,
+        number: int,
+        *,
+        per_page: int = 100,
+    ) -> list[IssueComment]:
+        """``GET .../issues/{n}/comments`` — the Q&A thread itself (R13).
+
+        A *read*, so it is available in generation mode: the card's Q&A thread
+        is projected from these comments on every open (U7), and doing that with
+        a reviewer's write PAT would spend one principal's rate budget to render
+        another's dashboard.
+
+        One page, oldest first — GitHub's default ordering, which is the order
+        the thread is built in. A PR whose conversation outgrows a hundred
+        comments has bigger problems than a truncated Q&A panel.
+        """
+        data = await self._request_list(
+            "GET",
+            f"/repos/{_enc(owner)}/{_enc(repo)}/issues/{int(number)}/comments"
+            f"?per_page={int(per_page)}",
         )
+        return [_parse_issue_comment(item) for item in data if isinstance(item, dict)]
 
     # --- Parsing ---
 
@@ -902,6 +921,18 @@ class PRPartyGitHubClient:
 
 
 # --- Module helpers ---------------------------------------------------------
+
+
+def _parse_issue_comment(data: Mapping[str, Any]) -> IssueComment:
+    """One comment object, however it arrived — posted or listed."""
+    return IssueComment(
+        id=int(data.get("id", 0)),
+        body=str(data.get("body", "")),
+        user_login=_user_field(data, "login"),
+        html_url=data.get("html_url"),
+        created_at=_parse_dt(data.get("created_at")),
+        updated_at=_parse_dt(data.get("updated_at")),
+    )
 
 
 def _validate_review_event(event: ReviewEvent | str) -> ReviewEvent:

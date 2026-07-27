@@ -140,6 +140,15 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
 
     register_ready_hook()
 
+    # --- PR Party Q&A ingestion (U7, R13) -----------------------------------
+    # Q&A rides the same intake seam, and only the API process receives webhook
+    # deliveries — so unlike the ready hook, this one has no worker-side twin.
+    # It stores nothing (GitHub owns the thread); what it buys is a greppable
+    # record that a question or an answer crossed the boundary.
+    from ontokit.services.pr_party_qa import register_qa_hook
+
+    register_qa_hook()
+
     _startup_print("Startup complete")
     logger.info("Startup complete")
 
