@@ -198,6 +198,15 @@ class ActionStore(Protocol):
         action_kind: PRPartyActionKind,
     ) -> PRPartyAction | None: ...
 
+    async def claim_action(
+        self,
+        *,
+        reviewer_id: uuid.UUID,
+        pr_id: uuid.UUID,
+        head_sha: str,
+        action_kind: PRPartyActionKind,
+    ) -> PRPartyAction | None: ...
+
     async def actions_at_head(self, *, pr_id: uuid.UUID, head_sha: str) -> list[PRPartyAction]: ...
 
     async def persist(self, action: PRPartyAction) -> None: ...
@@ -205,6 +214,8 @@ class ActionStore(Protocol):
     async def save(self) -> None: ...
 
     async def delete(self, action: PRPartyAction) -> None: ...
+
+    async def rollback(self) -> None: ...
 
 
 # ---------------------------------------------------------------------------
@@ -293,6 +304,36 @@ class PRPartyActionStore:
         pool = live or rows
         return pool[0] if pool else None
 
+    async def claim_action(
+        self,
+        *,
+        reviewer_id: uuid.UUID,
+        pr_id: uuid.UUID,
+        head_sha: str,
+        action_kind: PRPartyActionKind,
+    ) -> PRPartyAction | None:
+        """Lock the existing fingerprint row until its pending claim commits.
+
+        PostgreSQL serializes concurrent reclaim/repair requests on this row.
+        The waiter re-reads the status after the winner commits and therefore
+        observes a fresh in-flight ``pending`` row instead of posting again.
+        """
+        result = await self._db.execute(
+            select(PRPartyAction)
+            .where(
+                PRPartyAction.reviewer_id == reviewer_id,
+                PRPartyAction.pr_id == pr_id,
+                PRPartyAction.head_sha == head_sha,
+                PRPartyAction.action_kind == action_kind,
+            )
+            .order_by(PRPartyAction.created_at.desc())
+            .with_for_update()
+        )
+        rows = list(result.scalars().all())
+        live = [r for r in rows if PRPartyActionStatus(r.status) is not PRPartyActionStatus.FAILED]
+        pool = live or rows
+        return pool[0] if pool else None
+
     async def actions_at_head(self, *, pr_id: uuid.UUID, head_sha: str) -> list[PRPartyAction]:
         """Every reviewer's actions against one revision — merge authorization."""
         result = await self._db.execute(
@@ -314,6 +355,9 @@ class PRPartyActionStore:
     async def delete(self, action: PRPartyAction) -> None:
         await self._db.delete(action)
         await self._db.commit()
+
+    async def rollback(self) -> None:
+        await self._db.rollback()
 
 
 # ---------------------------------------------------------------------------
@@ -420,6 +464,10 @@ class PRPartyActionService:
         await self._store.delete(action)
         return True
 
+    async def rollback(self) -> None:
+        """Restore the session after a database claim conflict."""
+        await self._store.rollback()
+
     # --- Preconditions ---
 
     async def _check_merge_preconditions(
@@ -457,7 +505,7 @@ class PRPartyActionService:
         pr_url: str,
     ) -> _ClaimedRow:
         """Take ownership of this fingerprint, or hand back a replayed receipt."""
-        existing = await self._store.find_action(
+        existing = await self._store.claim_action(
             reviewer_id=reviewer.id,
             pr_id=pr.id,
             head_sha=request.head_sha,

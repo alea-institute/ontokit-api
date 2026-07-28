@@ -185,6 +185,9 @@ class _FakeStore:
     async def save(self) -> None:
         self.saves += 1
 
+    async def rollback(self) -> None:
+        return None
+
 
 @dataclass
 class _FakeClient:

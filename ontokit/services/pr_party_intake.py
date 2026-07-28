@@ -275,6 +275,7 @@ class PRFacts:
     node_id: str | None
     mergeable_state: str | None
     updated_at_github: datetime | None
+    mergeable_known: bool = True
     checks_rollup: str | None = None
     checks_known: bool = False
     #: GitHub's PR title. ``None`` means "this payload did not carry one", which
@@ -430,6 +431,7 @@ def facts_from_detail(detail: PRDetail, *, rollup: ChecksRollup | None = None) -
         author_type=detail.author_type,
         node_id=detail.node_id,
         mergeable_state=resolve_mergeable_state(detail),
+        mergeable_known=True,
         updated_at_github=detail.updated_at,
         checks_rollup=rollup.value if rollup is not None else None,
         checks_known=rollup is not None,
@@ -457,7 +459,7 @@ def facts_from_webhook_pr(payload: Mapping[str, Any]) -> PRFacts | None:
 
     mergeable = pr.get("mergeable")
     if mergeable is None:
-        mergeable_state = Mergeability.COMPUTING.value
+        mergeable_state = None
     else:
         raw = pr.get("mergeable_state")
         fallback = Mergeability.MERGEABLE if mergeable else Mergeability.NOT_MERGEABLE
@@ -475,6 +477,7 @@ def facts_from_webhook_pr(payload: Mapping[str, Any]) -> PRFacts | None:
         author_type=_opt_str(user.get("type")),
         node_id=_opt_str(pr.get("node_id")),
         mergeable_state=mergeable_state,
+        mergeable_known=mergeable is not None,
         updated_at_github=parse_dt(pr.get("updated_at")),
         # A ``pull_request`` payload carries no check runs; leave the column be.
         checks_known=False,
@@ -547,7 +550,8 @@ async def upsert_pr(
     if facts.title:
         row.title = facts.title[:TITLE_MAX_LENGTH]
     row.state = facts.resolved_state
-    row.mergeable_state = facts.mergeable_state
+    if facts.mergeable_known:
+        row.mergeable_state = facts.mergeable_state
     if facts.checks_known:
         row.checks_rollup = facts.checks_rollup
     if facts.updated_at_github is not None:
@@ -821,7 +825,8 @@ async def sweep_open_prs(
                 pool=pool,
                 result=result,
             )
-        except Exception as exc:  # noqa: BLE001 — one bad PR must not end the cycle
+        except Exception as exc:  # noqa: BLE001 — rollback makes the shared session reusable
+            await db.rollback()
             result.errors += 1
             logger.exception(
                 "PR Party sweep failed for %s#%s: %s", item.repo_full_name, item.number, exc
@@ -1022,6 +1027,11 @@ async def handle_webhook_event(
     hook subscribes to, and a receiver that 500s on an unexpected event gets its
     hook disabled.
     """
+    repo_full_name = _repo_full_name(payload, _sub_mapping(payload, "pull_request"))
+    expected_prefix = f"{settings.pr_party_org.casefold()}/"
+    if not repo_full_name or not repo_full_name.casefold().startswith(expected_prefix):
+        return {"status": "ignored", "event": event, "reason": "repository_outside_org"}
+
     known_registry = registry if registry is not None else await load_reviewer_registry(db)
     active_client = client if client is not None else default_generation_client()
 
