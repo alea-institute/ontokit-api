@@ -15,6 +15,9 @@
 | Repo | Commits | HEAD | Gates at review time |
 |---|---|---|---|
 | `ontokit-api` | 12 | `e94580a` | 2539 tests green · mypy strict clean · ruff clean |
+
+**Updated after the cross-model round (same day):** `api:ccd6d3e` — 2547 tests green, mypy strict clean, ruff
+clean · `web:7b49d68` — 3160 tests green, type-check clean, lint 0 errors / 19 warnings. Both pushed to `origin`.
 | `ontokit-web` | 5 | `6ab1569` | 3146 tests green · `tsc` clean · lint 0 errors / 19 pre-existing warnings |
 
 **State:** all 15 units implemented, code-reviewed, and fixes applied. **No PRs opened yet** — the CatholicOS
@@ -27,10 +30,15 @@ creation, the `catholicos/.github` answerer-workflow merge, and the shared gener
 Eight Opus personas over the full two-repo diff: **correctness, security, adversarial, testing, reliability,
 data-migration, maintainability, project-standards.** Findings below are deduped across personas.
 
-**Cross-model peer review was NOT run.** The `codex` CLI is present on the box but unauthenticated, so the
-adversarial lens ran in-process (same limitation as the prototype round). Treat "no independent model looked at
-this" as a standing caveat on everything below, and re-run the adversarial pass from a second model before merge
-if authentication becomes available.
+**Cross-model peer review was NOT run in the first round.** The `codex` CLI was present on the box but
+unauthenticated, so the adversarial lens ran in-process (same limitation as the prototype round).
+
+**CLOSED — the cross-model round ran later on 2026-07-28.** `codex` is now authenticated (ChatGPT auth), and an
+independent adversarial pass ran over the branch diff in **both** repos (`codex adversarial-review --base
+feat/trust-ladder --scope branch`). It returned `needs-attention` on each, with **four findings the eight
+in-family personas missed** — two of them high-severity, and one (duplicate real GitHub reviews) in the feature's
+highest-consequence class. All four are fixed; see the section below. The standing "no independent model looked at
+this" caveat no longer applies to the code as of `api:ccd6d3e` / `web:7b49d68`.
 
 ## Verdict
 
@@ -39,7 +47,54 @@ as it stands; these are the items a future session should either action delibera
 
 ---
 
-## Fixed this round — do NOT re-file
+## Cross-model round (later on 2026-07-28) — fixed, do NOT re-file
+
+Codex found four issues in-family review missed. What made them invisible is worth noting: three of the four are
+**invariant-scope** bugs — a rule the build genuinely implemented, applied to a strict subset of the places it
+needed to hold. In-family personas that read the same plan language kept validating the rule where it was applied
+instead of enumerating where it wasn't.
+
+**`ontokit-api`** — fixed in `ccd6d3e`
+- **N1 (high) — concurrent claim of an *existing* action row could post duplicate real GitHub reviews.** Two
+  requests could read the same stale pending / failed / degraded-intent row, both flip it to pending, both commit,
+  and both call `create_review` — two real reviews on a colleague's PR. The partial unique index cannot catch this
+  because both transactions **UPDATE the same row**, which is why A12's first-INSERT race looked like the whole
+  problem and wasn't. Existing rows are now claimed with `SELECT ... FOR UPDATE` held through the pending commit
+  (`ontokit/services/pr_party_actions.py`), with concurrency tests on all three retry paths. Verified at unit
+  level only — there is still no live-Postgres PR Party harness (that is A4, which this gives a second reason to
+  want).
+- **N2 (medium) — brief delimiters forgeable by case.** `wrap_untrusted` stripped only exact lowercase tokens, so
+  `</UNTRUSTED-PR-CONTENT>` plausibly reads as the same boundary to an LLM, and the echo filter matched only a few
+  exact spellings. Delimiters are now an unpredictable per-run nonce minted after content collection, with
+  case-insensitive neutralization and adversarial tests (case, whitespace, near-closing tags, valid-JSON
+  instruction-following).
+
+**`ontokit-web`** — fixed in `7b49d68`
+- **N1 (high) — URL guard covered a subset of sinks.** `isTrustedGitHubLink` gated LLM `brief_links` and Q&A URLs;
+  the degraded `deep_link` went straight to `window.open`, and PR-derived `pr_url`/`diff_url` rendered as raw
+  hrefs. Now every API-derived navigation target passes one boundary (`lib/prPartyLinks.ts`).
+- **N2 (high) — derived idempotency key suppressed legitimate later actions.** An approval dismissed at the same
+  head SHA could never be resubmitted — the server replayed the old receipt forever. Keys are now minted per
+  attempt and rotate on a definitive response.
+
+**Also fixed in that round, from the lists below:** api A6 (downgrade narrowing only), A9, A12, A13, A14, A15,
+A16, A17; web B1, B2, B3, B4, B5. The entries remain below for their reasoning — do not re-file them.
+
+**Verification of that round was run by the orchestrator, not taken from the workers.** Gates re-run locally:
+api `2547` tests / mypy strict / ruff; web `3160` tests / type-check / lint 0 errors. Note that the api worker
+reported `make test` stalling in its sandbox — that did not reproduce (29s, clean), so treat worker gate claims
+as hints, not evidence.
+
+**A6's pre-merge stamp check is DONE and clear.** The hazard was a database stamped at `x1y2z3a4b5c6` while
+missing the amended `title` column and `pr_id` index. Checked the only Postgres on this box
+(`docker exec ontokit-postgres psql -U ontokit -d ontokit`): the `ontokit` database is stamped `47cc27515626`
+and has **no `pr_party*` tables at all** — it never ran the migration, so nothing is stamped mid-amendment.
+Production cannot be affected: the revision exists only on this unmerged branch. What remains of A6 is the
+after-merge discipline — treat the revision as frozen; any further change is a new revision.
+
+---
+
+## Fixed in the first (in-family) round — do NOT re-file
 
 Recorded so a fresh session does not "rediscover" them from the plan's risk list. All of the following were found
 by the review and are already fixed on `feat/pr-party`:
@@ -265,7 +320,12 @@ should consider a drift check (fetch the deployed file, compare to the local cop
 - **Learnings from the build:** `ontokit-web/docs/solutions/2026-07-28-pr-party-fifteen-unit-build.md`
 - **Prototype findings (closed, kept for provenance):**
   `~/Coding Projects/docs/residual-review-findings/2026-07-26-pr-party-dashboard-review.md`
-- **Next actions, in order:** (1) A6's migration-stamp check before any merge; (2) open the fork PRs
-  (`ontokit-api` and `ontokit-web` → `catholicos/dev`, each with a linked issue — **ask before pushing to a
-  `catholicos` remote**); (3) the `catholicos/.github` answerer PR (§C); (4) U14's live E2E once the external
-  gates clear.
+- **Next actions, in order:** (1) ~~A6's migration-stamp check~~ **done, clear** — see the cross-model section;
+  (2) open the fork PRs (`ontokit-api` and `ontokit-web` → `catholicos/dev`, each with a linked issue — **ask
+  before pushing to a `catholicos` remote**); (3) the `catholicos/.github` answerer PR (§C) — note the per-run
+  delimiter fix landed **twice** now (first round, then the cross-model nonce hardening), and **neither is live
+  in the org** until that PR merges; (4) U14's live E2E once the external gates clear.
+- **Still open and deliberately deferred** (not attempted in the cross-model round): **A1/A2** the >1000-line
+  module splits and the read-model extraction, **A4** the live-Postgres integration module, **A5**, **A18**, and
+  the advisory items. **A3** (`rotate_reviewer_token`: wire an operator-triggered rotation task, or delete it and
+  its tests) is an owner decision, not a coding call.
