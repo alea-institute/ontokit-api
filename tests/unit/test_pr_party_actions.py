@@ -21,6 +21,7 @@ The contracts these pin:
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -54,6 +55,7 @@ from ontokit.schemas.pr_party import (
     PR_PARTY_VERDICT_COMMENT,
     PR_PARTY_VERDICT_DISCUSS_LIVE,
     PR_PARTY_VERDICT_REQUEST_CHANGES,
+    PRPartyActionRequest,
 )
 from ontokit.services.pr_party_actions import PRPartyActionService
 from ontokit.services.pr_party_github import (
@@ -234,6 +236,21 @@ class _FakeStore:
         pool = live or matches
         return pool[-1] if pool else None
 
+    async def claim_action(
+        self,
+        *,
+        reviewer_id: uuid.UUID,
+        pr_id: uuid.UUID,
+        head_sha: str,
+        action_kind: PRPartyActionKind,
+    ) -> PRPartyAction | None:
+        return await self.find_action(
+            reviewer_id=reviewer_id,
+            pr_id=pr_id,
+            head_sha=head_sha,
+            action_kind=action_kind,
+        )
+
     async def actions_at_head(self, *, pr_id: uuid.UUID, head_sha: str) -> list[PRPartyAction]:
         return [a for a in self.rows if a.pr_id == pr_id and a.head_sha == head_sha]
 
@@ -255,6 +272,9 @@ class _FakeStore:
         self.deleted.append(action)
         self._commit()
 
+    async def rollback(self) -> None:
+        self._rollback()
+
     def _commit(self) -> None:
         self.commits += 1
         self._committed = {
@@ -272,6 +292,37 @@ class _FakeStore:
                     action.github_review_id,
                     action.idempotency_key,
                 ) = snapshot
+
+
+class _LockingStore(_FakeStore):
+    """Unit-level model of PostgreSQL's ``SELECT ... FOR UPDATE`` claim."""
+
+    def __init__(self, actions: list[PRPartyAction]) -> None:
+        super().__init__(actions)
+        self._claim_lock = asyncio.Lock()
+
+    async def claim_action(
+        self,
+        *,
+        reviewer_id: uuid.UUID,
+        pr_id: uuid.UUID,
+        head_sha: str,
+        action_kind: PRPartyActionKind,
+    ) -> PRPartyAction | None:
+        await self._claim_lock.acquire()
+        return await super().claim_action(
+            reviewer_id=reviewer_id,
+            pr_id=pr_id,
+            head_sha=head_sha,
+            action_kind=action_kind,
+        )
+
+    async def persist(self, action: PRPartyAction) -> None:
+        action.updated_at = datetime.now(UTC)
+        try:
+            await super().persist(action)
+        finally:
+            self._claim_lock.release()
 
 
 class _FakeGitHub:
@@ -969,6 +1020,56 @@ class TestReclaimAdoption:
         fakes = install(_reviewer(), prs=[pr])
         assert _post(client, pr).status_code == 200
         assert fakes["github"].list_reviews_calls == []
+
+
+@pytest.mark.parametrize(
+    "row_status,stale",
+    [
+        (PRPartyActionStatus.PENDING, True),
+        (PRPartyActionStatus.FAILED, False),
+        (PRPartyActionStatus.DEGRADED_INTENT, False),
+    ],
+)
+async def test_concurrent_existing_row_retry_posts_only_one_review(
+    row_status: PRPartyActionStatus, stale: bool
+) -> None:
+    """N1: row-lock claiming admits one stale/failed/repair delivery."""
+    reviewer = _reviewer()
+    pr = _pr()
+    row = _action(
+        reviewer,
+        pr,
+        status=row_status,
+        created_at=datetime.now(UTC) - (timedelta(hours=3) if stale else timedelta(minutes=1)),
+    )
+    store = _LockingStore([row])
+    github = _FakeGitHub()
+    service = PRPartyActionService(
+        store=store,
+        credentials=_FakeCredentials(token="ghp_repaired", reviewer=reviewer),
+        actuation_factory=lambda _token: github,
+        reclaim_minutes=30,
+    )
+    request = PRPartyActionRequest.model_validate(_body())
+
+    outcomes = await asyncio.gather(
+        service.actuate(
+            reviewer=reviewer,
+            pr=pr,
+            request=request,
+            pr_url=f"https://github.com/{REPO}/pull/42",
+        ),
+        service.actuate(
+            reviewer=reviewer,
+            pr=pr,
+            request=request,
+            pr_url=f"https://github.com/{REPO}/pull/42",
+        ),
+        return_exceptions=True,
+    )
+
+    assert len(github.review_calls) == 1
+    assert sum(not isinstance(outcome, Exception) for outcome in outcomes) >= 1
 
 
 # ---------------------------------------------------------------------------

@@ -158,6 +158,9 @@ class _FakeSession:
     async def commit(self) -> None:
         self.commits += 1
 
+    async def rollback(self) -> None:
+        return None
+
     async def flush(self) -> None:
         return None
 

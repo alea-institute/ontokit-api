@@ -48,6 +48,7 @@ from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 # Imported rather than restated: "who may use PR Party" must have one answer
@@ -97,7 +98,11 @@ from ontokit.services.pr_party_actions import (
 )
 from ontokit.services.pr_party_credentials import PRPartyCredentialService
 from ontokit.services.pr_party_github import ChecksRollup
-from ontokit.services.pr_party_intake import PR_STATE_OPEN, missing_long_enough_to_retire
+from ontokit.services.pr_party_intake import (
+    PR_STATE_DRAFT,
+    PR_STATE_OPEN,
+    missing_long_enough_to_retire,
+)
 from ontokit.services.pr_party_qa import PRPartyQAService, QARefused, QAResult
 from ontokit.services.pr_party_rate_limiter import (
     ActionLimiterRedis,
@@ -437,7 +442,7 @@ def _build_card(
         pr_url=url,
         diff_url=f"{url}/files",
         readiness=compute_readiness(pr),
-        actions=[_action_state(a) for a in reversed(_latest_per_kind(mine))],
+        actions=[_action_state(a) for a in _latest_per_kind(mine)],
         other_reviewer=_other_reviewer_state(theirs, head_sha=pr.head_sha),
         stale=latest_review is not None and latest_review.head_sha != pr.head_sha,
         parked=(
@@ -573,6 +578,23 @@ def _refusal(message: str, **extra: Any) -> dict[str, Any]:
     return {"message": message, **extra}
 
 
+def _integrity_constraint_name(exc: IntegrityError) -> str | None:
+    """Read the violated name through psycopg or asyncpg's adapter layers."""
+    current: Any = exc.orig
+    for _ in range(3):
+        direct = getattr(current, "constraint_name", None)
+        if isinstance(direct, str):
+            return direct
+        diag = getattr(current, "diag", None)
+        diagnosed = getattr(diag, "constraint_name", None)
+        if isinstance(diagnosed, str):
+            return diagnosed
+        current = getattr(current, "orig", None)
+        if current is None:
+            break
+    return None
+
+
 async def _load_card(reader: PRPartyQueueReader, card_id: uuid.UUID) -> PRPartyPR:
     """The row behind a card id, or 404. Never trusts a client-supplied PR."""
     pr = await reader.get_pr(card_id)
@@ -618,14 +640,18 @@ def _check_lifecycle(pr: PRPartyPR) -> None:
     """
     if pr.state == PR_STATE_OPEN:
         return
-    finished = "merged" if pr.state == "merged" else "closed"
+    if pr.state == "merged":
+        message = "This pull request was already merged on GitHub, so there is nothing left to decide."
+    elif pr.state == PR_STATE_DRAFT:
+        message = (
+            "This pull request was converted back to draft on GitHub, so it is not ready "
+            "for a decision."
+        )
+    else:
+        message = "This pull request was already closed on GitHub, so there is nothing left to decide."
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
-        detail=_refusal(
-            f"This pull request was already {finished} on GitHub, so there is "
-            "nothing left to decide.",
-            retire=True,
-        ),
+        detail=_refusal(message, retire=True),
     )
 
 
@@ -772,6 +798,17 @@ async def create_action(
         if e.retire:
             extra["retire"] = True
         raise HTTPException(status_code=e.status_code, detail=_refusal(e.message, **extra)) from e
+    except IntegrityError as e:
+        await service.rollback()
+        if _integrity_constraint_name(e) != "uq_pr_party_action_live_fingerprint":
+            raise
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=_refusal(
+                "An attempt for this action is already in flight. Give it a moment "
+                "and refresh before trying again."
+            ),
+        ) from e
 
     return PRPartyActionResponse(
         action=_receipt(result),

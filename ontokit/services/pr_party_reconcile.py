@@ -223,6 +223,8 @@ class ReconcileStore(Protocol):
 
     async def save(self) -> None: ...
 
+    async def rollback(self) -> None: ...
+
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -454,6 +456,9 @@ class PRPartyReconcileStore:
     async def save(self) -> None:
         await self._db.commit()
 
+    async def rollback(self) -> None:
+        await self._db.rollback()
+
 
 # ---------------------------------------------------------------------------
 # The pass
@@ -532,7 +537,8 @@ async def _reconcile_unsettled(
                 reclaim_minutes=reclaim_minutes,
                 sweep_minutes=sweep_minutes,
             )
-        except Exception as exc:  # noqa: BLE001 — one bad PR must not end the pass
+        except Exception as exc:  # noqa: BLE001 — rollback restores the shared session
+            await store.rollback()
             result.errors += 1
             logger.exception(
                 "PR Party reconcile failed for action %s on %s#%s: %s",
@@ -631,7 +637,8 @@ async def _detect_dismissals(
                 ctx.pr.repo_full_name,
                 ctx.pr.pr_number,
             )
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001 — rollback restores the shared session
+            await store.rollback()
             result.errors += 1
             logger.exception(
                 "PR Party dismissal check failed for %s#%s: %s",
@@ -658,13 +665,15 @@ def _approval_was_dismissed(ctx: ActionContext, reviews: Sequence[PRPartyReview]
         return False
     # No verdict filter here on purpose: the state this is hunting for is
     # DISMISSED, which is precisely *not* the state the row's verdict produced.
-    match = find_matching_review(
-        reviews,
-        reviewer=ctx.reviewer,
-        head_sha=ctx.action.head_sha,
-        include_dismissed=True,
-    )
-    return match is not None and _review_state(match) == REVIEW_STATE_DISMISSED
+    matches = [
+        review
+        for review in reviews
+        if review_matches_reviewer(review, ctx.reviewer)
+        and review.commit_id == ctx.action.head_sha
+    ]
+    if any(_review_state(review) != REVIEW_STATE_DISMISSED for review in matches):
+        return False
+    return any(_review_state(review) == REVIEW_STATE_DISMISSED for review in matches)
 
 
 async def _verify_missing(

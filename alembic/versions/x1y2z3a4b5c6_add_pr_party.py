@@ -195,8 +195,14 @@ def downgrade() -> None:
     # Restoring NOT NULL requires the null rows to be gone first; PR Party rows
     # are the only source of them, and they go with the tables below. Alembic
     # runs statements in order, so delete them before re-tightening.
-    op.execute("DELETE FROM notifications WHERE project_id IS NULL OR project_name IS NULL")
-    op.execute("DELETE FROM llm_audit_logs WHERE project_id IS NULL")
+    op.execute(
+        "DELETE FROM notifications WHERE type = 'pr_party_ready' "
+        "AND (project_id IS NULL OR project_name IS NULL)"
+    )
+    op.execute(
+        "DELETE FROM llm_audit_logs WHERE project_id IS NULL "
+        "AND endpoint LIKE 'pr-party/%'"
+    )
 
     op.alter_column("llm_audit_logs", "project_id", existing_type=sa.Uuid(), nullable=False)
     op.alter_column(

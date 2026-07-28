@@ -146,8 +146,9 @@ _ECHO_MARKERS: Final[tuple[str, ...]] = (
     "ignore all previous instructions",
     "disregard previous instructions",
     "disregard all previous instructions",
-    brief_prompt.UNTRUSTED_OPEN.casefold(),
-    brief_prompt.UNTRUSTED_CLOSE.casefold(),
+)
+_DELIMITER_ECHO: Final = re.compile(
+    r"<\s*/?\s*untrusted\s*-\s*pr\s*-\s*content\b", re.IGNORECASE
 )
 
 MAX_ATTEMPTS: Final = 2
@@ -473,7 +474,15 @@ def filter_links(
 
     candidates = raw if isinstance(raw, list) else [raw]
     target = repo_full_name.strip("/").casefold()
-    allowed_origins = tuple(o.rstrip("/").casefold() for o in extra_origins if o)
+    allowed_origins: set[tuple[str, str, int | None]] = set()
+    for origin in extra_origins:
+        try:
+            parsed_origin = urlparse(origin)
+            origin_port = parsed_origin.port
+        except ValueError:
+            continue
+        if parsed_origin.scheme == "https" and parsed_origin.hostname:
+            allowed_origins.add(("https", parsed_origin.hostname.casefold(), origin_port))
 
     kept: list[str] = []
     for item in candidates:
@@ -488,6 +497,10 @@ def filter_links(
         except ValueError:
             continue
 
+        try:
+            port = parsed.port
+        except ValueError:
+            continue
         if parsed.scheme != "https" or not parsed.hostname:
             continue
 
@@ -498,8 +511,7 @@ def filter_links(
             if path != target and not path.startswith(f"{target}/"):
                 continue
         else:
-            origin = f"https://{host}".casefold()
-            if origin not in allowed_origins:
+            if ("https", host, port) not in allowed_origins:
                 continue
 
         if url not in kept:
@@ -516,16 +528,11 @@ def _coerce_content(raw: dict[str, Any], repo_full_name: str) -> BriefContent:
         text for text in (_plain_text(item, limit=MAX_DECISION_CHARS) for item in items) if text
     ][:MAX_DECISIONS]
 
-    origins: tuple[str, ...] = ()
-    frontend = (settings.frontend_url or "").strip().rstrip("/")
-    if frontend.startswith("https://"):
-        origins = (frontend,)
-
     return BriefContent(
         what=_plain_text(raw.get("what"), limit=MAX_FIELD_CHARS),
         why=_plain_text(raw.get("why"), limit=MAX_FIELD_CHARS),
         decisions=decisions,
-        links=filter_links(raw.get("links"), repo_full_name, extra_origins=origins),
+        links=filter_links(raw.get("links"), repo_full_name),
     )
 
 
@@ -539,7 +546,7 @@ def looks_like_injection_echo(content: BriefContent) -> bool:
     a dashboard as though PR Party said it.
     """
     blob = " ".join([content.what, content.why, *content.decisions]).casefold()
-    return any(marker in blob for marker in _ECHO_MARKERS)
+    return any(marker in blob for marker in _ECHO_MARKERS) or bool(_DELIMITER_ECHO.search(blob))
 
 
 # --- Budget (fail closed) ---------------------------------------------------
