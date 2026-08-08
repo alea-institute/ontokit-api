@@ -5,10 +5,10 @@ import json
 import logging
 import os
 import secrets
-from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
+from weakref import WeakValueDictionary
 
 from ontokit.core.anonymous_token import create_anonymous_token
 
@@ -67,7 +67,17 @@ from ontokit.services.verification import get_verification_provider
 logger = logging.getLogger(__name__)
 
 # Per-branch locks to serialize concurrent git writes (save + beacon_save)
-_branch_locks: dict[tuple[UUID, str], asyncio.Lock] = defaultdict(asyncio.Lock)
+_branch_locks: WeakValueDictionary[tuple[UUID, str], asyncio.Lock] = WeakValueDictionary()
+
+
+def _branch_lock(project_id: UUID, branch: str) -> asyncio.Lock:
+    """Return a process-local lock without retaining inactive branches forever."""
+    key = (project_id, branch)
+    lock = _branch_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _branch_locks[key] = lock
+    return lock
 
 
 class SuggestionService:
@@ -467,7 +477,7 @@ class SuggestionService:
             session.user_id, session.user_name
         )
 
-        async with _branch_locks[(project_id, session.branch)]:
+        async with _branch_lock(project_id, session.branch):
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
             derived_mint = self._validate_turtle_and_detect_mint(
@@ -1387,7 +1397,7 @@ class SuggestionService:
         )
 
         # Serialize git writes per branch to prevent lost commits
-        async with _branch_locks[(project_id, session.branch)]:
+        async with _branch_lock(project_id, session.branch):
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
             derived_mint = self._validate_turtle_and_detect_mint(
@@ -1555,7 +1565,7 @@ class SuggestionService:
             session_id=session.session_id,
         )
 
-        async with _branch_locks[(project_id, session.branch)]:
+        async with _branch_lock(project_id, session.branch):
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
             derived_mint = self._validate_turtle_and_detect_mint(

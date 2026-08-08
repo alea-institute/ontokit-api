@@ -6,7 +6,7 @@ import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Protocol, TypeVar, cast, runtime_checkable
 from uuid import UUID
 
 from cryptography.fernet import Fernet
@@ -46,6 +46,7 @@ from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
 from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
 
 logger = logging.getLogger(__name__)
+_EmbeddingResult = TypeVar("_EmbeddingResult")
 
 
 def _get_fernet() -> Fernet:
@@ -104,8 +105,8 @@ class EmbeddingService:
         input_text: str,
         endpoint: str,
         user_id: str,
-        operation: Callable[[], Awaitable[Any]],
-    ) -> Any:
+        operation: Callable[[], Awaitable[_EmbeddingResult]],
+    ) -> _EmbeddingResult:
         """Run a paid embedding operation through budget and audit controls."""
         provider_name = provider.provider_name
         if provider_name == "local":
