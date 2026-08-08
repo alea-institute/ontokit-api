@@ -16,6 +16,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.core.database import get_db
 from ontokit.main import app
 
+pytestmark = pytest.mark.integration
+
 
 @pytest.fixture
 def mock_db_client() -> Generator[tuple[TestClient, AsyncMock]]:

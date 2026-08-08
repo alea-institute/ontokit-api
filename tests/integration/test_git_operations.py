@@ -9,6 +9,8 @@ import pytest
 
 from ontokit.git.bare_repository import BareOntologyRepository
 
+pytestmark = pytest.mark.integration
+
 
 class TestCreateRepoCommitAndRead:
     """Create a fresh repo, commit a file, and read it back."""

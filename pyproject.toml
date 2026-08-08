@@ -138,3 +138,6 @@ warn_required_dynamic_aliases = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-v --cov=ontokit --cov-report=term-missing"
+markers = [
+    "integration: exercises live infrastructure such as Postgres, Redis, or on-disk git",
+]

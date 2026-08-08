@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
@@ -11,7 +12,21 @@ import pytest
 from fastapi.testclient import TestClient
 from rdflib import Graph
 
-from ontokit.core.auth import CurrentUser
+# Integration tests use dedicated local services by default.  Set these before
+# importing the application, whose database engine is constructed at import time.
+os.environ.setdefault(
+    "DATABASE_URL",
+    os.environ.get(
+        "TEST_DATABASE_URL",
+        "postgresql+asyncpg://ontokit:ontokit_test@127.0.0.1:5433/ontokit_test",
+    ),
+)
+os.environ.setdefault(
+    "REDIS_URL",
+    os.environ.get("TEST_REDIS_URL", "redis://127.0.0.1:6380/0"),
+)
+
+from ontokit.core.auth import CurrentUser  # noqa: E402
 from ontokit.git.bare_repository import BareOntologyRepository
 from ontokit.main import app
 from ontokit.services.github_service import GitHubService
