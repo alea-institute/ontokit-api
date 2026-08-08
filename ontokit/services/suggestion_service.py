@@ -66,6 +66,10 @@ from ontokit.services.verification import get_verification_provider
 
 logger = logging.getLogger(__name__)
 
+# Bound submit-time semantic duplicate checks so a malformed diff cannot fan out
+# into an unbounded sequence of embedding and pgvector queries.
+MAX_NEW_ENTITIES_PER_SUBMISSION = 25
+
 # Per-branch locks to serialize concurrent git writes (save + beacon_save)
 _branch_locks: WeakValueDictionary[tuple[UUID, str], asyncio.Lock] = WeakValueDictionary()
 
@@ -137,16 +141,47 @@ class SuggestionService:
         return project
 
     def _get_git_ontology_path(self, project: Project) -> str:
-        """Get the ontology file path within the git repo."""
+        """Resolve the ontology path from the default branch's Git tree."""
+        configured_path = "ontology.ttl"
         if project.source_file_path:
-            path = os.path.normpath(project.source_file_path).lstrip("/\\")
-            if path.startswith(".."):
+            configured_path = os.path.normpath(project.source_file_path).lstrip("/\\")
+            if configured_path.startswith(".."):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Invalid ontology path",
                 )
-            return path
+
+        default_branch = self.git_service.get_default_branch(project.id)
+        candidates = list(
+            dict.fromkeys(
+                (configured_path, os.path.basename(configured_path), "ontology.ttl")
+            )
+        )
+        for candidate in candidates:
+            try:
+                self.git_service.get_file_from_branch(project.id, default_branch, candidate)
+            except KeyError:
+                continue
+            return candidate
+
+        # A repository without an ontology is a genuinely new/empty project. Keep
+        # its first ontology at the canonical root path rather than reproducing a
+        # storage-key-shaped directory hierarchy in Git.
         return "ontology.ttl"
+
+    def _find_existing_ontology_path(self, project_id: UUID, branch: str) -> str | None:
+        """Return a deterministic ontology candidate from a branch tree, if any."""
+        files = self.git_service.get_repository(project_id).list_files(branch)
+        ontology_files = [
+            path
+            for path in files
+            if os.path.splitext(path)[1].casefold() in {".ttl", ".owl", ".rdf"}
+        ]
+        if "ontology.ttl" in ontology_files:
+            return "ontology.ttl"
+        if len(ontology_files) == 1:
+            return ontology_files[0]
+        return None
 
     @staticmethod
     def _declared_entities(graph: Graph) -> set[URIRef]:
@@ -210,11 +245,30 @@ class SuggestionService:
             )
             baseline.parse(data=baseline_content.decode("utf-8"), format="turtle")
         except KeyError:
-            pass
+            existing_path = self._find_existing_ontology_path(project_id, default_branch)
+            if existing_path is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail={
+                        "message": "Resolved ontology path is missing from the default branch",
+                        "resolved_path": filename,
+                        "existing_path": existing_path,
+                    },
+                ) from None
 
         proposed_entities = self._declared_entities(proposed)
         baseline_entities = self._declared_entities(baseline)
         new_entities = proposed_entities - baseline_entities
+        if len(new_entities) > MAX_NEW_ENTITIES_PER_SUBMISSION:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "message": "Suggestion adds too many entities for duplicate validation",
+                    "code": "SUGGESTION_ENTITY_LIMIT",
+                    "new_entity_count": len(new_entities),
+                    "max_new_entities": MAX_NEW_ENTITIES_PER_SUBMISSION,
+                },
+            )
         baseline_labels = {
             str(label).strip().casefold(): entity
             for entity in baseline_entities

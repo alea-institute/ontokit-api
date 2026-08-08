@@ -30,7 +30,10 @@ from ontokit.schemas.suggestion import (
 from ontokit.services.duplicate_check_service import DuplicateCheckService
 from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.llm import pricing
-from ontokit.services.suggestion_service import SuggestionService
+from ontokit.services.suggestion_service import (
+    MAX_NEW_ENTITIES_PER_SUBMISSION,
+    SuggestionService,
+)
 
 pytestmark = pytest.mark.integration
 
@@ -87,6 +90,120 @@ async def test_p0_1_suggestion_save_commits_with_real_git_service(
         )
     finally:
         await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
+async def test_f5_storage_key_path_saves_to_existing_root_ontology(
+    real_db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """A storage object key never becomes a shadow path in the Git tree."""
+    project_id = uuid4()
+    user = CurrentUser(id="f5-path-user", name="F5 Path User")
+    project = Project(
+        id=project_id,
+        name="F5 path truth",
+        owner_id=user.id,
+        source_file_path=f"ontokit/projects/{project_id}/ontology.ttl",
+    )
+    project.members.append(ProjectMember(user_id=user.id, role="editor"))
+    session = SuggestionSession(
+        project_id=project_id,
+        user_id=user.id,
+        user_name=user.name,
+        session_id="f5-path-save",
+        branch="suggestion/f5-path-save",
+        beacon_token="integration-token",
+    )
+    real_db_session.add_all([project, session])
+    await real_db_session.commit()
+
+    git = BareGitRepositoryService(base_path=str(tmp_path))
+    initial = b"@prefix ex: <https://example.test/> .\n"
+    git.initialize_repository(project_id, initial, "ontology.ttl")
+    git.create_branch(project_id, session.branch, from_ref="main")
+    suggestions = SuggestionService(real_db_session, git)
+    suggestions._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
+
+    try:
+        content = initial.decode() + "ex:Thing a ex:Class .\n"
+        await suggestions.save(
+            project_id,
+            session.session_id,
+            SuggestionSaveRequest(
+                content=content,
+                entity_iri="https://example.test/Thing",
+                entity_label="Thing",
+            ),
+            user,
+        )
+
+        repo = git.get_repository(project_id)
+        assert repo.read_file(session.branch, "ontology.ttl") == content.encode()
+        assert repo.list_files(session.branch) == ["ontology.ttl"]
+    finally:
+        await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
+async def test_f5_missing_resolved_baseline_names_existing_ontology_path(
+    real_db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """A wrong resolved path is an inconsistency, not an empty baseline."""
+    project_id = uuid4()
+    git = BareGitRepositoryService(base_path=str(tmp_path))
+    content = b"@prefix ex: <https://example.test/> .\nex:Existing a ex:Class .\n"
+    git.initialize_repository(project_id, content, "ontology.ttl")
+    suggestions = SuggestionService(real_db_session, git)
+    wrong_path = f"ontokit/projects/{project_id}/ontology.ttl"
+
+    with pytest.raises(HTTPException) as exc_info:
+        await suggestions._validate_submission_content(
+            project_id, "suggestion/f5-inconsistent", wrong_path, content.decode()
+        )
+
+    assert exc_info.value.status_code == 500
+    assert exc_info.value.detail == {
+        "message": "Resolved ontology path is missing from the default branch",
+        "resolved_path": wrong_path,
+        "existing_path": "ontology.ttl",
+    }
+
+
+@pytest.mark.asyncio
+async def test_f5_submit_rejects_oversized_new_entity_sweep_before_duplicate_checks(
+    real_db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Submissions over the integrity-check bound fail before semantic ANN work."""
+    project_id = uuid4()
+    git = BareGitRepositoryService(base_path=str(tmp_path))
+    initial = b"""\
+@prefix ex: <https://example.test/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+"""
+    git.initialize_repository(project_id, initial, "ontology.ttl")
+    proposed = initial.decode() + "".join(
+        f'ex:New{index} a owl:Class ; rdfs:label "New {index}" .\n'
+        for index in range(MAX_NEW_ENTITIES_PER_SUBMISSION + 1)
+    )
+    suggestions = SuggestionService(real_db_session, git)
+
+    with (
+        patch.object(DuplicateCheckService, "check", new=AsyncMock()) as duplicate_check,
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await suggestions._validate_submission_content(
+            project_id, "suggestion/f5-too-large", "ontology.ttl", proposed
+        )
+
+    assert duplicate_check.await_count == 0
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == {
+        "message": "Suggestion adds too many entities for duplicate validation",
+        "code": "SUGGESTION_ENTITY_LIMIT",
+        "new_entity_count": MAX_NEW_ENTITIES_PER_SUBMISSION + 1,
+        "max_new_entities": MAX_NEW_ENTITIES_PER_SUBMISSION,
+    }
 
 
 @pytest.mark.asyncio
