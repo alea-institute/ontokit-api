@@ -47,6 +47,7 @@ from ontokit.core.config import settings
 from ontokit.models.llm_config import LLMAuditLog
 from ontokit.models.pr_party import PRPartyAuthorKind, PRPartyBriefStatus, PRPartyPR
 from ontokit.services import pr_party_brief
+from ontokit.services.llm.pricing import PricingUnavailableError
 from ontokit.services.llm.prompts import pr_party_brief as brief_prompt
 from ontokit.services.pr_party_brief import (
     APPROVED_PR_PARTY_PROVIDERS,
@@ -59,7 +60,6 @@ from ontokit.services.pr_party_brief import (
     spend_key,
 )
 from ontokit.services.pr_party_intake import ready_transition_hooks
-from ontokit.services.llm.pricing import PricingUnavailableError
 
 NOW = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
 REPO = "CatholicOS/liturgy"
