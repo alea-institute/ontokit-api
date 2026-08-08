@@ -59,3 +59,20 @@ costs, and embedding jobs reaching `complete`. Roll back the API release (while
 leaving additive migrations in place) if confirmed merges fail, trust outcomes
 appear without merges, or active embedding jobs remain stuck for more than one
 worker cycle.
+
+## Round 2
+
+| Finding | Fix commit | Red evidence | Green evidence |
+|---|---|---|---|
+| Defect 1 — submit self-dedup | `b9832da3` | Live save/embed/submit regression reproduced the branch entity as its own blocking candidate before exclusions. | `test_r2_1_saved_entity_embedding_does_not_block_its_own_submit` saves through real bare git, writes the real pgvector row through `embed_single_entity`, and submits successfully. |
+| Defect 2 — PR Party pricing | `1830ffaf` | `test_unknown_model_pricing_degrades_without_failing_brief` raised `PricingUnavailableError` from `_run_llm`. | The same test reaches `ready`; unavailable pricing logs and displays zero cost without aborting generation. |
+| Defect 3 — local-provider drift | `ea6bac6e` | Generation used a hard-coded set lacking `custom`. | Generation now consumes `llm._LOCAL_PROVIDERS`, the single provider classification source. |
+| Defects 4 and 7 — imported parents / refresh logging | `ad1f8111` | A well-formed FOLIO parent was rejected as unknown; active-job uniqueness skips returned silently. | The FOLIO-parent submit proof passes, malformed absolute IRIs remain rejected, and uniqueness skips emit an INFO record. |
+| Defect 5 — advisory lock lifetime | `0a4ffe94` | Paid embedding audit committed the caller session inside submit validation. | Audit writes use an independent session, so the caller transaction and `pg_advisory_xact_lock` remain open through PR creation. |
+| Defect 6 — embedding-only budget | `7c487904` | Paid embeddings required a `ProjectLLMConfig` row. | Embedding configuration owns monthly/daily caps (migration `a4b5c6d7e8f9`) and is the fallback budget source. |
+| P0-6 warn tier / P1-5 delimiter | `5797e46e` | Semantic-only near matches could not exceed 0.50; a literal closing delimiter survived in payload. | `test_semantic_only_near_duplicate_can_warn` reaches `warn` at 0.86; delimiter tokens are escaped before wrapping. |
+| P0-5 route gaps | `419bcf6a` | Only helper-level semantic access was exercised. | Anonymous route requests are 401 for semantic search and duplicate check before either service is invoked. |
+
+Round-2 verification commands: `.venv/bin/pytest -q`, `.venv/bin/mypy ontokit`, and
+`.venv/bin/ruff check ontokit tests`. The first command includes the live Postgres/pgvector
+and Redis integration suite using the round-1 harness variables.
