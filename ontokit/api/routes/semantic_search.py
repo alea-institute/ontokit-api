@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
+from ontokit.core.auth import CurrentUser, RequiredUser
 from ontokit.core.database import get_db
 from ontokit.schemas.embeddings import (
     RankedCandidate,
@@ -31,14 +31,16 @@ def get_embeddings(
     return EmbeddingService(db)
 
 
-async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser | None) -> None:
-    from fastapi import HTTPException
-
+async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser) -> None:
     service = get_project_service(db)
-    try:
-        await service.get(project_id, user)
-    except HTTPException:
-        raise
+    project = await service.get(project_id, user)
+    if project.user_role is None and not user.is_superadmin:
+        from fastapi import HTTPException, status
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Project membership required for embedding-powered search",
+        )
 
 
 @router.get(
@@ -49,7 +51,7 @@ async def semantic_search(
     project_id: UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
     service: Annotated[EmbeddingService, Depends(get_embeddings)],
-    user: OptionalUser,
+    user: RequiredUser,
     q: str = Query(..., min_length=1, description="Search query"),
     branch: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
@@ -74,7 +76,7 @@ async def find_similar_entities(
     iri: str,
     db: Annotated[AsyncSession, Depends(get_db)],
     service: Annotated[EmbeddingService, Depends(get_embeddings)],
-    user: OptionalUser,
+    user: RequiredUser,
     branch: str | None = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
     threshold: float = Query(default=0.5, ge=0.0, le=1.0),

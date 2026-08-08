@@ -4,10 +4,10 @@ import logging
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import OptionalUser
+from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
 from ontokit.schemas.duplicate_check import DuplicateCheckRequest, DuplicateCheckResponse
 from ontokit.services.duplicate_check_service import DuplicateCheckService
@@ -23,7 +23,7 @@ async def check_duplicate(
     project_id: UUID,
     request: DuplicateCheckRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: OptionalUser,
+    user: RequiredUser,
 ) -> DuplicateCheckResponse:
     """Check if a proposed entity is a duplicate of anything in the ontology.
 
@@ -33,13 +33,17 @@ async def check_duplicate(
     Used by suggestion generation (Phase 13) and inline UX (Phase 14)
     before allowing a suggestion to be submitted.
 
-    Access mirrors the other ontology-index reads (semantic search): public
-    projects are readable by anyone; private projects require membership —
-    enforced by ``project_service.get`` (403/404).
+    Embedding-backed checks may spend a stored project key, so authentication
+    and project membership are required even when the project is public.
     """
     # Same access rule as /search/semantic — this endpoint reads the ontology
     # index + embeddings, so it must not leak private-project entity data.
-    await get_project_service(db).get(project_id, user)
+    project = await get_project_service(db).get(project_id, user)
+    if project.user_role is None and not user.is_superadmin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Project membership required for duplicate checks",
+        )
     service = DuplicateCheckService(db)
     return await service.check(
         project_id=project_id,
