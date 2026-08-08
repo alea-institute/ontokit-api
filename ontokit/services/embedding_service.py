@@ -126,10 +126,13 @@ class EmbeddingService:
                 select(ProjectLLMConfig).where(ProjectLLMConfig.project_id == project_id)
             )
         ).scalar_one_or_none()
-        if config is not None:
-            within_budget, reason = await check_budget(self._db, project_id, config)
-            if not within_budget:
-                raise EmbeddingBudgetExceeded(str(reason))
+        if config is None:
+            raise EmbeddingBudgetExceeded(
+                "Paid embeddings require a project LLM budget configuration"
+            )
+        within_budget, reason = await check_budget(self._db, project_id, config)
+        if not within_budget:
+            raise EmbeddingBudgetExceeded(str(reason))
 
         try:
             input_price, _ = await get_model_pricing(model_name)

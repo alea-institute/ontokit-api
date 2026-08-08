@@ -539,6 +539,11 @@ class SuggestionService:
         async with _branch_lock(project_id, session.branch):
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
+            if session.status != SuggestionSessionStatus.ACTIVE.value:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Session is {session.status}, cannot save",
+                )
             derived_mint = self._validate_turtle_and_detect_mint(
                 project_id, session.branch, filename, data.content
             )
@@ -622,18 +627,30 @@ class SuggestionService:
             )
 
         filename = self._get_git_ontology_path(project)
-        content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
-        await self._validate_submission_content(project_id, filename, content.decode("utf-8"))
+        async with _branch_lock(project_id, session.branch):
+            await self._acquire_branch_lock(project_id, session.branch)
+            await self.db.refresh(session)
+            if session.status != SuggestionSessionStatus.ACTIVE.value:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Session is {session.status}, cannot submit",
+                )
+            content = self.git_service.get_file_from_branch(
+                project_id, session.branch, filename
+            )
+            await self._validate_submission_content(
+                project_id, filename, content.decode("utf-8")
+            )
 
-        # R10 gates run BEFORE any git or PR work, so a refused submission
-        # leaves no side effects behind.
-        await self._enforce_untrusted_gates(
-            project, session, user, verification_token, client_ip, redis
-        )
+            # R10 gates run BEFORE any git or PR work, so a refused submission
+            # leaves no side effects behind.
+            await self._enforce_untrusted_gates(
+                project, session, user, verification_token, client_ip, redis
+            )
 
-        return await self._create_pr_for_session(
-            project_id, session, user, data.summary, "submitted"
-        )
+            return await self._create_pr_for_session(
+                project_id, session, user, data.summary, "submitted"
+            )
 
     async def _enforce_untrusted_gates(
         self,
@@ -1459,6 +1476,8 @@ class SuggestionService:
         async with _branch_lock(project_id, session.branch):
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
+            if session.status != SuggestionSessionStatus.ACTIVE.value:
+                return
             derived_mint = self._validate_turtle_and_detect_mint(
                 project_id, session.branch, filename, data.content
             )

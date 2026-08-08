@@ -1773,6 +1773,28 @@ class TestGetConfigWithTimestamp:
 
 class TestPaidEmbeddingMetering:
     @pytest.mark.asyncio
+    async def test_missing_budget_config_prevents_provider_call(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        config_result = MagicMock()
+        config_result.scalar_one_or_none.return_value = None
+        mock_db.execute.return_value = config_result
+        provider = MagicMock(provider_name="openai", model_id="text-embedding-3-small")
+        operation = AsyncMock(return_value=[0.1])
+
+        with pytest.raises(RuntimeError, match="budget configuration"):
+            await service._check_and_audit_embedding(
+                PROJECT_ID,
+                provider,
+                "sensitive query",
+                "embeddings/semantic-search",
+                "user-1",
+                operation,
+            )
+
+        operation.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_budget_failure_prevents_provider_call(
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:

@@ -14,7 +14,6 @@ from ontokit.schemas.duplicate_check import (
 from ontokit.schemas.embeddings import SemanticSearchResultWithBranch
 from ontokit.services.duplicate_check_service import (
     BLOCK_THRESHOLD,
-    EXACT_WEIGHT,
     SEMANTIC_WEIGHT,
     STRUCTURAL_WEIGHT,
     WARN_THRESHOLD,
@@ -83,11 +82,10 @@ async def test_exact_label_match_returns_block_verdict():
 
 
 @pytest.mark.asyncio
-async def test_semantic_similarity_warn_range():
-    """Composite score in (0.80, 0.95] produces verdict='warn' — UI surfaces warning (DEDUP-06)."""
+async def test_exact_label_blocks_even_when_other_signals_are_weaker():
+    """An exact normalized label is deterministic duplicate evidence."""
     svc, _ = _make_service()
 
-    # exact=1.0, semantic=0.8, structural=0.5 → 0.4+0.32+0.1 = 0.82 → warn
     sem_result = _make_sem_result(label="Legal Entity", score=0.8, branch="main")
 
     with (
@@ -109,12 +107,12 @@ async def test_semantic_similarity_warn_range():
     ):
         response = await svc.check(
             project_id=PROJECT_ID,
-            label="Legal Entity",  # exact match → exact_score=1.0
+            label="Legal Entity",
             parent_iri="http://example.org/Entity",
         )
 
-    assert response.verdict == "warn"
-    assert WARN_THRESHOLD < response.composite_score <= BLOCK_THRESHOLD
+    assert response.verdict == "block"
+    assert response.composite_score == 1.0
 
 
 @pytest.mark.asyncio
@@ -157,9 +155,8 @@ async def test_composite_score_weights():
     """Composite = 0.40 * exact + 0.40 * semantic + 0.20 * structural (DEDUP-04, D-01)."""
     svc, _ = _make_service()
 
-    # exact=1.0 (label matches), semantic=0.5, structural=0.75
-    # Expected composite = 0.4*1.0 + 0.4*0.5 + 0.2*0.75 = 0.4 + 0.2 + 0.15 = 0.75
-    sem_result = _make_sem_result(label="Target Label", score=0.5, branch="main")
+    # exact=0.0, semantic=0.5, structural=0.75
+    sem_result = _make_sem_result(label="Related Label", score=0.5, branch="main")
 
     with (
         patch.object(
@@ -185,10 +182,10 @@ async def test_composite_score_weights():
         )
 
     expected_composite = round(
-        EXACT_WEIGHT * 1.0 + SEMANTIC_WEIGHT * 0.5 + STRUCTURAL_WEIGHT * 0.75, 4
+        SEMANTIC_WEIGHT * 0.5 + STRUCTURAL_WEIGHT * 0.75, 4
     )
     assert response.composite_score == expected_composite
-    assert response.score_breakdown.exact == 1.0
+    assert response.score_breakdown.exact == 0.0
     assert response.score_breakdown.semantic == 0.5
     assert response.score_breakdown.structural == 0.75
 
@@ -197,7 +194,7 @@ async def test_composite_score_weights():
 async def test_missing_structural_signal_renormalizes_available_weights():
     """A minted IRI with no parent can still block on exact + semantic identity."""
     svc, _ = _make_service()
-    sem_result = _make_sem_result(label="Legal Entity", score=1.0, branch="main")
+    sem_result = _make_sem_result(label="Legal Entity", score=0.9, branch="main")
 
     with (
         patch.object(

@@ -116,6 +116,13 @@ class DuplicateCheckService:
                 + (STRUCTURAL_WEIGHT * structural_score if structural_available else 0.0)
             ) / available_weight
 
+            # An exact normalized label match is itself deterministic duplicate
+            # evidence. Do not let representation differences between a short
+            # query and the candidate's richer embedding text dilute that fact
+            # to the strict non-blocking threshold boundary.
+            if exact_score == 1.0:
+                composite = 1.0
+
             # Determine source (D-09)
             source = await self._classify_source(project_id, sem_result.branch)
 
