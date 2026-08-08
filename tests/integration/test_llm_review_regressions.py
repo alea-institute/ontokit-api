@@ -196,3 +196,63 @@ async def test_p1_1_unpriced_model_stops_before_provider_on_real_budget_rows(
         provider_factory.assert_not_called()
     finally:
         await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("role", "content", "expected_status"),
+    [
+        ("editor", "not valid turtle", 422),
+        (
+            "suggester",
+            "@prefix ex: <https://example.test/> .\n"
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+            "ex:Minted a owl:Class .\n",
+            403,
+        ),
+    ],
+)
+async def test_p1_7_p1_12_server_gates_content_before_real_git_commit(
+    real_db_session: AsyncSession,
+    tmp_path: Path,
+    role: str,
+    content: str,
+    expected_status: int,
+) -> None:
+    """Malformed Turtle and client-hidden minting never reach the branch."""
+    project_id = uuid4()
+    user = CurrentUser(id=f"write-{role}", name="Writer")
+    project = Project(id=project_id, name=f"write-{role}", owner_id="owner")
+    project.members.append(ProjectMember(user_id=user.id, role=role))
+    session = SuggestionSession(
+        project_id=project_id,
+        user_id=user.id,
+        session_id=f"write-{role}",
+        branch=f"suggestion/write-{role}",
+        beacon_token="integration-token",
+    )
+    real_db_session.add_all([project, session])
+    await real_db_session.commit()
+
+    git = BareGitRepositoryService(base_path=str(tmp_path))
+    initial = b"@prefix ex: <https://example.test/> .\n"
+    git.initialize_repository(project_id, initial, "ontology.ttl")
+    git.create_branch(project_id, session.branch, from_ref="main")
+
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await SuggestionService(real_db_session, git).save(
+                project_id,
+                session.session_id,
+                SuggestionSaveRequest(
+                    content=content,
+                    entity_iri="https://example.test/Minted",
+                    entity_label="Minted",
+                    mints_entity=False,
+                ),
+                user,
+            )
+        assert exc_info.value.status_code == expected_status
+        assert git.get_file_from_branch(project_id, session.branch, "ontology.ttl") == initial
+    finally:
+        await _delete_project(real_db_session, project_id)

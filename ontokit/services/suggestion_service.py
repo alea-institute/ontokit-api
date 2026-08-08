@@ -16,7 +16,9 @@ if TYPE_CHECKING:
     from ontokit.models.pull_request import PullRequest
 
 from fastapi import HTTPException, status
-from sqlalchemy import select, update
+from rdflib import Graph
+from rdflib.namespace import OWL, RDF
+from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -134,6 +136,53 @@ class SuggestionService:
                 )
             return path
         return "ontology.ttl"
+
+    @staticmethod
+    def _declared_entities(graph: Graph) -> set[object]:
+        declaration_types = {
+            OWL.Class,
+            RDF.Property,
+            OWL.ObjectProperty,
+            OWL.DatatypeProperty,
+            OWL.AnnotationProperty,
+        }
+        return {
+            subject
+            for subject, entity_type in graph.subject_objects(RDF.type)
+            if entity_type in declaration_types
+        }
+
+    def _validate_turtle_and_detect_mint(
+        self,
+        project_id: UUID,
+        branch: str,
+        filename: str,
+        content: str,
+    ) -> bool:
+        """Parse Turtle and derive minting from the real branch diff."""
+        proposed = Graph()
+        try:
+            proposed.parse(data=content, format="turtle")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Suggestion content is not valid Turtle",
+            ) from exc
+
+        current = Graph()
+        try:
+            previous = self.git_service.get_file_from_branch(project_id, branch, filename)
+            current.parse(data=previous.decode("utf-8"), format="turtle")
+        except KeyError:
+            pass
+        return bool(self._declared_entities(proposed) - self._declared_entities(current))
+
+    async def _acquire_branch_lock(self, project_id: UUID, branch: str) -> None:
+        """Serialize branch mutations across all API worker processes."""
+        await self.db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {"lock_key": f"suggestion:{project_id}:{branch}"},
+        )
 
     async def _get_session(self, project_id: UUID, session_id: str) -> SuggestionSession:
         """Get a suggestion session or raise 404."""
@@ -312,9 +361,12 @@ class SuggestionService:
             )
 
         project = await self._get_project(project_id)
-        if data.mints_entity:
-            self._assert_can_mint(project, user)
         filename = self._get_git_ontology_path(project)
+        derived_mint = self._validate_turtle_and_detect_mint(
+            project_id, session.branch, filename, data.content
+        )
+        if derived_mint:
+            self._assert_can_mint(project, user)
 
         # Serialize git writes per branch to prevent lost commits
         # R14: never author with the contributor's real email address.
@@ -323,6 +375,8 @@ class SuggestionService:
         )
 
         async with _branch_locks[session.branch]:
+            await self._acquire_branch_lock(project_id, session.branch)
+            await self.db.refresh(session)
             # Commit to the suggestion branch
             commit_message = f"Update {data.entity_label}"
             try:
@@ -396,6 +450,12 @@ class SuggestionService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No changes to submit",
             )
+
+        filename = self._get_git_ontology_path(project)
+        content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
+        self._validate_turtle_and_detect_mint(
+            project_id, session.branch, filename, content.decode("utf-8")
+        )
 
         # R10 gates run BEFORE any git or PR work, so a refused submission
         # leaves no side effects behind.
@@ -1215,6 +1275,9 @@ class SuggestionService:
         """Commit a beacon payload to the session branch (fire-and-forget)."""
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
+        self._validate_turtle_and_detect_mint(
+            project_id, session.branch, filename, data.content
+        )
         author_name, author_email = await self.commit_identity.resolve(
             session.user_id,
             session.user_name,
@@ -1224,6 +1287,8 @@ class SuggestionService:
 
         # Serialize git writes per branch to prevent lost commits
         async with _branch_locks[session.branch]:
+            await self._acquire_branch_lock(project_id, session.branch)
+            await self.db.refresh(session)
             # Commit without full validation (speed over correctness for beacon)
             try:
                 self.git_service.commit_changes(
@@ -1369,10 +1434,13 @@ class SuggestionService:
             )
 
         project = await self._get_project(project_id)
-        if data.mints_entity:
+        filename = self._get_git_ontology_path(project)
+        derived_mint = self._validate_turtle_and_detect_mint(
+            project_id, session.branch, filename, data.content
+        )
+        if derived_mint:
             # Anonymous callers are below the trusted rung by construction (R8).
             self._assert_can_mint(project, None)
-        filename = self._get_git_ontology_path(project)
 
         # R14: the credit name the submitter typed is used for the NAME only —
         # never for the address, which is a per-session anonymous alias.
@@ -1384,6 +1452,8 @@ class SuggestionService:
         )
 
         async with _branch_locks[session.branch]:
+            await self._acquire_branch_lock(project_id, session.branch)
+            await self.db.refresh(session)
             commit_message = f"Update {data.entity_label}"
             try:
                 commit_info = self.git_service.commit_changes(

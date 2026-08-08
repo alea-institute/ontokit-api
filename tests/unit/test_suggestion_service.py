@@ -136,12 +136,17 @@ def mock_git() -> MagicMock:
     git.create_branch = MagicMock()
     git.delete_branch = MagicMock()
     git.get_default_branch = MagicMock(return_value="main")
+    git.get_file_from_branch = MagicMock(
+        return_value=b"@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+    )
     return git
 
 
 @pytest.fixture
 def service(mock_db: AsyncMock, mock_git: MagicMock) -> SuggestionService:
-    return SuggestionService(db=mock_db, git_service=mock_git)
+    suggestion_service = SuggestionService(db=mock_db, git_service=mock_git)
+    suggestion_service._acquire_branch_lock = AsyncMock()  # type: ignore[method-assign]
+    return suggestion_service
 
 
 # ---------------------------------------------------------------------------
@@ -767,7 +772,7 @@ class TestSave:
         from ontokit.schemas.suggestion import SuggestionSaveRequest
 
         data = SuggestionSaveRequest(
-            content="content",
+            content="@prefix : <http://example.org/> .",
             entity_iri="http://example.org/X",
             entity_label="X",
         )
@@ -808,7 +813,7 @@ class TestSave:
         from ontokit.schemas.suggestion import SuggestionSaveRequest
 
         data = SuggestionSaveRequest(
-            content="content",
+            content="@prefix : <http://example.org/> .",
             entity_iri="http://example.org/X",
             entity_label="X",
         )
@@ -854,7 +859,7 @@ class TestSave:
         from ontokit.schemas.suggestion import SuggestionSaveRequest
 
         data = SuggestionSaveRequest(
-            content="content",
+            content="@prefix : <http://example.org/> .",
             entity_iri="http://example.org/X",
             entity_label="X",
         )
@@ -1606,7 +1611,10 @@ class TestBeaconSave:
 
         from ontokit.schemas.suggestion import SuggestionBeaconRequest
 
-        data = SuggestionBeaconRequest(session_id=session.session_id, content="data")
+        data = SuggestionBeaconRequest(
+            session_id=session.session_id,
+            content="@prefix : <http://example.org/> .",
+        )
 
         with patch(
             "ontokit.services.suggestion_service.verify_beacon_token",
@@ -1646,7 +1654,10 @@ class TestBeaconSave:
 
         from ontokit.schemas.suggestion import SuggestionBeaconRequest
 
-        data = SuggestionBeaconRequest(session_id=session.session_id, content="data")
+        data = SuggestionBeaconRequest(
+            session_id=session.session_id,
+            content="@prefix : <http://example.org/> .",
+        )
 
         with patch(
             "ontokit.services.suggestion_service.verify_beacon_token",

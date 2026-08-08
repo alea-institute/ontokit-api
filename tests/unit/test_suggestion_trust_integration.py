@@ -154,7 +154,11 @@ def mock_db() -> AsyncMock:
 
 @pytest.fixture
 def service(mock_db: AsyncMock) -> SuggestionService:
-    return SuggestionService(db=mock_db, git_service=MagicMock())
+    git = MagicMock()
+    git.get_file_from_branch.return_value = (
+        b"@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+    )
+    return SuggestionService(db=mock_db, git_service=git)
 
 
 def _added_outcomes(mock_db: AsyncMock) -> list[SuggestionOutcome]:
@@ -389,8 +393,13 @@ class TestDismiss:
 
 class TestMintingGate:
     def _save(self, mints: bool) -> SuggestionSaveRequest:
+        declaration = ":A a owl:Class ." if mints else ""
         return SuggestionSaveRequest(
-            content="@prefix : <http://x#> .",
+            content=(
+                "@prefix : <http://x#> .\n"
+                "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+                f"{declaration}"
+            ),
             entity_iri="http://x#A",
             entity_label="A",
             mints_entity=mints,
@@ -452,6 +461,21 @@ class TestMintingGate:
             )
         assert exc.value.status_code == 403
         service.git_service.commit_changes.assert_not_called()
+
+    async def test_client_flag_false_cannot_hide_real_mint(
+        self, service: SuggestionService, mock_db: AsyncMock
+    ) -> None:
+        project = _project([_member("contributor-1")])
+        session = _session(status=SuggestionSessionStatus.ACTIVE.value, changes_count=0)
+        mock_db.execute.side_effect = _results(
+            _result_for(session), _result_for(project), _result_for(project), project=project
+        )
+        request = self._save(True).model_copy(update={"mints_entity": False})
+
+        with pytest.raises(HTTPException) as exc:
+            await service.save(PROJECT_ID, session.session_id, request, _user("contributor-1"))
+
+        assert exc.value.status_code == 403
 
 
 class TestCapabilities:
