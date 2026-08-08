@@ -6,7 +6,7 @@ import uuid
 from collections.abc import Generator
 from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, call, patch
 from urllib.parse import quote
 
 import pytest
@@ -1496,13 +1496,51 @@ class TestOntologyNavigation:
         mock_git_service.get_default_branch.return_value = "main"
         mock_git_service.repository_exists.return_value = True
 
-        self.mock_indexed.get_root_tree_nodes = AsyncMock(return_value=[])
+        node = {
+            "iri": "http://example.org/ontology#Person",
+            "label": "Person",
+            "child_count": 0,
+            "deprecated": False,
+        }
+        self.mock_indexed.get_root_tree_nodes = AsyncMock(return_value=[node])
         self.mock_indexed.get_class_count = AsyncMock(return_value=5)
 
+        default_response = client.get(f"/api/v1/projects/{PROJECT_ID}/ontology/tree")
+        explicit_response = client.get(
+            f"/api/v1/projects/{PROJECT_ID}/ontology/tree", params={"branch": "main"}
+        )
+
+        assert default_response.status_code == 200
+        assert default_response.json() == explicit_response.json()
+        assert default_response.json()["total_classes"] == 5
+        assert self.mock_indexed.get_root_tree_nodes.await_args_list == [
+            call(PROJECT_ID, None, "main"),
+            call(PROJECT_ID, None, "main"),
+        ]
+
+    def test_get_ontology_tree_root_uses_non_main_default_branch(
+        self,
+        authed_client: tuple[TestClient, AsyncMock],
+        mock_project_service: AsyncMock,
+        mock_ontology_service: MagicMock,
+        mock_git_service: MagicMock,
+    ) -> None:
+        """A missing branch resolves the repository's own non-main default."""
+        client, _db = authed_client
+        mock_project_service.get = AsyncMock(
+            return_value=_project_response(source_file_path="ontology.ttl")
+        )
+        mock_ontology_service.is_loaded.return_value = True
+        mock_git_service.get_default_branch.return_value = "develop"
+        mock_git_service.repository_exists.return_value = True
+        self.mock_indexed.get_root_tree_nodes = AsyncMock(return_value=[])
+        self.mock_indexed.get_class_count = AsyncMock(return_value=0)
+
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/ontology/tree")
+
         assert response.status_code == 200
-        data = response.json()
-        assert data["total_classes"] == 5
+        self.mock_indexed.get_root_tree_nodes.assert_awaited_once_with(PROJECT_ID, None, "develop")
+        self.mock_indexed.get_class_count.assert_awaited_once_with(PROJECT_ID, "develop")
 
     def test_get_ontology_tree_root_with_branch(
         self,
