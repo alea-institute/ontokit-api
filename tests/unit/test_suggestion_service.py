@@ -2226,3 +2226,48 @@ class TestGetSuggestionServiceFactory:
         mock_db = AsyncMock()
         svc = get_suggestion_service(mock_db)
         assert isinstance(svc, SuggestionService)
+
+
+class TestSubmissionContentGates:
+    BASELINE = b"""
+        @prefix ex: <http://example.org/> .
+        @prefix owl: <http://www.w3.org/2002/07/owl#> .
+        @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+        ex:Existing a owl:Class ; rdfs:label "Existing" .
+    """
+
+    def test_blocks_duplicate_label_at_submit(
+        self, service: SuggestionService, mock_git: MagicMock
+    ) -> None:
+        mock_git.get_default_branch.return_value = "main"
+        mock_git.get_file_from_branch.return_value = self.BASELINE
+        proposed = """
+            @prefix ex: <http://example.org/> .
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:Existing a owl:Class ; rdfs:label "Existing" .
+            ex:Minted a owl:Class ; rdfs:label " existing " .
+        """
+
+        with pytest.raises(HTTPException) as exc:
+            service._validate_submission_content(PROJECT_ID, "ontology.ttl", proposed)
+
+        assert exc.value.status_code == 409
+
+    def test_blocks_unknown_parent_at_submit(
+        self, service: SuggestionService, mock_git: MagicMock
+    ) -> None:
+        mock_git.get_default_branch.return_value = "main"
+        mock_git.get_file_from_branch.return_value = self.BASELINE
+        proposed = """
+            @prefix ex: <http://example.org/> .
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:Existing a owl:Class ; rdfs:label "Existing" .
+            ex:Minted a owl:Class ; rdfs:subClassOf ex:Missing .
+        """
+
+        with pytest.raises(HTTPException) as exc:
+            service._validate_submission_content(PROJECT_ID, "ontology.ttl", proposed)
+
+        assert exc.value.status_code == 422

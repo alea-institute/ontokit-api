@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     from ontokit.models.pull_request import PullRequest
 
 from fastapi import HTTPException, status
-from rdflib import Graph
-from rdflib.namespace import OWL, RDF
+from rdflib import Graph, Literal, URIRef
+from rdflib.namespace import OWL, RDF, RDFS
 from sqlalchemy import select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -139,7 +139,7 @@ class SuggestionService:
         return "ontology.ttl"
 
     @staticmethod
-    def _declared_entities(graph: Graph) -> set[object]:
+    def _declared_entities(graph: Graph) -> set[URIRef]:
         declaration_types = {
             OWL.Class,
             RDF.Property,
@@ -150,7 +150,7 @@ class SuggestionService:
         return {
             subject
             for subject, entity_type in graph.subject_objects(RDF.type)
-            if entity_type in declaration_types
+            if isinstance(subject, URIRef) and entity_type in declaration_types
         }
 
     def _validate_turtle_and_detect_mint(
@@ -177,6 +177,60 @@ class SuggestionService:
         except KeyError:
             pass
         return bool(self._declared_entities(proposed) - self._declared_entities(current))
+
+    def _validate_submission_content(
+        self, project_id: UUID, filename: str, content: str
+    ) -> None:
+        """Re-run deterministic duplicate and reference gates at submit time."""
+        proposed = Graph()
+        try:
+            proposed.parse(data=content, format="turtle")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Suggestion content is not valid Turtle",
+            ) from exc
+
+        baseline = Graph()
+        default_branch = self.git_service.get_default_branch(project_id)
+        try:
+            baseline_content = self.git_service.get_file_from_branch(
+                project_id, default_branch, filename
+            )
+            baseline.parse(data=baseline_content.decode("utf-8"), format="turtle")
+        except KeyError:
+            pass
+
+        proposed_entities = self._declared_entities(proposed)
+        baseline_entities = self._declared_entities(baseline)
+        known_entities = proposed_entities | baseline_entities | {OWL.Thing}
+        unknown_parents = {
+            parent
+            for parent in proposed.objects(None, RDFS.subClassOf)
+            if isinstance(parent, URIRef) and parent not in known_entities
+        }
+        if unknown_parents:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Suggestion references an unknown parent IRI",
+            )
+
+        baseline_labels = {
+            str(label).strip().casefold(): entity
+            for entity in baseline_entities
+            for label in baseline.objects(entity, RDFS.label)
+            if isinstance(label, Literal) and str(label).strip()
+        }
+        for entity in proposed_entities - baseline_entities:
+            for label in proposed.objects(entity, RDFS.label):
+                if not isinstance(label, Literal):
+                    continue
+                existing = baseline_labels.get(str(label).strip().casefold())
+                if existing is not None and existing != entity:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Suggestion duplicates an existing entity label",
+                    )
 
     async def _acquire_branch_lock(self, project_id: UUID, branch: str) -> None:
         """Serialize branch mutations across all API worker processes."""
@@ -496,6 +550,9 @@ class SuggestionService:
         content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
         self._validate_turtle_and_detect_mint(
             project_id, session.branch, filename, content.decode("utf-8")
+        )
+        self._validate_submission_content(
+            project_id, filename, content.decode("utf-8")
         )
 
         # R10 gates run BEFORE any git or PR work, so a refused submission
@@ -1570,6 +1627,13 @@ class SuggestionService:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No changes to submit",
             )
+
+        project = await self._get_project(project_id)
+        filename = self._get_git_ontology_path(project)
+        content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
+        self._validate_submission_content(
+            project_id, filename, content.decode("utf-8")
+        )
 
         # Store optional credit info
         if data.submitter_name or data.submitter_email:
