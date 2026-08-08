@@ -140,18 +140,21 @@ class EmbeddingService:
             raise EmbeddingPricingUnavailable(model_name) from exc
         result = await operation()
         tokens = estimate_tokens(input_text)
-        await log_llm_call(
-            self._db,
-            str(project_id),
-            user_id,
-            model_name,
-            provider_name,
-            endpoint,
-            tokens,
-            0,
-            tokens * input_price,
-        )
-        await self._db.commit()
+        from ontokit.core.database import async_session_maker
+
+        async with async_session_maker() as audit_db:
+            await log_llm_call(
+                audit_db,
+                str(project_id),
+                user_id,
+                model_name,
+                provider_name,
+                endpoint,
+                tokens,
+                0,
+                tokens * input_price,
+            )
+            await audit_db.commit()
         return result
 
     async def get_config(self, project_id: UUID) -> EmbeddingConfig | None:
