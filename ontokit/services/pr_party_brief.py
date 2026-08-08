@@ -72,7 +72,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.core.config import settings
 from ontokit.models.pr_party import PRPartyAuthorKind, PRPartyBriefStatus, PRPartyPR
 from ontokit.services.llm.audit import log_llm_call
-from ontokit.services.llm.pricing import get_model_pricing
+from ontokit.services.llm.pricing import PricingUnavailableError, get_model_pricing
 from ontokit.services.llm.prompts import pr_party_brief as brief_prompt
 from ontokit.services.llm.registry import get_provider
 from ontokit.services.llm.ssrf import validate_base_url
@@ -783,7 +783,14 @@ async def _run_llm(
     total_out = 0
     total_cost = 0.0
 
-    input_cost, output_cost = await get_model_pricing(model)
+    try:
+        input_cost, output_cost = await get_model_pricing(model)
+    except PricingUnavailableError:
+        logger.warning(
+            "PR Party brief pricing unavailable for model %s; continuing without cost display",
+            model,
+        )
+        input_cost, output_cost = (0.0, 0.0)
 
     while attempts < MAX_ATTEMPTS and content is None:
         attempts += 1
