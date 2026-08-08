@@ -3,8 +3,10 @@
 import base64
 import hashlib
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Protocol, cast, runtime_checkable
+from functools import partial
+from typing import Any, Protocol, cast, runtime_checkable
 from uuid import UUID
 
 from cryptography.fernet import Fernet
@@ -20,6 +22,7 @@ from ontokit.models.embedding import (
     ProjectEmbeddingConfig,
     Vector,
 )
+from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.schemas.embeddings import (
     EmbeddingConfig,
     EmbeddingConfigUpdate,
@@ -35,6 +38,10 @@ from ontokit.schemas.embeddings import EmbeddingProvider as EmbeddingProviderLit
 from ontokit.services.embedding_providers import get_embedding_provider
 from ontokit.services.embedding_providers.base import EmbeddingProvider as EmbeddingProviderBase
 from ontokit.services.embedding_text_builder import build_embedding_text
+from ontokit.services.llm.audit import log_llm_call
+from ontokit.services.llm.base import estimate_tokens
+from ontokit.services.llm.budget import check_budget
+from ontokit.services.llm.pricing import get_model_pricing
 from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
 from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
 
@@ -89,6 +96,48 @@ def _vec_to_str(vec: list[float] | _HasToList) -> str:
 class EmbeddingService:
     def __init__(self, db: AsyncSession):
         self._db = db
+
+    async def _check_and_audit_embedding(
+        self,
+        project_id: UUID,
+        provider: EmbeddingProviderBase,
+        input_text: str,
+        endpoint: str,
+        user_id: str,
+        operation: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """Run a paid embedding operation through budget and audit controls."""
+        provider_name = provider.provider_name
+        if provider_name == "local":
+            return await operation()
+
+        model_name = provider.model_id
+        config = (
+            await self._db.execute(
+                select(ProjectLLMConfig).where(ProjectLLMConfig.project_id == project_id)
+            )
+        ).scalar_one_or_none()
+        if config is not None:
+            within_budget, reason = await check_budget(self._db, project_id, config)
+            if not within_budget:
+                raise RuntimeError(f"Embedding budget exhausted: {reason}")
+
+        input_price, _ = await get_model_pricing(model_name)
+        result = await operation()
+        tokens = estimate_tokens(input_text)
+        await log_llm_call(
+            self._db,
+            str(project_id),
+            user_id,
+            model_name,
+            provider_name,
+            endpoint,
+            tokens,
+            0,
+            tokens * input_price,
+        )
+        await self._db.commit()
+        return result
 
     async def get_config(self, project_id: UUID) -> EmbeddingConfig | None:
         result = await self._db.execute(
@@ -335,7 +384,17 @@ class EmbeddingService:
             for i in range(0, len(entities), batch_size):
                 batch = entities[i : i + batch_size]
                 texts = [t[2] for t in batch]
-                embeddings = await provider.embed_batch(texts)
+                embeddings = cast(
+                    list[list[float]],
+                    await self._check_and_audit_embedding(
+                        project_id,
+                        provider,
+                        "\n".join(texts),
+                        "embeddings/full-project",
+                        "system:embedding-worker",
+                        partial(provider.embed_batch, texts),
+                    ),
+                )
 
                 for (uri, etype, embed_text), embedding in zip(batch, embeddings, strict=True):
                     iri = str(uri)
@@ -458,7 +517,17 @@ class EmbeddingService:
 
         embed_text = build_embedding_text(graph, uri, etype)
         provider = await self._get_provider(project_id)
-        embedding = await provider.embed_text(embed_text)
+        embedding = cast(
+            list[float],
+            await self._check_and_audit_embedding(
+                project_id,
+                provider,
+                embed_text,
+                "embeddings/single-entity",
+                "system:embedding-worker",
+                lambda: provider.embed_text(embed_text),
+            ),
+        )
 
         label = next(
             (str(o) for o in graph.objects(uri, RDFS.label) if isinstance(o, RDFLiteral)),
@@ -507,6 +576,7 @@ class EmbeddingService:
         query: str,
         limit: int = 20,
         threshold: float = 0.3,
+        billing_user_id: str = "system:semantic-search",
     ) -> SemanticSearchResponse:
         """Semantic search using cosine similarity."""
         if Vector is None:
@@ -529,7 +599,17 @@ class EmbeddingService:
 
         # Embed query
         provider = await self._get_provider(project_id)
-        query_vec = await provider.embed_text(query)
+        query_vec = cast(
+            list[float],
+            await self._check_and_audit_embedding(
+                project_id,
+                provider,
+                query,
+                "embeddings/semantic-search",
+                billing_user_id,
+                lambda: provider.embed_text(query),
+            ),
+        )
 
         # pgvector cosine distance: <=> returns distance (0=identical), score = 1 - distance.
         # NOTE: must use CAST(:query_vec AS vector) — SQLAlchemy's text() parser silently
@@ -575,6 +655,7 @@ class EmbeddingService:
         query: str,
         limit: int = 20,
         threshold: float = 0.3,
+        billing_user_id: str = "system:duplicate-check",
     ) -> list[SemanticSearchResultWithBranch]:
         """Search across ALL branches for a project (DEDUP-08).
 
@@ -600,7 +681,17 @@ class EmbeddingService:
 
         # Embed query
         provider = await self._get_provider(project_id)
-        query_vec = await provider.embed_text(query)
+        query_vec = cast(
+            list[float],
+            await self._check_and_audit_embedding(
+                project_id,
+                provider,
+                query,
+                "embeddings/duplicate-check",
+                billing_user_id,
+                lambda: provider.embed_text(query),
+            ),
+        )
 
         # pgvector cosine distance across ALL branches (no branch = :br filter).
         # See note in semantic_search() above re: CAST() vs ::vector.

@@ -51,4 +51,5 @@ async def check_duplicate(
         entity_type=request.entity_type,
         parent_iri=request.parent_iri,
         limit=10,
+        billing_user_id=str(user.id),
     )

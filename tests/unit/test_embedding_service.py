@@ -436,6 +436,7 @@ class TestEmbedProject:
 
         mock_provider = AsyncMock()
         mock_provider.provider_name = "local"
+        mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
         mock_provider.embed_batch = AsyncMock(return_value=[[0.1, 0.2, 0.3]])
 
@@ -532,6 +533,7 @@ class TestEmbedProject:
         ]
 
         mock_provider = AsyncMock()
+        mock_provider.provider_name = "local"
         mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
 
@@ -689,6 +691,7 @@ class TestEmbedProject:
 
         mock_provider = AsyncMock()
         mock_provider.provider_name = "local"
+        mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
         mock_provider.embed_batch = AsyncMock(return_value=[[0.4, 0.5, 0.6]])
 
@@ -773,6 +776,7 @@ class TestEmbedProject:
         mock_git.get_default_branch.return_value = "main"
 
         mock_provider = AsyncMock()
+        mock_provider.provider_name = "local"
         mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
 
@@ -1105,6 +1109,7 @@ class TestEmbedSingleEntity:
 
         mock_provider = AsyncMock()
         mock_provider.provider_name = "local"
+        mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
         mock_provider.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
@@ -1161,6 +1166,7 @@ class TestEmbedSingleEntity:
         mock_ontology._get_graph = AsyncMock(return_value=g)
 
         mock_provider = AsyncMock()
+        mock_provider.provider_name = "local"
         mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
         mock_provider.embed_text = AsyncMock(return_value=[0.7, 0.8, 0.9])
@@ -1259,6 +1265,7 @@ class TestSemanticSearch:
         cfg_result.scalar_one_or_none.return_value = _make_config_row()
 
         mock_provider = AsyncMock()
+        mock_provider.provider_name = "local"
         mock_provider.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
         # Search results
@@ -1312,6 +1319,7 @@ class TestSemanticSearch:
         cfg_result.scalar_one_or_none.return_value = _make_config_row()
 
         mock_provider = AsyncMock()
+        mock_provider.provider_name = "local"
         mock_provider.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
         search_result = MagicMock()
@@ -1761,3 +1769,35 @@ class TestGetConfigWithTimestamp:
         config = await service.get_config(PROJECT_ID)
         assert config is not None
         assert config.last_full_embed_at == ts.isoformat()
+
+
+class TestPaidEmbeddingMetering:
+    @pytest.mark.asyncio
+    async def test_budget_failure_prevents_provider_call(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        from unittest.mock import patch
+
+        config_result = MagicMock()
+        config_result.scalar_one_or_none.return_value = MagicMock()
+        mock_db.execute.return_value = config_result
+        provider = MagicMock(provider_name="openai", model_id="text-embedding-3-small")
+        operation = AsyncMock(return_value=[0.1])
+
+        with (
+            patch(
+                "ontokit.services.embedding_service.check_budget",
+                new=AsyncMock(return_value=(False, "daily budget exceeded")),
+            ),
+            pytest.raises(RuntimeError, match="daily budget exceeded"),
+        ):
+            await service._check_and_audit_embedding(
+                PROJECT_ID,
+                provider,
+                "sensitive query",
+                "embeddings/semantic-search",
+                "user-1",
+                operation,
+            )
+
+        operation.assert_not_awaited()

@@ -45,6 +45,7 @@ class DuplicateCheckService:
         entity_type: str = "class",
         parent_iri: str | None = None,
         limit: int = 10,
+        billing_user_id: str = "system:duplicate-check",
     ) -> DuplicateCheckResponse:
         """Run composite duplicate check across all branches (DEDUP-04 through DEDUP-08).
 
@@ -64,7 +65,7 @@ class DuplicateCheckService:
 
         # 1. Semantic search across ALL branches (DEDUP-08)
         semantic_candidates = await self._embedding_svc.semantic_search_all_branches(
-            project_id, label, limit=limit
+            project_id, label, limit=limit, billing_user_id=billing_user_id
         )
 
         if not semantic_candidates:

@@ -64,7 +64,14 @@ async def semantic_search(
         from ontokit.git import get_git_service
 
         resolved_branch = get_git_service().get_default_branch(project_id)
-    return await service.semantic_search(project_id, resolved_branch, q, limit, threshold)
+    return await service.semantic_search(
+        project_id,
+        resolved_branch,
+        q,
+        limit,
+        threshold,
+        billing_user_id=str(user.id),
+    )
 
 
 @router.get(
