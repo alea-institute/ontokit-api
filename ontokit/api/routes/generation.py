@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.routes.llm import _LOCAL_PROVIDERS
 from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
 from ontokit.models.llm_config import ProjectLLMConfig
@@ -171,7 +172,7 @@ async def generate_suggestions(
     # Resolve trustworthy pricing before any provider call. Unknown models and
     # pricing outages fail closed so the dollar budget cannot silently become
     # an unlimited $0 ledger.
-    if config.provider in {"ollama", "lmstudio", "llamafile"}:
+    if config.provider in _LOCAL_PROVIDERS:
         input_cost_per_tok, output_cost_per_tok = (0.0, 0.0)
     else:
         try:
