@@ -171,13 +171,16 @@ async def generate_suggestions(
     # Resolve trustworthy pricing before any provider call. Unknown models and
     # pricing outages fail closed so the dollar budget cannot silently become
     # an unlimited $0 ledger.
-    try:
-        input_cost_per_tok, output_cost_per_tok = await get_model_pricing(config.model)
-    except PricingUnavailableError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Pricing data is unavailable for the selected model; generation is paused.",
-        ) from exc
+    if config.provider in {"ollama", "lmstudio", "llamafile"}:
+        input_cost_per_tok, output_cost_per_tok = (0.0, 0.0)
+    else:
+        try:
+            input_cost_per_tok, output_cost_per_tok = await get_model_pricing(config.model)
+        except PricingUnavailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Pricing data is unavailable for the selected model; generation is paused.",
+            ) from exc
 
     # 4. Rate limit check (fails open if Redis unavailable — DB budget in step 5
     #    is the non-fail-open backstop). Both fail-open paths (pool absent here,

@@ -5,7 +5,7 @@ from typing import Annotated
 from urllib.parse import unquote
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.auth import CurrentUser, RequiredUser
@@ -16,7 +16,11 @@ from ontokit.schemas.embeddings import (
     SemanticSearchResponse,
     SimilarEntity,
 )
-from ontokit.services.embedding_service import EmbeddingService
+from ontokit.services.embedding_service import (
+    EmbeddingBudgetExceeded,
+    EmbeddingPricingUnavailable,
+    EmbeddingService,
+)
 from ontokit.services.project_service import get_project_service
 
 logger = logging.getLogger(__name__)
@@ -64,14 +68,22 @@ async def semantic_search(
         from ontokit.git import get_git_service
 
         resolved_branch = get_git_service().get_default_branch(project_id)
-    return await service.semantic_search(
-        project_id,
-        resolved_branch,
-        q,
-        limit,
-        threshold,
-        billing_user_id=str(user.id),
-    )
+    try:
+        return await service.semantic_search(
+            project_id,
+            resolved_branch,
+            q,
+            limit,
+            threshold,
+            billing_user_id=str(user.id),
+        )
+    except EmbeddingBudgetExceeded as exc:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc)) from exc
+    except EmbeddingPricingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Embedding pricing is unavailable; search is paused.",
+        ) from exc
 
 
 @router.get(

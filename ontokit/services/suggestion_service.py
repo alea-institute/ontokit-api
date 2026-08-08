@@ -156,6 +156,7 @@ class SuggestionService:
             OWL.ObjectProperty,
             OWL.DatatypeProperty,
             OWL.AnnotationProperty,
+            OWL.NamedIndividual,
         }
         return {
             subject
@@ -188,7 +189,7 @@ class SuggestionService:
             pass
         return bool(self._declared_entities(proposed) - self._declared_entities(current))
 
-    def _validate_submission_content(
+    async def _validate_submission_content(
         self, project_id: UUID, filename: str, content: str
     ) -> None:
         """Re-run deterministic duplicate and reference gates at submit time."""
@@ -214,9 +215,12 @@ class SuggestionService:
         proposed_entities = self._declared_entities(proposed)
         baseline_entities = self._declared_entities(baseline)
         known_entities = proposed_entities | baseline_entities | {OWL.Thing}
+        added_parent_links = set(proposed.triples((None, RDFS.subClassOf, None))) - set(
+            baseline.triples((None, RDFS.subClassOf, None))
+        )
         unknown_parents = {
             parent
-            for parent in proposed.objects(None, RDFS.subClassOf)
+            for _, _, parent in added_parent_links
             if isinstance(parent, URIRef) and parent not in known_entities
         }
         if unknown_parents:
@@ -231,7 +235,8 @@ class SuggestionService:
             for label in baseline.objects(entity, RDFS.label)
             if isinstance(label, Literal) and str(label).strip()
         }
-        for entity in proposed_entities - baseline_entities:
+        new_entities = proposed_entities - baseline_entities
+        for entity in new_entities:
             for label in proposed.objects(entity, RDFS.label):
                 if not isinstance(label, Literal):
                     continue
@@ -240,6 +245,60 @@ class SuggestionService:
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail="Suggestion duplicates an existing entity label",
+                    )
+
+        if not new_entities:
+            return
+
+        from ontokit.services.duplicate_check_service import DuplicateCheckService
+        from ontokit.services.validation_service import (
+            ValidationService,
+            detect_project_namespace,
+        )
+
+        project_namespace = await detect_project_namespace(
+            None, self.db, project_id, default_branch
+        )
+        for entity in new_entities:
+            labels = [
+                label
+                for label in proposed.objects(entity, RDFS.label)
+                if isinstance(label, Literal)
+            ]
+            parents = [
+                str(parent)
+                for parent in proposed.objects(entity, RDFS.subClassOf)
+                if isinstance(parent, URIRef)
+            ]
+            if labels:
+                duplicate = await DuplicateCheckService(self.db).check(
+                    project_id,
+                    str(labels[0]),
+                    parent_iri=parents[0] if parents else None,
+                )
+                if duplicate.verdict == "block":
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Suggestion is a semantic duplicate of an existing entity",
+                    )
+            if (entity, RDF.type, OWL.Class) in proposed:
+                errors = await ValidationService(self.db).validate_entity(
+                    project_id,
+                    default_branch,
+                    {
+                        "iri": str(entity),
+                        "parent_iris": parents,
+                        "labels": [
+                            {"value": str(label), "lang": label.language or ""}
+                            for label in labels
+                        ],
+                    },
+                    project_namespace,
+                )
+                if errors:
+                    raise HTTPException(
+                        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                        detail="Suggestion failed server-side entity validation",
                     )
 
     async def _acquire_branch_lock(self, project_id: UUID, branch: str) -> None:
@@ -564,7 +623,7 @@ class SuggestionService:
 
         filename = self._get_git_ontology_path(project)
         content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
-        self._validate_submission_content(project_id, filename, content.decode("utf-8"))
+        await self._validate_submission_content(project_id, filename, content.decode("utf-8"))
 
         # R10 gates run BEFORE any git or PR work, so a refused submission
         # leaves no side effects behind.
@@ -1649,7 +1708,7 @@ class SuggestionService:
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
         content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
-        self._validate_submission_content(
+        await self._validate_submission_content(
             project_id, filename, content.decode("utf-8")
         )
 

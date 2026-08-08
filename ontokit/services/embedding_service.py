@@ -41,11 +41,19 @@ from ontokit.services.embedding_text_builder import build_embedding_text
 from ontokit.services.llm.audit import log_llm_call
 from ontokit.services.llm.base import estimate_tokens
 from ontokit.services.llm.budget import check_budget
-from ontokit.services.llm.pricing import get_model_pricing
+from ontokit.services.llm.pricing import PricingUnavailableError, get_model_pricing
 from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
 from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
 
 logger = logging.getLogger(__name__)
+
+
+class EmbeddingBudgetExceeded(RuntimeError):
+    """A paid embedding call was refused by the project budget."""
+
+
+class EmbeddingPricingUnavailable(RuntimeError):
+    """A paid embedding model cannot be metered safely."""
 _EmbeddingResult = TypeVar("_EmbeddingResult")
 
 
@@ -121,9 +129,12 @@ class EmbeddingService:
         if config is not None:
             within_budget, reason = await check_budget(self._db, project_id, config)
             if not within_budget:
-                raise RuntimeError(f"Embedding budget exhausted: {reason}")
+                raise EmbeddingBudgetExceeded(str(reason))
 
-        input_price, _ = await get_model_pricing(model_name)
+        try:
+            input_price, _ = await get_model_pricing(model_name)
+        except PricingUnavailableError as exc:
+            raise EmbeddingPricingUnavailable(model_name) from exc
         result = await operation()
         tokens = estimate_tokens(input_text)
         await log_llm_call(

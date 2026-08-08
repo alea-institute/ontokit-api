@@ -2236,7 +2236,8 @@ class TestSubmissionContentGates:
         ex:Existing a owl:Class ; rdfs:label "Existing" .
     """
 
-    def test_blocks_duplicate_label_at_submit(
+    @pytest.mark.asyncio
+    async def test_blocks_duplicate_label_at_submit(
         self, service: SuggestionService, mock_git: MagicMock
     ) -> None:
         mock_git.get_default_branch.return_value = "main"
@@ -2250,11 +2251,12 @@ class TestSubmissionContentGates:
         """
 
         with pytest.raises(HTTPException) as exc:
-            service._validate_submission_content(PROJECT_ID, "ontology.ttl", proposed)
+            await service._validate_submission_content(PROJECT_ID, "ontology.ttl", proposed)
 
         assert exc.value.status_code == 409
 
-    def test_blocks_unknown_parent_at_submit(
+    @pytest.mark.asyncio
+    async def test_blocks_unknown_parent_at_submit(
         self, service: SuggestionService, mock_git: MagicMock
     ) -> None:
         mock_git.get_default_branch.return_value = "main"
@@ -2268,6 +2270,6 @@ class TestSubmissionContentGates:
         """
 
         with pytest.raises(HTTPException) as exc:
-            service._validate_submission_content(PROJECT_ID, "ontology.ttl", proposed)
+            await service._validate_submission_content(PROJECT_ID, "ontology.ttl", proposed)
 
         assert exc.value.status_code == 422

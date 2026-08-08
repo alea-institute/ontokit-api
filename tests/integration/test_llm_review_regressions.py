@@ -119,8 +119,9 @@ async def test_p0_2_database_accepts_review_action_statuses(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("parent_iri", [None, "https://example.test/UnindexedParent"])
 async def test_p0_6_identical_real_embedding_blocks_without_structure(
-    real_db_session: AsyncSession,
+    real_db_session: AsyncSession, parent_iri: str | None,
 ) -> None:
     """An identical label in pgvector blocks even when a new IRI has no structure."""
     project_id = uuid4()
@@ -155,7 +156,7 @@ async def test_p0_6_identical_real_embedding_blocks_without_structure(
     service._embedding_svc._get_provider = AsyncMock(return_value=provider)  # type: ignore[method-assign]
 
     try:
-        response = await service.check(project_id, "Legal Entity", parent_iri=None)
+        response = await service.check(project_id, "Legal Entity", parent_iri=parent_iri)
         assert response.verdict == "block"
         assert response.composite_score == pytest.approx(1.0)
     finally:

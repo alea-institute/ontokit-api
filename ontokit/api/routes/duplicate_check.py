@@ -11,6 +11,10 @@ from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
 from ontokit.schemas.duplicate_check import DuplicateCheckRequest, DuplicateCheckResponse
 from ontokit.services.duplicate_check_service import DuplicateCheckService
+from ontokit.services.embedding_service import (
+    EmbeddingBudgetExceeded,
+    EmbeddingPricingUnavailable,
+)
 from ontokit.services.project_service import get_project_service
 
 logger = logging.getLogger(__name__)
@@ -45,11 +49,19 @@ async def check_duplicate(
             detail="Project membership required for duplicate checks",
         )
     service = DuplicateCheckService(db)
-    return await service.check(
-        project_id=project_id,
-        label=request.label,
-        entity_type=request.entity_type,
-        parent_iri=request.parent_iri,
-        limit=10,
-        billing_user_id=str(user.id),
-    )
+    try:
+        return await service.check(
+            project_id=project_id,
+            label=request.label,
+            entity_type=request.entity_type,
+            parent_iri=request.parent_iri,
+            limit=10,
+            billing_user_id=str(user.id),
+        )
+    except EmbeddingBudgetExceeded as exc:
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc)) from exc
+    except EmbeddingPricingUnavailable as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Embedding pricing is unavailable; duplicate check is paused.",
+        ) from exc

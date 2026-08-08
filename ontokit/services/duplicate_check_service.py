@@ -90,16 +90,17 @@ class DuplicateCheckService:
             semantic_score = sem_result.score
 
             # Structural score: folio-python Jaccard (returns 0.0 if folio unavailable)
-            structural_available = parent_iri is not None
-            structural_score = (
-                self._structural_svc.compute_similarity(
+            structural_result = (
+                self._structural_svc.try_compute_similarity(
                     sem_result.iri,
                     parent_iri,
                     max_depth=3,
                 )
                 if parent_iri
-                else 0.0
+                else None
             )
+            structural_available = structural_result is not None
+            structural_score = structural_result or 0.0
 
             # Composite (D-01 weights). A freshly-minted proposal frequently has
             # no structural context. In that case, renormalize the two available

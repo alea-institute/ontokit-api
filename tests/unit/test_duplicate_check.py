@@ -63,7 +63,7 @@ async def test_exact_label_match_returns_block_verdict():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=1.0,
         ),
         patch.object(
@@ -98,7 +98,7 @@ async def test_semantic_similarity_warn_range():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.5,
         ),
         patch.object(
@@ -133,7 +133,7 @@ async def test_below_threshold_passes_silently():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.3,
         ),
         patch.object(
@@ -169,7 +169,7 @@ async def test_composite_score_weights():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.75,
         ),
         patch.object(
@@ -241,7 +241,7 @@ async def test_all_branch_scope():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.0,
         ),
         patch.object(
@@ -296,7 +296,7 @@ async def test_rejection_history_surfaced():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.0,
         ),
         patch.object(svc, "_classify_source", new=AsyncMock(side_effect=mock_classify_source)),
@@ -331,7 +331,7 @@ async def test_response_includes_score_breakdown():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.5,
         ),
         patch.object(
