@@ -365,7 +365,7 @@ async def get_llm_status(
             provider_type = provider_enum
             is_local = provider_enum in _LOCAL_PROVIDERS
             # Local providers (Ollama etc.) don't need an API key to be usable
-            configured = bool(config.api_key_encrypted) or is_local
+            configured = bool(config.model) and (bool(config.api_key_encrypted) or is_local)
 
     budget_exhausted = False
     monthly_spent_usd = 0.0

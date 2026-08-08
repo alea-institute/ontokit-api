@@ -48,13 +48,14 @@ def _llm_config(
     api_key_encrypted: bytes | None = b"enc",
     monthly: float | None = 100.0,
     daily: float | None = None,
+    model: str | None = "configured-model",
 ) -> Mock:
     config = Mock()
     config.provider = provider
     config.api_key_encrypted = api_key_encrypted
     config.monthly_budget_usd = monthly
     config.daily_cap_usd = daily
-    config.model = None
+    config.model = model
     config.model_tier = "quality"
     config.base_url = None
     return config
@@ -135,6 +136,21 @@ def test_status_editor_gets_static_daily_cap(authed_client: tuple[TestClient, As
     assert body["daily_remaining"] == 500  # COST-03 static cap (Redis count in PR-5)
     assert body["monthly_spent_usd"] == 20.0
     assert body["monthly_budget_usd"] == 100.0
+
+
+def test_status_requires_selected_model(authed_client: tuple[TestClient, AsyncMock]):
+    client, session = authed_client
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_one_or_none(_member("editor")),
+            _scalar_one_or_none(_llm_config(model=None)),
+            _budget_row(monthly=0.0, daily=0.0, week_total=0.0),
+        ]
+    )
+
+    resp = client.get(f"/api/v1/projects/{PROJECT_ID}/llm/status")
+    assert resp.status_code == 200
+    assert resp.json()["configured"] is False
 
 
 def test_status_viewer_reports_zero_not_unlimited(
