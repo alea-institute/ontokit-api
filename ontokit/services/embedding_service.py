@@ -127,9 +127,16 @@ class EmbeddingService:
             )
         ).scalar_one_or_none()
         if config is None:
-            raise EmbeddingBudgetExceeded(
-                "Paid embeddings require a project LLM budget configuration"
-            )
+            embedding_config = (
+                await self._db.execute(
+                    select(ProjectEmbeddingConfig).where(
+                        ProjectEmbeddingConfig.project_id == project_id
+                    )
+                )
+            ).scalar_one_or_none()
+            if embedding_config is None:
+                raise EmbeddingBudgetExceeded("Paid embeddings require a project budget")
+            config = cast(ProjectLLMConfig, embedding_config)
         within_budget, reason = await check_budget(self._db, project_id, config)
         if not within_budget:
             raise EmbeddingBudgetExceeded(str(reason))
@@ -170,6 +177,8 @@ class EmbeddingService:
             api_key_set=config.api_key_encrypted is not None,
             dimensions=config.dimensions,
             auto_embed_on_save=config.auto_embed_on_save,
+            monthly_budget_usd=config.monthly_budget_usd,
+            daily_cap_usd=config.daily_cap_usd,
             last_full_embed_at=config.last_full_embed_at.isoformat()
             if config.last_full_embed_at
             else None,
@@ -207,6 +216,10 @@ class EmbeddingService:
             config.api_key_encrypted = _encrypt_secret(update.api_key)
         if update.auto_embed_on_save is not None:
             config.auto_embed_on_save = update.auto_embed_on_save
+        if update.monthly_budget_usd is not None:
+            config.monthly_budget_usd = update.monthly_budget_usd
+        if update.daily_cap_usd is not None:
+            config.daily_cap_usd = update.daily_cap_usd
 
         await self._db.commit()
         await self._db.refresh(config)
@@ -217,6 +230,8 @@ class EmbeddingService:
             api_key_set=config.api_key_encrypted is not None,
             dimensions=config.dimensions,
             auto_embed_on_save=config.auto_embed_on_save,
+            monthly_budget_usd=config.monthly_budget_usd,
+            daily_cap_usd=config.daily_cap_usd,
             last_full_embed_at=config.last_full_embed_at.isoformat()
             if config.last_full_embed_at
             else None,

@@ -41,6 +41,8 @@ class ProjectEmbeddingConfig(Base):
     api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     dimensions: Mapped[int] = mapped_column(Integer, default=384)
     auto_embed_on_save: Mapped[bool] = mapped_column(Boolean, default=False)
+    monthly_budget_usd: Mapped[float | None] = mapped_column(nullable=True)
+    daily_cap_usd: Mapped[float | None] = mapped_column(nullable=True)
     last_full_embed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
