@@ -38,6 +38,11 @@ def _hardened(builder: PromptBuilder) -> PromptBuilder:
                 hardened.append({**message, "content": message["content"] + _UNTRUSTED_DATA_RULE})
             else:
                 content = message["content"][:_MAX_USER_PROMPT_CHARS]
+                content = content.replace(
+                    "<untrusted_ontology_data>", "&lt;untrusted_ontology_data&gt;"
+                ).replace(
+                    "</untrusted_ontology_data>", "&lt;/untrusted_ontology_data&gt;"
+                )
                 hardened.append(
                     {
                         **message,

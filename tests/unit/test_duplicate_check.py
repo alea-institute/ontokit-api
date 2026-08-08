@@ -215,6 +215,23 @@ async def test_missing_structural_signal_renormalizes_available_weights():
 
 
 @pytest.mark.asyncio
+async def test_semantic_only_near_duplicate_can_warn():
+    svc, _ = _make_service()
+    sem_result = _make_sem_result(label="Legal Organization", score=0.86, branch="main")
+    with (
+        patch.object(
+            svc._embedding_svc,
+            "semantic_search_all_branches",
+            new=AsyncMock(return_value=[sem_result]),
+        ),
+        patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
+    ):
+        response = await svc.check(PROJECT_ID, "Legal Entity", parent_iri=None)
+    assert response.verdict == "warn"
+    assert response.composite_score == 0.86
+
+
+@pytest.mark.asyncio
 async def test_all_branch_scope():
     """Duplicate search spans all project branches, not just the active one (DEDUP-08)."""
     svc, _ = _make_service()

@@ -114,14 +114,18 @@ class DuplicateCheckService:
             # signals instead of treating the missing signal as evidence against
             # duplication. Thresholds remain unchanged, so weak semantic matches
             # are not promoted into false blocks.
-            available_weight = EXACT_WEIGHT + SEMANTIC_WEIGHT
             if structural_available:
-                available_weight += STRUCTURAL_WEIGHT
-            composite = (
-                EXACT_WEIGHT * exact_score
-                + SEMANTIC_WEIGHT * semantic_score
-                + (STRUCTURAL_WEIGHT * structural_score if structural_available else 0.0)
-            ) / available_weight
+                composite = (
+                    EXACT_WEIGHT * exact_score
+                    + SEMANTIC_WEIGHT * semantic_score
+                    + STRUCTURAL_WEIGHT * structural_score
+                )
+            elif exact_score == 0.0:
+                composite = semantic_score
+            else:
+                composite = (
+                    EXACT_WEIGHT * exact_score + SEMANTIC_WEIGHT * semantic_score
+                ) / (EXACT_WEIGHT + SEMANTIC_WEIGHT)
 
             # An exact normalized label match is itself deterministic duplicate
             # evidence. Do not let representation differences between a short
