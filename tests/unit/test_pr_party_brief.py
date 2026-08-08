@@ -59,6 +59,7 @@ from ontokit.services.pr_party_brief import (
     spend_key,
 )
 from ontokit.services.pr_party_intake import ready_transition_hooks
+from ontokit.services.llm.pricing import PricingUnavailableError
 
 NOW = datetime(2026, 7, 26, 12, 0, tzinfo=UTC)
 REPO = "CatholicOS/liturgy"
@@ -334,6 +335,21 @@ def _brief_settings(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 class TestToolDenial:
+    async def test_unknown_model_pricing_degrades_without_failing_brief(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        row = _pr()
+        db = _FakeSession([row])
+
+        async def _unpriced(_model: str) -> tuple[float, float]:
+            raise PricingUnavailableError("unknown model")
+
+        monkeypatch.setattr(pr_party_brief, "get_model_pricing", _unpriced)
+        outcome = await _run(db, row, monkeypatch=monkeypatch)
+
+        assert outcome.status == "ready"
+        assert row.brief_status == PRPartyBriefStatus.READY
+
     async def test_provider_call_threads_no_tool_parameter(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
