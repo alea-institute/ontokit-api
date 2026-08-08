@@ -37,7 +37,7 @@ Scope: API-side P0/P1 findings from
 
 ## Verification
 
-- Full suite: `.venv/bin/pytest --no-cov` — **2574 passed**, including 26 live
+- Full suite: `.venv/bin/pytest -q` — **2574 passed**, including 26 live
   integration tests, on 2026-08-08.
 - Changed production/test files: Ruff clean and focused strict mypy clean.
 - Repository-wide `.venv/bin/mypy .` is not green at this base: 402 existing
