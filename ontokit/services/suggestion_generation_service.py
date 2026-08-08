@@ -53,7 +53,8 @@ def _is_safe_iri(value: str) -> bool:
     return bool(
         value
         and not any(char.isspace() or char in _FORBIDDEN_IRI_CHARS for char in value)
-        and urlsplit(value).scheme.lower() in {"http", "https", "urn"}
+        and urlsplit(value).scheme.lower()
+        in {"http", "https", "urn", "rdf", "rdfs", "owl", "skos", "dc", "dcterms"}
     )
 
 
