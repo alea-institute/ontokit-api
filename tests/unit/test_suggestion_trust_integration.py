@@ -158,7 +158,9 @@ def service(mock_db: AsyncMock) -> SuggestionService:
     git.get_file_from_branch.return_value = (
         b"@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
     )
-    return SuggestionService(db=mock_db, git_service=git)
+    suggestion_service = SuggestionService(db=mock_db, git_service=git)
+    suggestion_service._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
+    return suggestion_service
 
 
 def _added_outcomes(mock_db: AsyncMock) -> list[SuggestionOutcome]:

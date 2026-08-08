@@ -17,6 +17,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ontokit.core.database import Base
@@ -87,3 +88,12 @@ class EmbeddingJob(Base):
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     project: Mapped["Project"] = relationship()  # type: ignore[name-defined]  # noqa: F821
+
+    __table_args__ = (
+        Index(
+            "uq_embedding_job_active_project",
+            "project_id",
+            unique=True,
+            postgresql_where=sql_text("status IN ('pending', 'running')"),
+        ),
+    )

@@ -26,6 +26,7 @@ from sqlalchemy.orm import selectinload
 from ontokit.core.auth import CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
 from ontokit.git import GitRepositoryService, get_git_service
+from ontokit.models.embedding import EmbeddingJob
 from ontokit.models.project import Project
 from ontokit.models.suggestion_outcome import SuggestionOutcomeType
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
@@ -183,6 +184,43 @@ class SuggestionService:
             text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
             {"lock_key": f"suggestion:{project_id}:{branch}"},
         )
+
+    async def _enqueue_branch_refresh(
+        self,
+        project_id: UUID,
+        branch: str,
+        *,
+        entity_iri: str | None = None,
+        full_embedding: bool = False,
+    ) -> None:
+        """Keep duplicate and ontology indexes current after suggestion writes."""
+        try:
+            from ontokit.api.utils.redis import get_arq_pool
+
+            pool = await get_arq_pool()
+            await pool.enqueue_job("run_ontology_index_task", str(project_id), branch, None)
+            if entity_iri:
+                await pool.enqueue_job(
+                    "run_single_entity_embed_task", str(project_id), branch, entity_iri
+                )
+            elif full_embedding:
+                job = EmbeddingJob(project_id=project_id, branch=branch, status="pending")
+                self.db.add(job)
+                try:
+                    await self.db.commit()
+                except IntegrityError:
+                    await self.db.rollback()
+                    return
+                await pool.enqueue_job(
+                    "run_embedding_generation_task", str(project_id), branch, str(job.id)
+                )
+        except Exception:
+            logger.warning(
+                "Failed to enqueue suggestion index refresh for project=%s branch=%s",
+                project_id,
+                branch,
+                exc_info=True,
+            )
 
     async def _get_session(self, project_id: UUID, session_id: str) -> SuggestionSession:
         """Get a suggestion session or raise 404."""
@@ -417,6 +455,9 @@ class SuggestionService:
                     detail="Saved to branch but failed to update session metadata",
                 ) from e
 
+        await self._enqueue_branch_refresh(
+            project_id, session.branch, entity_iri=data.entity_iri
+        )
         return SuggestionSaveResponse(
             commit_hash=commit_info.hash,
             branch=session.branch,
@@ -633,6 +674,9 @@ class SuggestionService:
         )
 
         await self.db.commit()
+        await self._enqueue_branch_refresh(
+            project_id, session.branch, full_embedding=True
+        )
 
         return SuggestionSubmitResponse(
             pr_number=pr_response.pr_number,
@@ -1053,6 +1097,7 @@ class SuggestionService:
             project_id, session, SuggestionOutcomeType.ACCEPTED, decided_by or user.id
         )
         await self.db.commit()
+        await self._enqueue_branch_refresh(project_id, "main", full_embedding=True)
 
     async def dismiss(
         self, project_id: UUID, session_id: str, user: CurrentUser, note: str | None = None

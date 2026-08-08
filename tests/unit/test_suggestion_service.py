@@ -146,6 +146,7 @@ def mock_git() -> MagicMock:
 def service(mock_db: AsyncMock, mock_git: MagicMock) -> SuggestionService:
     suggestion_service = SuggestionService(db=mock_db, git_service=mock_git)
     suggestion_service._acquire_branch_lock = AsyncMock()  # type: ignore[method-assign]
+    suggestion_service._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
     return suggestion_service
 
 
