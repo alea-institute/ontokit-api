@@ -12,7 +12,7 @@ from fastapi import HTTPException
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.api.routes import generation
+from ontokit.api.routes import generation, semantic_search
 from ontokit.core.auth import CurrentUser
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.embedding import EntityEmbedding, ProjectEmbeddingConfig
@@ -149,6 +149,8 @@ async def test_p0_6_identical_real_embedding_blocks_without_structure(
 
     service = DuplicateCheckService(real_db_session)
     provider = AsyncMock()
+    provider.provider_name = "local"
+    provider.model_id = "integration-vector"
     provider.embed_text.return_value = [1.0, 0.0, 0.0]
     service._embedding_svc._get_provider = AsyncMock(return_value=provider)  # type: ignore[method-assign]
 
@@ -156,6 +158,33 @@ async def test_p0_6_identical_real_embedding_blocks_without_structure(
         response = await service.check(project_id, "Legal Entity", parent_iri=None)
         assert response.verdict == "block"
         assert response.composite_score == pytest.approx(1.0)
+    finally:
+        await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
+async def test_p0_5_public_project_embedding_spend_requires_membership(
+    real_db_session: AsyncSession,
+) -> None:
+    """A public project does not expose its owner's paid embedding key to strangers."""
+    project_id = uuid4()
+    project = Project(
+        id=project_id,
+        name="P0-5",
+        owner_id="embedding-owner",
+        is_public=True,
+    )
+    real_db_session.add(project)
+    await real_db_session.commit()
+
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await semantic_search._verify_access(
+                project_id,
+                real_db_session,
+                CurrentUser(id="authenticated-stranger", name="Stranger"),
+            )
+        assert exc_info.value.status_code == 403
     finally:
         await _delete_project(real_db_session, project_id)
 
