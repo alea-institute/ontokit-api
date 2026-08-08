@@ -135,7 +135,9 @@ class EmbeddingService:
                 )
             ).scalar_one_or_none()
             if embedding_config is None:
-                raise EmbeddingBudgetExceeded("Paid embeddings require a project budget")
+                raise EmbeddingBudgetExceeded(
+                    "Paid embeddings require an embedding budget configuration"
+                )
             config = cast(ProjectLLMConfig, embedding_config)
         within_budget, reason = await check_budget(self._db, project_id, config)
         if not within_budget:
