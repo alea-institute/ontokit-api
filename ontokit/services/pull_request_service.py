@@ -512,14 +512,21 @@ class PullRequestService:
         pr_number: int,
         merge_request: PRMergeRequest,
         user: CurrentUser,
+        *,
+        suggestion_review_authorized: bool = False,
     ) -> PRMergeResponse:
-        """Merge a pull request."""
+        """Merge a pull request.
+
+        ``suggestion_review_authorized`` is reserved for SuggestionService,
+        which has already enforced its reviewer or auto-accept authorization.
+        The public PR route never sets it, preserving the owner/admin gate.
+        """
         project = await self._get_project(project_id)
         pr = await self._get_pr(project_id, pr_number)
 
         # Only admin or owner can merge
         user_role = self._get_user_role(project, user)
-        if user_role not in ("owner", "admin"):
+        if user_role not in ("owner", "admin") and not suggestion_review_authorized:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Only admins and owners can merge pull requests",

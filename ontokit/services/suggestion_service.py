@@ -970,14 +970,17 @@ class SuggestionService:
             from ontokit.schemas.pull_request import PRMergeRequest
 
             pr_service = get_pull_request_service(self.db)
-            try:
-                merge_req = PRMergeRequest(
-                    merge_message=f"Merge suggestion: {session_id}",
-                    delete_source_branch=True,
-                )
-                await pr_service.merge_pull_request(project_id, session.pr_number, merge_req, user)
-            except HTTPException:
-                logger.warning(f"PR merge failed for session {session_id}, marking merged anyway")
+            merge_req = PRMergeRequest(
+                merge_message=f"Merge suggestion: {session_id}",
+                delete_source_branch=True,
+            )
+            await pr_service.merge_pull_request(
+                project_id,
+                session.pr_number,
+                merge_req,
+                user,
+                suggestion_review_authorized=True,
+            )
 
         session.status = SuggestionSessionStatus.MERGED.value
         session.reviewer_id = user.id

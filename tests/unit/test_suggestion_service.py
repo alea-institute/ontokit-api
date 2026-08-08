@@ -1240,12 +1240,12 @@ class TestApprove:
         assert session.status == SuggestionSessionStatus.MERGED.value
 
     @pytest.mark.asyncio
-    async def test_approve_merge_failure_still_merges(
+    async def test_approve_merge_failure_propagates_without_credit(
         self,
         service: SuggestionService,
         mock_db: AsyncMock,
     ) -> None:
-        """Marks session merged even if PR merge raises HTTPException."""
+        """A failed PR merge leaves the session submitted and surfaces the error."""
         session = _make_session(
             status=SuggestionSessionStatus.SUBMITTED.value,
             pr_number=5,
@@ -1273,9 +1273,12 @@ class TestApprove:
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
 
-            await service.approve(PROJECT_ID, session.session_id, user)
+            with pytest.raises(HTTPException) as exc_info:
+                await service.approve(PROJECT_ID, session.session_id, user)
 
-        assert session.status == SuggestionSessionStatus.MERGED.value
+        assert exc_info.value.status_code == 409
+        assert session.status == SuggestionSessionStatus.SUBMITTED.value
+        mock_db.commit.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

@@ -752,6 +752,34 @@ class TestMergePullRequest:
         assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
+    async def test_merge_pr_editor_allowed_after_suggestion_review_authorization(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+        mock_git_service: MagicMock,
+    ) -> None:
+        """The internal suggestion-review path can merge after its own role gate."""
+        project = _make_project(pr_approval_required=0)
+        pr = _make_pr(author_id=EDITOR_ID)
+        user = _make_user(EDITOR_ID)
+        branches = []
+        mock_git_service.list_branches.return_value = branches
+        merge_result = MagicMock(success=True, merge_commit_hash="merge123")
+        mock_git_service.merge_branch.return_value = merge_result
+        _setup_project_and_pr_lookup(mock_db, project, pr)
+
+        result = await service.merge_pull_request(
+            PROJECT_ID,
+            1,
+            PRMergeRequest(delete_source_branch=False),
+            user,
+            suggestion_review_authorized=True,
+        )
+
+        assert result.success is True
+        assert pr.status == PRStatus.MERGED.value
+
+    @pytest.mark.asyncio
     async def test_merge_pr_insufficient_approvals(
         self,
         service: PullRequestService,
