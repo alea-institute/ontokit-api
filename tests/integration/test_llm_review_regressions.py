@@ -185,7 +185,12 @@ async def test_r3_restriction_parent_baseline_allows_mint_save_and_submit(
     """Reparsed restriction blank nodes do not become malformed mint parents."""
     project_id = uuid4()
     user = CurrentUser(id="r3-restriction-user", name="R3 User", email="r3@example.test")
-    project = Project(id=project_id, name="R3 restrictions", owner_id=user.id)
+    project = Project(
+        id=project_id,
+        name="R3 restrictions",
+        owner_id=user.id,
+        ontology_iri="https://project.example/ontology",
+    )
     project.members.append(ProjectMember(user_id=user.id, role="editor"))
     session = SuggestionSession(
         project_id=project_id,
@@ -214,11 +219,15 @@ ex:RestrictedWork a owl:Class ;
 """
     git.initialize_repository(project_id, initial, "ontology.ttl")
     git.create_branch(project_id, session.branch, from_ref="main")
-    minted_iri = "http://example.org/ontology/Minted"
+    minted_iri = "https://folio.example/ontology/Minted"
     content = (
         initial.decode()
-        + '\nex:Minted a owl:Class ; rdfs:label "Minted" ; '
-        "rdfs:subClassOf ex:RestrictedWork .\n"
+        + f'\n<{minted_iri}> a owl:Class ; rdfs:label "Minted" ; '
+        "rdfs:subClassOf ex:RestrictedWork, [\n"
+        "    a owl:Restriction ;\n"
+        "    owl:onProperty ex:hasRisk ;\n"
+        "    owl:someValuesFrom ex:Risk\n"
+        "] .\n"
     )
     suggestions = SuggestionService(real_db_session, git)
     suggestions._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
@@ -237,18 +246,213 @@ ex:RestrictedWork a owl:Class ;
             ),
             user,
         )
-        with patch(
-            "ontokit.services.validation_service.ValidationService.validate_entity",
-            new=AsyncMock(return_value=[]),
-        ):
-            result = await suggestions.submit(
+        result = await suggestions.submit(
+            project_id,
+            session.session_id,
+            SuggestionSubmitRequest(summary="ready"),
+            user,
+        )
+
+        assert result.status == "submitted"
+    finally:
+        await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
+async def test_f3_folio_parent_mint_submits_outside_project_namespace(
+    real_db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """A well-formed FOLIO mint and parent are not restricted to a derived namespace."""
+    project_id = uuid4()
+    user = CurrentUser(id="f3-folio-user", name="F3 User")
+    project = Project(
+        id=project_id,
+        name="F3 FOLIO mint",
+        owner_id=user.id,
+        ontology_iri="https://project.example/ontology",
+    )
+    project.members.append(ProjectMember(user_id=user.id, role="editor"))
+    session = SuggestionSession(
+        project_id=project_id,
+        user_id=user.id,
+        session_id="f3-folio-submit",
+        branch="suggestion/f3-folio-submit",
+        beacon_token="integration-token",
+    )
+    real_db_session.add_all([project, session])
+    await real_db_session.commit()
+
+    git = BareGitRepositoryService(base_path=str(tmp_path))
+    initial = b"""\
+@prefix folio: <https://folio.example/ontology/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+folio:Actor a owl:Class ; rdfs:label "Actor" .
+"""
+    git.initialize_repository(project_id, initial, "ontology.ttl")
+    git.create_branch(project_id, session.branch, from_ref="main")
+    minted_iri = "https://folio.example/ontology/ZorpticWidgetClaim"
+    content = (
+        initial.decode()
+        + f'\n<{minted_iri}> a owl:Class ; rdfs:label "Zorptic Widget Claim"@en ; '
+        "rdfs:subClassOf folio:Actor .\n"
+    )
+    suggestions = SuggestionService(real_db_session, git)
+    suggestions._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
+    suggestions._create_pr_for_session = AsyncMock(  # type: ignore[method-assign]
+        return_value=SuggestionSubmitResponse(pr_number=1, pr_url=None, status="submitted")
+    )
+
+    try:
+        await suggestions.save(
+            project_id,
+            session.session_id,
+            SuggestionSaveRequest(
+                content=content,
+                entity_iri=minted_iri,
+                entity_label="Zorptic Widget Claim",
+            ),
+            user,
+        )
+        result = await suggestions.submit(
+            project_id,
+            session.session_id,
+            SuggestionSubmitRequest(summary="ready"),
+            user,
+        )
+        assert result.status == "submitted"
+    finally:
+        await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
+async def test_f3_malformed_parent_422_names_rule_and_carries_errors(
+    real_db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Malformed parent IRIs retain a rule-named structured 422 contract."""
+    project_id = uuid4()
+    user = CurrentUser(id="f3-invalid-user", name="F3 Invalid User")
+    project = Project(id=project_id, name="F3 invalid parent", owner_id=user.id)
+    project.members.append(ProjectMember(user_id=user.id, role="editor"))
+    session = SuggestionSession(
+        project_id=project_id,
+        user_id=user.id,
+        session_id="f3-invalid-submit",
+        branch="suggestion/f3-invalid-submit",
+        beacon_token="integration-token",
+    )
+    real_db_session.add_all([project, session])
+    await real_db_session.commit()
+
+    git = BareGitRepositoryService(base_path=str(tmp_path))
+    initial = b"""\
+@prefix ex: <https://folio.example/ontology/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+"""
+    git.initialize_repository(project_id, initial, "ontology.ttl")
+    git.create_branch(project_id, session.branch, from_ref="main")
+    content = (
+        initial.decode()
+        + '\nex:Minted a owl:Class ; rdfs:label "Minted"@en ; '
+        "rdfs:subClassOf <mailto:not-an-accepted-parent> .\n"
+    )
+    suggestions = SuggestionService(real_db_session, git)
+    suggestions._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
+
+    try:
+        await suggestions.save(
+            project_id,
+            session.session_id,
+            SuggestionSaveRequest(
+                content=content,
+                entity_iri="https://folio.example/ontology/Minted",
+                entity_label="Minted",
+            ),
+            user,
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await suggestions.submit(
                 project_id,
                 session.session_id,
                 SuggestionSubmitRequest(summary="ready"),
                 user,
             )
 
-        assert result.status == "submitted"
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.detail == {
+            "message": "Suggestion failed server-side entity validation",
+            "errors": [
+                {
+                    "field": "parent_iris",
+                    "code": "VALID-04",
+                    "message": "Parent IRI 'mailto:not-an-accepted-parent' is not a well-formed absolute IRI.",
+                }
+            ],
+        }
+    finally:
+        await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
+async def test_f3_existing_label_still_returns_duplicate_409(
+    real_db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Exact baseline label duplication remains a 409 before mint validation."""
+    project_id = uuid4()
+    user = CurrentUser(id="f3-duplicate-user", name="F3 Duplicate User")
+    project = Project(id=project_id, name="F3 duplicate", owner_id=user.id)
+    project.members.append(ProjectMember(user_id=user.id, role="editor"))
+    session = SuggestionSession(
+        project_id=project_id,
+        user_id=user.id,
+        session_id="f3-duplicate-submit",
+        branch="suggestion/f3-duplicate-submit",
+        beacon_token="integration-token",
+    )
+    real_db_session.add_all([project, session])
+    await real_db_session.commit()
+
+    git = BareGitRepositoryService(base_path=str(tmp_path))
+    initial = b"""\
+@prefix ex: <https://folio.example/ontology/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+ex:Actor a owl:Class ; rdfs:label "Actor" .
+ex:Existing a owl:Class ; rdfs:label "Zorptic Widget Claim"@en .
+"""
+    git.initialize_repository(project_id, initial, "ontology.ttl")
+    git.create_branch(project_id, session.branch, from_ref="main")
+    content = (
+        initial.decode()
+        + '\nex:Minted a owl:Class ; rdfs:label "Zorptic Widget Claim"@en ; '
+        "rdfs:subClassOf ex:Actor .\n"
+    )
+    suggestions = SuggestionService(real_db_session, git)
+    suggestions._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
+
+    try:
+        await suggestions.save(
+            project_id,
+            session.session_id,
+            SuggestionSaveRequest(
+                content=content,
+                entity_iri="https://folio.example/ontology/Minted",
+                entity_label="Zorptic Widget Claim",
+            ),
+            user,
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await suggestions.submit(
+                project_id,
+                session.session_id,
+                SuggestionSubmitRequest(summary="ready"),
+                user,
+            )
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == "Suggestion duplicates an existing entity label"
     finally:
         await _delete_project(real_db_session, project_id)
 

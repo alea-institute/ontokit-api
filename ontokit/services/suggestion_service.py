@@ -215,22 +215,6 @@ class SuggestionService:
         proposed_entities = self._declared_entities(proposed)
         baseline_entities = self._declared_entities(baseline)
         new_entities = proposed_entities - baseline_entities
-        malformed_parents = {
-            parent
-            for entity in new_entities
-            for parent in proposed.objects(entity, RDFS.subClassOf)
-            if isinstance(parent, URIRef)
-            and (
-                not str(parent).startswith(("http://", "https://", "urn:"))
-                or any(char.isspace() for char in str(parent))
-            )
-        }
-        if malformed_parents:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Suggestion references a malformed parent IRI",
-            )
-
         baseline_labels = {
             str(label).strip().casefold(): entity
             for entity in baseline_entities
@@ -301,7 +285,10 @@ class SuggestionService:
                 if errors:
                     raise HTTPException(
                         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                        detail="Suggestion failed server-side entity validation",
+                        detail={
+                            "message": "Suggestion failed server-side entity validation",
+                            "errors": [error.model_dump() for error in errors],
+                        },
                     )
 
     async def _acquire_branch_lock(self, project_id: UUID, branch: str) -> None:

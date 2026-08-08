@@ -2295,13 +2295,32 @@ class TestSubmissionContentGates:
             @prefix owl: <http://www.w3.org/2002/07/owl#> .
             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
             ex:Existing a owl:Class ; rdfs:label "Existing" .
-            ex:Minted a owl:Class ; rdfs:subClassOf <ftp://example.org/Parent> .
+            ex:Minted a owl:Class ; rdfs:label "Minted" ;
+                rdfs:subClassOf <ftp://example.org/Parent> .
         """
 
-        with pytest.raises(HTTPException) as exc:
+        duplicate_result = MagicMock(verdict="pass")
+        with (
+            patch(
+                "ontokit.services.duplicate_check_service.DuplicateCheckService.check",
+                new=AsyncMock(return_value=duplicate_result),
+            ),
+            pytest.raises(HTTPException) as exc,
+        ):
             await service._validate_submission_content(
                 PROJECT_ID, "suggestion/test", "ontology.ttl", proposed
             )
 
         assert exc.value.status_code == 422
-        assert exc.value.detail == "Suggestion references a malformed parent IRI"
+        assert exc.value.detail == {
+            "message": "Suggestion failed server-side entity validation",
+            "errors": [
+                {
+                    "field": "parent_iris",
+                    "code": "VALID-04",
+                    "message": (
+                        "Parent IRI 'ftp://example.org/Parent' is not a well-formed absolute IRI."
+                    ),
+                }
+            ],
+        }

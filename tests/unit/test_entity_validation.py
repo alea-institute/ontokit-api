@@ -184,15 +184,15 @@ async def test_valid03_cycle_detection_passes_no_cycle():
 
 
 # ---------------------------------------------------------------------------
-# VALID-04: namespace ownership
+# VALID-04: well-formed absolute IRIs
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_valid04_namespace_rejects_foreign():
-    """VALID-04: IRI outside the project-owned namespace is blocked."""
+async def test_valid04_rejects_malformed_absolute_iri():
+    """VALID-04: malformed entity IRIs remain blocked."""
     svc, _ = _make_service()
-    entity = _entity(iri="http://foreign.org/ontology#SomeClass")
+    entity = _entity(iri="ftp://foreign.org/ontology#SomeClass")
 
     with patch.object(svc._index, "get_ancestor_path", new=AsyncMock(return_value=[])):
         errors = await svc.validate_entity(
@@ -204,10 +204,10 @@ async def test_valid04_namespace_rejects_foreign():
 
 
 @pytest.mark.asyncio
-async def test_valid04_namespace_accepts_owned():
-    """VALID-04: IRI within the project-owned namespace passes."""
+async def test_valid04_accepts_well_formed_external_iri():
+    """VALID-04: a well-formed external IRI is valid knowledge."""
     svc, _ = _make_service()
-    entity = _entity(iri="http://example.org/ontology#OwnedClass")
+    entity = _entity(iri="http://foreign.org/ontology#SomeClass")
 
     with patch.object(svc._index, "get_ancestor_path", new=AsyncMock(return_value=[])):
         errors = await svc.validate_entity(

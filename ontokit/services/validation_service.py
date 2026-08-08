@@ -6,7 +6,7 @@ they enter the draft pipeline. All 6 VALID-* rules are enforced here:
   VALID-01 — parent required (no free-floating entities)
   VALID-02 — English rdfs:label required
   VALID-03 — cycle detection (lightweight SQL ancestor path check)
-  VALID-04 — namespace ownership (entity IRI must be in project namespace)
+  VALID-04 — entity and parent IRIs must be well-formed absolute IRIs
   VALID-05 — structured error returns (field + code + message)
   VALID-06 — IRI minting ({namespace}{uuid4} per D-11/D-12)
 
@@ -14,7 +14,7 @@ Design notes:
   - VALID-03 uses OntologyIndexService.get_ancestor_path() (SQL BFS/CTE),
     NOT the full RDFLib DFS in reasoner_service.py — per Pitfall 2 in
     RESEARCH.md: the SQL-based check is the lightweight gate here.
-  - VALID-04 skips the check when entity IRI is empty/None (pre-mint state).
+  - VALID-04 accepts project, imported, and external HTTP(S)/URN knowledge.
   - detect_project_namespace falls back to a stable fallback URL if the DB
     query yields no results.
 """
@@ -34,6 +34,16 @@ from ontokit.schemas.generation import ValidationError
 from ontokit.services.ontology_index import OntologyIndexService
 
 logger = logging.getLogger(__name__)
+
+_ALLOWED_IRI_SCHEMES = ("http://", "https://", "urn:")
+_FORBIDDEN_IRI_CHARS = frozenset('<>"{}|\\^`')
+
+
+def _is_well_formed_absolute_iri(value: str) -> bool:
+    """Return whether an IRI is safe, absolute, and resolvable by supported knowledge."""
+    return bool(value) and value.startswith(_ALLOWED_IRI_SCHEMES) and not any(
+        char.isspace() or char in _FORBIDDEN_IRI_CHARS for char in value
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -144,7 +154,7 @@ class ValidationService:
             project_id:        UUID of the project being validated against.
             branch:            Branch name (e.g. "main").
             entity:            Dict with keys: label, parent_iris, labels, iri.
-            project_namespace: Canonical namespace for IRI ownership check.
+            project_namespace: Canonical namespace retained for caller compatibility.
 
         Returns:
             List of ValidationError objects (empty = valid).
@@ -259,26 +269,31 @@ class ValidationService:
         entity: dict[str, Any],
         project_namespace: str,
     ) -> list[ValidationError]:
-        """VALID-04: entity IRI must be in the project-owned namespace.
+        """VALID-04: entity and parent IRIs must be well-formed and absolute.
 
-        Blocks IRIs that use namespaces belonging to other projects or
-        external vocabularies. Skips the check when IRI is empty/None
-        (pre-mint state — IRI will be assigned by mint_iri()).
+        Namespace ownership is not required: a project graph can legitimately mint
+        entities in its domain namespace and reference imported or external knowledge.
         """
+        del project_namespace
         entity_iri = entity.get("iri") or ""
-        if not entity_iri:
-            return []  # IRI not yet minted; skip check
-
-        extracted_ns = _extract_namespace(entity_iri)
-        if extracted_ns != project_namespace:
-            return [
+        errors: list[ValidationError] = []
+        if entity_iri and not _is_well_formed_absolute_iri(entity_iri):
+            errors.append(
                 ValidationError(
                     field="iri",
                     code="VALID-04",
-                    message=(
-                        f"IRI namespace '{extracted_ns}' is not owned by this project. "
-                        f"Expected namespace: '{project_namespace}'."
-                    ),
+                    message=f"Entity IRI '{entity_iri}' is not a well-formed absolute IRI.",
                 )
-            ]
-        return []
+            )
+        for parent_iri in entity.get("parent_iris", []):
+            if not _is_well_formed_absolute_iri(parent_iri):
+                errors.append(
+                    ValidationError(
+                        field="parent_iris",
+                        code="VALID-04",
+                        message=(
+                            f"Parent IRI '{parent_iri}' is not a well-formed absolute IRI."
+                        ),
+                    )
+                )
+        return errors
