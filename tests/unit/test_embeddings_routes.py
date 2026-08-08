@@ -10,6 +10,15 @@ from fastapi.testclient import TestClient
 PROJECT_ID = "12345678-1234-5678-1234-567812345678"
 
 
+def test_semantic_search_rejects_anonymous_at_route(client: TestClient) -> None:
+    with patch("ontokit.api.routes.semantic_search.EmbeddingService") as service:
+        response = client.get(
+            f"/api/v1/projects/{PROJECT_ID}/search/semantic", params={"q": "contract"}
+        )
+    assert response.status_code == 401
+    service.assert_not_called()
+
+
 def _make_project_response(user_role: str = "owner") -> MagicMock:
     resp = MagicMock()
     resp.user_role = user_role
