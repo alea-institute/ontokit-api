@@ -179,6 +179,81 @@ async def test_r2_1_saved_entity_embedding_does_not_block_its_own_submit(
 
 
 @pytest.mark.asyncio
+async def test_r3_restriction_parent_baseline_allows_mint_save_and_submit(
+    real_db_session: AsyncSession, tmp_path: Path
+) -> None:
+    """Reparsed restriction blank nodes do not become malformed mint parents."""
+    project_id = uuid4()
+    user = CurrentUser(id="r3-restriction-user", name="R3 User", email="r3@example.test")
+    project = Project(id=project_id, name="R3 restrictions", owner_id=user.id)
+    project.members.append(ProjectMember(user_id=user.id, role="editor"))
+    session = SuggestionSession(
+        project_id=project_id,
+        user_id=user.id,
+        user_name=user.name,
+        session_id="r3-restriction-submit",
+        branch="suggestion/r3-restriction-submit",
+        beacon_token="integration-token",
+    )
+    real_db_session.add_all([project, session])
+    await real_db_session.commit()
+
+    git = BareGitRepositoryService(base_path=str(tmp_path))
+    initial = b"""\
+@prefix ex: <http://example.org/ontology/> .
+@prefix owl: <http://www.w3.org/2002/07/owl#> .
+@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+
+ex:RestrictedWork a owl:Class ;
+    rdfs:label "Restricted work" ;
+    rdfs:subClassOf [
+        a owl:Restriction ;
+        owl:onProperty ex:hasRisk ;
+        owl:someValuesFrom ex:Risk
+    ] .
+"""
+    git.initialize_repository(project_id, initial, "ontology.ttl")
+    git.create_branch(project_id, session.branch, from_ref="main")
+    minted_iri = "http://example.org/ontology/Minted"
+    content = (
+        initial.decode()
+        + '\nex:Minted a owl:Class ; rdfs:label "Minted" ; '
+        "rdfs:subClassOf ex:RestrictedWork .\n"
+    )
+    suggestions = SuggestionService(real_db_session, git)
+    suggestions._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
+    suggestions._create_pr_for_session = AsyncMock(  # type: ignore[method-assign]
+        return_value=SuggestionSubmitResponse(pr_number=1, pr_url=None, status="submitted")
+    )
+
+    try:
+        await suggestions.save(
+            project_id,
+            session.session_id,
+            SuggestionSaveRequest(
+                content=content,
+                entity_iri=minted_iri,
+                entity_label="Minted",
+            ),
+            user,
+        )
+        with patch(
+            "ontokit.services.validation_service.ValidationService.validate_entity",
+            new=AsyncMock(return_value=[]),
+        ):
+            result = await suggestions.submit(
+                project_id,
+                session.session_id,
+                SuggestionSubmitRequest(summary="ready"),
+                user,
+            )
+
+        assert result.status == "submitted"
+    finally:
+        await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "review_status",
     [

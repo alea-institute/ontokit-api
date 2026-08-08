@@ -214,15 +214,16 @@ class SuggestionService:
 
         proposed_entities = self._declared_entities(proposed)
         baseline_entities = self._declared_entities(baseline)
-        added_parent_links = set(proposed.triples((None, RDFS.subClassOf, None))) - set(
-            baseline.triples((None, RDFS.subClassOf, None))
-        )
+        new_entities = proposed_entities - baseline_entities
         malformed_parents = {
             parent
-            for _, _, parent in added_parent_links
-            if not isinstance(parent, URIRef)
-            or not str(parent).startswith(("http://", "https://", "urn:"))
-            or any(char.isspace() for char in str(parent))
+            for entity in new_entities
+            for parent in proposed.objects(entity, RDFS.subClassOf)
+            if isinstance(parent, URIRef)
+            and (
+                not str(parent).startswith(("http://", "https://", "urn:"))
+                or any(char.isspace() for char in str(parent))
+            )
         }
         if malformed_parents:
             raise HTTPException(
@@ -236,7 +237,6 @@ class SuggestionService:
             for label in baseline.objects(entity, RDFS.label)
             if isinstance(label, Literal) and str(label).strip()
         }
-        new_entities = proposed_entities - baseline_entities
         for entity in new_entities:
             for label in proposed.objects(entity, RDFS.label):
                 if not isinstance(label, Literal):

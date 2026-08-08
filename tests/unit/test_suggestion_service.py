@@ -2283,3 +2283,25 @@ class TestSubmissionContentGates:
             await service._validate_submission_content(
                 PROJECT_ID, "suggestion/test", "ontology.ttl", proposed
             )
+
+    @pytest.mark.asyncio
+    async def test_blocks_malformed_parent_on_minted_entity(
+        self, service: SuggestionService, mock_git: MagicMock
+    ) -> None:
+        mock_git.get_default_branch.return_value = "main"
+        mock_git.get_file_from_branch.return_value = self.BASELINE
+        proposed = """
+            @prefix ex: <http://example.org/> .
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:Existing a owl:Class ; rdfs:label "Existing" .
+            ex:Minted a owl:Class ; rdfs:subClassOf <ftp://example.org/Parent> .
+        """
+
+        with pytest.raises(HTTPException) as exc:
+            await service._validate_submission_content(
+                PROJECT_ID, "suggestion/test", "ontology.ttl", proposed
+            )
+
+        assert exc.value.status_code == 422
+        assert exc.value.detail == "Suggestion references a malformed parent IRI"
