@@ -39,6 +39,7 @@ from ontokit.schemas.generation import (
 from ontokit.services.context_assembler import OntologyContextAssembler
 from ontokit.services.duplicate_check_service import DuplicateCheckService
 from ontokit.services.llm import (
+    PricingUnavailableError,
     check_budget,
     check_llm_access,
     check_rate_limit,
@@ -166,6 +167,17 @@ async def generate_suggestions(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No model selected for this project's LLM configuration. Choose one in project settings.",
         )
+
+    # Resolve trustworthy pricing before any provider call. Unknown models and
+    # pricing outages fail closed so the dollar budget cannot silently become
+    # an unlimited $0 ledger.
+    try:
+        input_cost_per_tok, output_cost_per_tok = await get_model_pricing(config.model)
+    except PricingUnavailableError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Pricing data is unavailable for the selected model; generation is paused.",
+        ) from exc
 
     # 4. Rate limit check (fails open if Redis unavailable — DB budget in step 5
     #    is the non-fail-open backstop). Both fail-open paths (pool absent here,
@@ -312,7 +324,6 @@ async def generate_suggestions(
     # 11. Audit log — metadata only, never prompt/response content (D-08)
     try:
         model_id = config.model or ""
-        input_cost_per_tok, output_cost_per_tok = await get_model_pricing(model_id)
         cost_estimate = (
             response.input_tokens * input_cost_per_tok
             + response.output_tokens * output_cost_per_tok

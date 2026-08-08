@@ -7,16 +7,21 @@ from unittest.mock import AsyncMock
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.routes import generation
 from ontokit.core.auth import CurrentUser
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.embedding import EntityEmbedding, ProjectEmbeddingConfig
+from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
+from ontokit.schemas.generation import GenerateSuggestionsRequest
 from ontokit.schemas.suggestion import SuggestionSaveRequest
 from ontokit.services.duplicate_check_service import DuplicateCheckService
+from ontokit.services.llm import pricing
 from ontokit.services.suggestion_service import SuggestionService
 
 pytestmark = pytest.mark.integration
@@ -149,5 +154,45 @@ async def test_p0_6_identical_real_embedding_blocks_without_structure(
         response = await service.check(project_id, "Legal Entity", parent_iri=None)
         assert response.verdict == "block"
         assert response.composite_score == pytest.approx(1.0)
+    finally:
+        await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
+async def test_p1_1_unpriced_model_stops_before_provider_on_real_budget_rows(
+    real_db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real project budget cannot be bypassed by an unknown $0 model."""
+    project_id = uuid4()
+    user = CurrentUser(id="budget-user", name="Budget User")
+    project = Project(id=project_id, name="P1-1", owner_id=user.id)
+    project.members.append(ProjectMember(user_id=user.id, role="editor"))
+    config = ProjectLLMConfig(
+        project_id=project_id,
+        provider="openai",
+        model="unknown-paid-model",
+        monthly_budget_usd=1.0,
+    )
+    real_db_session.add_all([project, config])
+    await real_db_session.commit()
+
+    monkeypatch.setattr(pricing, "_pricing_cache", {"known": (0.1, 0.2)})
+    monkeypatch.setattr(pricing, "_pricing_fetched_at", pricing.time.time())
+    provider_factory = AsyncMock()
+    monkeypatch.setattr(generation, "get_provider", provider_factory)
+
+    try:
+        with pytest.raises(HTTPException) as exc_info:
+            await generation.generate_suggestions(
+                project_id,
+                GenerateSuggestionsRequest(
+                    class_iri="https://example.test/Thing",
+                    suggestion_type="children",
+                ),
+                real_db_session,
+                user,
+            )
+        assert exc_info.value.status_code == 503
+        provider_factory.assert_not_called()
     finally:
         await _delete_project(real_db_session, project_id)

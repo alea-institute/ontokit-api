@@ -24,10 +24,16 @@ LITELLM_PRICING_URL = (
 )
 
 CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
+FAILURE_CACHE_TTL_SECONDS = 5 * 60
 
 # Module-level cache — maps model_id → (input_cost_per_token, output_cost_per_token)
 _pricing_cache: dict[str, tuple[float, float]] | None = None
 _pricing_fetched_at: float = 0.0
+_pricing_fetch_failed_at: float = 0.0
+
+
+class PricingUnavailableError(RuntimeError):
+    """Raised when a paid model has no trustworthy price information."""
 
 
 def _is_cache_valid() -> bool:
@@ -38,7 +44,7 @@ def _is_cache_valid() -> bool:
 
 async def _fetch_and_cache() -> None:
     """Fetch the LiteLLM pricing JSON and populate the module-level cache."""
-    global _pricing_cache, _pricing_fetched_at
+    global _pricing_cache, _pricing_fetch_failed_at, _pricing_fetched_at
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -47,6 +53,7 @@ async def _fetch_and_cache() -> None:
             raw: dict[str, Any] = resp.json()
     except Exception:
         logger.warning("Failed to fetch LiteLLM pricing data; using stale cache", exc_info=True)
+        _pricing_fetch_failed_at = time.time()
         return  # keep existing stale cache (or None on first attempt)
 
     prices: dict[str, tuple[float, float]] = {}
@@ -70,16 +77,20 @@ async def _fetch_and_cache() -> None:
 
     _pricing_cache = prices
     _pricing_fetched_at = time.time()
+    _pricing_fetch_failed_at = 0.0
     logger.info("Loaded LiteLLM pricing for %d models", len(prices))
 
 
 async def get_model_pricing(model: str) -> tuple[float, float]:
     """Return (input_cost_per_token, output_cost_per_token) for the given model ID.
 
-    If pricing is not found, returns (0.0, 0.0) — cost will be recorded as zero
-    rather than failing the LLM call.
+    Raises PricingUnavailableError when the model is unknown or pricing cannot
+    be fetched. Treating an unpriced paid call as free defeats every dollar cap.
     """
-    if not _is_cache_valid():
+    recent_failure = _pricing_fetch_failed_at and (
+        time.time() - _pricing_fetch_failed_at < FAILURE_CACHE_TTL_SECONDS
+    )
+    if not _is_cache_valid() and not recent_failure:
         await _fetch_and_cache()
 
     if _pricing_cache:
@@ -92,8 +103,7 @@ async def get_model_pricing(model: str) -> tuple[float, float]:
             if short in _pricing_cache:
                 return _pricing_cache[short]
 
-    logger.debug("No pricing data found for model %r; using 0.0", model)
-    return (0.0, 0.0)
+    raise PricingUnavailableError(f"Pricing unavailable for model {model!r}")
 
 
 def get_pricing_cache_age() -> datetime | None:
