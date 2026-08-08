@@ -2251,7 +2251,9 @@ class TestSubmissionContentGates:
         """
 
         with pytest.raises(HTTPException) as exc:
-            await service._validate_submission_content(PROJECT_ID, "ontology.ttl", proposed)
+            await service._validate_submission_content(
+                PROJECT_ID, "suggestion/test", "ontology.ttl", proposed
+            )
 
         assert exc.value.status_code == 409
 
@@ -2270,6 +2272,8 @@ class TestSubmissionContentGates:
         """
 
         with pytest.raises(HTTPException) as exc:
-            await service._validate_submission_content(PROJECT_ID, "ontology.ttl", proposed)
+            await service._validate_submission_content(
+                PROJECT_ID, "suggestion/test", "ontology.ttl", proposed
+            )
 
         assert exc.value.status_code == 422

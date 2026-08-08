@@ -9,6 +9,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
+from rdflib import Graph
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -21,8 +22,13 @@ from ontokit.models.project import Project, ProjectMember
 from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.generation import GenerateSuggestionsRequest
-from ontokit.schemas.suggestion import SuggestionSaveRequest
+from ontokit.schemas.suggestion import (
+    SuggestionSaveRequest,
+    SuggestionSubmitRequest,
+    SuggestionSubmitResponse,
+)
 from ontokit.services.duplicate_check_service import DuplicateCheckService
+from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.llm import pricing
 from ontokit.services.suggestion_service import SuggestionService
 
@@ -79,6 +85,95 @@ async def test_p0_1_suggestion_save_commits_with_real_git_service(
         assert git.get_repository(project_id).read_file(session.branch, "ontology.ttl").endswith(
             b"ex:Thing a ex:Class .\n"
         )
+    finally:
+        await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
+async def test_r2_1_saved_entity_embedding_does_not_block_its_own_submit(
+    real_db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live pgvector row minted on this suggestion branch is excluded at submit."""
+    project_id = uuid4()
+    user = CurrentUser(id="r2-self-user", name="Self User", email="self@example.test")
+    project = Project(id=project_id, name="R2 self", owner_id=user.id)
+    project.members.append(ProjectMember(user_id=user.id, role="editor"))
+    session = SuggestionSession(
+        project_id=project_id,
+        user_id=user.id,
+        user_name=user.name,
+        session_id="r2-self-submit",
+        branch="suggestion/r2-self-submit",
+        beacon_token="integration-token",
+    )
+    real_db_session.add_all(
+        [
+            project,
+            session,
+            ProjectEmbeddingConfig(
+                project_id=project_id,
+                provider="local",
+                model_name="integration-vector",
+                dimensions=3,
+            ),
+        ]
+    )
+    await real_db_session.commit()
+
+    git = BareGitRepositoryService(base_path=str(tmp_path))
+    initial = (
+        b"@prefix ex: <https://example.test/> .\n"
+        b"@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+        b"@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
+    )
+    git.initialize_repository(project_id, initial, "ontology.ttl")
+    git.create_branch(project_id, session.branch, from_ref="main")
+    minted_iri = f"http://example.org/ontology/{project_id}#Minted"
+    content = (
+        initial.decode()
+        + f'<{minted_iri}> a owl:Class ; rdfs:label "Minted concept" ; '
+        "rdfs:subClassOf owl:Thing .\n"
+    )
+    suggestions = SuggestionService(real_db_session, git)
+    suggestions._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
+
+    try:
+        await suggestions.save(
+            project_id,
+            session.session_id,
+            SuggestionSaveRequest(
+                content=content,
+                entity_iri=minted_iri,
+                entity_label="Minted concept",
+            ),
+            user,
+        )
+
+        graph = Graph().parse(data=content, format="turtle")
+        ontology = MagicMock()
+        ontology.is_loaded.return_value = True
+        ontology._get_graph = AsyncMock(return_value=graph)
+        monkeypatch.setattr("ontokit.services.ontology.get_ontology_service", lambda: ontology)
+        embedder = EmbeddingService(real_db_session)
+        provider = AsyncMock()
+        provider.provider_name = "local"
+        provider.model_id = "integration-vector"
+        provider.embed_text.return_value = [1.0, 0.0, 0.0]
+        monkeypatch.setattr(EmbeddingService, "_get_provider", AsyncMock(return_value=provider))
+        await embedder.embed_single_entity(
+            project_id, session.branch, minted_iri
+        )
+
+        suggestions._create_pr_for_session = AsyncMock(  # type: ignore[method-assign]
+            return_value=SuggestionSubmitResponse(pr_number=1, pr_url=None, status="submitted")
+        )
+        result = await suggestions.submit(
+            project_id,
+            session.session_id,
+            SuggestionSubmitRequest(summary="ready"),
+            user,
+        )
+        assert result.status == "submitted"
     finally:
         await _delete_project(real_db_session, project_id)
 

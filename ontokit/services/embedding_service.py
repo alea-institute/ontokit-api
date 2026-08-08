@@ -671,6 +671,8 @@ class EmbeddingService:
         limit: int = 20,
         threshold: float = 0.3,
         billing_user_id: str = "system:duplicate-check",
+        exclude_branch: str | None = None,
+        exclude_iris: set[str] | None = None,
     ) -> list[SemanticSearchResultWithBranch]:
         """Search across ALL branches for a project (DEDUP-08).
 
@@ -710,24 +712,35 @@ class EmbeddingService:
 
         # pgvector cosine distance across ALL branches (no branch = :br filter).
         # See note in semantic_search() above re: CAST() vs ::vector.
-        query_str = text("""
+        exclusions = ""
+        params: dict[str, object] = {
+            "query_vec": _vec_to_str(query_vec),
+            "pid": str(project_id),
+            "threshold": threshold,
+            "lim": limit,
+        }
+        if exclude_branch is not None:
+            exclusions += " AND branch != :exclude_branch"
+            params["exclude_branch"] = exclude_branch
+        for index, iri in enumerate(sorted(exclude_iris or set())):
+            key = f"exclude_iri_{index}"
+            exclusions += f" AND entity_iri != :{key}"
+            params[key] = iri
+
+        query_str = text(f"""
             SELECT entity_iri, label, entity_type, branch, deprecated,
                    1 - (embedding <=> CAST(:query_vec AS vector)) AS score
             FROM entity_embeddings
             WHERE project_id = :pid
               AND (1 - (embedding <=> CAST(:query_vec AS vector))) >= :threshold
+              {exclusions}
             ORDER BY embedding <=> CAST(:query_vec AS vector)
             LIMIT :lim
-        """)
+        """)  # nosec B608 -- only fixed SQL fragments and generated bind names are interpolated
 
         result = await self._db.execute(
             query_str,
-            {
-                "query_vec": _vec_to_str(query_vec),
-                "pid": str(project_id),
-                "threshold": threshold,
-                "lim": limit,
-            },
+            params,
         )
 
         return [

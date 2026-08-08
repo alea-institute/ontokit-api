@@ -46,6 +46,8 @@ class DuplicateCheckService:
         parent_iri: str | None = None,
         limit: int = 10,
         billing_user_id: str = "system:duplicate-check",
+        exclude_branch: str | None = None,
+        exclude_iris: set[str] | None = None,
     ) -> DuplicateCheckResponse:
         """Run composite duplicate check across all branches (DEDUP-04 through DEDUP-08).
 
@@ -65,7 +67,12 @@ class DuplicateCheckService:
 
         # 1. Semantic search across ALL branches (DEDUP-08)
         semantic_candidates = await self._embedding_svc.semantic_search_all_branches(
-            project_id, label, limit=limit, billing_user_id=billing_user_id
+            project_id,
+            label,
+            limit=limit,
+            billing_user_id=billing_user_id,
+            exclude_branch=exclude_branch,
+            exclude_iris=exclude_iris,
         )
 
         if not semantic_candidates:

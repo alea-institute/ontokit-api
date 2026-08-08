@@ -190,7 +190,7 @@ class SuggestionService:
         return bool(self._declared_entities(proposed) - self._declared_entities(current))
 
     async def _validate_submission_content(
-        self, project_id: UUID, filename: str, content: str
+        self, project_id: UUID, branch: str, filename: str, content: str
     ) -> None:
         """Re-run deterministic duplicate and reference gates at submit time."""
         proposed = Graph()
@@ -275,6 +275,8 @@ class SuggestionService:
                     project_id,
                     str(labels[0]),
                     parent_iri=parents[0] if parents else None,
+                    exclude_branch=branch,
+                    exclude_iris={str(iri) for iri in new_entities},
                 )
                 if duplicate.verdict == "block":
                     raise HTTPException(
@@ -639,7 +641,7 @@ class SuggestionService:
                 project_id, session.branch, filename
             )
             await self._validate_submission_content(
-                project_id, filename, content.decode("utf-8")
+                project_id, session.branch, filename, content.decode("utf-8")
             )
 
             # R10 gates run BEFORE any git or PR work, so a refused submission
@@ -1728,7 +1730,7 @@ class SuggestionService:
         filename = self._get_git_ontology_path(project)
         content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
         await self._validate_submission_content(
-            project_id, filename, content.decode("utf-8")
+            project_id, session.branch, filename, content.decode("utf-8")
         )
 
         # Store optional credit info
