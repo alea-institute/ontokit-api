@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
@@ -178,7 +179,7 @@ async def test_p1_1_unpriced_model_stops_before_provider_on_real_budget_rows(
     await real_db_session.commit()
 
     monkeypatch.setattr(pricing, "_pricing_cache", {"known": (0.1, 0.2)})
-    monkeypatch.setattr(pricing, "_pricing_fetched_at", pricing.time.time())
+    monkeypatch.setattr(pricing, "_pricing_fetched_at", time.time())
     provider_factory = AsyncMock()
     monkeypatch.setattr(generation, "get_provider", provider_factory)
 
