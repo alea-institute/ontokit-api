@@ -10,6 +10,16 @@ import abc
 from typing import Any
 
 
+def estimate_tokens(text: str) -> int:
+    """Conservative provider-independent fallback for missing usage metadata."""
+    return max(1, (len(text) + 3) // 4) if text else 0
+
+
+def estimate_message_tokens(messages: list[dict[str, str]]) -> int:
+    """Estimate tokens across message content when a gateway omits usage."""
+    return sum(estimate_tokens(message.get("content", "")) for message in messages)
+
+
 class LLMProvider(abc.ABC):
     """Abstract base class for all LLM provider implementations.
 

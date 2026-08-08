@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ontokit.services.llm.base import LLMProvider
+from ontokit.services.llm.base import LLMProvider, estimate_message_tokens, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -67,8 +67,8 @@ class OpenAICompatProvider(LLMProvider):
         )
         text = response.choices[0].message.content or ""
         usage = response.usage
-        input_tokens = usage.prompt_tokens if usage else 0
-        output_tokens = usage.completion_tokens if usage else 0
+        input_tokens = usage.prompt_tokens if usage else estimate_message_tokens(messages)
+        output_tokens = usage.completion_tokens if usage else estimate_tokens(text)
         return text, input_tokens, output_tokens
 
     async def test_connection(self) -> bool:
