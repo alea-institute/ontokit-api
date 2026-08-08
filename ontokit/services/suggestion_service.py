@@ -67,7 +67,7 @@ from ontokit.services.verification import get_verification_provider
 logger = logging.getLogger(__name__)
 
 # Per-branch locks to serialize concurrent git writes (save + beacon_save)
-_branch_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+_branch_locks: dict[tuple[UUID, str], asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 class SuggestionService:
@@ -265,9 +265,16 @@ class SuggestionService:
                 except IntegrityError:
                     await self.db.rollback()
                     return
-                await pool.enqueue_job(
-                    "run_embedding_generation_task", str(project_id), branch, str(job.id)
-                )
+                try:
+                    await pool.enqueue_job(
+                        "run_embedding_generation_task", str(project_id), branch, str(job.id)
+                    )
+                except Exception as exc:
+                    job.status = "failed"
+                    job.error_message = f"Failed to enqueue embedding job: {exc}"
+                    job.completed_at = datetime.now(UTC)
+                    await self.db.commit()
+                    raise
         except Exception:
             logger.warning(
                 "Failed to enqueue suggestion index refresh for project=%s branch=%s",
@@ -454,21 +461,20 @@ class SuggestionService:
 
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
-        derived_mint = self._validate_turtle_and_detect_mint(
-            project_id, session.branch, filename, data.content
-        )
-        if derived_mint:
-            self._assert_can_mint(project, user)
-
         # Serialize git writes per branch to prevent lost commits
         # R14: never author with the contributor's real email address.
         author_name, author_email = await self.commit_identity.resolve(
             session.user_id, session.user_name
         )
 
-        async with _branch_locks[session.branch]:
+        async with _branch_locks[(project_id, session.branch)]:
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
+            derived_mint = self._validate_turtle_and_detect_mint(
+                project_id, session.branch, filename, data.content
+            )
+            if derived_mint:
+                self._assert_can_mint(project, user)
             # Commit to the suggestion branch
             commit_message = f"Update {data.entity_label}"
             try:
@@ -548,12 +554,7 @@ class SuggestionService:
 
         filename = self._get_git_ontology_path(project)
         content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
-        self._validate_turtle_and_detect_mint(
-            project_id, session.branch, filename, content.decode("utf-8")
-        )
-        self._validate_submission_content(
-            project_id, filename, content.decode("utf-8")
-        )
+        self._validate_submission_content(project_id, filename, content.decode("utf-8"))
 
         # R10 gates run BEFORE any git or PR work, so a refused submission
         # leaves no side effects behind.
@@ -1154,7 +1155,8 @@ class SuggestionService:
             project_id, session, SuggestionOutcomeType.ACCEPTED, decided_by or user.id
         )
         await self.db.commit()
-        await self._enqueue_branch_refresh(project_id, "main", full_embedding=True)
+        default_branch = self.git_service.get_default_branch(project_id)
+        await self._enqueue_branch_refresh(project_id, default_branch, full_embedding=True)
 
     async def dismiss(
         self, project_id: UUID, session_id: str, user: CurrentUser, note: str | None = None
@@ -1377,9 +1379,6 @@ class SuggestionService:
         """Commit a beacon payload to the session branch (fire-and-forget)."""
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
-        self._validate_turtle_and_detect_mint(
-            project_id, session.branch, filename, data.content
-        )
         author_name, author_email = await self.commit_identity.resolve(
             session.user_id,
             session.user_name,
@@ -1388,9 +1387,19 @@ class SuggestionService:
         )
 
         # Serialize git writes per branch to prevent lost commits
-        async with _branch_locks[session.branch]:
+        async with _branch_locks[(project_id, session.branch)]:
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
+            derived_mint = self._validate_turtle_and_detect_mint(
+                project_id, session.branch, filename, data.content
+            )
+            if derived_mint:
+                session_user = CurrentUser(
+                    id=session.user_id,
+                    name=session.user_name,
+                    email=session.user_email,
+                )
+                self._assert_can_mint(project, session_user)
             # Commit without full validation (speed over correctness for beacon)
             try:
                 self.git_service.commit_changes(
@@ -1537,13 +1546,6 @@ class SuggestionService:
 
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
-        derived_mint = self._validate_turtle_and_detect_mint(
-            project_id, session.branch, filename, data.content
-        )
-        if derived_mint:
-            # Anonymous callers are below the trusted rung by construction (R8).
-            self._assert_can_mint(project, None)
-
         # R14: the credit name the submitter typed is used for the NAME only —
         # never for the address, which is a per-session anonymous alias.
         author_name, author_email = await self.commit_identity.resolve(
@@ -1553,9 +1555,15 @@ class SuggestionService:
             session_id=session.session_id,
         )
 
-        async with _branch_locks[session.branch]:
+        async with _branch_locks[(project_id, session.branch)]:
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
+            derived_mint = self._validate_turtle_and_detect_mint(
+                project_id, session.branch, filename, data.content
+            )
+            if derived_mint:
+                # Anonymous callers are below the trusted rung by construction (R8).
+                self._assert_can_mint(project, None)
             commit_message = f"Update {data.entity_label}"
             try:
                 commit_info = self.git_service.commit_changes(

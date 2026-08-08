@@ -37,6 +37,11 @@ class SuggestionSessionStatus(StrEnum):
     CHANGES_REQUESTED = "changes-requested"
 
 
+_STATUS_CHECK_SQL = "status IN ({})".format(
+    ", ".join(repr(status.value) for status in SuggestionSessionStatus)
+)
+
+
 class SuggestionSession(Base):
     """Suggestion session model for tracking suggester edits."""
 
@@ -118,8 +123,7 @@ class SuggestionSession(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "session_id", name="uq_suggestion_session"),
         CheckConstraint(
-            "status IN ('active', 'submitted', 'auto-submitted', 'discarded', "
-            "'merged', 'rejected', 'changes-requested')",
+            _STATUS_CHECK_SQL,
             name="ck_suggestion_session_status",
         ),
     )
