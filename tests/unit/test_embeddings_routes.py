@@ -16,7 +16,7 @@ def test_semantic_search_rejects_anonymous_at_route(client: TestClient) -> None:
             f"/api/v1/projects/{PROJECT_ID}/search/semantic", params={"q": "contract"}
         )
     assert response.status_code == 401
-    service.assert_not_called()
+    service.return_value.semantic_search.assert_not_called()
 
 
 def _make_project_response(user_role: str = "owner") -> MagicMock:
