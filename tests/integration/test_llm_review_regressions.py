@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import delete
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.routes import generation
@@ -17,6 +17,7 @@ from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.embedding import EntityEmbedding, ProjectEmbeddingConfig
 from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.project import Project, ProjectMember
+from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.generation import GenerateSuggestionsRequest
 from ontokit.schemas.suggestion import SuggestionSaveRequest
@@ -254,5 +255,53 @@ async def test_p1_7_p1_12_server_gates_content_before_real_git_commit(
             )
         assert exc_info.value.status_code == expected_status
         assert git.get_file_from_branch(project_id, session.branch, "ontology.ttl") == initial
+    finally:
+        await _delete_project(real_db_session, project_id)
+
+
+@pytest.mark.asyncio
+async def test_p0_4_failed_merge_keeps_real_session_and_trust_ledger_unchanged(
+    real_db_session: AsyncSession,
+) -> None:
+    """A downstream merge failure cannot mint ACCEPTED trust credit."""
+    project_id = uuid4()
+    user = CurrentUser(id="review-editor", name="Reviewer")
+    project = Project(id=project_id, name="P0-4", owner_id="owner")
+    project.members.append(ProjectMember(user_id=user.id, role="editor"))
+    session = SuggestionSession(
+        project_id=project_id,
+        user_id="contributor",
+        session_id="p0-4-merge",
+        branch="suggestion/p0-4-merge",
+        beacon_token="integration-token",
+        status=SuggestionSessionStatus.SUBMITTED.value,
+        pr_number=42,
+    )
+    real_db_session.add_all([project, session])
+    await real_db_session.commit()
+
+    pull_requests = MagicMock()
+    pull_requests.merge_pull_request = AsyncMock(
+        side_effect=HTTPException(status_code=409, detail="conflict")
+    )
+    try:
+        with patch(
+            "ontokit.services.suggestion_service.get_pull_request_service",
+            return_value=pull_requests,
+        ), pytest.raises(HTTPException) as exc_info:
+            await SuggestionService(real_db_session).approve(
+                project_id, session.session_id, user
+            )
+        assert exc_info.value.status_code == 409
+        await real_db_session.refresh(session)
+        assert session.status == SuggestionSessionStatus.SUBMITTED.value
+        outcome_count = (
+            await real_db_session.execute(
+                select(func.count())
+                .select_from(SuggestionOutcome)
+                .where(SuggestionOutcome.session_id == session.id)
+            )
+        ).scalar_one()
+        assert outcome_count == 0
     finally:
         await _delete_project(real_db_session, project_id)
