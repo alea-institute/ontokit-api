@@ -76,3 +76,24 @@ worker cycle.
 Round-2 verification commands: `.venv/bin/pytest -q`, `.venv/bin/mypy ontokit`, and
 `.venv/bin/ruff check ontokit tests`. The first command includes the live Postgres/pgvector
 and Redis integration suite using the round-1 harness variables.
+
+## Round 3
+
+| Finding | Fix commit | Red evidence | Green evidence |
+|---|---|---|---|
+| Restriction blank-node parents blocked every real FOLIO submit | `45b82a42` | Before the fix, `test_r3_restriction_parent_baseline_allows_mint_save_and_submit` performed a real bare-git mint save and submit over restriction-bearing Turtle, then failed with 422 `Suggestion references a malformed parent IRI`. Independent rdflib parses assigned different blank-node identifiers, so the whole-graph `subClassOf` triple subtraction treated the unchanged restriction parent as added. | The same live integration test now submits successfully. Parent validation iterates only `rdfs:subClassOf` objects on newly declared URIRef entities, ignores legitimate blank-node restriction parents, and `test_blocks_malformed_parent_on_minted_entity` proves an `ftp://` URIRef parent still returns the exact malformed-parent 422. |
+
+### Blank-node identity audit
+
+| Round 1–2 path checked | Comparison shape | Verdict / action |
+|---|---|---|
+| `_validate_submission_content` parent validation | Raw `subClassOf` triple-set difference across independent baseline/proposal parses | **Unsafe; fixed in `45b82a42`.** Replaced the graph-wide triple diff with parent inspection scoped to `new_entities`; only malformed URIRef parents are rejected and blank-node restriction parents are legitimate. |
+| `_validate_turtle_and_detect_mint` | `_declared_entities(proposed) - _declared_entities(current)` | **Safe.** `_declared_entities` admits only URIRef subjects with named declaration types, so parse-local blank-node identifiers cannot enter either set. |
+| `_validate_submission_content` mint detection | `_declared_entities(proposed) - _declared_entities(baseline)` | **Safe.** This is the same URIRef-only entity-set comparison; restriction blank nodes are excluded by construction. |
+| `_validate_submission_content` duplicate-label gate | Labels collected only for baseline/new declared URIRef entities | **Safe.** It compares normalized literal label text and entity URIRefs, not RDF triples or blank-node identifiers. |
+| All other production changes from Round 1 start (`b35d2947`) through Round 2 disposition (`3dc64817`) | Reviewed the production diff for `Graph`, `triples`, baseline/proposal, and set-difference comparisons | **No additional cross-parse RDF triple comparison found.** The malformed-parent block was the only Round 1–2 path whose result depended on blank-node identity. |
+
+Round-3 verification on 2026-08-08: `.venv/bin/pytest -q` — **2580 passed**,
+including 31 live integration tests; `.venv/bin/mypy ontokit` — **Success: no issues
+found in 168 source files**; `.venv/bin/ruff check ontokit tests` — **All checks
+passed**.
