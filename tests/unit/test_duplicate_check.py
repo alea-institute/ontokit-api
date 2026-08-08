@@ -194,6 +194,30 @@ async def test_composite_score_weights():
 
 
 @pytest.mark.asyncio
+async def test_missing_structural_signal_renormalizes_available_weights():
+    """A minted IRI with no parent can still block on exact + semantic identity."""
+    svc, _ = _make_service()
+    sem_result = _make_sem_result(label="Legal Entity", score=1.0, branch="main")
+
+    with (
+        patch.object(
+            svc._embedding_svc,
+            "semantic_search_all_branches",
+            new=AsyncMock(return_value=[sem_result]),
+        ),
+        patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
+    ):
+        response = await svc.check(
+            project_id=PROJECT_ID,
+            label="Legal Entity",
+            parent_iri=None,
+        )
+
+    assert response.composite_score == 1.0
+    assert response.verdict == "block"
+
+
+@pytest.mark.asyncio
 async def test_all_branch_scope():
     """Duplicate search spans all project branches, not just the active one (DEDUP-08)."""
     svc, _ = _make_service()

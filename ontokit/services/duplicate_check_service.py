@@ -89,6 +89,7 @@ class DuplicateCheckService:
             semantic_score = sem_result.score
 
             # Structural score: folio-python Jaccard (returns 0.0 if folio unavailable)
+            structural_available = parent_iri is not None
             structural_score = (
                 self._structural_svc.compute_similarity(
                     sem_result.iri,
@@ -99,12 +100,19 @@ class DuplicateCheckService:
                 else 0.0
             )
 
-            # Composite (D-01 weights)
+            # Composite (D-01 weights). A freshly-minted proposal frequently has
+            # no structural context. In that case, renormalize the two available
+            # signals instead of treating the missing signal as evidence against
+            # duplication. Thresholds remain unchanged, so weak semantic matches
+            # are not promoted into false blocks.
+            available_weight = EXACT_WEIGHT + SEMANTIC_WEIGHT
+            if structural_available:
+                available_weight += STRUCTURAL_WEIGHT
             composite = (
                 EXACT_WEIGHT * exact_score
                 + SEMANTIC_WEIGHT * semantic_score
-                + STRUCTURAL_WEIGHT * structural_score
-            )
+                + (STRUCTURAL_WEIGHT * structural_score if structural_available else 0.0)
+            ) / available_weight
 
             # Determine source (D-09)
             source = await self._classify_source(project_id, sem_result.branch)
