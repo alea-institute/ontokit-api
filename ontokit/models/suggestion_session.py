@@ -5,7 +5,17 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 if TYPE_CHECKING:
@@ -105,7 +115,14 @@ class SuggestionSession(Base):
     project: Mapped["Project"] = relationship()
     pull_request: Mapped["PullRequest | None"] = relationship()
 
-    __table_args__ = (UniqueConstraint("project_id", "session_id", name="uq_suggestion_session"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "session_id", name="uq_suggestion_session"),
+        CheckConstraint(
+            "status IN ('active', 'submitted', 'auto-submitted', 'discarded', "
+            "'merged', 'rejected', 'changes-requested')",
+            name="ck_suggestion_session_status",
+        ),
+    )
 
     def __repr__(self) -> str:
         return (
