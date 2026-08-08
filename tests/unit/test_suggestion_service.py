@@ -2258,7 +2258,7 @@ class TestSubmissionContentGates:
         assert exc.value.status_code == 409
 
     @pytest.mark.asyncio
-    async def test_blocks_unknown_parent_at_submit(
+    async def test_accepts_external_folio_parent_at_submit(
         self, service: SuggestionService, mock_git: MagicMock
     ) -> None:
         mock_git.get_default_branch.return_value = "main"
@@ -2268,12 +2268,18 @@ class TestSubmissionContentGates:
             @prefix owl: <http://www.w3.org/2002/07/owl#> .
             @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
             ex:Existing a owl:Class ; rdfs:label "Existing" .
-            ex:Minted a owl:Class ; rdfs:subClassOf ex:Missing .
+            ex:Minted a owl:Class ; rdfs:subClassOf <https://folio.openlegalstandard.org/Risk> .
         """
-
-        with pytest.raises(HTTPException) as exc:
+        with (
+            patch(
+                "ontokit.services.validation_service.detect_project_namespace",
+                new=AsyncMock(return_value="http://example.org/"),
+            ),
+            patch(
+                "ontokit.services.validation_service.ValidationService.validate_entity",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
             await service._validate_submission_content(
                 PROJECT_ID, "suggestion/test", "ontology.ttl", proposed
             )
-
-        assert exc.value.status_code == 422

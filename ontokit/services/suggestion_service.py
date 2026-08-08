@@ -214,19 +214,20 @@ class SuggestionService:
 
         proposed_entities = self._declared_entities(proposed)
         baseline_entities = self._declared_entities(baseline)
-        known_entities = proposed_entities | baseline_entities | {OWL.Thing}
         added_parent_links = set(proposed.triples((None, RDFS.subClassOf, None))) - set(
             baseline.triples((None, RDFS.subClassOf, None))
         )
-        unknown_parents = {
+        malformed_parents = {
             parent
             for _, _, parent in added_parent_links
-            if isinstance(parent, URIRef) and parent not in known_entities
+            if not isinstance(parent, URIRef)
+            or not str(parent).startswith(("http://", "https://", "urn:"))
+            or any(char.isspace() for char in str(parent))
         }
-        if unknown_parents:
+        if malformed_parents:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Suggestion references an unknown parent IRI",
+                detail="Suggestion references a malformed parent IRI",
             )
 
         baseline_labels = {
@@ -335,6 +336,11 @@ class SuggestionService:
                     await self.db.commit()
                 except IntegrityError:
                     await self.db.rollback()
+                    logger.info(
+                        "Skipping duplicate active embedding refresh for project=%s branch=%s",
+                        project_id,
+                        branch,
+                    )
                     return
                 try:
                     await pool.enqueue_job(
