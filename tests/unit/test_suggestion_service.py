@@ -729,7 +729,7 @@ class TestSave:
 
         commit_info = MagicMock()
         commit_info.hash = "abc123"
-        mock_git.commit_to_branch = MagicMock(return_value=commit_info)
+        mock_git.commit_changes = MagicMock(return_value=commit_info)
 
         from ontokit.schemas.suggestion import SuggestionSaveRequest
 
@@ -745,7 +745,7 @@ class TestSave:
         assert result.commit_hash == "abc123"
         assert result.branch == session.branch
         assert result.changes_count == 1
-        mock_git.commit_to_branch.assert_called_once()
+        mock_git.commit_changes.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_save_non_active_session_raises_400(
@@ -803,7 +803,7 @@ class TestSave:
             _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
-        mock_git.commit_to_branch = MagicMock(side_effect=RuntimeError("git error"))
+        mock_git.commit_changes = MagicMock(side_effect=RuntimeError("git error"))
 
         from ontokit.schemas.suggestion import SuggestionSaveRequest
 
@@ -846,7 +846,7 @@ class TestSave:
 
         commit_info = MagicMock()
         commit_info.hash = "abc123"
-        mock_git.commit_to_branch = MagicMock(return_value=commit_info)
+        mock_git.commit_changes = MagicMock(return_value=commit_info)
 
         # Make db.commit fail
         mock_db.commit.side_effect = RuntimeError("DB error")
@@ -1533,7 +1533,7 @@ class TestBeaconSave:
             _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
-        mock_git.commit_to_branch = MagicMock()
+        mock_git.commit_changes = MagicMock()
 
         from ontokit.schemas.suggestion import SuggestionBeaconRequest
 
@@ -1549,7 +1549,7 @@ class TestBeaconSave:
             await service.beacon_save(PROJECT_ID, data, "valid-token")
 
         assert session.changes_count == 2
-        mock_git.commit_to_branch.assert_called_once()
+        mock_git.commit_changes.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_beacon_save_invalid_token_raises_401(
@@ -1611,7 +1611,7 @@ class TestBeaconSave:
         ):
             await service.beacon_save(PROJECT_ID, data, "token")
 
-        mock_git.commit_to_branch.assert_not_called()
+        mock_git.commit_changes.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_beacon_save_git_failure_silently_returns(
@@ -1639,7 +1639,7 @@ class TestBeaconSave:
             _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
-        mock_git.commit_to_branch = MagicMock(side_effect=RuntimeError("disk full"))
+        mock_git.commit_changes = MagicMock(side_effect=RuntimeError("disk full"))
 
         from ontokit.schemas.suggestion import SuggestionBeaconRequest
 

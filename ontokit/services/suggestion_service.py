@@ -326,7 +326,7 @@ class SuggestionService:
             # Commit to the suggestion branch
             commit_message = f"Update {data.entity_label}"
             try:
-                commit_info = self.git_service.commit_to_branch(  # type: ignore[attr-defined]
+                commit_info = self.git_service.commit_changes(
                     project_id=project_id,
                     branch_name=session.branch,
                     ontology_content=data.content.encode("utf-8"),
@@ -1223,7 +1223,7 @@ class SuggestionService:
         async with _branch_locks[session.branch]:
             # Commit without full validation (speed over correctness for beacon)
             try:
-                self.git_service.commit_to_branch(  # type: ignore[attr-defined]
+                self.git_service.commit_changes(
                     project_id=project_id,
                     branch_name=session.branch,
                     ontology_content=data.content.encode("utf-8"),
@@ -1383,7 +1383,7 @@ class SuggestionService:
         async with _branch_locks[session.branch]:
             commit_message = f"Update {data.entity_label}"
             try:
-                commit_info = self.git_service.commit_to_branch(  # type: ignore[attr-defined]
+                commit_info = self.git_service.commit_changes(
                     project_id=project_id,
                     branch_name=session.branch,
                     ontology_content=data.content.encode("utf-8"),

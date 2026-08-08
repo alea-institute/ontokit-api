@@ -429,7 +429,7 @@ class TestMintingGate:
         )
         commit_info = MagicMock()
         commit_info.hash = "abc123"
-        service.git_service.commit_to_branch = MagicMock(return_value=commit_info)
+        service.git_service.commit_changes = MagicMock(return_value=commit_info)
 
         response = await service.save(
             PROJECT_ID, session.session_id, self._save(False), _user("contributor-1")
@@ -444,14 +444,14 @@ class TestMintingGate:
         mock_db.execute.side_effect = _results(
             _result_for(session), _result_for(project), _result_for(project), project=project
         )
-        service.git_service.commit_to_branch = MagicMock()
+        service.git_service.commit_changes = MagicMock()
 
         with pytest.raises(HTTPException) as exc:
             await service.save(
                 PROJECT_ID, session.session_id, self._save(True), _user("contributor-1")
             )
         assert exc.value.status_code == 403
-        service.git_service.commit_to_branch.assert_not_called()
+        service.git_service.commit_changes.assert_not_called()
 
 
 class TestCapabilities:
