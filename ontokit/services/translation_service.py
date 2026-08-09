@@ -215,6 +215,8 @@ class TranslationService:
                 entity_iri=entity_iri,
                 predicate=predicate,
                 language=language,
+                source_value=source_value,
+                proposed_value=result.proposed_value,
                 source_value_hash=source_value_hash,
                 translated_value_hash=hash_literal_value(result.proposed_value),
                 model_name=self._primary.model,
