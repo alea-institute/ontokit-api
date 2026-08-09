@@ -78,6 +78,8 @@ def _to_response(config: ProjectTranslationConfig | None) -> TranslationConfigRe
         translate_examples=config.translate_examples,
         speed_mode=TranslationSpeedMode(config.speed_mode),
         provisional_gate=config.provisional_gate,
+        primary_provider=config.primary_provider,
+        primary_model=config.primary_model,
         verifier_provider=config.verifier_provider,
         verifier_model=config.verifier_model,
         verifier_api_key_set=bool(config.verifier_api_key_encrypted),
@@ -120,7 +122,7 @@ async def update_translation_config(
 
     values = data.model_dump(exclude_unset=True, exclude={"verifier_api_key"})
     for field, value in values.items():
-        if value is not None:
+        if value is not None or field in {"primary_provider", "primary_model"}:
             setattr(config, field, value.value if hasattr(value, "value") else value)
     if data.verifier_api_key:
         config.verifier_api_key_encrypted = encrypt_secret(data.verifier_api_key)
