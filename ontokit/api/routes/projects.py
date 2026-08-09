@@ -1433,6 +1433,20 @@ async def save_source_content(
     except Exception:
         logger.warning("Failed to queue ontology re-index", exc_info=True)
 
+    # Commit-before-enqueue: translation discovery always observes a durable tree.
+    try:
+        from ontokit.services.translation_jobs import enqueue_label_diff_after_commit
+
+        await enqueue_label_diff_after_commit(
+            project_id=project_id,
+            branch=current_branch,
+            commit_hash=commit_info.hash,
+            actor_id=user.id,
+            role=project.user_role or "viewer",
+        )
+    except Exception:
+        logger.warning("Failed to queue translation label diff", exc_info=True)
+
     return SourceContentSaveResponse(
         success=True,
         commit_hash=commit_info.hash,

@@ -1,0 +1,285 @@
+"""Commit-diff discovery and bounded ARQ fan-out for machine translations.
+
+The Redis counter covers queued plus running per-entity jobs for one project. Reservation is
+atomic, rejected reservations are rolled back, enqueue failures release unqueued slots, and each
+worker releases its slot in ``finally``. ``mode=batch`` is preserved in every payload as the U7
+provider-batch seam; until that adapter lands, execution uses the existing standard service path.
+"""
+
+from __future__ import annotations
+
+import logging
+from dataclasses import dataclass
+from typing import Any, cast
+from uuid import UUID
+
+import pygit2
+from rdflib import Graph, Literal, URIRef
+from rdflib.namespace import RDFS, SKOS
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ontokit.git import GitRepositoryService, get_git_service
+from ontokit.models.llm_config import ProjectLLMConfig
+from ontokit.models.project import Project, get_git_ontology_path
+from ontokit.models.translation import (
+    ProjectTranslationConfig,
+    TranslationRecord,
+    hash_literal_value,
+)
+from ontokit.services.llm import check_llm_access, check_rate_limit
+from ontokit.services.translation_annotations import read_annotation, translation_record_digest
+from ontokit.services.translation_service import TranslationService
+
+logger = logging.getLogger(__name__)
+
+AUTO_PREDICATES = frozenset((RDFS.label, SKOS.prefLabel, SKOS.altLabel))
+SCOPED_PREDICATES = {SKOS.definition: "translate_definitions", SKOS.example: "translate_examples"}
+MAX_PENDING_TRANSLATIONS_PER_PROJECT = 100
+
+
+@dataclass(frozen=True, slots=True)
+class TranslationTask:
+    entity_iri: str
+    predicate: str
+    source_value: str | None
+    source_language: str | None
+    target_language: str | None
+    mode: str
+
+
+def discover_translation_tasks(
+    parent: Graph,
+    current: Graph,
+    config: ProjectTranslationConfig,
+    covered: set[tuple[str, str, str, str]],
+) -> list[TranslationTask]:
+    """Return newly-added source literals; replacement edits deliberately produce no work."""
+    if not config.language_tags:
+        return []
+    predicates = set(AUTO_PREDICATES)
+    predicates.update(
+        predicate for predicate, flag in SCOPED_PREDICATES.items() if bool(getattr(config, flag))
+    )
+    tasks: list[TranslationTask] = []
+    for subject, predicate, literal in current - parent:
+        if (
+            predicate not in predicates
+            or not isinstance(subject, URIRef)
+            or not isinstance(literal, Literal)
+        ):
+            continue
+        # A remove+add at the same entity/predicate is an edit, not a mint.
+        if any(True for _ in (parent - current).triples((subject, predicate, None))):
+            continue
+        source_language = literal.language or "und"
+        for language in config.language_tags:
+            if language.casefold() == source_language.casefold():
+                continue
+            key = (str(subject), str(predicate), str(literal), language)
+            if key not in covered:
+                tasks.append(
+                    TranslationTask(
+                        str(subject),
+                        str(predicate),
+                        str(literal),
+                        source_language,
+                        language,
+                        config.speed_mode,
+                    )
+                )
+    return tasks
+
+
+def _pending_key(project_id: UUID) -> str:
+    return f"translation:pending:{project_id}"
+
+
+async def enqueue_translation_tasks(
+    pool: Any,
+    redis: Any,
+    project_id: UUID,
+    branch: str,
+    actor_id: str,
+    tasks: list[TranslationTask],
+) -> list[str]:
+    """Atomically reserve bounded project fan-out before any paid work is queued."""
+    if not tasks:
+        return []
+    reserved = len(tasks)
+    pending = int(await redis.incrby(_pending_key(project_id), reserved))
+    if pending > MAX_PENDING_TRANSLATIONS_PER_PROJECT:
+        await redis.decrby(_pending_key(project_id), reserved)
+        raise RuntimeError("project translation fan-out cap reached")
+    job_ids: list[str] = []
+    try:
+        for task in tasks:
+            job = await pool.enqueue_job(
+                "run_translation_entity_task",
+                str(project_id),
+                branch,
+                task.entity_iri,
+                task.predicate,
+                task.source_value,
+                task.source_language,
+                task.target_language,
+                actor_id,
+                task.mode,
+            )
+            if job is None:
+                raise RuntimeError("translation queue refused the job")
+            job_ids.append(str(job.job_id))
+    except Exception:
+        await redis.decrby(_pending_key(project_id), reserved - len(job_ids))
+        raise
+    return job_ids
+
+
+async def enqueue_label_diff_after_commit(
+    *, project_id: UUID, branch: str, commit_hash: str, actor_id: str, role: str
+) -> bool:
+    """Apply the shared LLM role/rate gate before queueing a post-commit trigger."""
+    if not check_llm_access(role, is_anonymous=False):
+        return False
+    from ontokit.api.utils.redis import get_arq_pool
+    from ontokit.main import redis_pool
+
+    pool = await get_arq_pool()
+    if (
+        pool is None
+        or redis_pool is None
+        or not await check_rate_limit(cast(Any, redis_pool), str(project_id), actor_id, role)
+    ):
+        return False
+    job = await pool.enqueue_job(
+        "run_translation_label_diff_task",
+        str(project_id),
+        branch,
+        commit_hash,
+        actor_id,
+    )
+    return job is not None
+
+
+async def _covered_values(
+    db: AsyncSession, project_id: UUID, graph: Graph
+) -> set[tuple[str, str, str, str]]:
+    result = await db.execute(
+        select(TranslationRecord).where(TranslationRecord.project_id == project_id)
+    )
+    covered: set[tuple[str, str, str, str]] = set()
+    for record in result.scalars().all():
+        if record.source_value is None or record.proposed_value is None:
+            continue
+        subject, predicate = URIRef(record.entity_iri), URIRef(record.predicate)
+        translated = Literal(record.proposed_value, lang=record.language)
+        annotation = read_annotation(graph, subject, predicate, translated)
+        if (
+            hash_literal_value(record.source_value) == record.source_value_hash
+            and annotation is not None
+            and annotation.record_digest == translation_record_digest(record)
+        ):
+            covered.add((record.entity_iri, record.predicate, record.source_value, record.language))
+    return covered
+
+
+async def run_label_diff_job(
+    ctx: dict[str, Any], project_id: str, branch: str, commit_hash: str, actor_id: str
+) -> dict[str, Any]:
+    db: AsyncSession = ctx["db"]
+    redis = ctx["redis"]
+    git: GitRepositoryService = get_git_service()
+    project_uuid = UUID(project_id)
+    config = await db.scalar(
+        select(ProjectTranslationConfig).where(ProjectTranslationConfig.project_id == project_uuid)
+    )
+    if config is None or not config.language_tags:
+        return {"queued": 0}
+    project = await db.scalar(select(Project).where(Project.id == project_uuid))
+    if project is None:
+        raise RuntimeError("translation project not found")
+    filename = get_git_ontology_path(project)
+    repository = git.get_repository(project_uuid)
+    commit = cast(pygit2.Commit, repository.repo.revparse_single(commit_hash))
+    current = Graph().parse(data=repository.read_file(commit_hash, filename), format="turtle")
+    parent = Graph()
+    if commit.parents:
+        parent.parse(
+            data=repository.read_file(str(commit.parents[0].id), filename), format="turtle"
+        )
+    tasks = discover_translation_tasks(
+        parent, current, config, await _covered_values(db, project_uuid, current)
+    )
+    job_ids = await enqueue_translation_tasks(redis, redis, project_uuid, branch, actor_id, tasks)
+    return {"queued": len(job_ids), "job_ids": job_ids}
+
+
+async def run_translation_entity_job(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str,
+    entity_iri: str,
+    predicate: str,
+    source_value: str | None,
+    source_language: str | None,
+    target_language: str | None,
+    actor_id: str,
+    mode: str,
+) -> dict[str, Any]:
+    db: AsyncSession = ctx["db"]
+    project_uuid = UUID(project_id)
+    try:
+        config = await db.scalar(
+            select(ProjectTranslationConfig).where(
+                ProjectTranslationConfig.project_id == project_uuid
+            )
+        )
+        llm_config = await db.scalar(
+            select(ProjectLLMConfig).where(ProjectLLMConfig.project_id == project_uuid)
+        )
+        project = await db.scalar(select(Project).where(Project.id == project_uuid))
+        if config is None or llm_config is None or project is None:
+            raise RuntimeError("translation configuration is incomplete")
+        filename = get_git_ontology_path(project)
+        git = get_git_service()
+        if source_value is None:
+            graph = Graph().parse(
+                data=git.get_file_from_branch(project_uuid, branch, filename), format="turtle"
+            )
+            candidates = [
+                value
+                for value in graph.objects(URIRef(entity_iri), URIRef(predicate))
+                if isinstance(value, Literal)
+            ]
+            if not candidates:
+                raise RuntimeError("requested source field is absent")
+            literal = candidates[0]
+            source_value, source_language = str(literal), literal.language or "und"
+        service = TranslationService(db, config, llm_config, actor_id, git_service=git)
+        languages = [target_language] if target_language else None
+        results = await service.translate(source_value, source_language or "und", languages)
+        outcome = await service.apply_results(
+            branch=branch,
+            filename=filename,
+            entity_iri=entity_iri,
+            predicate=predicate,
+            source_value=source_value,
+            source_language=source_language or "und",
+            source_value_hash=hash_literal_value(source_value),
+            results=results,
+            model_version=config.primary_model or "unknown",
+        )
+        return {"mode": mode, "commit_hash": outcome.commit.hash if outcome.commit else None}
+    finally:
+        await ctx["redis"].decrby(_pending_key(project_uuid), 1)
+
+
+__all__ = [
+    "MAX_PENDING_TRANSLATIONS_PER_PROJECT",
+    "TranslationTask",
+    "discover_translation_tasks",
+    "enqueue_translation_tasks",
+    "enqueue_label_diff_after_commit",
+    "run_label_diff_job",
+    "run_translation_entity_job",
+]

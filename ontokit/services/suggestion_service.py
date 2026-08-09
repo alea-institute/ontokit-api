@@ -21,6 +21,7 @@ from ontokit.core.anonymous_token import create_anonymous_token
 from ontokit.core.auth import ANONYMOUS_USER, CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
 from ontokit.git import GitRepositoryService, get_git_service
+from ontokit.models.embedding import EmbeddingJob
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.pull_request import PRStatus, PullRequest
 from ontokit.models.suggestion_outcome import SuggestionOutcomeType
@@ -341,6 +342,55 @@ class SuggestionService:
         proposed_entities = self._declared_entity_iris(proposed_content)
         if proposed_entities - current_entities:
             self._assert_can_mint(project, user)
+
+    async def _enqueue_branch_refresh(
+        self,
+        project_id: UUID,
+        branch: str,
+        *,
+        entity_iri: str | None = None,
+        full_embedding: bool = False,
+    ) -> None:
+        """Keep duplicate and ontology indexes current after suggestion writes."""
+        try:
+            from ontokit.api.utils.redis import get_arq_pool
+
+            pool = await get_arq_pool()
+            await pool.enqueue_job("run_ontology_index_task", str(project_id), branch, None)
+            if entity_iri:
+                await pool.enqueue_job(
+                    "run_single_entity_embed_task", str(project_id), branch, entity_iri
+                )
+            elif full_embedding:
+                job = EmbeddingJob(project_id=project_id, branch=branch, status="pending")
+                self.db.add(job)
+                try:
+                    await self.db.commit()
+                except IntegrityError:
+                    await self.db.rollback()
+                    logger.info(
+                        "Skipping duplicate active embedding refresh for project=%s branch=%s",
+                        project_id,
+                        branch,
+                    )
+                    return
+                try:
+                    await pool.enqueue_job(
+                        "run_embedding_generation_task", str(project_id), branch, str(job.id)
+                    )
+                except Exception as exc:
+                    job.status = "failed"
+                    job.error_message = f"Failed to enqueue embedding job: {exc}"
+                    job.completed_at = datetime.now(UTC)
+                    await self.db.commit()
+                    raise
+        except Exception:
+            logger.warning(
+                "Failed to enqueue suggestion index refresh for project=%s branch=%s",
+                project_id,
+                branch,
+                exc_info=True,
+            )
 
     async def _get_session(self, project_id: UUID, session_id: str) -> SuggestionSession:
         """Get a suggestion session or raise 404."""
@@ -1420,6 +1470,7 @@ class SuggestionService:
         # finalization failed, a retry sees the already-merged PR and resumes
         # here without attempting a second external/local merge.
         pr_already_merged = False
+        merge_commit_hash: str | None = None
         if session.pr_id is not None:
             pr_result = await self.db.execute(
                 select(PullRequest).where(PullRequest.id == session.pr_id)
@@ -1428,6 +1479,8 @@ class SuggestionService:
             pr_already_merged = bool(
                 linked_pr is not None and linked_pr.status == PRStatus.MERGED.value
             )
+            if pr_already_merged and linked_pr is not None:
+                merge_commit_hash = linked_pr.merge_commit_hash
 
         # Merge the PR if it exists and has not already crossed that boundary.
         if session.pr_number and not pr_already_merged:
@@ -1439,7 +1492,7 @@ class SuggestionService:
                     merge_message=f"Merge suggestion: {session_id}",
                     delete_source_branch=True,
                 )
-                await pr_service.merge_pull_request(
+                merge_response = await pr_service.merge_pull_request(
                     project_id,
                     session.pr_number,
                     merge_req,
@@ -1449,6 +1502,7 @@ class SuggestionService:
                         and user.id == SYSTEM_AUTO_ACCEPT_ACTOR
                     ),
                 )
+                merge_commit_hash = merge_response.merge_commit_hash
             except HTTPException:
                 logger.warning("PR merge failed for suggestion session %s", session_id)
                 raise
@@ -1465,6 +1519,22 @@ class SuggestionService:
             project_id, session, SuggestionOutcomeType.ACCEPTED, decided_by or user.id
         )
         await self.db.commit()
+        default_branch = self.git_service.get_default_branch(project_id)
+        if merge_commit_hash:
+            try:
+                from ontokit.services.translation_jobs import enqueue_label_diff_after_commit
+
+                project = await self._get_project(project_id)
+                await enqueue_label_diff_after_commit(
+                    project_id=project_id,
+                    branch=default_branch,
+                    commit_hash=merge_commit_hash,
+                    actor_id=user.id,
+                    role=self._get_user_role(project, user) or "viewer",
+                )
+            except Exception:
+                logger.warning("Failed to queue suggestion translation label diff", exc_info=True)
+        await self._enqueue_branch_refresh(project_id, default_branch, full_embedding=True)
 
     async def dismiss(
         self, project_id: UUID, session_id: str, user: CurrentUser, note: str | None = None

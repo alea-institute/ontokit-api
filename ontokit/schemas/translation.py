@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -73,3 +74,13 @@ class LanguagePaletteEntry(BaseModel):
     tag: str
     english_name: str
     native_name: str | None = None
+
+
+class TranslateFieldRequest(BaseModel):
+    entity_iri: str = Field(min_length=1, max_length=2000)
+    predicate: Literal["skos:definition", "skos:example"]
+    branch: str = Field(min_length=1, max_length=255)
+
+
+class TranslationJobAccepted(BaseModel):
+    job_id: str
