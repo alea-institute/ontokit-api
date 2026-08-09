@@ -46,7 +46,7 @@ from ontokit.models.pull_request import (
 from ontokit.models.remote_sync import RemoteSyncConfig, SyncEvent
 from ontokit.models.suggestion_outcome import SuggestionOutcome, SuggestionOutcomeType
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
-from ontokit.models.translation import TranslationRecord
+from ontokit.models.translation import ProjectTranslationConfig, TranslationRecord
 from ontokit.models.user_commit_identity import UserCommitIdentity
 from ontokit.models.user_github_token import UserGitHubToken
 
@@ -88,6 +88,7 @@ __all__ = [
     "Project",
     "ProjectEmbeddingConfig",
     "ProjectMember",
+    "ProjectTranslationConfig",
     "PullRequest",
     "PullRequestComment",
     "PullRequestReview",
