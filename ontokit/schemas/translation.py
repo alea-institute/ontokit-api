@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 from uuid import UUID
@@ -85,6 +86,28 @@ class TranslateFieldRequest(BaseModel):
 
 class TranslationJobAccepted(BaseModel):
     job_id: str
+
+
+class TranslationBackfillRequest(BaseModel):
+    branch: str = Field(min_length=1, max_length=255)
+    language: str | None = Field(default=None, min_length=1, max_length=35)
+    era_before: datetime | None = None
+    never_confirmed: bool | None = None
+
+
+class TranslationBackfillPreview(BaseModel):
+    literal_count: int
+    expected_cost_usd: float
+    upper_bound_cost_usd: float
+    batch_discount_applied: bool
+
+
+class TranslationBackfillStatus(BaseModel):
+    job_id: str
+    status: Literal["pending", "running", "completed", "failed"]
+    total: int
+    completed: int
+    error: str | None = None
 
 
 class ReviewerLanguagesUpdate(BaseModel):

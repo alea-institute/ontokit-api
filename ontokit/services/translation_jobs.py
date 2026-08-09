@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any, cast
 from uuid import UUID
 
@@ -24,11 +25,13 @@ from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.translation import (
     ProjectTranslationConfig,
+    TranslationJob,
     TranslationRecord,
     hash_literal_value,
 )
 from ontokit.services.llm import check_llm_access, check_rate_limit
 from ontokit.services.translation_annotations import read_annotation, translation_record_digest
+from ontokit.services.translation_backfill import BackfillLiteral, select_backfill_literals
 from ontokit.services.translation_service import TranslationService
 
 logger = logging.getLogger(__name__)
@@ -225,6 +228,8 @@ async def run_translation_entity_job(
     target_language: str | None,
     actor_id: str,
     mode: str,
+    *,
+    release_slot: bool = True,
 ) -> dict[str, Any]:
     db: AsyncSession = ctx["db"]
     project_uuid = UUID(project_id)
@@ -271,7 +276,81 @@ async def run_translation_entity_job(
         )
         return {"mode": mode, "commit_hash": outcome.commit.hash if outcome.commit else None}
     finally:
-        await ctx["redis"].decrby(_pending_key(project_uuid), 1)
+        if release_slot:
+            await ctx["redis"].decrby(_pending_key(project_uuid), 1)
+
+
+async def _run_backfill_literal(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str,
+    actor_id: str,
+    literal: BackfillLiteral,
+) -> None:
+    await run_translation_entity_job(
+        ctx,
+        project_id,
+        branch,
+        literal.entity_iri,
+        literal.predicate,
+        literal.source_value,
+        literal.source_language,
+        literal.target_language,
+        actor_id,
+        "batch",
+        release_slot=False,
+    )
+
+
+async def run_translation_backfill_job(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str,
+    job_id: str,
+    actor_id: str,
+    *,
+    task_runner: Any = _run_backfill_literal,
+) -> dict[str, Any]:
+    """Run a durable backfill serially, committing progress after each literal.
+
+    Each literal reuses U6's entity task and U5's gated commit path. A failed job keeps
+    completed progress; a relaunch reselects branch gaps so hash-covered work is skipped.
+    """
+    db: AsyncSession = ctx["db"]
+    project_uuid, job_uuid = UUID(project_id), UUID(job_id)
+    job = await db.get(TranslationJob, job_uuid)
+    if job is None:
+        raise RuntimeError("translation backfill job not found")
+    job.status = "running"
+    job.started_at = datetime.now(UTC)
+    git = get_git_service()
+    literals = await select_backfill_literals(
+        db,
+        git,
+        project_uuid,
+        branch,
+        language=job.language,
+        era_before=job.era_before,
+        never_confirmed=job.never_confirmed,
+    )
+    job.total_literals = len(literals)
+    await db.commit()
+    try:
+        for literal in literals:
+            await task_runner(ctx, project_id, branch, actor_id, literal)
+            job.completed_literals = (job.completed_literals or 0) + 1
+            await db.commit()
+    except Exception as exc:
+        job.status = "failed"
+        job.error_message = str(exc)
+        job.completed_at = datetime.now(UTC)
+        await db.commit()
+        raise
+    job.status = "completed"
+    job.error_message = None
+    job.completed_at = datetime.now(UTC)
+    await db.commit()
+    return {"job_id": job_id, "completed": job.completed_literals}
 
 
 __all__ = [
@@ -281,5 +360,6 @@ __all__ = [
     "enqueue_translation_tasks",
     "enqueue_label_diff_after_commit",
     "run_label_diff_job",
+    "run_translation_backfill_job",
     "run_translation_entity_job",
 ]

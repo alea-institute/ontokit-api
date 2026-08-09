@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 from dataclasses import dataclass
 from typing import Any
 from uuid import UUID
@@ -15,6 +14,7 @@ from ontokit.git import GitRepositoryService
 from ontokit.models.ontology_index import IndexedEntity, IndexedLabel
 from ontokit.models.translation import (
     ProjectTranslationConfig,
+    TranslationJob,
     TranslationRecord,
     hash_literal_value,
 )
@@ -38,12 +38,23 @@ class TranslationCoverageService:
 
     async def coverage(self, project_id: UUID, branch: str) -> dict[str, Any]:
         languages, labels, records, graph = await self._load(project_id, branch)
-        pending = await self._pending_scopes(project_id, branch)
+        candidates = {
+            (entity, predicate, language)
+            for entity, predicate in self._source_slots(labels, records)
+            for language in languages
+        }
+        pending = await self._pending_scopes(project_id, branch, candidates)
         return self.classify(branch, languages, labels, records, graph, pending)
 
     async def entity_state(self, project_id: UUID, entity_iri: str, branch: str) -> dict[str, Any]:
         languages, labels, records, graph = await self._load(project_id, branch)
-        pending = await self._pending_scopes(project_id, branch)
+        candidates = {
+            (entity, predicate, language)
+            for entity, predicate in self._source_slots(labels, records)
+            if entity == entity_iri
+            for language in languages
+        }
+        pending = await self._pending_scopes(project_id, branch, candidates)
         return self.entity_state_from_data(
             entity_iri, branch, languages, labels, records, graph, pending
         )
@@ -89,36 +100,36 @@ class TranslationCoverageService:
         )
         return list(config.language_tags if config else []), labels, records, graph
 
-    async def _pending_scopes(self, project_id: UUID, branch: str) -> set[tuple[str, str, str]]:
-        """Return active job scopes when U7's optional TranslationJob model is installed.
-
-        Until that model exists, the coverage projection has no pending rows. Keeping the
-        import and query here isolates U8 from U7's schema arrival.
-        """
+    async def _pending_scopes(
+        self,
+        project_id: UUID,
+        branch: str,
+        candidates: set[tuple[str, str, str]],
+    ) -> set[tuple[str, str, str]]:
+        """Return candidate slots covered by an active project backfill."""
         if self._db is None:
             return set()
-        module = importlib.import_module("ontokit.models.translation")
-        job_model = getattr(module, "TranslationJob", None)
-        if job_model is None:
-            return set()
-        active_states = ("pending", "queued", "running", "processing", "submitted")
+        active_states = ("pending", "running")
         result = await self._db.execute(
-            select(job_model).where(
-                job_model.project_id == project_id,
-                job_model.branch == branch,
-                job_model.status.in_(active_states),
+            select(TranslationJob).where(
+                TranslationJob.project_id == project_id,
+                TranslationJob.branch == branch,
+                TranslationJob.status.in_(active_states),
             )
         )
-        scopes: set[tuple[str, str, str]] = set()
-        for job in result.scalars().all():
-            entity_iri = getattr(job, "entity_iri", None)
-            predicate = getattr(job, "predicate", None)
-            languages = getattr(job, "languages", None) or [getattr(job, "language", None)]
-            if entity_iri and predicate:
-                scopes.update(
-                    (entity_iri, predicate, language) for language in languages if language
-                )
-        return scopes
+        return self.pending_scopes_from_jobs(list(result.scalars().all()), candidates)
+
+    @staticmethod
+    def pending_scopes_from_jobs(
+        jobs: list[TranslationJob], candidates: set[tuple[str, str, str]]
+    ) -> set[tuple[str, str, str]]:
+        """Expand project-level jobs over current candidate slots and language filters."""
+        return {
+            scope
+            for job in jobs
+            for scope in candidates
+            if job.language is None or scope[2].casefold() == job.language.casefold()
+        }
 
     @classmethod
     def classify(

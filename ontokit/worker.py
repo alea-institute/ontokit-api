@@ -36,7 +36,11 @@ from ontokit.services.linter import LintResult, get_linter
 from ontokit.services.normalization_service import NormalizationService
 from ontokit.services.ontology import get_ontology_service
 from ontokit.services.storage import get_storage_service
-from ontokit.services.translation_jobs import run_label_diff_job, run_translation_entity_job
+from ontokit.services.translation_jobs import (
+    run_label_diff_job,
+    run_translation_backfill_job,
+    run_translation_entity_job,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -995,6 +999,13 @@ async def run_translation_label_diff_task(
     return await run_label_diff_job(ctx, project_id, branch, commit_hash, actor_id)
 
 
+async def run_translation_backfill_task(
+    ctx: dict[str, Any], project_id: str, branch: str, job_id: str, actor_id: str
+) -> dict[str, Any]:
+    """Run a durable translation backfill job."""
+    return await run_translation_backfill_job(ctx, project_id, branch, job_id, actor_id)
+
+
 async def run_translation_entity_task(
     ctx: dict[str, Any],
     project_id: str,
@@ -1465,6 +1476,7 @@ class WorkerSettings:
         run_single_entity_embed_task,
         run_batch_entity_embed_task,
         run_translation_label_diff_task,
+        run_translation_backfill_task,
         run_translation_entity_task,
         run_remote_check_task,
         # KTD14: bounded under both the 300s worker default and the 5-minute

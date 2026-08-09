@@ -4,22 +4,26 @@ from __future__ import annotations
 
 import logging
 import uuid
-from typing import Annotated, Any
+from datetime import datetime
+from typing import Annotated, Any, Literal, cast
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from rdflib.namespace import SKOS
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
 from ontokit.core.database import get_db
 from ontokit.git import GitRepositoryService, get_git_service
+from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.project import Project, ProjectMember, get_git_ontology_path
 from ontokit.models.translation import (
     NativeReviewerLanguage,
     ProjectTranslationConfig,
+    TranslationJob,
     TranslationRecord,
 )
 from ontokit.schemas.translation import (
@@ -28,6 +32,9 @@ from ontokit.schemas.translation import (
     ReviewerLanguagesResponse,
     ReviewerLanguagesUpdate,
     TranslateFieldRequest,
+    TranslationBackfillPreview,
+    TranslationBackfillRequest,
+    TranslationBackfillStatus,
     TranslationBulkConfirmRequest,
     TranslationBulkConfirmResponse,
     TranslationBulkResult,
@@ -43,6 +50,7 @@ from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.language_palette import LANGUAGE_PALETTE
 from ontokit.services.llm import check_llm_access, check_rate_limit
 from ontokit.services.llm.crypto import encrypt_secret
+from ontokit.services.translation_backfill import preview_backfill_cost, select_backfill_literals
 from ontokit.services.translation_coverage import TranslationCoverageService
 from ontokit.services.translation_jobs import TranslationTask, enqueue_translation_tasks
 from ontokit.services.translation_review import TranslationReviewService
@@ -204,6 +212,137 @@ async def get_translation_coverage(
 ) -> dict[str, object]:
     await _require_project_view(db, project_id, user)
     return await TranslationCoverageService(db, git).coverage(project_id, branch)
+
+
+@router.get("/{project_id}/translation/backfill/preview", response_model=TranslationBackfillPreview)
+async def preview_translation_backfill(
+    project_id: UUID,
+    branch: Annotated[str, Query(min_length=1)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+    git: Annotated[GitRepositoryService, Depends(_get_git)],
+    language: Annotated[str | None, Query()] = None,
+    era_before: Annotated[datetime | None, Query()] = None,
+    never_confirmed: Annotated[bool | None, Query()] = None,
+) -> TranslationBackfillPreview:
+    """Return scope and conservative cost without provider calls or audit writes."""
+    await _require_member(db, project_id, user.id, user.is_superadmin)
+    config = await _get_config(db, project_id)
+    llm_config = await db.scalar(
+        select(ProjectLLMConfig).where(ProjectLLMConfig.project_id == project_id)
+    )
+    if config is None or llm_config is None or not config.primary_model:
+        raise HTTPException(status_code=409, detail="Translation configuration is incomplete")
+    literals = await select_backfill_literals(
+        db,
+        git,
+        project_id,
+        branch,
+        language=language,
+        era_before=era_before,
+        never_confirmed=never_confirmed,
+    )
+    result = await preview_backfill_cost(
+        literals,
+        mechanism=config.verification_mechanism,
+        primary_model=config.primary_model,
+        verifier_model=config.verifier_model or config.primary_model,
+        primary_provider=config.primary_provider or llm_config.provider,
+        speed_mode=config.speed_mode,
+    )
+    return TranslationBackfillPreview(
+        literal_count=result.literal_count,
+        expected_cost_usd=result.expected_cost_usd,
+        upper_bound_cost_usd=result.upper_bound_cost_usd,
+        batch_discount_applied=result.batch_discount_applied,
+    )
+
+
+@router.post(
+    "/{project_id}/translation/backfill",
+    response_model=TranslationJobAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def launch_translation_backfill(
+    project_id: UUID,
+    data: TranslationBackfillRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> TranslationJobAccepted:
+    """Claim a durable project job before enqueueing asynchronous backfill work."""
+    await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
+    active = await db.execute(
+        select(TranslationJob).where(
+            TranslationJob.project_id == project_id,
+            TranslationJob.status.in_(("pending", "running")),
+        )
+    )
+    if active.scalar_one_or_none() is not None:
+        raise HTTPException(status_code=409, detail="Translation backfill already in progress")
+    job = TranslationJob(
+        id=uuid.uuid4(),
+        project_id=project_id,
+        branch=data.branch,
+        language=data.language,
+        era_before=data.era_before,
+        never_confirmed=data.never_confirmed,
+        status="pending",
+    )
+    try:
+        db.add(job)
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(
+            status_code=409, detail="Translation backfill already in progress"
+        ) from None
+    try:
+        pool = await get_arq_pool()
+        if pool is None:
+            raise RuntimeError("background job queue unavailable")
+        queued = await pool.enqueue_job(
+            "run_translation_backfill_task",
+            str(project_id),
+            data.branch,
+            str(job.id),
+            user.id,
+        )
+        if queued is None:
+            raise RuntimeError("translation queue refused the job")
+    except Exception:
+        await db.execute(delete(TranslationJob).where(TranslationJob.id == job.id))
+        await db.commit()
+        raise
+    return TranslationJobAccepted(job_id=str(job.id))
+
+
+@router.get(
+    "/{project_id}/translation/backfill/status",
+    response_model=TranslationBackfillStatus | None,
+)
+async def get_translation_backfill_status(
+    project_id: UUID,
+    branch: Annotated[str, Query(min_length=1)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> TranslationBackfillStatus | None:
+    await _require_member(db, project_id, user.id, user.is_superadmin)
+    result = await db.execute(
+        select(TranslationJob)
+        .where(TranslationJob.project_id == project_id, TranslationJob.branch == branch)
+        .order_by(TranslationJob.created_at.desc())
+        .limit(1)
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        return None
+    return TranslationBackfillStatus(
+        job_id=str(job.id),
+        status=cast(Literal["pending", "running", "completed", "failed"], job.status),
+        total=job.total_literals,
+        completed=job.completed_literals,
+        error=job.error_message,
+    )
 
 
 @router.get("/{project_id}/translation/entity-state")
