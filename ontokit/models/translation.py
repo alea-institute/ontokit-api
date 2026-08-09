@@ -16,6 +16,7 @@ from sqlalchemy import (
     Float,
     ForeignKey,
     Index,
+    Integer,
     String,
     Text,
     UniqueConstraint,
@@ -176,6 +177,41 @@ class TranslationRecord(Base):
         self.confirmed_at = at or datetime.now(UTC)
 
 
+class TranslationJob(Base):
+    """Durable, resumable project backfill lifecycle."""
+
+    __tablename__ = "translation_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), nullable=False
+    )
+    branch: Mapped[str] = mapped_column(String(255), nullable=False)
+    language: Mapped[str | None] = mapped_column(String(35), nullable=True)
+    era_before: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    never_confirmed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="pending", nullable=False)
+    total_literals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    completed_literals: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    project: Mapped[Project] = relationship()
+
+    __table_args__ = (
+        Index(
+            "uq_translation_job_active_project",
+            "project_id",
+            unique=True,
+            postgresql_where=sql_text("status IN ('pending', 'running')"),
+        ),
+    )
+
+
 class NativeReviewerLanguage(Base):
     """A project member's independently assignable native-reviewer language tag."""
 
@@ -193,6 +229,7 @@ __all__ = [
     "ProjectTranslationConfig",
     "NativeReviewerLanguage",
     "TRANSLATION_STATES",
+    "TranslationJob",
     "TranslationRecord",
     "hash_literal_value",
 ]

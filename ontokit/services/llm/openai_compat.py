@@ -24,6 +24,9 @@ class OpenAICompatProvider(LLMProvider):
     which allows a single implementation to cover nine different providers.
     """
 
+    # This adapter currently uses chat.completions, not OpenAI Batch.
+    supports_true_batch_api = False
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -56,9 +59,7 @@ class OpenAICompatProvider(LLMProvider):
             )
         return self._client
 
-    async def chat(
-        self, messages: list[dict[str, str]], **kwargs: Any
-    ) -> tuple[str, int, int]:
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> tuple[str, int, int]:
         client = self._get_client()
         response = await client.chat.completions.create(
             model=kwargs.pop("model", self.model or "gpt-4o-mini"),
