@@ -1,0 +1,309 @@
+"""Read-only translation coverage and provenance projections."""
+
+from __future__ import annotations
+
+import importlib
+from dataclasses import dataclass
+from typing import Any
+from uuid import UUID
+
+from rdflib import Graph, Literal, URIRef
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ontokit.git import GitRepositoryService
+from ontokit.models.ontology_index import IndexedEntity, IndexedLabel
+from ontokit.models.translation import (
+    ProjectTranslationConfig,
+    TranslationRecord,
+    hash_literal_value,
+)
+from ontokit.services.translation_annotations import read_annotation, translation_record_digest
+
+
+@dataclass(frozen=True, slots=True)
+class LabelValue:
+    entity_iri: str
+    predicate: str
+    language: str | None
+    value: str
+
+
+class TranslationCoverageService:
+    """Build branch-local views without invoking any translation provider."""
+
+    def __init__(self, db: AsyncSession | None, git_service: GitRepositoryService | None) -> None:
+        self._db = db
+        self._git = git_service
+
+    async def coverage(self, project_id: UUID, branch: str) -> dict[str, Any]:
+        languages, labels, records, graph = await self._load(project_id, branch)
+        pending = await self._pending_scopes(project_id, branch)
+        return self.classify(branch, languages, labels, records, graph, pending)
+
+    async def entity_state(self, project_id: UUID, entity_iri: str, branch: str) -> dict[str, Any]:
+        languages, labels, records, graph = await self._load(project_id, branch)
+        pending = await self._pending_scopes(project_id, branch)
+        return self.entity_state_from_data(
+            entity_iri, branch, languages, labels, records, graph, pending
+        )
+
+    async def provisional(
+        self, project_id: UUID, language: str, branch: str
+    ) -> list[dict[str, Any]]:
+        _, labels, records, _ = await self._load(project_id, branch)
+        return self.provisional_from_data(language, labels, records)
+
+    async def _load(
+        self, project_id: UUID, branch: str
+    ) -> tuple[list[str], list[LabelValue], list[TranslationRecord], Graph]:
+        if self._db is None or self._git is None:
+            raise RuntimeError("coverage service I/O dependencies are not configured")
+        config_result = await self._db.execute(
+            select(ProjectTranslationConfig).where(
+                ProjectTranslationConfig.project_id == project_id
+            )
+        )
+        config = config_result.scalar_one_or_none()
+        label_result = await self._db.execute(
+            select(
+                IndexedEntity.iri, IndexedLabel.property_iri, IndexedLabel.lang, IndexedLabel.value
+            )
+            .join(IndexedLabel, IndexedLabel.entity_id == IndexedEntity.id)
+            .where(IndexedEntity.project_id == project_id, IndexedEntity.branch == branch)
+        )
+        labels = [LabelValue(*row) for row in label_result.all()]
+        record_result = await self._db.execute(
+            select(TranslationRecord).where(TranslationRecord.project_id == project_id)
+        )
+        records = list(record_result.scalars().all())
+        repository = self._git.get_repository(project_id)
+        candidates = [
+            path
+            for path in repository.list_files(branch)
+            if path.casefold().endswith((".ttl", ".owl", ".rdf"))
+        ]
+        filename = "ontology.ttl" if "ontology.ttl" in candidates else candidates[0]
+        graph = Graph().parse(
+            data=self._git.get_file_from_branch(project_id, branch, filename), format="turtle"
+        )
+        return list(config.language_tags if config else []), labels, records, graph
+
+    async def _pending_scopes(self, project_id: UUID, branch: str) -> set[tuple[str, str, str]]:
+        """Return active job scopes when U7's optional TranslationJob model is installed.
+
+        Until that model exists, the coverage projection has no pending rows. Keeping the
+        import and query here isolates U8 from U7's schema arrival.
+        """
+        if self._db is None:
+            return set()
+        module = importlib.import_module("ontokit.models.translation")
+        job_model = getattr(module, "TranslationJob", None)
+        if job_model is None:
+            return set()
+        active_states = ("pending", "queued", "running", "processing", "submitted")
+        result = await self._db.execute(
+            select(job_model).where(
+                job_model.project_id == project_id,
+                job_model.branch == branch,
+                job_model.status.in_(active_states),
+            )
+        )
+        scopes: set[tuple[str, str, str]] = set()
+        for job in result.scalars().all():
+            entity_iri = getattr(job, "entity_iri", None)
+            predicate = getattr(job, "predicate", None)
+            languages = getattr(job, "languages", None) or [getattr(job, "language", None)]
+            if entity_iri and predicate:
+                scopes.update(
+                    (entity_iri, predicate, language) for language in languages if language
+                )
+        return scopes
+
+    @classmethod
+    def classify(
+        cls,
+        branch: str,
+        languages: list[str],
+        labels: list[LabelValue],
+        records: list[TranslationRecord],
+        graph: Graph,
+        pending: set[tuple[str, str, str]] | None = None,
+    ) -> dict[str, Any]:
+        slots = cls._source_slots(labels, records)
+        states = cls._states(slots, languages, labels, records, graph, pending or set())
+        rows = []
+        for language in languages:
+            counts = dict.fromkeys(("verified", "provisional", "pending", "missing"), 0)
+            for entity_iri, predicate in slots:
+                counts[states[(entity_iri, predicate, language)][0]] += 1
+            rows.append({"language": language, **counts, "total": len(slots)})
+        return {
+            "branch": branch,
+            "languages": rows,
+            "total_entities": len({entity for entity, _ in slots}),
+        }
+
+    @classmethod
+    def entity_state_from_data(
+        cls,
+        entity_iri: str,
+        branch: str,
+        languages: list[str],
+        labels: list[LabelValue],
+        records: list[TranslationRecord],
+        graph: Graph,
+        pending: set[tuple[str, str, str]] | None = None,
+    ) -> dict[str, Any]:
+        slots = {slot for slot in cls._source_slots(labels, records) if slot[0] == entity_iri}
+        states = cls._states(slots, languages, labels, records, graph, pending or set())
+        items = []
+        for entity, predicate in sorted(slots):
+            for language in languages:
+                state, record = states[(entity, predicate, language)]
+                items.append(
+                    {
+                        "predicate": predicate,
+                        "language": language,
+                        "state": state,
+                        "value": record.proposed_value
+                        if state == "provisional" and record
+                        else None,
+                        "record_id": str(record.id) if record else None,
+                    }
+                )
+        return {"entity_iri": entity_iri, "branch": branch, "items": items}
+
+    @classmethod
+    def provisional_from_data(
+        cls, language: str, labels: list[LabelValue], records: list[TranslationRecord]
+    ) -> list[dict[str, Any]]:
+        current_hashes = {
+            (label.entity_iri, label.predicate, hash_literal_value(label.value)) for label in labels
+        }
+        rows = []
+        for record in records:
+            if record.language != language or record.state != "provisional":
+                continue
+            if record.source_value is None or record.proposed_value is None:
+                continue
+            if (
+                record.entity_iri,
+                record.predicate,
+                record.source_value_hash,
+            ) not in current_hashes:
+                continue
+            rows.append(
+                {
+                    "record_id": str(record.id),
+                    "entity_iri": record.entity_iri,
+                    "predicate": record.predicate,
+                    "language": record.language,
+                    "source_value": record.source_value,
+                    "proposed_value": record.proposed_value,
+                    "model_name": record.model_name,
+                    "method": record.method,
+                    "score": record.score,
+                    "created_at": record.created_at,
+                }
+            )
+        return sorted(rows, key=lambda row: (row["created_at"], row["record_id"]))
+
+    @staticmethod
+    def _source_slots(
+        labels: list[LabelValue], records: list[TranslationRecord]
+    ) -> set[tuple[str, str]]:
+        translated = {
+            (record.entity_iri, record.predicate, record.language, record.translated_value_hash)
+            for record in records
+        }
+        return {
+            (label.entity_iri, label.predicate)
+            for label in labels
+            if (label.entity_iri, label.predicate, label.language, hash_literal_value(label.value))
+            not in translated
+        }
+
+    @classmethod
+    def _states(
+        cls,
+        slots: set[tuple[str, str]],
+        languages: list[str],
+        labels: list[LabelValue],
+        records: list[TranslationRecord],
+        graph: Graph,
+        pending: set[tuple[str, str, str]],
+    ) -> dict[tuple[str, str, str], tuple[str, TranslationRecord | None]]:
+        label_lookup = {
+            (
+                label.entity_iri,
+                label.predicate,
+                label.language,
+                hash_literal_value(label.value),
+            ): label
+            for label in labels
+        }
+        source_hashes = {
+            (label.entity_iri, label.predicate, hash_literal_value(label.value)) for label in labels
+        }
+        output: dict[tuple[str, str, str], tuple[str, TranslationRecord | None]] = {}
+        for entity, predicate in slots:
+            for language in languages:
+                key = (entity, predicate, language)
+                candidates = [
+                    record
+                    for record in records
+                    if record.entity_iri == entity
+                    and record.predicate == predicate
+                    and record.language == language
+                    and (entity, predicate, record.source_value_hash) in source_hashes
+                ]
+                verified = next(
+                    (
+                        record
+                        for record in candidates
+                        if cls._is_verified(record, label_lookup, graph)
+                    ),
+                    None,
+                )
+                provisional = next(
+                    (
+                        record
+                        for record in candidates
+                        if record.state == "provisional" and record.proposed_value is not None
+                    ),
+                    None,
+                )
+                if verified:
+                    output[key] = ("verified", verified)
+                elif provisional:
+                    output[key] = ("provisional", provisional)
+                elif key in pending:
+                    output[key] = ("pending", None)
+                else:
+                    output[key] = ("missing", None)
+        return output
+
+    @staticmethod
+    def _is_verified(
+        record: TranslationRecord,
+        labels: dict[tuple[str, str, str | None, str], LabelValue],
+        graph: Graph,
+    ) -> bool:
+        if record.state != "verified":
+            return False
+        label = labels.get(
+            (record.entity_iri, record.predicate, record.language, record.translated_value_hash)
+        )
+        if label is None:
+            return False
+        literal = Literal(label.value, lang=label.language)
+        annotation = read_annotation(
+            graph, URIRef(record.entity_iri), URIRef(record.predicate), literal
+        )
+        return annotation is not None and annotation.record_digest == translation_record_digest(
+            record
+        )
+
+
+__all__ = ["LabelValue", "TranslationCoverageService"]

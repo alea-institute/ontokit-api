@@ -6,13 +6,14 @@ import uuid
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import RequiredUser
+from ontokit.core.auth import OptionalUser, RequiredUser
 from ontokit.core.database import get_db
-from ontokit.models.project import ProjectMember
+from ontokit.git import GitRepositoryService, get_git_service
+from ontokit.models.project import Project, ProjectMember
 from ontokit.models.translation import ProjectTranslationConfig
 from ontokit.schemas.translation import (
     LanguagePaletteEntry,
@@ -23,9 +24,14 @@ from ontokit.schemas.translation import (
 )
 from ontokit.services.language_palette import LANGUAGE_PALETTE
 from ontokit.services.llm.crypto import encrypt_secret
+from ontokit.services.translation_coverage import TranslationCoverageService
 
 router = APIRouter()
 public_router = APIRouter()
+
+
+def _get_git() -> GitRepositoryService:
+    return get_git_service()
 
 
 async def _get_member_role(db: AsyncSession, project_id: UUID, user_id: str) -> str | None:
@@ -57,6 +63,25 @@ async def _require_owner_or_admin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Only owner or admin can perform this action",
         )
+
+
+async def _require_project_view(db: AsyncSession, project_id: UUID, user: object | None) -> None:
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if project is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    if project.is_public:
+        return
+    user_id = getattr(user, "id", None)
+    if user_id is None:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project access denied")
+    member = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id, ProjectMember.user_id == user_id
+        )
+    )
+    if member.scalar_one_or_none() is None and not getattr(user, "is_superadmin", False):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Project access denied")
 
 
 async def _get_config(db: AsyncSession, project_id: UUID) -> ProjectTranslationConfig | None:
@@ -94,6 +119,44 @@ async def get_translation_config(
 ) -> TranslationConfigResponse:
     await _require_member(db, project_id, user.id, user.is_superadmin)
     return _to_response(await _get_config(db, project_id))
+
+
+@router.get("/{project_id}/translation/coverage")
+async def get_translation_coverage(
+    project_id: UUID,
+    branch: Annotated[str, Query(min_length=1)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: OptionalUser,
+    git: Annotated[GitRepositoryService, Depends(_get_git)],
+) -> dict[str, object]:
+    await _require_project_view(db, project_id, user)
+    return await TranslationCoverageService(db, git).coverage(project_id, branch)
+
+
+@router.get("/{project_id}/translation/entity-state")
+async def get_translation_entity_state(
+    project_id: UUID,
+    entity_iri: Annotated[str, Query(min_length=1)],
+    branch: Annotated[str, Query(min_length=1)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: OptionalUser,
+    git: Annotated[GitRepositoryService, Depends(_get_git)],
+) -> dict[str, object]:
+    await _require_project_view(db, project_id, user)
+    return await TranslationCoverageService(db, git).entity_state(project_id, entity_iri, branch)
+
+
+@router.get("/{project_id}/translation/provisional")
+async def get_provisional_translations(
+    project_id: UUID,
+    language: Annotated[str, Query(min_length=1)],
+    branch: Annotated[str, Query(min_length=1)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: OptionalUser,
+    git: Annotated[GitRepositoryService, Depends(_get_git)],
+) -> list[dict[str, object]]:
+    await _require_project_view(db, project_id, user)
+    return await TranslationCoverageService(db, git).provisional(project_id, language, branch)
 
 
 @router.put("/{project_id}/translation/config", response_model=TranslationConfigResponse)

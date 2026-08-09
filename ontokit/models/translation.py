@@ -111,6 +111,8 @@ class TranslationRecord(Base):
     entity_iri: Mapped[str] = mapped_column(String(2000), nullable=False)
     predicate: Mapped[str] = mapped_column(String(2000), nullable=False)
     language: Mapped[str] = mapped_column(String(35), nullable=False)
+    source_value: Mapped[str | None] = mapped_column(Text, nullable=True)
+    proposed_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_value_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     translated_value_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     model_name: Mapped[str] = mapped_column(String(200), nullable=False)
