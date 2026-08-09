@@ -61,9 +61,11 @@ class InlineQueue:
         self.redis = redis
         self.jobs: list[tuple[str, tuple[object, ...]]] = []
 
-    async def enqueue_job(self, name: str, *args: object) -> SimpleNamespace:
+    async def enqueue_job(
+        self, name: str, *args: object, **kwargs: object
+    ) -> SimpleNamespace:
         self.jobs.append((name, args))
-        return SimpleNamespace(job_id=f"inline-{len(self.jobs)}")
+        return SimpleNamespace(job_id=kwargs.get("_job_id", f"inline-{len(self.jobs)}"))
 
     def __getattr__(self, name: str) -> object:
         return getattr(self.redis, name)
@@ -207,6 +209,7 @@ async def _source_save(
         result = await projects.save_source_content(
             project_id,
             SourceContentSave(content=content, commit_message="Mint translated concept"),
+            db,
             ProjectService(db, git),
             SimpleNamespace(upload_file=AsyncMock()),
             ontology,
@@ -468,6 +471,18 @@ async def test_era_scope_selects_only_old_never_confirmed_records(
             ("bird", "Oiseau", datetime.now(UTC), None),
         )
     ]
+    git.commit_changes(
+        project_id,
+        (
+            BASE
+            + 'ex:cat skos:prefLabel "Cat"@en .\n'
+            + 'ex:dog skos:prefLabel "Dog"@en .\n'
+            + 'ex:bird skos:prefLabel "Bird"@en .\n'
+        ).encode(),
+        FILE,
+        "Seed era sources",
+        branch_name="main",
+    )
     real_db_session.add_all(records)
     await real_db_session.commit()
     try:

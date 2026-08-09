@@ -170,6 +170,47 @@ async def test_failure_records_progress_and_relaunch_skips_completed_work() -> N
     assert db.commit.await_count >= 2
 
 
+@pytest.mark.asyncio
+async def test_completed_backfill_redelivery_spends_zero_provider_calls() -> None:
+    job = TranslationJob(
+        id=uuid.uuid4(),
+        project_id=PROJECT_ID,
+        branch="main",
+        status="completed",
+        total_literals=2,
+        completed_literals=2,
+    )
+    db = AsyncMock()
+    db.get.return_value = job
+    runner = AsyncMock()
+    with patch(
+        "ontokit.services.translation_jobs.select_backfill_literals", AsyncMock()
+    ) as select_literals:
+        result = await run_translation_backfill_job(
+            {"db": db}, str(PROJECT_ID), "main", str(job.id), "actor", task_runner=runner
+        )
+    assert result["completed"] == 2
+    select_literals.assert_not_awaited()
+    runner.assert_not_awaited()
+    db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_registered_backfill_wrapper_delegates_lifecycle_payload() -> None:
+    from ontokit import worker
+
+    registered = next(
+        function
+        for function in worker.WorkerSettings.functions
+        if getattr(function, "__name__", "") == "run_translation_backfill_task"
+    )
+    expected = {"job_id": "job", "completed": 0}
+    with patch.object(worker, "run_translation_backfill_job", AsyncMock(return_value=expected)) as run:
+        result = await registered({}, str(PROJECT_ID), "main", "job", "actor")
+    assert result == expected
+    run.assert_awaited_once_with({}, str(PROJECT_ID), "main", "job", "actor")
+
+
 def test_translation_job_active_index_is_project_scoped() -> None:
     index = next(index for index in TranslationJob.__table__.indexes if index.unique)
     assert [column.name for column in index.columns] == ["project_id"]
@@ -235,7 +276,20 @@ async def test_era_scope_excludes_native_confirmed_records() -> None:
     with patch.object(
         TranslationCoverageService,
         "_load",
-        AsyncMock(return_value=(["fr"], [], [], Graph())),
+        AsyncMock(
+            return_value=(
+                ["fr"],
+                [],
+                [],
+                Graph().parse(
+                    data=(
+                        f'@prefix skos: <{SKOS}> . '
+                        f'<{machine.entity_iri}> skos:prefLabel "Cat"@en .'
+                    ),
+                    format="turtle",
+                ),
+            )
+        ),
     ):
         selected = await select_backfill_literals(
             db,

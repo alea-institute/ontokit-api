@@ -1274,6 +1274,7 @@ async def delete_branch(
 async def save_source_content(
     project_id: UUID,
     data: SourceContentSave,
+    db: Annotated[AsyncSession, Depends(get_db)],
     service: Annotated[ProjectService, Depends(get_service)],
     storage: Annotated[StorageService, Depends(get_storage)],
     ontology: Annotated[OntologyService, Depends(get_ontology)],
@@ -1343,7 +1344,7 @@ async def save_source_content(
             detail=f"Failed to save to storage: {e}",
         ) from e
 
-    async with branch_write_lock(project_id, current_branch):
+    async with branch_write_lock(db, project_id, current_branch):
         # Capture old graph for change event diffing (before the commit).
         old_graph = None
         was_loaded = ontology.is_loaded(project_id, current_branch)

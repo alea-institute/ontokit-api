@@ -174,7 +174,10 @@ def service(
         yield
 
     monkeypatch.setattr("ontokit.services.suggestion_service.pull_request_write_locks", unlocked)
-    return SuggestionService(db=mock_db, git_service=mock_git)
+    monkeypatch.setattr("ontokit.services.suggestion_service.branch_write_lock", unlocked)
+    suggestion_service = SuggestionService(db=mock_db, git_service=mock_git)
+    suggestion_service._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
+    return suggestion_service
 
 
 # ---------------------------------------------------------------------------

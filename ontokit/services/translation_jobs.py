@@ -106,6 +106,8 @@ async def enqueue_translation_tasks(
     branch: str,
     actor_id: str,
     tasks: list[TranslationTask],
+    *,
+    commit_hash: str | None = None,
 ) -> list[str]:
     """Atomically reserve bounded project fan-out before any paid work is queued."""
     if not tasks:
@@ -118,6 +120,15 @@ async def enqueue_translation_tasks(
     job_ids: list[str] = []
     try:
         for task in tasks:
+            identity = ":".join(
+                (
+                    commit_hash or "on-demand",
+                    task.entity_iri,
+                    task.predicate,
+                    hash_literal_value(task.source_value or ""),
+                    task.target_language or "all",
+                )
+            )
             job = await pool.enqueue_job(
                 "run_translation_entity_task",
                 str(project_id),
@@ -129,6 +140,7 @@ async def enqueue_translation_tasks(
                 task.target_language,
                 actor_id,
                 task.mode,
+                _job_id=f"translation-entity:{hash_literal_value(identity)}",
             )
             if job is None:
                 raise RuntimeError("translation queue refused the job")
@@ -218,7 +230,9 @@ async def run_label_diff_job(
     tasks = discover_translation_tasks(
         parent, current, config, await _covered_values(db, project_uuid, current)
     )
-    job_ids = await enqueue_translation_tasks(redis, redis, project_uuid, branch, actor_id, tasks)
+    job_ids = await enqueue_translation_tasks(
+        redis, redis, project_uuid, branch, actor_id, tasks, commit_hash=commit_hash
+    )
     return {"queued": len(job_ids), "job_ids": job_ids}
 
 
@@ -286,7 +300,10 @@ async def run_translation_entity_job(
         return {"mode": mode, "commit_hash": outcome.commit.hash if outcome.commit else None}
     finally:
         if release_slot:
-            await ctx["redis"].decrby(_pending_key(project_uuid), 1)
+            arq_job_id = str(ctx.get("job_id", ""))
+            release_key = f"translation:released:{project_uuid}"
+            if arq_job_id and await ctx["redis"].sadd(release_key, arq_job_id):
+                await ctx["redis"].decrby(_pending_key(project_uuid), 1)
 
 
 async def _run_backfill_literal(
@@ -331,24 +348,30 @@ async def run_translation_backfill_job(
     job = await db.get(TranslationJob, job_uuid)
     if job is None:
         raise RuntimeError("translation backfill job not found")
+    if job.status == "completed":
+        return {"job_id": job_id, "completed": job.completed_literals}
+    first_attempt = job.started_at is None
     job.status = "running"
-    job.started_at = datetime.now(UTC)
-    git = get_git_service()
-    literals = await select_backfill_literals(
-        db,
-        git,
-        project_uuid,
-        branch,
-        language=job.language,
-        era_before=job.era_before,
-        never_confirmed=job.never_confirmed,
-    )
-    job.total_literals = len(literals)
-    await db.commit()
+    job.started_at = job.started_at or datetime.now(UTC)
     try:
+        git = get_git_service()
+        literals = await select_backfill_literals(
+            db,
+            git,
+            project_uuid,
+            branch,
+            language=job.language,
+            era_before=job.era_before,
+            never_confirmed=job.never_confirmed,
+        )
+        if first_attempt:
+            job.total_literals = len(literals)
+        await db.commit()
         for literal in literals:
             await task_runner(ctx, project_id, branch, actor_id, literal)
-            job.completed_literals = (job.completed_literals or 0) + 1
+            job.completed_literals = min(
+                job.total_literals, (job.completed_literals or 0) + 1
+            )
             await db.commit()
     except Exception as exc:
         job.status = "failed"

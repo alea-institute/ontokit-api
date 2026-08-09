@@ -135,6 +135,22 @@ async def test_below_threshold_is_provisional_without_git_commit(
 
 
 @pytest.mark.asyncio
+async def test_record_flush_failure_cannot_orphan_git_annotation(
+    bare_git_repo: BareOntologyRepository,
+) -> None:
+    service, db, _git = _service(bare_git_repo, project_id=uuid4())
+    before = bare_git_repo.get_branch_commit_hash("main")
+    db.flush.side_effect = RuntimeError("database flush failed")
+
+    with pytest.raises(RuntimeError, match="database flush failed"):
+        await _apply(service, {"fr": _result("fr", "Personne")})
+
+    assert bare_git_repo.get_branch_commit_hash("main") == before
+    graph = Graph().parse(data=bare_git_repo.read_file("main", "ontology.ttl"), format="turtle")
+    assert (ENTITY, RDFS.label, Literal("Personne", lang="fr")) not in graph
+
+
+@pytest.mark.asyncio
 async def test_user_save_and_translation_commit_are_serialized_without_lost_update(
     bare_git_repo: BareOntologyRepository,
 ) -> None:
@@ -143,7 +159,7 @@ async def test_user_save_and_translation_commit_are_serialized_without_lost_upda
     user_started = asyncio.Event()
 
     async def user_save() -> None:
-        async with branch_write_lock(project_id, "main"):
+        async with branch_write_lock(service._db, project_id, "main"):
             content = git.get_file_from_branch(project_id, "main", "ontology.ttl")
             user_started.set()
             await asyncio.sleep(0)
@@ -232,4 +248,8 @@ async def test_translation_diff_adds_only_target_entity_and_axiom_triples(
         if line.origin == "+" and line.content.strip()
     ]
     assert added
-    assert all(str(ENTITY) in line or "translation#axiom-" in line for line in added)
+    updated = bare_git_repo.read_file(outcome.commit.hash, "ontology.ttl").decode()
+    assert "owl:Axiom" in updated
+    assert Literal("Personne", lang="fr") in Graph().parse(data=updated, format="turtle").objects(
+        ENTITY, RDFS.label
+    )

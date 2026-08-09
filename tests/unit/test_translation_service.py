@@ -142,6 +142,38 @@ async def test_consensus_disagreement_is_flagged_below_threshold() -> None:
 
 
 @pytest.mark.asyncio
+async def test_consensus_floor_rejects_high_aggregate_with_low_verifier() -> None:
+    service, _, _ = _service(FakeProvider([]), FakeProvider([]))
+    service._consensus = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            "Gato",
+            {
+                "candidate_agreement": 1.0,
+                "back_translation_similarity": 1.0,
+                "verifier_agreement": 0.59,
+            },
+        )
+    )
+    result = (await service.translate("Cat", "en", ["es"]))["es"]
+    assert result.score >= result.threshold
+    assert result.accepted is False
+
+
+@pytest.mark.asyncio
+async def test_confidence_floor_rejects_high_aggregate_with_low_back_translation() -> None:
+    service, _, _ = _service(FakeProvider([]), FakeProvider([]), mechanism="confidence")
+    service._confidence = AsyncMock(  # type: ignore[method-assign]
+        return_value=(
+            "Gato",
+            {"self_reported_confidence": 1.0, "back_translation_similarity": 0.59},
+        )
+    )
+    result = (await service.translate("Cat", "en", ["es"]))["es"]
+    assert result.score >= result.threshold
+    assert result.accepted is False
+
+
+@pytest.mark.asyncio
 async def test_confidence_low_self_report_is_below_threshold() -> None:
     primary = FakeProvider(['{"translation":"Chat","confidence":0.2}'])
     verifier = FakeProvider(['{"translation":"Cat"}'])

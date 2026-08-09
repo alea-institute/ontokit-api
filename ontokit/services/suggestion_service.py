@@ -578,6 +578,12 @@ class SuggestionService:
         )
 
         async with branch_write_lock(self.db, project_id, session.branch):
+            await self.db.refresh(session)
+            if session.status != SuggestionSessionStatus.ACTIVE.value:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Session is {session.status}, cannot save",
+                )
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
@@ -1783,6 +1789,9 @@ class SuggestionService:
 
         # Serialize git writes per branch to prevent lost commits
         async with branch_write_lock(self.db, project_id, session.branch):
+            await self.db.refresh(session)
+            if session.status != SuggestionSessionStatus.ACTIVE.value:
+                return
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
@@ -1945,6 +1954,12 @@ class SuggestionService:
         )
 
         async with branch_write_lock(self.db, project_id, session.branch):
+            await self.db.refresh(session)
+            if session.status != SuggestionSessionStatus.ACTIVE.value:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Session is {session.status}, cannot save",
+                )
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
