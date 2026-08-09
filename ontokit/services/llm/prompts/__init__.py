@@ -40,9 +40,7 @@ def _hardened(builder: PromptBuilder) -> PromptBuilder:
                 content = message["content"][:_MAX_USER_PROMPT_CHARS]
                 content = content.replace(
                     "<untrusted_ontology_data>", "&lt;untrusted_ontology_data&gt;"
-                ).replace(
-                    "</untrusted_ontology_data>", "&lt;/untrusted_ontology_data&gt;"
-                )
+                ).replace("</untrusted_ontology_data>", "&lt;/untrusted_ontology_data&gt;")
                 hardened.append(
                     {
                         **message,
@@ -52,6 +50,16 @@ def _hardened(builder: PromptBuilder) -> PromptBuilder:
         return hardened
 
     return build
+
+
+def harden_messages(messages: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Apply the shared ontology-data boundary to an already-built prompt."""
+
+    def builder(context: dict[str, Any], batch_size: int) -> list[dict[str, str]]:  # noqa: ARG001
+        return messages
+
+    return _hardened(builder)({}, 1)
+
 
 PROMPT_BUILDERS: dict[str, PromptBuilder] = {
     "children": _hardened(children.build_messages),
@@ -68,4 +76,5 @@ __all__ = [
     "annotations_module",
     "parents",
     "edges",
+    "harden_messages",
 ]
