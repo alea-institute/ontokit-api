@@ -29,6 +29,8 @@ class TranslationConfigResponse(BaseModel):
     translate_examples: bool = False
     speed_mode: TranslationSpeedMode = TranslationSpeedMode.batch
     provisional_gate: bool = False
+    primary_provider: str | None = None
+    primary_model: str | None = None
     verifier_provider: str | None = None
     verifier_model: str | None = None
     verifier_api_key_set: bool = False
@@ -43,6 +45,8 @@ class TranslationConfigUpdate(BaseModel):
     translate_examples: bool | None = None
     speed_mode: TranslationSpeedMode | None = None
     provisional_gate: bool | None = None
+    primary_provider: str | None = Field(default=None, max_length=50)
+    primary_model: str | None = Field(default=None, max_length=200)
     verifier_provider: str | None = Field(default=None, max_length=50)
     verifier_model: str | None = Field(default=None, max_length=200)
     # Write-only. It is intentionally absent from TranslationConfigResponse.

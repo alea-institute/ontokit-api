@@ -36,7 +36,12 @@ _STATE_CHECK_SQL = "state IN ('verified', 'provisional', 'rejected')"
 
 
 class ProjectTranslationConfig(Base):
-    """Per-project translation generation and verification settings."""
+    """Per-project translation generation and verification settings.
+
+    A null primary provider uses the project's ``ProjectLLMConfig`` provider and key, but
+    ``primary_model`` must be set because translation never falls back to
+    ``ProjectLLMConfig.model``. A null verifier key continues to use the primary project LLM key.
+    """
 
     __tablename__ = "project_translation_configs"
 
@@ -54,6 +59,8 @@ class ProjectTranslationConfig(Base):
     translate_examples: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     speed_mode: Mapped[str] = mapped_column(String(20), default="batch", nullable=False)
     provisional_gate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    primary_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    primary_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     verifier_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
     verifier_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Null deliberately means translation verification uses the primary project LLM key.
