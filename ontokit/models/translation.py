@@ -176,8 +176,22 @@ class TranslationRecord(Base):
         self.confirmed_at = at or datetime.now(UTC)
 
 
+class NativeReviewerLanguage(Base):
+    """A project member's independently assignable native-reviewer language tag."""
+
+    __tablename__ = "native_reviewer_languages"
+
+    member_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("project_members.id", ondelete="CASCADE"), primary_key=True
+    )
+    language: Mapped[str] = mapped_column(String(35), primary_key=True)
+
+    member: Mapped[ProjectMember] = relationship()
+
+
 __all__ = [
     "ProjectTranslationConfig",
+    "NativeReviewerLanguage",
     "TRANSLATION_STATES",
     "TranslationRecord",
     "hash_literal_value",
