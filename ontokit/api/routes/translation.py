@@ -13,6 +13,7 @@ from rdflib.namespace import SKOS
 from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
@@ -94,7 +95,11 @@ async def _reviewer_languages(db: AsyncSession, member_id: UUID) -> set[str]:
 async def _review_context(
     db: AsyncSession, project_id: UUID, user: CurrentUser
 ) -> tuple[Project, ProjectMember, set[str]]:
-    project_result = await db.execute(select(Project).where(Project.id == project_id))
+    project_result = await db.execute(
+        select(Project)
+        .options(selectinload(Project.github_integration))
+        .where(Project.id == project_id)
+    )
     project = project_result.scalar_one_or_none()
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")

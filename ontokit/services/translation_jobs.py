@@ -19,6 +19,7 @@ from rdflib import Graph, Literal, URIRef
 from rdflib.namespace import RDFS, SKOS
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.llm_config import ProjectLLMConfig
@@ -198,7 +199,11 @@ async def run_label_diff_job(
     )
     if config is None or not config.language_tags:
         return {"queued": 0}
-    project = await db.scalar(select(Project).where(Project.id == project_uuid))
+    project = await db.scalar(
+        select(Project)
+        .options(selectinload(Project.github_integration))
+        .where(Project.id == project_uuid)
+    )
     if project is None:
         raise RuntimeError("translation project not found")
     filename = get_git_ontology_path(project)
@@ -242,7 +247,11 @@ async def run_translation_entity_job(
         llm_config = await db.scalar(
             select(ProjectLLMConfig).where(ProjectLLMConfig.project_id == project_uuid)
         )
-        project = await db.scalar(select(Project).where(Project.id == project_uuid))
+        project = await db.scalar(
+            select(Project)
+            .options(selectinload(Project.github_integration))
+            .where(Project.id == project_uuid)
+        )
         if config is None or llm_config is None or project is None:
             raise RuntimeError("translation configuration is incomplete")
         filename = get_git_ontology_path(project)
