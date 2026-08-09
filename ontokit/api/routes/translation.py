@@ -66,13 +66,7 @@ def _get_git() -> GitRepositoryService:
 
 
 async def _get_member_role(db: AsyncSession, project_id: UUID, user_id: str) -> str | None:
-    result = await db.execute(
-        select(ProjectMember).where(
-            ProjectMember.project_id == project_id,
-            ProjectMember.user_id == user_id,
-        )
-    )
-    member = result.scalar_one_or_none()
+    member = await _get_member(db, project_id, user_id)
     return member.role if member else None
 
 

@@ -322,8 +322,9 @@ async def run_translation_backfill_job(
 ) -> dict[str, Any]:
     """Run a durable backfill serially, committing progress after each literal.
 
-    Each literal reuses U6's entity task and U5's gated commit path. A failed job keeps
-    completed progress; a relaunch reselects branch gaps so hash-covered work is skipped.
+    Each literal reuses entity translation execution and the gated translation commit path.
+    A failed job keeps completed progress; a relaunch reselects branch gaps so hash-covered
+    work is skipped.
     """
     db: AsyncSession = ctx["db"]
     project_uuid, job_uuid = UUID(project_id), UUID(job_id)

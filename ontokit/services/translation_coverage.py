@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -27,6 +27,10 @@ class LabelValue:
     predicate: str
     language: str | None
     value: str
+    value_hash: str = field(init=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "value_hash", hash_literal_value(self.value))
 
 
 class TranslationCoverageService:
@@ -62,8 +66,26 @@ class TranslationCoverageService:
     async def provisional(
         self, project_id: UUID, language: str, branch: str
     ) -> list[dict[str, Any]]:
-        _, labels, records, _ = await self._load(project_id, branch)
+        labels, records = await self._load_provisional(project_id, branch)
         return self.provisional_from_data(language, labels, records)
+
+    async def _load_provisional(
+        self, project_id: UUID, branch: str
+    ) -> tuple[list[LabelValue], list[TranslationRecord]]:
+        if self._db is None:
+            raise RuntimeError("coverage service I/O dependencies are not configured")
+        label_result = await self._db.execute(
+            select(
+                IndexedEntity.iri, IndexedLabel.property_iri, IndexedLabel.lang, IndexedLabel.value
+            )
+            .join(IndexedLabel, IndexedLabel.entity_id == IndexedEntity.id)
+            .where(IndexedEntity.project_id == project_id, IndexedEntity.branch == branch)
+        )
+        labels = [LabelValue(*row) for row in label_result.all()]
+        record_result = await self._db.execute(
+            select(TranslationRecord).where(TranslationRecord.project_id == project_id)
+        )
+        return labels, list(record_result.scalars().all())
 
     async def _load(
         self, project_id: UUID, branch: str
@@ -190,7 +212,7 @@ class TranslationCoverageService:
         cls, language: str, labels: list[LabelValue], records: list[TranslationRecord]
     ) -> list[dict[str, Any]]:
         current_hashes = {
-            (label.entity_iri, label.predicate, hash_literal_value(label.value)) for label in labels
+            (label.entity_iri, label.predicate, label.value_hash) for label in labels
         }
         rows = []
         for record in records:
@@ -231,7 +253,7 @@ class TranslationCoverageService:
         return {
             (label.entity_iri, label.predicate)
             for label in labels
-            if (label.entity_iri, label.predicate, label.language, hash_literal_value(label.value))
+            if (label.entity_iri, label.predicate, label.language, label.value_hash)
             not in translated
         }
 
@@ -250,24 +272,26 @@ class TranslationCoverageService:
                 label.entity_iri,
                 label.predicate,
                 label.language,
-                hash_literal_value(label.value),
+                label.value_hash,
             ): label
             for label in labels
         }
         source_hashes = {
-            (label.entity_iri, label.predicate, hash_literal_value(label.value)) for label in labels
+            (label.entity_iri, label.predicate, label.value_hash) for label in labels
         }
+        records_by_slot: dict[tuple[str, str, str], list[TranslationRecord]] = {}
+        for record in records:
+            records_by_slot.setdefault(
+                (record.entity_iri, record.predicate, record.language), []
+            ).append(record)
         output: dict[tuple[str, str, str], tuple[str, TranslationRecord | None]] = {}
         for entity, predicate in slots:
             for language in languages:
                 key = (entity, predicate, language)
                 candidates = [
                     record
-                    for record in records
-                    if record.entity_iri == entity
-                    and record.predicate == predicate
-                    and record.language == language
-                    and (entity, predicate, record.source_value_hash) in source_hashes
+                    for record in records_by_slot.get(key, [])
+                    if (entity, predicate, record.source_value_hash) in source_hashes
                 ]
                 verified = next(
                     (

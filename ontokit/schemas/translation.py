@@ -13,6 +13,21 @@ from pydantic import BaseModel, Field, field_validator
 _BCP47_RE = re.compile(r"^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$")
 
 
+def _validate_language_tags(value: list[str] | None) -> list[str] | None:
+    if value is None:
+        return None
+    unique: list[str] = []
+    seen: set[str] = set()
+    for tag in value:
+        if not tag or len(tag) > 35 or not _BCP47_RE.fullmatch(tag):
+            raise ValueError(f"invalid BCP 47 language tag: {tag!r}")
+        normalized = tag.casefold()
+        if normalized not in seen:
+            seen.add(normalized)
+            unique.append(tag)
+    return unique
+
+
 class VerificationMechanism(StrEnum):
     consensus = "consensus"
     confidence = "confidence"
@@ -58,18 +73,7 @@ class TranslationConfigUpdate(BaseModel):
     @field_validator("language_tags")
     @classmethod
     def validate_language_tags(cls, value: list[str] | None) -> list[str] | None:
-        if value is None:
-            return None
-        unique: list[str] = []
-        seen: set[str] = set()
-        for tag in value:
-            if not tag or len(tag) > 35 or not _BCP47_RE.fullmatch(tag):
-                raise ValueError(f"invalid BCP 47 language tag: {tag!r}")
-            normalized = tag.casefold()
-            if normalized not in seen:
-                seen.add(normalized)
-                unique.append(tag)
-        return unique
+        return _validate_language_tags(value)
 
 
 class LanguagePaletteEntry(BaseModel):
@@ -116,7 +120,7 @@ class ReviewerLanguagesUpdate(BaseModel):
     @field_validator("languages")
     @classmethod
     def validate_languages(cls, value: list[str]) -> list[str]:
-        validated = TranslationConfigUpdate.validate_language_tags(value)
+        validated = _validate_language_tags(value)
         return validated or []
 
 
