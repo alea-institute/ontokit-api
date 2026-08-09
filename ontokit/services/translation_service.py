@@ -15,7 +15,7 @@ from enum import StrEnum
 from rdflib import Graph, Literal, URIRef
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.constants import ONTOKIT_COMMITTER_EMAIL, ONTOKIT_COMMITTER_NAME
+from ontokit.core.constants import ONTOKIT_COMMITTER_EMAIL
 from ontokit.git.bare_repository import BareGitRepositoryService, CommitInfo
 from ontokit.models.llm_config import LLMAuditLog, ProjectLLMConfig
 from ontokit.models.translation import (
@@ -223,7 +223,11 @@ class TranslationService:
                 model_version=model_version,
                 method=result.method,
                 score=result.score,
-                state="verified" if result.accepted else "provisional",
+                state=(
+                    "verified"
+                    if result.accepted and not self._translation_config.provisional_gate
+                    else "provisional"
+                ),
                 created_at=now,
             )
             self._db.add(record)
@@ -232,7 +236,10 @@ class TranslationService:
         verified = {
             language: result
             for language, result in results.items()
-            if result.accepted and result.succeeded and result.proposed_value is not None
+            if result.accepted
+            and not self._translation_config.provisional_gate
+            and result.succeeded
+            and result.proposed_value is not None
         }
         if not verified:
             await self._db.commit()
@@ -287,10 +294,10 @@ class TranslationService:
                         ontology_content=updated,
                         filename=filename,
                         message=f"Add verified {languages} translations ({records[committed[0]].method})",
-                        author_name=f"OntoKit Translation Engine ({self._primary.model})",
+                        author_name="translation-bot",
                         author_email="translation-engine@ontokit.dev",
                         branch_name=branch,
-                        committer_name=ONTOKIT_COMMITTER_NAME,
+                        committer_name="OntoKit-bot",
                         committer_email=ONTOKIT_COMMITTER_EMAIL,
                     )
 

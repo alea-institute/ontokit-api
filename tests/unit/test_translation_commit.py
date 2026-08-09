@@ -12,7 +12,7 @@ import pytest
 from rdflib import Graph, Literal, URIRef
 from rdflib.namespace import RDFS
 
-from ontokit.core.constants import ONTOKIT_COMMITTER_EMAIL, ONTOKIT_COMMITTER_NAME
+from ontokit.core.constants import ONTOKIT_COMMITTER_EMAIL
 from ontokit.git.bare_repository import BareGitRepositoryService, BareOntologyRepository
 from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.translation import ProjectTranslationConfig, hash_literal_value
@@ -105,9 +105,9 @@ async def test_verified_translation_commits_literal_annotation_and_split_identit
     assert outcome.commit is not None
     commit = bare_git_repo.repo[outcome.commit.hash]
     assert isinstance(commit, pygit2.Commit)
-    assert commit.author.name == "OntoKit Translation Engine (gpt-5.4-mini)"
+    assert commit.author.name == "translation-bot"
     assert commit.author.email == "translation-engine@ontokit.dev"
-    assert commit.committer.name == ONTOKIT_COMMITTER_NAME
+    assert commit.committer.name == "OntoKit-bot"
     assert commit.committer.email == ONTOKIT_COMMITTER_EMAIL
 
     graph = Graph().parse(data=bare_git_repo.read_file("main", "ontology.ttl"), format="turtle")
