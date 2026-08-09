@@ -1,6 +1,5 @@
 """Suggestion session service for managing suggester workflows."""
 
-import asyncio
 import json
 import logging
 import os
@@ -8,7 +7,6 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
-from weakref import WeakValueDictionary
 
 from ontokit.core.anonymous_token import create_anonymous_token
 
@@ -57,6 +55,7 @@ from ontokit.schemas.suggestion import (
     SuggestionUser,
 )
 from ontokit.schemas.trust import TrustTier
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
@@ -69,19 +68,6 @@ logger = logging.getLogger(__name__)
 # Bound submit-time semantic duplicate checks so a malformed diff cannot fan out
 # into an unbounded sequence of embedding and pgvector queries.
 MAX_NEW_ENTITIES_PER_SUBMISSION = 25
-
-# Per-branch locks to serialize concurrent git writes (save + beacon_save)
-_branch_locks: WeakValueDictionary[tuple[UUID, str], asyncio.Lock] = WeakValueDictionary()
-
-
-def _branch_lock(project_id: UUID, branch: str) -> asyncio.Lock:
-    """Return a process-local lock without retaining inactive branches forever."""
-    key = (project_id, branch)
-    lock = _branch_locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _branch_locks[key] = lock
-    return lock
 
 
 class SuggestionService:
@@ -585,7 +571,7 @@ class SuggestionService:
             session.user_id, session.user_name
         )
 
-        async with _branch_lock(project_id, session.branch):
+        async with branch_write_lock(project_id, session.branch):
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
             if session.status != SuggestionSessionStatus.ACTIVE.value:
@@ -676,7 +662,7 @@ class SuggestionService:
             )
 
         filename = self._get_git_ontology_path(project)
-        async with _branch_lock(project_id, session.branch):
+        async with branch_write_lock(project_id, session.branch):
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
             if session.status != SuggestionSessionStatus.ACTIVE.value:
@@ -1271,13 +1257,15 @@ class SuggestionService:
                 merge_message=f"Merge suggestion: {session_id}",
                 delete_source_branch=True,
             )
-            await pr_service.merge_pull_request(
-                project_id,
-                session.pr_number,
-                merge_req,
-                user,
-                suggestion_review_authorized=True,
-            )
+            target_branch = self.git_service.get_default_branch(project_id)
+            async with branch_write_lock(project_id, target_branch):
+                await pr_service.merge_pull_request(
+                    project_id,
+                    session.pr_number,
+                    merge_req,
+                    user,
+                    suggestion_review_authorized=True,
+                )
 
         session.status = SuggestionSessionStatus.MERGED.value
         session.reviewer_id = user.id
@@ -1522,7 +1510,7 @@ class SuggestionService:
         )
 
         # Serialize git writes per branch to prevent lost commits
-        async with _branch_lock(project_id, session.branch):
+        async with branch_write_lock(project_id, session.branch):
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
             if session.status != SuggestionSessionStatus.ACTIVE.value:
@@ -1692,7 +1680,7 @@ class SuggestionService:
             session_id=session.session_id,
         )
 
-        async with _branch_lock(project_id, session.branch):
+        async with branch_write_lock(project_id, session.branch):
             await self._acquire_branch_lock(project_id, session.branch)
             await self.db.refresh(session)
             derived_mint = self._validate_turtle_and_detect_mint(
