@@ -9,12 +9,15 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from sqlalchemy import (
+    JSON,
+    Boolean,
     CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
     Index,
     String,
+    Text,
     UniqueConstraint,
     func,
     select,
@@ -30,6 +33,57 @@ if TYPE_CHECKING:
 
 TRANSLATION_STATES = ("verified", "provisional", "rejected")
 _STATE_CHECK_SQL = "state IN ('verified', 'provisional', 'rejected')"
+
+
+class ProjectTranslationConfig(Base):
+    """Per-project translation generation and verification settings."""
+
+    __tablename__ = "project_translation_configs"
+
+    id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("projects.id", ondelete="CASCADE"), unique=True, nullable=False
+    )
+    language_tags: Mapped[list[str]] = mapped_column(JSON, default=list, nullable=False)
+    verification_mechanism: Mapped[str] = mapped_column(
+        String(20), default="consensus", nullable=False
+    )
+    consensus_threshold: Mapped[float] = mapped_column(Float, default=0.85, nullable=False)
+    confidence_threshold: Mapped[float] = mapped_column(Float, default=0.80, nullable=False)
+    translate_definitions: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    translate_examples: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    speed_mode: Mapped[str] = mapped_column(String(20), default="batch", nullable=False)
+    provisional_gate: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    verifier_provider: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    verifier_model: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Null deliberately means translation verification uses the primary project LLM key.
+    verifier_api_key_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, onupdate=func.now()
+    )
+
+    project: Mapped[Project] = relationship()
+
+    __table_args__ = (
+        CheckConstraint(
+            "verification_mechanism IN ('consensus', 'confidence')",
+            name="ck_project_translation_verification_mechanism",
+        ),
+        CheckConstraint(
+            "speed_mode IN ('batch', 'fast')", name="ck_project_translation_speed_mode"
+        ),
+        CheckConstraint(
+            "consensus_threshold >= 0 AND consensus_threshold <= 1",
+            name="ck_project_translation_consensus_threshold",
+        ),
+        CheckConstraint(
+            "confidence_threshold >= 0 AND confidence_threshold <= 1",
+            name="ck_project_translation_confidence_threshold",
+        ),
+    )
 
 
 def hash_literal_value(value: str) -> str:
@@ -113,4 +167,9 @@ class TranslationRecord(Base):
         self.confirmed_at = at or datetime.now(UTC)
 
 
-__all__ = ["TRANSLATION_STATES", "TranslationRecord", "hash_literal_value"]
+__all__ = [
+    "ProjectTranslationConfig",
+    "TRANSLATION_STATES",
+    "TranslationRecord",
+    "hash_literal_value",
+]
