@@ -1,0 +1,178 @@
+"""Native-speaker review transitions and their ontology commits."""
+
+from __future__ import annotations
+
+import logging
+import uuid
+from collections.abc import Awaitable, Callable
+
+from rdflib import Graph, Literal, URIRef
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from ontokit.core.constants import ONTOKIT_COMMITTER_EMAIL, ONTOKIT_COMMITTER_NAME
+from ontokit.git.bare_repository import BareGitRepositoryService, CommitInfo
+from ontokit.models.project import ProjectMember
+from ontokit.models.translation import TranslationRecord
+from ontokit.services.branch_lock import branch_write_lock
+from ontokit.services.translation_annotations import (
+    TranslationAnnotation,
+    annotate,
+    remove_annotation,
+    translation_record_digest,
+)
+from ontokit.services.translation_service import _enqueue_ontology_index
+
+logger = logging.getLogger(__name__)
+IndexEnqueuer = Callable[..., Awaitable[None]]
+
+
+class TranslationReviewService:
+    def __init__(
+        self,
+        db: AsyncSession,
+        git_service: BareGitRepositoryService,
+        *,
+        index_enqueuer: IndexEnqueuer | None = None,
+    ) -> None:
+        self.db = db
+        self.git = git_service
+        self.index_enqueuer = index_enqueuer or _enqueue_ontology_index
+
+    @staticmethod
+    def authorize(
+        project_id: uuid.UUID,
+        member: ProjectMember,
+        reviewer_languages: set[str],
+        record: TranslationRecord,
+    ) -> None:
+        if member.project_id != project_id or record.project_id != project_id:
+            raise PermissionError("translation record is outside this project")
+        if record.language.casefold() not in {tag.casefold() for tag in reviewer_languages}:
+            raise PermissionError("native-reviewer tag required for this language")
+
+    async def confirm_loaded(
+        self,
+        *,
+        project_id: uuid.UUID,
+        branch: str,
+        filename: str,
+        member: ProjectMember,
+        reviewer_languages: set[str],
+        record: TranslationRecord,
+        author_name: str,
+        author_email: str,
+    ) -> CommitInfo:
+        self.authorize(project_id, member, reviewer_languages, record)
+        if record.proposed_value is None:
+            raise ValueError("translation record has no proposed literal")
+        record.confirm(member.id)
+        literal = Literal(record.proposed_value, lang=record.language)
+        commit = await self._commit_graph_change(
+            project_id=project_id,
+            branch=branch,
+            filename=filename,
+            message=f"Confirm {record.language} translation",
+            author_name=author_name,
+            author_email=author_email,
+            mutate=lambda graph: self._confirm_graph(graph, record, literal),
+        )
+        await self.db.commit()
+        await self._enqueue(project_id, branch, commit.hash)
+        return commit
+
+    async def reject_loaded(
+        self,
+        *,
+        project_id: uuid.UUID,
+        branch: str,
+        filename: str,
+        member: ProjectMember,
+        reviewer_languages: set[str],
+        record: TranslationRecord,
+        author_name: str,
+        author_email: str,
+    ) -> CommitInfo | None:
+        self.authorize(project_id, member, reviewer_languages, record)
+        if record.state != "provisional":
+            raise ValueError("only provisional translation records can be rejected")
+        record.state = "rejected"
+        commit: CommitInfo | None = None
+        if record.proposed_value is not None:
+            literal = Literal(record.proposed_value, lang=record.language)
+            content = self.git.get_file_from_branch(project_id, branch, filename)
+            graph = Graph().parse(data=content, format="turtle")
+            subject, predicate = URIRef(record.entity_iri), URIRef(record.predicate)
+            if (subject, predicate, literal) in graph:
+                commit = await self._commit_graph_change(
+                    project_id=project_id,
+                    branch=branch,
+                    filename=filename,
+                    message=f"Reject {record.language} translation",
+                    author_name=author_name,
+                    author_email=author_email,
+                    mutate=lambda target: self._reject_graph(target, record, literal),
+                )
+        await self.db.commit()
+        if commit is not None:
+            await self._enqueue(project_id, branch, commit.hash)
+        return commit
+
+    @staticmethod
+    def _confirm_graph(graph: Graph, record: TranslationRecord, literal: Literal) -> None:
+        subject, predicate = URIRef(record.entity_iri), URIRef(record.predicate)
+        graph.add((subject, predicate, literal))
+        annotate(
+            graph,
+            subject,
+            predicate,
+            literal,
+            TranslationAnnotation(
+                method=record.method,
+                state="verified",
+                created=record.created_at,
+                record_digest=translation_record_digest(record),
+            ),
+        )
+
+    @staticmethod
+    def _reject_graph(graph: Graph, record: TranslationRecord, literal: Literal) -> None:
+        subject, predicate = URIRef(record.entity_iri), URIRef(record.predicate)
+        remove_annotation(graph, subject, predicate, literal)
+        graph.remove((subject, predicate, literal))
+
+    async def _commit_graph_change(
+        self,
+        *,
+        project_id: uuid.UUID,
+        branch: str,
+        filename: str,
+        message: str,
+        author_name: str,
+        author_email: str,
+        mutate: Callable[[Graph], None],
+    ) -> CommitInfo:
+        async with branch_write_lock(project_id, branch):
+            content = self.git.get_file_from_branch(project_id, branch, filename)
+            graph = Graph().parse(data=content, format="turtle")
+            mutate(graph)
+            updated = graph.serialize(format="turtle").encode()
+            return self.git.commit_changes(
+                project_id=project_id,
+                ontology_content=updated,
+                filename=filename,
+                message=message,
+                author_name=author_name,
+                author_email=author_email,
+                branch_name=branch,
+                committer_name=ONTOKIT_COMMITTER_NAME,
+                committer_email=ONTOKIT_COMMITTER_EMAIL,
+            )
+
+    async def _enqueue(self, project_id: uuid.UUID, branch: str, commit_hash: str) -> None:
+        try:
+            await self.index_enqueuer(project_id=project_id, branch=branch, commit_hash=commit_hash)
+        except Exception:
+            logger.warning("Failed to queue native-review ontology re-index", exc_info=True)
+
+
+__all__ = ["TranslationReviewService"]

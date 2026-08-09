@@ -9,29 +9,43 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from rdflib.namespace import SKOS
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
-from ontokit.core.auth import OptionalUser, RequiredUser
+from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
 from ontokit.core.database import get_db
 from ontokit.git import GitRepositoryService, get_git_service
-from ontokit.models.project import Project, ProjectMember
-from ontokit.models.translation import ProjectTranslationConfig
+from ontokit.models.project import Project, ProjectMember, get_git_ontology_path
+from ontokit.models.translation import (
+    NativeReviewerLanguage,
+    ProjectTranslationConfig,
+    TranslationRecord,
+)
 from ontokit.schemas.translation import (
     LanguagePaletteEntry,
+    ReviewerEntry,
+    ReviewerLanguagesResponse,
+    ReviewerLanguagesUpdate,
     TranslateFieldRequest,
+    TranslationBulkConfirmRequest,
+    TranslationBulkConfirmResponse,
+    TranslationBulkResult,
     TranslationConfigResponse,
     TranslationConfigUpdate,
     TranslationJobAccepted,
+    TranslationRecordSummary,
+    TranslationReviewRequest,
     TranslationSpeedMode,
     VerificationMechanism,
 )
+from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.language_palette import LANGUAGE_PALETTE
 from ontokit.services.llm import check_llm_access, check_rate_limit
 from ontokit.services.llm.crypto import encrypt_secret
 from ontokit.services.translation_coverage import TranslationCoverageService
 from ontokit.services.translation_jobs import TranslationTask, enqueue_translation_tasks
+from ontokit.services.translation_review import TranslationReviewService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -51,6 +65,48 @@ async def _get_member_role(db: AsyncSession, project_id: UUID, user_id: str) -> 
     )
     member = result.scalar_one_or_none()
     return member.role if member else None
+
+
+async def _get_member(db: AsyncSession, project_id: UUID, user_id: str) -> ProjectMember | None:
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.project_id == project_id, ProjectMember.user_id == user_id
+        )
+    )
+    return result.scalar_one_or_none()
+
+
+async def _reviewer_languages(db: AsyncSession, member_id: UUID) -> set[str]:
+    result = await db.execute(
+        select(NativeReviewerLanguage.language).where(NativeReviewerLanguage.member_id == member_id)
+    )
+    return set(result.scalars().all())
+
+
+async def _review_context(
+    db: AsyncSession, project_id: UUID, user: CurrentUser
+) -> tuple[Project, ProjectMember, set[str]]:
+    project_result = await db.execute(select(Project).where(Project.id == project_id))
+    project = project_result.scalar_one_or_none()
+    if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    member = await _get_member(db, project_id, str(user.id))
+    if member is None:
+        raise HTTPException(status_code=403, detail="Not a project member")
+    return project, member, await _reviewer_languages(db, member.id)
+
+
+def _record_summary(record: TranslationRecord) -> TranslationRecordSummary:
+    return TranslationRecordSummary(
+        id=record.id,
+        project_id=record.project_id,
+        entity_iri=record.entity_iri,
+        predicate=record.predicate,
+        language=record.language,
+        proposed_value=record.proposed_value,
+        state=record.state,
+        confirming_member_id=record.confirming_member_id,
+    )
 
 
 async def _require_member(
@@ -256,6 +312,202 @@ async def translate_entity_field(
     except RuntimeError as exc:
         raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
     return TranslationJobAccepted(job_id=job_ids[0])
+
+
+@router.get("/{project_id}/translation/reviewers", response_model=list[ReviewerEntry])
+async def list_translation_reviewers(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> list[ReviewerEntry]:
+    await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
+    result = await db.execute(
+        select(ProjectMember, NativeReviewerLanguage.language)
+        .outerjoin(NativeReviewerLanguage, NativeReviewerLanguage.member_id == ProjectMember.id)
+        .where(ProjectMember.project_id == project_id)
+        .order_by(ProjectMember.id, NativeReviewerLanguage.language)
+    )
+    entries: dict[UUID, ReviewerEntry] = {}
+    for member, language in result.all():
+        entry = entries.setdefault(
+            member.id, ReviewerEntry(member_id=member.id, user_id=member.user_id, languages=[])
+        )
+        if language is not None:
+            entry.languages.append(language)
+    return [entry for entry in entries.values() if entry.languages]
+
+
+@router.put("/{project_id}/translation/reviewers/{member_id}", response_model=ReviewerEntry)
+async def update_translation_reviewer(
+    project_id: UUID,
+    member_id: UUID,
+    data: ReviewerLanguagesUpdate,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> ReviewerEntry:
+    await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
+    result = await db.execute(
+        select(ProjectMember).where(
+            ProjectMember.id == member_id, ProjectMember.project_id == project_id
+        )
+    )
+    member = result.scalar_one_or_none()
+    if member is None:
+        raise HTTPException(status_code=404, detail="Project member not found")
+    await db.execute(
+        delete(NativeReviewerLanguage).where(NativeReviewerLanguage.member_id == member_id)
+    )
+    for language in data.languages:
+        db.add(NativeReviewerLanguage(member_id=member_id, language=language))
+    await db.commit()
+    return ReviewerEntry(member_id=member.id, user_id=member.user_id, languages=data.languages)
+
+
+@router.get(
+    "/{project_id}/translation/my-reviewer-languages",
+    response_model=ReviewerLanguagesResponse,
+)
+async def get_my_reviewer_languages(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> ReviewerLanguagesResponse:
+    member = await _get_member(db, project_id, user.id)
+    if member is None:
+        raise HTTPException(status_code=403, detail="Not a project member")
+    return ReviewerLanguagesResponse(languages=sorted(await _reviewer_languages(db, member.id)))
+
+
+async def _review_record(
+    *,
+    project_id: UUID,
+    record_id: UUID,
+    data: TranslationReviewRequest,
+    db: AsyncSession,
+    user: CurrentUser,
+    git: GitRepositoryService,
+    reject: bool,
+) -> TranslationRecordSummary:
+    project, member, languages = await _review_context(db, project_id, user)
+    result = await db.execute(
+        select(TranslationRecord).where(
+            TranslationRecord.id == record_id, TranslationRecord.project_id == project_id
+        )
+    )
+    record = result.scalar_one_or_none()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Translation record not found")
+    try:
+        author_name, author_email = await CommitIdentityService(db).resolve(
+            str(user.id), getattr(user, "name", None)
+        )
+        service = TranslationReviewService(db, git)
+        if reject:
+            await service.reject_loaded(
+                project_id=project_id,
+                branch=data.branch,
+                filename=get_git_ontology_path(project),
+                member=member,
+                reviewer_languages=languages,
+                record=record,
+                author_name=author_name,
+                author_email=author_email,
+            )
+        else:
+            await service.confirm_loaded(
+                project_id=project_id,
+                branch=data.branch,
+                filename=get_git_ontology_path(project),
+                member=member,
+                reviewer_languages=languages,
+                record=record,
+                author_name=author_name,
+                author_email=author_email,
+            )
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _record_summary(record)
+
+
+@router.post(
+    "/{project_id}/translation/records/{record_id:uuid}/confirm",
+    response_model=TranslationRecordSummary,
+)
+async def confirm_translation_record(
+    project_id: UUID,
+    record_id: UUID,
+    data: TranslationReviewRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+    git: Annotated[GitRepositoryService, Depends(_get_git)],
+) -> TranslationRecordSummary:
+    return await _review_record(
+        project_id=project_id,
+        record_id=record_id,
+        data=data,
+        db=db,
+        user=user,
+        git=git,
+        reject=False,
+    )
+
+
+@router.post(
+    "/{project_id}/translation/records/{record_id:uuid}/reject",
+    response_model=TranslationRecordSummary,
+)
+async def reject_translation_record(
+    project_id: UUID,
+    record_id: UUID,
+    data: TranslationReviewRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+    git: Annotated[GitRepositoryService, Depends(_get_git)],
+) -> TranslationRecordSummary:
+    return await _review_record(
+        project_id=project_id,
+        record_id=record_id,
+        data=data,
+        db=db,
+        user=user,
+        git=git,
+        reject=True,
+    )
+
+
+@router.post(
+    "/{project_id}/translation/records/confirm-bulk",
+    response_model=TranslationBulkConfirmResponse,
+)
+async def confirm_translation_records_bulk(
+    project_id: UUID,
+    data: TranslationBulkConfirmRequest,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+    git: Annotated[GitRepositoryService, Depends(_get_git)],
+) -> TranslationBulkConfirmResponse:
+    results: list[TranslationBulkResult] = []
+    for record_id in data.record_ids:
+        try:
+            await _review_record(
+                project_id=project_id,
+                record_id=record_id,
+                data=TranslationReviewRequest(branch=data.branch),
+                db=db,
+                user=user,
+                git=git,
+                reject=False,
+            )
+        except HTTPException as exc:
+            await db.rollback()
+            results.append(
+                TranslationBulkResult(record_id=record_id, ok=False, error=str(exc.detail))
+            )
+        else:
+            results.append(TranslationBulkResult(record_id=record_id, ok=True, error=None))
+    return TranslationBulkConfirmResponse(results=results)
 
 
 @public_router.get("/translation/palette", response_model=list[LanguagePaletteEntry])

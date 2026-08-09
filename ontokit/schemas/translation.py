@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -84,3 +85,52 @@ class TranslateFieldRequest(BaseModel):
 
 class TranslationJobAccepted(BaseModel):
     job_id: str
+
+
+class ReviewerLanguagesUpdate(BaseModel):
+    languages: list[str] = Field(default_factory=list)
+
+    @field_validator("languages")
+    @classmethod
+    def validate_languages(cls, value: list[str]) -> list[str]:
+        validated = TranslationConfigUpdate.validate_language_tags(value)
+        return validated or []
+
+
+class ReviewerEntry(BaseModel):
+    member_id: UUID
+    user_id: str
+    languages: list[str] = Field(default_factory=list)
+
+
+class ReviewerLanguagesResponse(BaseModel):
+    languages: list[str] = Field(default_factory=list)
+
+
+class TranslationReviewRequest(BaseModel):
+    branch: str = Field(min_length=1, max_length=255)
+
+
+class TranslationBulkConfirmRequest(TranslationReviewRequest):
+    record_ids: list[UUID] = Field(min_length=1)
+
+
+class TranslationRecordSummary(BaseModel):
+    id: UUID
+    project_id: UUID
+    entity_iri: str
+    predicate: str
+    language: str
+    proposed_value: str | None
+    state: str
+    confirming_member_id: UUID | None
+
+
+class TranslationBulkResult(BaseModel):
+    record_id: UUID
+    ok: bool
+    error: str | None = None
+
+
+class TranslationBulkConfirmResponse(BaseModel):
+    results: list[TranslationBulkResult]
