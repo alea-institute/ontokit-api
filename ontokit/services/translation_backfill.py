@@ -60,9 +60,6 @@ async def select_backfill_literals(
     Era selection delegates to ``TranslationRecord.unconfirmed_machine_records_before``;
     therefore native-confirmed records never enter the replacement set.
     """
-    service = TranslationCoverageService(db, git)
-    languages, labels, records, graph = await service._load(project_id, branch)
-    targets = [language] if language else languages
     if era_before is not None:
         result = await db.execute(
             TranslationRecord.unconfirmed_machine_records_before(project_id, era_before)
@@ -82,15 +79,18 @@ async def select_backfill_literals(
             and (never_confirmed is not True or record.confirmed_at is None)
         ]
 
+    service = TranslationCoverageService(db, git)
+    languages, labels, records, graph = await service._load(project_id, branch)
+    targets = [language] if language else languages
     slots = service._source_slots(labels, records)
     states = service._states(slots, targets, labels, records, graph, set())
     source_by_slot = {
         (item.entity_iri, item.predicate): item for item in labels if item.language not in targets
     }
-    contexts = {
-        entity: tuple(item.value for item in labels if item.entity_iri == entity)
-        for entity, _ in slots
-    }
+    context_values: dict[str, list[str]] = {}
+    for item in labels:
+        context_values.setdefault(item.entity_iri, []).append(item.value)
+    contexts = {entity: tuple(context_values.get(entity, [])) for entity, _ in slots}
     output: list[BackfillLiteral] = []
     for entity, predicate in sorted(slots):
         source = source_by_slot.get((entity, predicate))
