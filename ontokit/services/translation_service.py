@@ -8,13 +8,22 @@ import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from difflib import SequenceMatcher
 from enum import StrEnum
 
+from rdflib import Graph, Literal, URIRef
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.core.constants import ONTOKIT_COMMITTER_EMAIL, ONTOKIT_COMMITTER_NAME
+from ontokit.git.bare_repository import BareGitRepositoryService, CommitInfo
 from ontokit.models.llm_config import LLMAuditLog, ProjectLLMConfig
-from ontokit.models.translation import ProjectTranslationConfig
+from ontokit.models.translation import (
+    ProjectTranslationConfig,
+    TranslationRecord,
+    hash_literal_value,
+)
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.llm.audit import log_llm_call
 from ontokit.services.llm.base import LLMProvider
 from ontokit.services.llm.budget import check_budget
@@ -28,6 +37,11 @@ from ontokit.services.llm.prompts.translation import (
     parse_verification_response,
 )
 from ontokit.services.llm.registry import get_provider
+from ontokit.services.translation_annotations import (
+    TranslationAnnotation,
+    annotate,
+    translation_record_digest,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +51,23 @@ BudgetChecker = Callable[
 ]
 AuditLogger = Callable[..., Awaitable[LLMAuditLog]]
 PricingResolver = Callable[[str], Awaitable[tuple[float, float]]]
+IndexEnqueuer = Callable[..., Awaitable[None]]
+
+
+async def _enqueue_ontology_index(*, project_id: uuid.UUID, branch: str, commit_hash: str) -> None:
+    """Queue one rebuild per pending/in-flight project branch via ARQ job identity."""
+    from ontokit.api.utils.redis import get_arq_pool
+
+    pool = await get_arq_pool()
+    if pool is None:
+        return
+    await pool.enqueue_job(
+        "run_ontology_index_task",
+        str(project_id),
+        branch,
+        commit_hash,
+        _job_id=f"ontology-index:{project_id}:{branch}",
+    )
 
 
 class TranslationErrorCode(StrEnum):
@@ -59,6 +90,15 @@ class TranslationResult:
     accepted: bool = False
     error_code: TranslationErrorCode | None = None
     error_message: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TranslationCommitOutcome:
+    """Result of persisting and, when eligible, applying translation results."""
+
+    commit: CommitInfo | None
+    committed_languages: tuple[str, ...] = ()
+    discarded_languages: tuple[str, ...] = ()
 
 
 class _TranslationCallError(RuntimeError):
@@ -104,6 +144,8 @@ class TranslationService:
         budget_checker: BudgetChecker = check_budget,
         audit_logger: AuditLogger = log_llm_call,
         pricing_resolver: PricingResolver = get_model_pricing,
+        git_service: BareGitRepositoryService | None = None,
+        index_enqueuer: IndexEnqueuer | None = None,
     ) -> None:
         self._db = db
         self._translation_config = translation_config
@@ -113,6 +155,8 @@ class TranslationService:
         self._budget_checker = budget_checker
         self._audit_logger = audit_logger
         self._pricing_resolver = pricing_resolver
+        self._git_service = git_service
+        self._index_enqueuer = index_enqueuer or _enqueue_ontology_index
 
         primary_model = translation_config.primary_model
         if not primary_model:
@@ -136,6 +180,132 @@ class TranslationService:
             llm_config.base_url
             if (translation_config.verifier_provider or primary_name) == llm_config.provider
             else None,
+        )
+
+    @property
+    def project_id(self) -> uuid.UUID:
+        """Return the configured project identifier."""
+        return self._translation_config.project_id
+
+    async def apply_results(
+        self,
+        *,
+        branch: str,
+        filename: str,
+        entity_iri: str,
+        predicate: str,
+        source_value: str,
+        source_language: str,
+        source_value_hash: str,
+        results: dict[str, TranslationResult],
+        model_version: str,
+    ) -> TranslationCommitOutcome:
+        """Persist results and coalesce eligible verified literals into one branch commit."""
+        if self._git_service is None:
+            raise RuntimeError("translation commit stage requires a git service")
+
+        now = datetime.now(UTC)
+        records: dict[str, TranslationRecord] = {}
+        for language, result in results.items():
+            if not result.succeeded or result.proposed_value is None:
+                continue
+            record = TranslationRecord(
+                id=uuid.uuid4(),
+                project_id=self.project_id,
+                entity_iri=entity_iri,
+                predicate=predicate,
+                language=language,
+                source_value_hash=source_value_hash,
+                translated_value_hash=hash_literal_value(result.proposed_value),
+                model_name=self._primary.model,
+                model_version=model_version,
+                method=result.method,
+                score=result.score,
+                state="verified" if result.accepted else "provisional",
+                created_at=now,
+            )
+            self._db.add(record)
+            records[language] = record
+
+        verified = {
+            language: result
+            for language, result in results.items()
+            if result.accepted and result.succeeded and result.proposed_value is not None
+        }
+        if not verified:
+            await self._db.commit()
+            return TranslationCommitOutcome(commit=None)
+
+        discarded: list[str] = []
+        committed: list[str] = []
+        commit: CommitInfo | None = None
+        async with branch_write_lock(self.project_id, branch):
+            content = self._git_service.get_file_from_branch(self.project_id, branch, filename)
+            graph = Graph().parse(data=content, format="turtle")
+            subject = URIRef(entity_iri)
+            property_iri = URIRef(predicate)
+            expected_source = Literal(source_value, lang=source_language)
+            source_is_current = (
+                hash_literal_value(source_value) == source_value_hash
+                and (subject, property_iri, expected_source) in graph
+            )
+            if not source_is_current:
+                discarded.extend(verified)
+            else:
+                additions = Graph()
+                for language in sorted(verified):
+                    result = verified[language]
+                    literal = Literal(result.proposed_value, lang=language)
+                    if any(
+                        isinstance(existing, Literal) and existing.language == language
+                        for existing in graph.objects(subject, property_iri)
+                    ):
+                        discarded.append(language)
+                        continue
+                    record = records[language]
+                    graph.add((subject, property_iri, literal))
+                    additions.add((subject, property_iri, literal))
+                    meta = TranslationAnnotation(
+                        method=record.method,
+                        state=record.state,
+                        created=record.created_at,
+                        record_digest=translation_record_digest(record),
+                    )
+                    annotate(graph, subject, property_iri, literal, meta)
+                    annotate(additions, subject, property_iri, literal, meta)
+                    committed.append(language)
+
+                if committed:
+                    serialized = additions.serialize(format="nt")
+                    delta = "\n".join(sorted(line for line in serialized.splitlines() if line))
+                    updated = content.rstrip() + b"\n\n" + delta.encode("utf-8") + b"\n"
+                    languages = ", ".join(committed)
+                    commit = self._git_service.commit_changes(
+                        project_id=self.project_id,
+                        ontology_content=updated,
+                        filename=filename,
+                        message=f"Add verified {languages} translations ({records[committed[0]].method})",
+                        author_name=f"OntoKit Translation Engine ({self._primary.model})",
+                        author_email="translation-engine@ontokit.dev",
+                        branch_name=branch,
+                        committer_name=ONTOKIT_COMMITTER_NAME,
+                        committer_email=ONTOKIT_COMMITTER_EMAIL,
+                    )
+
+        for language in discarded:
+            records[language].state = "rejected"
+        await self._db.commit()
+        if commit is not None:
+            try:
+                await self._index_enqueuer(
+                    project_id=self.project_id, branch=branch, commit_hash=commit.hash
+                )
+            except Exception:
+                logger.warning("Failed to queue translation ontology re-index", exc_info=True)
+        return TranslationCommitOutcome(
+            commit=commit,
+            committed_languages=tuple(committed),
+            discarded_languages=tuple(sorted(discarded)),
         )
 
     async def translate(
@@ -349,4 +519,9 @@ class TranslationService:
         return text
 
 
-__all__ = ["TranslationErrorCode", "TranslationResult", "TranslationService"]
+__all__ = [
+    "TranslationCommitOutcome",
+    "TranslationErrorCode",
+    "TranslationResult",
+    "TranslationService",
+]

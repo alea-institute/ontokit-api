@@ -1,11 +1,9 @@
 """Suggestion session service for managing suggester workflows."""
 
-import asyncio
 import json
 import logging
 import os
 import secrets
-from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -54,7 +52,7 @@ from ontokit.schemas.suggestion import (
     SuggestionUser,
 )
 from ontokit.schemas.trust import TrustTier
-from ontokit.services.branch_lock import pull_request_write_locks
+from ontokit.services.branch_lock import branch_write_lock, pull_request_write_locks
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import PullRequestService, get_pull_request_service
@@ -95,9 +93,6 @@ class _PendingSuggestionPullRequest:
     external_finalization: _ExternalPRFinalization | None = None
 
 
-# Per-branch locks to serialize concurrent git writes (save + beacon_save)
-_branch_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
-
 AUTO_ACCEPT_BATCH_SIZE = 100
 AUTO_ACCEPT_LEASE = timedelta(minutes=15)
 MAX_NEW_ENTITIES_PER_SUBMISSION = 25
@@ -119,7 +114,6 @@ _ENTITY_DECLARATION_TYPES = frozenset(
         OWL.IrreflexiveProperty,
     }
 )
-
 
 class SuggestionService:
     """Service for suggestion session CRUD, save, submit, and auto-submit."""
@@ -533,7 +527,7 @@ class SuggestionService:
             session.user_id, session.user_name
         )
 
-        async with _branch_locks[session.branch]:
+        async with branch_write_lock(self.db, project_id, session.branch):
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
@@ -1718,7 +1712,7 @@ class SuggestionService:
         )
 
         # Serialize git writes per branch to prevent lost commits
-        async with _branch_locks[session.branch]:
+        async with branch_write_lock(self.db, project_id, session.branch):
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
@@ -1880,7 +1874,7 @@ class SuggestionService:
             session_id=session.session_id,
         )
 
-        async with _branch_locks[session.branch]:
+        async with branch_write_lock(self.db, project_id, session.branch):
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
