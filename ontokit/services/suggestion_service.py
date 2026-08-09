@@ -1249,6 +1249,7 @@ class SuggestionService:
             )
 
         # Merge the PR if it exists
+        merge_commit_hash: str | None = None
         if session.pr_number:
             from ontokit.schemas.pull_request import PRMergeRequest
 
@@ -1259,13 +1260,15 @@ class SuggestionService:
             )
             target_branch = self.git_service.get_default_branch(project_id)
             async with branch_write_lock(project_id, target_branch):
-                await pr_service.merge_pull_request(
+                merge_response = await pr_service.merge_pull_request(
                     project_id,
                     session.pr_number,
                     merge_req,
                     user,
                     suggestion_review_authorized=True,
                 )
+                if isinstance(merge_response.merge_commit_hash, str):
+                    merge_commit_hash = merge_response.merge_commit_hash
 
         session.status = SuggestionSessionStatus.MERGED.value
         session.reviewer_id = user.id
@@ -1279,6 +1282,20 @@ class SuggestionService:
         )
         await self.db.commit()
         default_branch = self.git_service.get_default_branch(project_id)
+        if merge_commit_hash:
+            try:
+                from ontokit.services.translation_jobs import enqueue_label_diff_after_commit
+
+                project = await self._get_project(project_id)
+                await enqueue_label_diff_after_commit(
+                    project_id=project_id,
+                    branch=default_branch,
+                    commit_hash=merge_commit_hash,
+                    actor_id=user.id,
+                    role=self._get_user_role(project, user) or "viewer",
+                )
+            except Exception:
+                logger.warning("Failed to queue suggestion translation label diff", exc_info=True)
         await self._enqueue_branch_refresh(project_id, default_branch, full_embedding=True)
 
     async def dismiss(
