@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 from fastapi import HTTPException, status
 from rdflib import Graph, Literal, URIRef
 from rdflib.namespace import OWL, RDF, RDFS
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -331,13 +331,6 @@ class SuggestionService:
                         },
                     )
 
-    async def _acquire_branch_lock(self, project_id: UUID, branch: str) -> None:
-        """Serialize branch mutations across all API worker processes."""
-        await self.db.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-            {"lock_key": f"suggestion:{project_id}:{branch}"},
-        )
-
     async def _enqueue_branch_refresh(
         self,
         project_id: UUID,
@@ -571,8 +564,7 @@ class SuggestionService:
             session.user_id, session.user_name
         )
 
-        async with branch_write_lock(project_id, session.branch):
-            await self._acquire_branch_lock(project_id, session.branch)
+        async with branch_write_lock(self.db, project_id, session.branch):
             await self.db.refresh(session)
             if session.status != SuggestionSessionStatus.ACTIVE.value:
                 raise HTTPException(
@@ -662,8 +654,7 @@ class SuggestionService:
             )
 
         filename = self._get_git_ontology_path(project)
-        async with branch_write_lock(project_id, session.branch):
-            await self._acquire_branch_lock(project_id, session.branch)
+        async with branch_write_lock(self.db, project_id, session.branch):
             await self.db.refresh(session)
             if session.status != SuggestionSessionStatus.ACTIVE.value:
                 raise HTTPException(
@@ -1259,7 +1250,7 @@ class SuggestionService:
                 delete_source_branch=True,
             )
             target_branch = self.git_service.get_default_branch(project_id)
-            async with branch_write_lock(project_id, target_branch):
+            async with branch_write_lock(self.db, project_id, target_branch):
                 merge_response = await pr_service.merge_pull_request(
                     project_id,
                     session.pr_number,
@@ -1527,8 +1518,7 @@ class SuggestionService:
         )
 
         # Serialize git writes per branch to prevent lost commits
-        async with branch_write_lock(project_id, session.branch):
-            await self._acquire_branch_lock(project_id, session.branch)
+        async with branch_write_lock(self.db, project_id, session.branch):
             await self.db.refresh(session)
             if session.status != SuggestionSessionStatus.ACTIVE.value:
                 return
@@ -1697,8 +1687,7 @@ class SuggestionService:
             session_id=session.session_id,
         )
 
-        async with branch_write_lock(project_id, session.branch):
-            await self._acquire_branch_lock(project_id, session.branch)
+        async with branch_write_lock(self.db, project_id, session.branch):
             await self.db.refresh(session)
             derived_mint = self._validate_turtle_and_detect_mint(
                 project_id, session.branch, filename, data.content

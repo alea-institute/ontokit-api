@@ -7,10 +7,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
+from rdflib import Literal, URIRef
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.git import GitRepositoryService
-from ontokit.models.translation import TranslationRecord
+from ontokit.models.translation import TranslationRecord, hash_literal_value
 from ontokit.services.llm.base import estimate_message_tokens
 from ontokit.services.llm.pricing import get_model_pricing
 from ontokit.services.llm.prompts.translation import (
@@ -18,6 +19,7 @@ from ontokit.services.llm.prompts.translation import (
     build_translate_messages,
     build_verify_messages,
 )
+from ontokit.services.translation_annotations import read_annotation, translation_record_digest
 from ontokit.services.translation_coverage import TranslationCoverageService
 
 # Neither current provider adapter submits to a true asynchronous batch endpoint yet.
@@ -65,51 +67,63 @@ async def select_backfill_literals(
             TranslationRecord.unconfirmed_machine_records_before(project_id, era_before)
         )
         era_records = list(result.scalars().all())
-        return [
-            BackfillLiteral(
-                record.entity_iri,
-                record.predicate,
-                record.source_value,
-                "und",
-                record.language,
-            )
-            for record in era_records
-            if record.source_value is not None
-            and (language is None or record.language.casefold() == language.casefold())
-            and (never_confirmed is not True or record.confirmed_at is None)
-        ]
-
-    service = TranslationCoverageService(db, git)
-    languages, labels, records, graph = await service._load(project_id, branch)
-    targets = [language] if language else languages
-    slots = service._source_slots(labels, records)
-    states = service._states(slots, targets, labels, records, graph, set())
-    source_by_slot = {
-        (item.entity_iri, item.predicate): item for item in labels if item.language not in targets
-    }
-    context_values: dict[str, list[str]] = {}
-    for item in labels:
-        context_values.setdefault(item.entity_iri, []).append(item.value)
-    contexts = {entity: tuple(context_values.get(entity, [])) for entity, _ in slots}
-    output: list[BackfillLiteral] = []
-    for entity, predicate in sorted(slots):
-        source = source_by_slot.get((entity, predicate))
-        if source is None:
-            continue
-        for target in targets:
-            if states[(entity, predicate, target)][0] != "missing":
+        graph = await TranslationCoverageService(db, git).branch_graph(project_id, branch)
+        output: list[BackfillLiteral] = []
+        for record in era_records:
+            if (
+                record.state == "rejected"
+                or record.source_value is None
+                or (language is not None and record.language.casefold() != language.casefold())
+                or (never_confirmed is True and record.confirmed_at is not None)
+            ):
                 continue
+            subject, predicate = URIRef(record.entity_iri), URIRef(record.predicate)
+            source = next(
+                (
+                    value
+                    for value in graph.objects(subject, predicate)
+                    if isinstance(value, Literal)
+                    and str(value) == record.source_value
+                    and hash_literal_value(str(value)) == record.source_value_hash
+                ),
+                None,
+            )
+            if source is None:
+                continue
+            if record.proposed_value is not None:
+                target = Literal(record.proposed_value, lang=record.language)
+                annotation = read_annotation(graph, subject, predicate, target)
+                if (
+                    (subject, predicate, target) in graph
+                    and annotation is not None
+                    and annotation.record_digest == translation_record_digest(record)
+                ):
+                    continue
             output.append(
                 BackfillLiteral(
-                    entity,
-                    predicate,
-                    source.value,
+                    record.entity_iri,
+                    record.predicate,
+                    record.source_value,
                     source.language or "und",
-                    target,
-                    contexts[entity],
+                    record.language,
                 )
             )
-    return output
+        return output
+
+    service = TranslationCoverageService(db, git)
+    return [
+        BackfillLiteral(
+            source.entity_iri,
+            source.predicate,
+            source.value,
+            source.language or "und",
+            target,
+            context,
+        )
+        for source, target, context in await service.missing_literals(
+            project_id, branch, language
+        )
+    ]
 
 
 def _call_cost(messages: list[dict[str, str]], prices: tuple[float, float], output: int) -> float:

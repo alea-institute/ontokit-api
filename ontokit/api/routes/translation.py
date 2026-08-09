@@ -49,12 +49,12 @@ from ontokit.schemas.translation import (
 )
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.language_palette import LANGUAGE_PALETTE
-from ontokit.services.llm import check_llm_access, check_rate_limit
+from ontokit.services.llm import check_rate_limit, get_remaining_calls
 from ontokit.services.llm.crypto import encrypt_secret
 from ontokit.services.translation_backfill import preview_backfill_cost, select_backfill_literals
 from ontokit.services.translation_coverage import TranslationCoverageService
 from ontokit.services.translation_jobs import TranslationTask, enqueue_translation_tasks
-from ontokit.services.translation_review import TranslationReviewService
+from ontokit.services.translation_review import TranslationReviewConflict, TranslationReviewService
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -360,11 +360,11 @@ async def get_translation_entity_state(
 @router.get("/{project_id}/translation/provisional")
 async def get_provisional_translations(
     project_id: UUID,
-    language: Annotated[str, Query(min_length=1)],
     branch: Annotated[str, Query(min_length=1)],
     db: Annotated[AsyncSession, Depends(get_db)],
     user: OptionalUser,
     git: Annotated[GitRepositoryService, Depends(_get_git)],
+    language: Annotated[str | None, Query(min_length=1)] = None,
 ) -> list[dict[str, object]]:
     await _require_project_view(db, project_id, user)
     return await TranslationCoverageService(db, git).provisional(project_id, language, branch)
@@ -419,7 +419,7 @@ async def translate_entity_field(
 ) -> TranslationJobAccepted:
     """Queue an explicitly requested definition/example translation for one entity."""
     role = await _require_member(db, project_id, user.id, user.is_superadmin)
-    if not check_llm_access(role, is_anonymous=False):
+    if role not in {"owner", "admin", "editor"}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"LLM features are not available for your role ({role})",
@@ -430,11 +430,24 @@ async def translate_entity_field(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Translation rate limiter is unavailable",
         )
-    if not await check_rate_limit(redis, str(project_id), user.id, role):
+    config = await _get_config(db, project_id)
+    if config is None:
+        raise HTTPException(status_code=409, detail="Translation is not configured")
+    call_units = len(config.language_tags) * (
+        4 if config.verification_mechanism == "consensus" else 2
+    )
+    remaining = await get_remaining_calls(redis, str(project_id), user.id, role)
+    if remaining is not None and remaining < call_units:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Daily LLM call limit reached for your role ({role})",
+            detail=f"Daily LLM call limit cannot cover {call_units} provider calls",
         )
+    for _ in range(call_units):
+        if not await check_rate_limit(redis, str(project_id), user.id, role):
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail=f"Daily LLM call limit cannot cover {call_units} provider calls",
+            )
     pool = await get_arq_pool()
     if pool is None:
         raise HTTPException(
@@ -564,7 +577,7 @@ async def _review_record(
             )
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except ValueError as exc:
+    except (ValueError, TranslationReviewConflict) as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _record_summary(record)
 

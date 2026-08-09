@@ -16,7 +16,11 @@ from rdflib import Graph, Literal, URIRef
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.constants import ONTOKIT_COMMITTER_EMAIL
-from ontokit.git.bare_repository import BareGitRepositoryService, CommitInfo
+from ontokit.git.bare_repository import (
+    BareGitRepositoryService,
+    CommitInfo,
+    serialize_deterministic,
+)
 from ontokit.models.llm_config import LLMAuditLog, ProjectLLMConfig
 from ontokit.models.translation import (
     ProjectTranslationConfig,
@@ -42,6 +46,7 @@ from ontokit.services.translation_annotations import (
     annotate,
     translation_record_digest,
 )
+from ontokit.services.translation_index import enqueue_ontology_index
 
 logger = logging.getLogger(__name__)
 
@@ -54,20 +59,10 @@ PricingResolver = Callable[[str], Awaitable[tuple[float, float]]]
 IndexEnqueuer = Callable[..., Awaitable[None]]
 
 
-async def _enqueue_ontology_index(*, project_id: uuid.UUID, branch: str, commit_hash: str) -> None:
-    """Queue one rebuild per pending/in-flight project branch via ARQ job identity."""
-    from ontokit.api.utils.redis import get_arq_pool
-
-    pool = await get_arq_pool()
-    if pool is None:
-        return
-    await pool.enqueue_job(
-        "run_ontology_index_task",
-        str(project_id),
-        branch,
-        commit_hash,
-        _job_id=f"ontology-index:{project_id}:{branch}",
-    )
+"""Non-compensable verification component floors applied before aggregate thresholds."""
+CONSENSUS_VERIFIER_AGREEMENT_FLOOR = 0.6
+CONSENSUS_BACK_TRANSLATION_FLOOR = 0.6
+CONFIDENCE_BACK_TRANSLATION_FLOOR = 0.6
 
 
 class TranslationErrorCode(StrEnum):
@@ -156,7 +151,7 @@ class TranslationService:
         self._audit_logger = audit_logger
         self._pricing_resolver = pricing_resolver
         self._git_service = git_service
-        self._index_enqueuer = index_enqueuer or _enqueue_ontology_index
+        self._index_enqueuer = index_enqueuer or enqueue_ontology_index
 
         primary_model = translation_config.primary_model
         if not primary_model:
@@ -245,61 +240,67 @@ class TranslationService:
             await self._db.commit()
             return TranslationCommitOutcome(commit=None)
 
+        # Allocate and validate every durable record before a graph annotation can reference it.
+        # A flush failure therefore leaves git untouched; a later git failure rolls the rows back.
+        await self._db.flush()
+
         discarded: list[str] = []
         committed: list[str] = []
         commit: CommitInfo | None = None
-        async with branch_write_lock(self.project_id, branch):
-            content = self._git_service.get_file_from_branch(self.project_id, branch, filename)
-            graph = Graph().parse(data=content, format="turtle")
-            subject = URIRef(entity_iri)
-            property_iri = URIRef(predicate)
-            expected_source = Literal(source_value, lang=source_language)
-            source_is_current = (
-                hash_literal_value(source_value) == source_value_hash
-                and (subject, property_iri, expected_source) in graph
-            )
-            if not source_is_current:
-                discarded.extend(verified)
-            else:
-                additions = Graph()
-                for language in sorted(verified):
-                    result = verified[language]
-                    literal = Literal(result.proposed_value, lang=language)
-                    if any(
-                        isinstance(existing, Literal) and existing.language == language
-                        for existing in graph.objects(subject, property_iri)
-                    ):
-                        discarded.append(language)
-                        continue
-                    record = records[language]
-                    graph.add((subject, property_iri, literal))
-                    additions.add((subject, property_iri, literal))
-                    meta = TranslationAnnotation(
-                        method=record.method,
-                        state=record.state,
-                        created=record.created_at,
-                        record_digest=translation_record_digest(record),
-                    )
-                    annotate(graph, subject, property_iri, literal, meta)
-                    annotate(additions, subject, property_iri, literal, meta)
-                    committed.append(language)
+        try:
+            async with branch_write_lock(self._db, self.project_id, branch):
+                content = self._git_service.get_file_from_branch(self.project_id, branch, filename)
+                graph = Graph().parse(data=content, format="turtle")
+                subject = URIRef(entity_iri)
+                property_iri = URIRef(predicate)
+                expected_source = Literal(source_value, lang=source_language)
+                source_is_current = (
+                    hash_literal_value(source_value) == source_value_hash
+                    and (subject, property_iri, expected_source) in graph
+                )
+                if not source_is_current:
+                    discarded.extend(verified)
+                else:
+                    for language in sorted(verified):
+                        result = verified[language]
+                        literal = Literal(result.proposed_value, lang=language)
+                        if any(
+                            isinstance(existing, Literal) and existing.language == language
+                            for existing in graph.objects(subject, property_iri)
+                        ):
+                            discarded.append(language)
+                            continue
+                        record = records[language]
+                        graph.add((subject, property_iri, literal))
+                        meta = TranslationAnnotation(
+                            method=record.method,
+                            state=record.state,
+                            created=record.created_at,
+                            record_digest=translation_record_digest(record),
+                        )
+                        annotate(graph, subject, property_iri, literal, meta)
+                        committed.append(language)
 
-                if committed:
-                    serialized = additions.serialize(format="nt")
-                    delta = "\n".join(sorted(line for line in serialized.splitlines() if line))
-                    updated = content.rstrip() + b"\n\n" + delta.encode("utf-8") + b"\n"
-                    languages = ", ".join(committed)
-                    commit = self._git_service.commit_changes(
-                        project_id=self.project_id,
-                        ontology_content=updated,
-                        filename=filename,
-                        message=f"Add verified {languages} translations ({records[committed[0]].method})",
-                        author_name="translation-bot",
-                        author_email="translation-engine@ontokit.dev",
-                        branch_name=branch,
-                        committer_name="OntoKit-bot",
-                        committer_email=ONTOKIT_COMMITTER_EMAIL,
-                    )
+                    if committed:
+                        updated = serialize_deterministic(graph).encode()
+                        languages = ", ".join(committed)
+                        commit = self._git_service.commit_changes(
+                            project_id=self.project_id,
+                            ontology_content=updated,
+                            filename=filename,
+                            message=(
+                                f"Add verified {languages} translations "
+                                f"({records[committed[0]].method})"
+                            ),
+                            author_name="translation-bot",
+                            author_email="translation-engine@ontokit.dev",
+                            branch_name=branch,
+                            committer_name="OntoKit-bot",
+                            committer_email=ONTOKIT_COMMITTER_EMAIL,
+                        )
+        except Exception:
+            await self._db.rollback()
+            raise
 
         for language in discarded:
             records[language].state = "rejected"
@@ -381,6 +382,12 @@ class TranslationService:
                 error_code=exc.code,
                 error_message=str(exc),
             )
+        floors_met = (
+            inputs["verifier_agreement"] >= CONSENSUS_VERIFIER_AGREEMENT_FLOOR
+            and inputs["back_translation_similarity"] >= CONSENSUS_BACK_TRANSLATION_FLOOR
+            if method == "consensus"
+            else inputs["back_translation_similarity"] >= CONFIDENCE_BACK_TRANSLATION_FLOOR
+        )
         return TranslationResult(
             language=target_language,
             proposed_value=proposed,
@@ -388,7 +395,7 @@ class TranslationService:
             method=method,
             method_inputs=inputs,
             threshold=threshold,
-            accepted=score >= threshold,
+            accepted=floors_met and score >= threshold,
         )
 
     async def _consensus(

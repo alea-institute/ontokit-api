@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from itertools import chain, repeat
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -143,9 +144,15 @@ def mock_git() -> MagicMock:
 
 
 @pytest.fixture
-def service(mock_db: AsyncMock, mock_git: MagicMock) -> SuggestionService:
+def service(
+    mock_db: AsyncMock, mock_git: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> SuggestionService:
+    @asynccontextmanager
+    async def unlocked(*_args: object) -> AsyncIterator[None]:
+        yield
+
+    monkeypatch.setattr("ontokit.services.suggestion_service.branch_write_lock", unlocked)
     suggestion_service = SuggestionService(db=mock_db, git_service=mock_git)
-    suggestion_service._acquire_branch_lock = AsyncMock()  # type: ignore[method-assign]
     suggestion_service._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
     return suggestion_service
 

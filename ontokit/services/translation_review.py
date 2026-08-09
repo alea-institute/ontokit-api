@@ -12,18 +12,23 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.core.constants import ONTOKIT_COMMITTER_EMAIL, ONTOKIT_COMMITTER_NAME
 from ontokit.git.bare_repository import BareGitRepositoryService, CommitInfo
 from ontokit.models.project import ProjectMember
-from ontokit.models.translation import TranslationRecord
+from ontokit.models.translation import TranslationRecord, hash_literal_value
 from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.translation_annotations import (
     TranslationAnnotation,
     annotate,
+    read_annotation,
     remove_annotation,
     translation_record_digest,
 )
-from ontokit.services.translation_service import _enqueue_ontology_index
+from ontokit.services.translation_index import enqueue_ontology_index
 
 logger = logging.getLogger(__name__)
 IndexEnqueuer = Callable[..., Awaitable[None]]
+
+
+class TranslationReviewConflict(RuntimeError):
+    """The branch no longer contains the record's exact reviewable source/target state."""
 
 
 class TranslationReviewService:
@@ -36,7 +41,7 @@ class TranslationReviewService:
     ) -> None:
         self.db = db
         self.git = git_service
-        self.index_enqueuer = index_enqueuer or _enqueue_ontology_index
+        self.index_enqueuer = index_enqueuer or enqueue_ontology_index
 
     @staticmethod
     def authorize(
@@ -65,7 +70,6 @@ class TranslationReviewService:
         self.authorize(project_id, member, reviewer_languages, record)
         if record.proposed_value is None:
             raise ValueError("translation record has no proposed literal")
-        record.confirm(member.id)
         literal = Literal(record.proposed_value, lang=record.language)
         commit = await self._commit_graph_change(
             project_id=project_id,
@@ -76,7 +80,9 @@ class TranslationReviewService:
             author_email=author_email,
             mutate=lambda graph: self._confirm_graph(graph, record, literal),
         )
+        record.confirm(member.id)
         await self.db.commit()
+        assert commit is not None
         await self._enqueue(project_id, branch, commit.hash)
         return commit
 
@@ -95,23 +101,20 @@ class TranslationReviewService:
         self.authorize(project_id, member, reviewer_languages, record)
         if record.state != "provisional":
             raise ValueError("only provisional translation records can be rejected")
-        record.state = "rejected"
         commit: CommitInfo | None = None
         if record.proposed_value is not None:
             literal = Literal(record.proposed_value, lang=record.language)
-            content = self.git.get_file_from_branch(project_id, branch, filename)
-            graph = Graph().parse(data=content, format="turtle")
-            subject, predicate = URIRef(record.entity_iri), URIRef(record.predicate)
-            if (subject, predicate, literal) in graph:
-                commit = await self._commit_graph_change(
-                    project_id=project_id,
-                    branch=branch,
-                    filename=filename,
-                    message=f"Reject {record.language} translation",
-                    author_name=author_name,
-                    author_email=author_email,
-                    mutate=lambda target: self._reject_graph(target, record, literal),
-                )
+            commit = await self._commit_graph_change(
+                project_id=project_id,
+                branch=branch,
+                filename=filename,
+                message=f"Reject {record.language} translation",
+                author_name=author_name,
+                author_email=author_email,
+                mutate=lambda target: self._reject_graph(target, record, literal),
+                commit_if_unchanged=False,
+            )
+        record.state = "rejected"
         await self.db.commit()
         if commit is not None:
             await self._enqueue(project_id, branch, commit.hash)
@@ -120,6 +123,21 @@ class TranslationReviewService:
     @staticmethod
     def _confirm_graph(graph: Graph, record: TranslationRecord, literal: Literal) -> None:
         subject, predicate = URIRef(record.entity_iri), URIRef(record.predicate)
+        sources = [
+            value
+            for value in graph.objects(subject, predicate)
+            if isinstance(value, Literal)
+            and hash_literal_value(str(value)) == record.source_value_hash
+        ]
+        if not sources or not any(str(value) == record.source_value for value in sources):
+            raise TranslationReviewConflict("translation source literal changed")
+        existing = (subject, predicate, literal) in graph
+        annotation = read_annotation(graph, subject, predicate, literal)
+        if existing and (
+            annotation is None
+            or annotation.record_digest != translation_record_digest(record)
+        ):
+            raise TranslationReviewConflict("translation target belongs to another author or record")
         graph.add((subject, predicate, literal))
         annotate(
             graph,
@@ -137,6 +155,9 @@ class TranslationReviewService:
     @staticmethod
     def _reject_graph(graph: Graph, record: TranslationRecord, literal: Literal) -> None:
         subject, predicate = URIRef(record.entity_iri), URIRef(record.predicate)
+        annotation = read_annotation(graph, subject, predicate, literal)
+        if annotation is None or annotation.record_digest != translation_record_digest(record):
+            return
         remove_annotation(graph, subject, predicate, literal)
         graph.remove((subject, predicate, literal))
 
@@ -150,11 +171,16 @@ class TranslationReviewService:
         author_name: str,
         author_email: str,
         mutate: Callable[[Graph], None],
-    ) -> CommitInfo:
-        async with branch_write_lock(project_id, branch):
+        commit_if_unchanged: bool = True,
+    ) -> CommitInfo | None:
+        async with branch_write_lock(self.db, project_id, branch):
             content = self.git.get_file_from_branch(project_id, branch, filename)
             graph = Graph().parse(data=content, format="turtle")
             mutate(graph)
+            if not commit_if_unchanged and graph.isomorphic(
+                Graph().parse(data=content, format="turtle")
+            ):
+                return None
             updated = graph.serialize(format="turtle").encode()
             return self.git.commit_changes(
                 project_id=project_id,
@@ -175,4 +201,4 @@ class TranslationReviewService:
             logger.warning("Failed to queue native-review ontology re-index", exc_info=True)
 
 
-__all__ = ["TranslationReviewService"]
+__all__ = ["TranslationReviewConflict", "TranslationReviewService"]

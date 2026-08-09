@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, Mock, patch
+from unittest.mock import ANY, AsyncMock, Mock, patch
 from uuid import uuid4
 
 import pytest
@@ -157,6 +157,7 @@ def test_translation_jobs_are_registered_with_arq_worker() -> None:
     names = {getattr(function, "__name__", "") for function in WorkerSettings.functions}
     assert "run_translation_label_diff_task" in names
     assert "run_translation_entity_task" in names
+    assert "run_translation_backfill_task" in names
 
 
 @pytest.mark.asyncio
@@ -179,7 +180,15 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
 
     with (
         patch("ontokit.api.routes.translation._require_member", AsyncMock(return_value="editor")),
+        patch(
+            "ontokit.api.routes.translation._get_config",
+            AsyncMock(return_value=_config(language_tags=["fr"], verification_mechanism="confidence")),
+        ),
         patch("ontokit.api.routes.translation._get_redis", return_value=AsyncMock()),
+        patch(
+            "ontokit.api.routes.translation.get_remaining_calls",
+            AsyncMock(return_value=100),
+        ),
         patch("ontokit.api.routes.translation.check_rate_limit", AsyncMock(return_value=False)),
         pytest.raises(HTTPException) as limited,
     ):
@@ -190,9 +199,17 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
     redis.incrby.return_value = 1
     with (
         patch(
-            "ontokit.api.routes.translation._require_member", AsyncMock(return_value="suggester")
+            "ontokit.api.routes.translation._require_member", AsyncMock(return_value="editor")
+        ),
+        patch(
+            "ontokit.api.routes.translation._get_config",
+            AsyncMock(return_value=_config(language_tags=["fr"], verification_mechanism="confidence")),
         ),
         patch("ontokit.api.routes.translation._get_redis", return_value=redis),
+        patch(
+            "ontokit.api.routes.translation.get_remaining_calls",
+            AsyncMock(return_value=100),
+        ),
         patch("ontokit.api.routes.translation.check_rate_limit", AsyncMock(return_value=True)),
         patch("ontokit.api.routes.translation.get_arq_pool", AsyncMock(return_value=pool)),
     ):
@@ -209,4 +226,5 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
         None,
         "actor-1",
         "fast",
+        _job_id=ANY,
     )

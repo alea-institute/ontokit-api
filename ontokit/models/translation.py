@@ -164,6 +164,7 @@ class TranslationRecord(Base):
                 cls.project_id == project_id,
                 cls.created_at < cutoff,
                 cls.confirmed_at.is_(None),
+                cls.state != "rejected",
             )
             .order_by(cls.created_at, cls.id)
         )

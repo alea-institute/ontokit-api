@@ -50,6 +50,34 @@ class TranslationCoverageService:
         pending = await self._pending_scopes(project_id, branch, candidates)
         return self.classify(branch, languages, labels, records, graph, pending)
 
+    async def branch_graph(self, project_id: UUID, branch: str) -> Graph:
+        """Return the currently requested branch graph for provenance-sensitive selection."""
+        return (await self._load(project_id, branch))[3]
+
+    async def missing_literals(
+        self, project_id: UUID, branch: str, language: str | None = None
+    ) -> list[tuple[LabelValue, str, tuple[str, ...]]]:
+        """Return current source literals and target languages whose branch slots are gaps."""
+        languages, labels, records, graph = await self._load(project_id, branch)
+        targets = [language] if language else languages
+        slots = self._source_slots(labels, records)
+        states = self._states(slots, targets, labels, records, graph, set())
+        source_by_slot = {
+            (item.entity_iri, item.predicate): item
+            for item in labels
+            if item.language not in targets
+        }
+        context_values: dict[str, list[str]] = {}
+        for item in labels:
+            context_values.setdefault(item.entity_iri, []).append(item.value)
+        return [
+            (source, target, tuple(context_values.get(entity, [])))
+            for entity, predicate in sorted(slots)
+            if (source := source_by_slot.get((entity, predicate))) is not None
+            for target in targets
+            if states[(entity, predicate, target)][0] == "missing"
+        ]
+
     async def entity_state(self, project_id: UUID, entity_iri: str, branch: str) -> dict[str, Any]:
         languages, labels, records, graph = await self._load(project_id, branch)
         candidates = {
@@ -64,13 +92,13 @@ class TranslationCoverageService:
         )
 
     async def provisional(
-        self, project_id: UUID, language: str, branch: str
+        self, project_id: UUID, language: str | None, branch: str
     ) -> list[dict[str, Any]]:
-        labels, records = await self._load_provisional(project_id, branch)
+        labels, records = await self._load_provisional(project_id, branch, language)
         return self.provisional_from_data(language, labels, records)
 
     async def _load_provisional(
-        self, project_id: UUID, branch: str
+        self, project_id: UUID, branch: str, language: str | None
     ) -> tuple[list[LabelValue], list[TranslationRecord]]:
         if self._db is None:
             raise RuntimeError("coverage service I/O dependencies are not configured")
@@ -82,9 +110,13 @@ class TranslationCoverageService:
             .where(IndexedEntity.project_id == project_id, IndexedEntity.branch == branch)
         )
         labels = [LabelValue(*row) for row in label_result.all()]
-        record_result = await self._db.execute(
-            select(TranslationRecord).where(TranslationRecord.project_id == project_id)
+        record_query = select(TranslationRecord).where(
+            TranslationRecord.project_id == project_id,
+            TranslationRecord.state == "provisional",
         )
+        if language is not None:
+            record_query = record_query.where(TranslationRecord.language == language)
+        record_result = await self._db.execute(record_query)
         return labels, list(record_result.scalars().all())
 
     async def _load(
@@ -209,14 +241,14 @@ class TranslationCoverageService:
 
     @classmethod
     def provisional_from_data(
-        cls, language: str, labels: list[LabelValue], records: list[TranslationRecord]
+        cls, language: str | None, labels: list[LabelValue], records: list[TranslationRecord]
     ) -> list[dict[str, Any]]:
         current_hashes = {
             (label.entity_iri, label.predicate, label.value_hash) for label in labels
         }
         rows = []
         for record in records:
-            if record.language != language or record.state != "provisional":
+            if (language is not None and record.language != language) or record.state != "provisional":
                 continue
             if record.source_value is None or record.proposed_value is None:
                 continue
