@@ -118,6 +118,7 @@ class TestAutoAcceptSweep:
     async def test_merges_a_ripe_trusted_session(
         self, service: SuggestionService, mock_db: AsyncMock
     ) -> None:
+        """Covers AE3: the sweep snapshots the submitter, not its synthetic actor."""
         project = _project([_member("trusted-1")])
         session = _session()
         mock_db.execute.side_effect = _results(
@@ -137,6 +138,12 @@ class TestAutoAcceptSweep:
         recorded = _outcomes(mock_db)
         assert len(recorded) == 1
         assert recorded[0].decided_by == "system:auto-accept"
+        assert recorded[0].decided_by_name is None
+        assert recorded[0].snapshot_tier == "trusted"
+        assert recorded[0].snapshot_role == "suggester"
+        assert recorded[0].submitter_name == "T"
+        assert recorded[0].submitter_email == "t@example.com"
+        assert recorded[0].snapshot_captured_at is not None
 
     async def test_skips_when_another_worker_claimed_it(
         self, service: SuggestionService, mock_db: AsyncMock
