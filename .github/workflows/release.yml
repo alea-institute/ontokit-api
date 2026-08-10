@@ -13,6 +13,16 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install actionlint v1.7.12
+        run: |
+          curl -fsSLO https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz
+          echo '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  actionlint_1.7.12_linux_amd64.tar.gz' | sha256sum -c -
+          tar -xzf actionlint_1.7.12_linux_amd64.tar.gz actionlint
+          install actionlint "$RUNNER_TEMP/actionlint"
+      - name: Lint GitHub Actions workflows
+        run: find .github/workflows -type f \( -name '*.yml' -o -name '*.yaml' \) -exec "$RUNNER_TEMP/actionlint" {} +
       - uses: astral-sh/setup-uv@ae62891fec2bb8e7d6c99fc78c9fec3a63790f8d # v10.0.0
       - run: uv sync --group dev
       - run: uv run ruff check ontokit/
