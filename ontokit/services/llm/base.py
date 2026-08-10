@@ -41,9 +41,7 @@ class LLMProvider(abc.ABC):
         self.model = model
 
     @abc.abstractmethod
-    async def chat(
-        self, messages: list[dict[str, str]], **kwargs: Any
-    ) -> tuple[str, int, int]:
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> tuple[str, int, int]:
         """Multi-turn chat completion.
 
         Returns:

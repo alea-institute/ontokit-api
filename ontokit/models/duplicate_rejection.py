@@ -21,9 +21,7 @@ class DuplicateRejection(Base):
     __tablename__ = "duplicate_rejections"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    project_id: Mapped[uuid.UUID] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE")
-    )
+    project_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
     rejected_iri: Mapped[str] = mapped_column(String(2000))
     canonical_iri: Mapped[str] = mapped_column(String(2000))
     rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -35,6 +33,4 @@ class DuplicateRejection(Base):
         ForeignKey("suggestion_sessions.id", ondelete="SET NULL"), nullable=True
     )
 
-    __table_args__ = (
-        Index("ix_duplicate_rejections_lookup", "project_id", "rejected_iri"),
-    )
+    __table_args__ = (Index("ix_duplicate_rejections_lookup", "project_id", "rejected_iri"),)

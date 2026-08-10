@@ -140,15 +140,11 @@ async def get_budget_status(
                 0.0,
             ).label("monthly"),
             func.coalesce(
-                func.sum(LLMAuditLog.cost_estimate_usd).filter(
-                    LLMAuditLog.created_at >= day_start
-                ),
+                func.sum(LLMAuditLog.cost_estimate_usd).filter(LLMAuditLog.created_at >= day_start),
                 0.0,
             ).label("daily"),
             func.coalesce(
-                func.sum(LLMAuditLog.cost_estimate_usd).filter(
-                    LLMAuditLog.created_at >= week_ago
-                ),
+                func.sum(LLMAuditLog.cost_estimate_usd).filter(LLMAuditLog.created_at >= week_ago),
                 0.0,
             ).label("week"),
         )

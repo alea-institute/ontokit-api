@@ -36,11 +36,7 @@ class GitHubModelsProvider(OpenAICompatProvider):
                 resp.raise_for_status()
                 data = resp.json()
 
-            items = (
-                data
-                if isinstance(data, list)
-                else data.get("models", data.get("value", []))
-            )
+            items = data if isinstance(data, list) else data.get("models", data.get("value", []))
             model_ids = []
             for m in items:
                 model_id = m.get("id") or m.get("name", "")

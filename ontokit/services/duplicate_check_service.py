@@ -123,9 +123,9 @@ class DuplicateCheckService:
             elif exact_score == 0.0:
                 composite = semantic_score
             else:
-                composite = (
-                    EXACT_WEIGHT * exact_score + SEMANTIC_WEIGHT * semantic_score
-                ) / (EXACT_WEIGHT + SEMANTIC_WEIGHT)
+                composite = (EXACT_WEIGHT * exact_score + SEMANTIC_WEIGHT * semantic_score) / (
+                    EXACT_WEIGHT + SEMANTIC_WEIGHT
+                )
 
             # An exact normalized label match is itself deterministic duplicate
             # evidence. Do not let representation differences between a short
@@ -188,16 +188,20 @@ class DuplicateCheckService:
         """Classify a branch as main/pending/rejected per D-09."""
         # Check if branch matches a suggestion session
         session = (
-            await self._db.execute(
-                select(SuggestionSession)
-                .where(
-                    SuggestionSession.project_id == project_id,
-                    SuggestionSession.branch == branch,
+            (
+                await self._db.execute(
+                    select(SuggestionSession)
+                    .where(
+                        SuggestionSession.project_id == project_id,
+                        SuggestionSession.branch == branch,
+                    )
+                    .order_by(SuggestionSession.created_at.desc())
+                    .limit(1)
                 )
-                .order_by(SuggestionSession.created_at.desc())
-                .limit(1)
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
         if not session:
             return "main"
