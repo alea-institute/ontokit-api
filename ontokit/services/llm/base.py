@@ -30,6 +30,9 @@ class LLMProvider(abc.ABC):
     - Implement list_models() for the model picker UI.
     """
 
+    # Override only when chat requests are submitted through a true discounted batch API.
+    supports_true_batch_api = False
+
     def __init__(
         self,
         api_key: str | None = None,

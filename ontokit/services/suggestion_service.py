@@ -1,6 +1,5 @@
 """Suggestion session service for managing suggester workflows."""
 
-import asyncio
 import json
 import logging
 import os
@@ -8,7 +7,6 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
-from weakref import WeakValueDictionary
 
 from ontokit.core.anonymous_token import create_anonymous_token
 
@@ -18,7 +16,7 @@ if TYPE_CHECKING:
 from fastapi import HTTPException, status
 from rdflib import Graph, Literal, URIRef
 from rdflib.namespace import OWL, RDF, RDFS
-from sqlalchemy import select, text, update
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -57,6 +55,7 @@ from ontokit.schemas.suggestion import (
     SuggestionUser,
 )
 from ontokit.schemas.trust import TrustTier
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
@@ -69,19 +68,6 @@ logger = logging.getLogger(__name__)
 # Bound submit-time semantic duplicate checks so a malformed diff cannot fan out
 # into an unbounded sequence of embedding and pgvector queries.
 MAX_NEW_ENTITIES_PER_SUBMISSION = 25
-
-# Per-branch locks to serialize concurrent git writes (save + beacon_save)
-_branch_locks: WeakValueDictionary[tuple[UUID, str], asyncio.Lock] = WeakValueDictionary()
-
-
-def _branch_lock(project_id: UUID, branch: str) -> asyncio.Lock:
-    """Return a process-local lock without retaining inactive branches forever."""
-    key = (project_id, branch)
-    lock = _branch_locks.get(key)
-    if lock is None:
-        lock = asyncio.Lock()
-        _branch_locks[key] = lock
-    return lock
 
 
 class SuggestionService:
@@ -342,13 +328,6 @@ class SuggestionService:
                         },
                     )
 
-    async def _acquire_branch_lock(self, project_id: UUID, branch: str) -> None:
-        """Serialize branch mutations across all API worker processes."""
-        await self.db.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-            {"lock_key": f"suggestion:{project_id}:{branch}"},
-        )
-
     async def _enqueue_branch_refresh(
         self,
         project_id: UUID,
@@ -582,8 +561,7 @@ class SuggestionService:
             session.user_id, session.user_name
         )
 
-        async with _branch_lock(project_id, session.branch):
-            await self._acquire_branch_lock(project_id, session.branch)
+        async with branch_write_lock(self.db, project_id, session.branch):
             await self.db.refresh(session)
             if session.status != SuggestionSessionStatus.ACTIVE.value:
                 raise HTTPException(
@@ -671,8 +649,7 @@ class SuggestionService:
             )
 
         filename = self._get_git_ontology_path(project)
-        async with _branch_lock(project_id, session.branch):
-            await self._acquire_branch_lock(project_id, session.branch)
+        async with branch_write_lock(self.db, project_id, session.branch):
             await self.db.refresh(session)
             if session.status != SuggestionSessionStatus.ACTIVE.value:
                 raise HTTPException(
@@ -1069,10 +1046,11 @@ class SuggestionService:
 
     async def _record_terminal_outcome(
         self,
-        project_id: UUID,
+        project: Project,
         session: SuggestionSession,
         outcome: SuggestionOutcomeType,
         decided_by: str | None,
+        decided_by_name: str | None,
         note: str | None = None,
     ) -> None:
         """Append the outcome row and, on acceptance, run auto-promotion.
@@ -1081,12 +1059,20 @@ class SuggestionService:
         session's status change, so a resolved suggestion can never exist
         without its outcome row (which would silently break promotion counting).
         """
-        await self.trust.record_outcome(project_id, session, outcome, decided_by, note)
+        project_id = project.id
+        await self.trust.record_outcome(
+            project_id,
+            session,
+            outcome,
+            decided_by,
+            note,
+            project=project,
+            decided_by_name=decided_by_name,
+        )
 
         if outcome is not SuggestionOutcomeType.ACCEPTED:
             return
 
-        project = await self._get_project(project_id)
         promoted = await self.trust.evaluate_promotion(project, session.user_id)
         if not promoted:
             return
@@ -1251,14 +1237,14 @@ class SuggestionService:
         attribute its own merges to ``system:auto-accept`` while reusing this
         one path (and therefore the outcome log and promotion evaluation).
         """
-        await self._verify_reviewer_access(project_id, user)
-        await self._approve_unchecked(project_id, session_id, user, decided_by)
+        project = await self._verify_reviewer_access(project_id, user)
+        await self._approve_unchecked(session_id, user, project, decided_by)
 
     async def _approve_unchecked(
         self,
-        project_id: UUID,
         session_id: str,
         user: CurrentUser,
+        project: Project,
         decided_by: str | None = None,
     ) -> None:
         """Approve without the reviewer-role gate.
@@ -1267,6 +1253,7 @@ class SuggestionService:
         sweep is the sole other caller, and its authorization is the trust tier
         re-check it performs immediately before calling in.
         """
+        project_id = project.id
         session = await self._get_session(project_id, session_id)
 
         if session.status not in (
@@ -1279,6 +1266,7 @@ class SuggestionService:
             )
 
         # Merge the PR if it exists
+        merge_commit_hash: str | None = None
         if session.pr_number:
             from ontokit.schemas.pull_request import PRMergeRequest
 
@@ -1287,13 +1275,17 @@ class SuggestionService:
                 merge_message=f"Merge suggestion: {session_id}",
                 delete_source_branch=True,
             )
-            await pr_service.merge_pull_request(
-                project_id,
-                session.pr_number,
-                merge_req,
-                user,
-                suggestion_review_authorized=True,
-            )
+            target_branch = self.git_service.get_default_branch(project_id)
+            async with branch_write_lock(self.db, project_id, target_branch):
+                merge_response = await pr_service.merge_pull_request(
+                    project_id,
+                    session.pr_number,
+                    merge_req,
+                    user,
+                    suggestion_review_authorized=True,
+                )
+                if isinstance(merge_response.merge_commit_hash, str):
+                    merge_commit_hash = merge_response.merge_commit_hash
 
         session.status = SuggestionSessionStatus.MERGED.value
         session.reviewer_id = user.id
@@ -1302,11 +1294,30 @@ class SuggestionService:
         session.reviewed_at = datetime.now(UTC)
         session.last_activity = datetime.now(UTC)
         session.auto_accept_after = None
+        outcome_actor = decided_by or user.id
+        outcome_actor_name = None if outcome_actor == SYSTEM_AUTO_ACCEPT_ACTOR else user.name
         await self._record_terminal_outcome(
-            project_id, session, SuggestionOutcomeType.ACCEPTED, decided_by or user.id
+            project,
+            session,
+            SuggestionOutcomeType.ACCEPTED,
+            outcome_actor,
+            outcome_actor_name,
         )
         await self.db.commit()
         default_branch = self.git_service.get_default_branch(project_id)
+        if merge_commit_hash:
+            try:
+                from ontokit.services.translation_jobs import enqueue_label_diff_after_commit
+
+                await enqueue_label_diff_after_commit(
+                    project_id=project_id,
+                    branch=default_branch,
+                    commit_hash=merge_commit_hash,
+                    actor_id=user.id,
+                    role=self._get_user_role(project, user) or "viewer",
+                )
+            except Exception:
+                logger.warning("Failed to queue suggestion translation label diff", exc_info=True)
         await self._enqueue_branch_refresh(project_id, default_branch, full_embedding=True)
 
     async def dismiss(
@@ -1318,7 +1329,7 @@ class SuggestionService:
         carries no feedback obligation, where rejection is a considered review
         outcome with a reason the contributor sees.
         """
-        await self._verify_reviewer_access(project_id, user)
+        project = await self._verify_reviewer_access(project_id, user)
         session = await self._get_session(project_id, session_id)
 
         if session.status not in (
@@ -1338,7 +1349,12 @@ class SuggestionService:
         session.last_activity = datetime.now(UTC)
         self._halt_auto_accept(session)
         await self._record_terminal_outcome(
-            project_id, session, SuggestionOutcomeType.DISMISSED, user.id, note
+            project,
+            session,
+            SuggestionOutcomeType.DISMISSED,
+            user.id,
+            user.name,
+            note,
         )
         await self.db.commit()
 
@@ -1346,7 +1362,7 @@ class SuggestionService:
         self, project_id: UUID, session_id: str, data: SuggestionRejectRequest, user: CurrentUser
     ) -> None:
         """Reject a suggestion session with a reason."""
-        await self._verify_reviewer_access(project_id, user)
+        project = await self._verify_reviewer_access(project_id, user)
         session = await self._get_session(project_id, session_id)
 
         if session.status not in (
@@ -1368,7 +1384,12 @@ class SuggestionService:
         # An objection halts the quiet-period clock (R12).
         self._halt_auto_accept(session)
         await self._record_terminal_outcome(
-            project_id, session, SuggestionOutcomeType.REJECTED, user.id, data.reason
+            project,
+            session,
+            SuggestionOutcomeType.REJECTED,
+            user.id,
+            user.name,
+            data.reason,
         )
         await self.db.commit()
 
@@ -1538,8 +1559,7 @@ class SuggestionService:
         )
 
         # Serialize git writes per branch to prevent lost commits
-        async with _branch_lock(project_id, session.branch):
-            await self._acquire_branch_lock(project_id, session.branch)
+        async with branch_write_lock(self.db, project_id, session.branch):
             await self.db.refresh(session)
             if session.status != SuggestionSessionStatus.ACTIVE.value:
                 return
@@ -1708,8 +1728,7 @@ class SuggestionService:
             session_id=session.session_id,
         )
 
-        async with _branch_lock(project_id, session.branch):
-            await self._acquire_branch_lock(project_id, session.branch)
+        async with branch_write_lock(self.db, project_id, session.branch):
             await self.db.refresh(session)
             derived_mint = self._validate_turtle_and_detect_mint(
                 project_id, session.branch, filename, data.content
@@ -2016,9 +2035,9 @@ class SuggestionService:
             )
             try:
                 await self._approve_unchecked(
-                    session.project_id,
                     session.session_id,
                     system_actor,
+                    project,
                     SYSTEM_AUTO_ACCEPT_ACTOR,
                 )
                 count += 1

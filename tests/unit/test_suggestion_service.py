@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from itertools import chain, repeat
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -14,6 +15,7 @@ from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError, MissingGreenlet
 
 from ontokit.core.auth import CurrentUser
+from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.services.suggestion_service import SuggestionService
 
@@ -71,7 +73,10 @@ def _make_project(project_id: uuid.UUID = PROJECT_ID, is_public: bool = True) ->
     member = MagicMock()
     member.user_id = "test-user-id"
     member.role = "editor"
+    member.is_trusted = False
+    member.trust_override = "none"
     project.members = [member]
+    project.trust_promotion_threshold = 5
     return project
 
 
@@ -144,11 +149,25 @@ def mock_git() -> MagicMock:
 
 
 @pytest.fixture
-def service(mock_db: AsyncMock, mock_git: MagicMock) -> SuggestionService:
+def service(
+    mock_db: AsyncMock, mock_git: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> SuggestionService:
+    @asynccontextmanager
+    async def unlocked(*_args: object) -> AsyncIterator[None]:
+        yield
+
+    monkeypatch.setattr("ontokit.services.suggestion_service.branch_write_lock", unlocked)
     suggestion_service = SuggestionService(db=mock_db, git_service=mock_git)
-    suggestion_service._acquire_branch_lock = AsyncMock()  # type: ignore[method-assign]
     suggestion_service._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
     return suggestion_service
+
+
+def _outcomes(mock_db: AsyncMock) -> list[SuggestionOutcome]:
+    return [
+        call.args[0]
+        for call in mock_db.add.call_args_list
+        if isinstance(call.args[0], SuggestionOutcome)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -1189,6 +1208,10 @@ class TestSubmit:
                 "ontokit.services.suggestion_service.get_pull_request_service"
             ) as mock_pr_svc_factory,
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
+            patch(
+                "ontokit.services.suggestion_service.check_and_consume",
+                AsyncMock(return_value=(True, 9)),
+            ),
             patch.object(service, "_create_pr_directly", AsyncMock(return_value=direct_pr)),
         ):
             mock_pr_svc = AsyncMock()
@@ -1457,9 +1480,19 @@ class TestReject:
         mock_db: AsyncMock,
     ) -> None:
         """Rejects a submitted session with a reason."""
-        session = _make_session(status=SuggestionSessionStatus.SUBMITTED.value)
+        session = _make_session(
+            user_id="submitter-1", status=SuggestionSessionStatus.SUBMITTED.value
+        )
+        session.user_name = "Submitter Account"
+        session.user_email = "submitter@example.com"
         project = _make_project()
         project.members[0].role = "admin"
+        submitter = MagicMock()
+        submitter.user_id = "submitter-1"
+        submitter.role = "suggester"
+        submitter.is_trusted = True
+        submitter.trust_override = "none"
+        project.members.append(submitter)
 
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
@@ -1478,6 +1511,18 @@ class TestReject:
         assert session.status == SuggestionSessionStatus.REJECTED.value
         assert session.reviewer_feedback == "Not aligned with ontology design"
         assert session.reviewer_id == user.id
+        outcomes = _outcomes(mock_db)
+        assert len(outcomes) == 1
+        assert outcomes[0].snapshot_tier == "trusted"
+        assert outcomes[0].snapshot_role == "suggester"
+        assert outcomes[0].submitter_name == "Submitter Account"
+        assert outcomes[0].submitter_email == "submitter@example.com"
+        assert outcomes[0].decided_by_name == "Test User"
+        assert outcomes[0].snapshot_captured_at is not None
+
+        # Covers AE2: later membership changes cannot rewrite the snapshot.
+        submitter.role = "editor"
+        assert outcomes[0].snapshot_role == "suggester"
 
     @pytest.mark.asyncio
     async def test_reject_wrong_status_raises_400(
@@ -1534,6 +1579,77 @@ class TestReject:
 
 
 # ---------------------------------------------------------------------------
+# dismiss / bulk review
+# ---------------------------------------------------------------------------
+
+
+class TestDismissAndBulkReview:
+    async def test_dismiss_snapshots_anonymous_attribution(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+    ) -> None:
+        """Covers AE4 and the dismiss terminal path."""
+        session = _make_session(
+            user_id="anonymous-abc", status=SuggestionSessionStatus.SUBMITTED.value
+        )
+        session.is_anonymous = True
+        session.submitter_name = "Anonymous Author"
+        session.submitter_email = "author@example.com"
+        project = _make_project()
+        project.members[0].role = "admin"
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        mock_db.execute.side_effect = [project_result, session_result]
+
+        await service.dismiss(PROJECT_ID, session.session_id, _make_user(), "spam")
+
+        outcomes = _outcomes(mock_db)
+        assert len(outcomes) == 1
+        assert outcomes[0].outcome == "dismissed"
+        assert outcomes[0].is_anonymous is True
+        assert outcomes[0].snapshot_tier is None
+        assert outcomes[0].snapshot_role is None
+        assert outcomes[0].submitter_name == "Anonymous Author"
+        assert outcomes[0].submitter_email == "author@example.com"
+        assert outcomes[0].snapshot_captured_at is not None
+
+    async def test_bulk_dismiss_funnels_through_snapshot_seam(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+    ) -> None:
+        from ontokit.schemas.suggestion import BulkReviewAction, BulkReviewRequest
+
+        session = _make_session(status=SuggestionSessionStatus.SUBMITTED.value)
+        project = _make_project()
+        project.members[0].role = "admin"
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        # bulk_review verifies once, then dismiss performs its normal access check.
+        mock_db.execute.side_effect = [project_result, project_result, session_result]
+        data = BulkReviewRequest(
+            session_ids=[session.session_id],
+            action=BulkReviewAction.DISMISS,
+            note="bulk triage",
+        )
+
+        response = await service.bulk_review(PROJECT_ID, data, _make_user())
+
+        assert response.succeeded == [session.session_id]
+        assert response.failed == []
+        outcomes = _outcomes(mock_db)
+        assert len(outcomes) == 1
+        assert outcomes[0].snapshot_tier == "reviewer"
+        assert outcomes[0].snapshot_role == "admin"
+        assert outcomes[0].snapshot_captured_at is not None
+
+
+# ---------------------------------------------------------------------------
 # request_changes
 # ---------------------------------------------------------------------------
 
@@ -1567,6 +1683,7 @@ class TestRequestChanges:
         assert session.status == SuggestionSessionStatus.CHANGES_REQUESTED.value
         assert session.reviewer_feedback == "Please fix the label"
         assert session.reviewer_id == user.id
+        assert _outcomes(mock_db) == []
 
     @pytest.mark.asyncio
     async def test_request_changes_wrong_status_raises_400(

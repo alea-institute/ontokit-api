@@ -1,27 +1,33 @@
-"""Project-admin endpoints for the contribution trust ladder (R6, R11).
+"""Project-admin endpoints for the contribution trust ladder (R6, R7, R11).
 
 Grant, refuse, or revoke a member's trusted status, and configure the
 per-project promotion threshold and auto-accept quiet period. Owner/admin only,
 with a metadata-only audit line on every privilege change.
 """
 
+import base64
+import binascii
 import logging
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ontokit.core.auth import CurrentUser, RequiredUser
 from ontokit.core.database import get_db
 from ontokit.models.project import Project, ProjectMember
+from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.schemas.trust import (
     MemberTrustResponse,
     MemberTrustUpdate,
     ProjectTrustSettings,
     ProjectTrustSettingsUpdate,
+    SuggestionOutcomeItem,
+    SuggestionOutcomeListResponse,
 )
 from ontokit.services.trust_service import TrustService
 
@@ -50,6 +56,27 @@ def _require_owner_or_admin(project: Project, user: RequiredUser) -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Owner or admin access required to manage trust",
         )
+
+
+def _encode_outcome_cursor(created_at: datetime, outcome_id: UUID) -> str:
+    payload = f"{created_at.isoformat()}|{outcome_id}".encode()
+    return base64.urlsafe_b64encode(payload).decode()
+
+
+def _decode_outcome_cursor(cursor: str) -> tuple[datetime, UUID]:
+    try:
+        payload = base64.b64decode(cursor.encode(), altchars=b"-_", validate=True).decode()
+        created_at_raw, outcome_id_raw = payload.rsplit("|", 1)
+        created_at = datetime.fromisoformat(created_at_raw)
+        outcome_id = UUID(outcome_id_raw)
+        if created_at.tzinfo is None:
+            raise ValueError("cursor timestamp must include a timezone")
+    except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Invalid outcome cursor",
+        ) from exc
+    return created_at, outcome_id
 
 
 @router.get("/{project_id}/trust/members", response_model=list[MemberTrustResponse])
@@ -134,6 +161,50 @@ async def get_trust_settings(
         auto_accept_enabled=project.auto_accept_enabled,
         auto_accept_quiet_days=project.auto_accept_quiet_days,
     )
+
+
+@router.get("/{project_id}/trust/outcomes", response_model=SuggestionOutcomeListResponse)
+async def list_suggestion_outcomes(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+    cursor: str | None = Query(default=None),
+    limit: int = Query(default=25, ge=1, le=100),
+) -> SuggestionOutcomeListResponse:
+    """List stored suggestion-outcome audit facts, newest first."""
+    project = await _load_project(db, project_id)
+    _require_owner_or_admin(project, user)
+
+    count_result = await db.execute(
+        select(func.count(SuggestionOutcome.id)).where(SuggestionOutcome.project_id == project_id)
+    )
+    total = count_result.scalar_one()
+
+    query = select(SuggestionOutcome).where(SuggestionOutcome.project_id == project_id)
+    if cursor is not None:
+        cursor_created_at, cursor_id = _decode_outcome_cursor(cursor)
+        query = query.where(
+            or_(
+                SuggestionOutcome.created_at < cursor_created_at,
+                and_(
+                    SuggestionOutcome.created_at == cursor_created_at,
+                    SuggestionOutcome.id < cursor_id,
+                ),
+            )
+        )
+    query = query.order_by(SuggestionOutcome.created_at.desc(), SuggestionOutcome.id.desc()).limit(
+        limit + 1
+    )
+
+    result = await db.execute(query)
+    rows = list(result.scalars().all())
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    items = [SuggestionOutcomeItem.model_validate(row) for row in page_rows]
+    next_cursor = (
+        _encode_outcome_cursor(page_rows[-1].created_at, page_rows[-1].id) if has_more else None
+    )
+    return SuggestionOutcomeListResponse(items=items, total=total, next_cursor=next_cursor)
 
 
 @router.patch("/{project_id}/trust/settings", response_model=ProjectTrustSettings)

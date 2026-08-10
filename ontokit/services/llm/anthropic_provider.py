@@ -28,6 +28,9 @@ _FALLBACK_MODELS = [
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude provider using the official anthropic SDK."""
 
+    # This adapter currently uses messages.create, not Message Batches.
+    supports_true_batch_api = False
+
     def __init__(
         self,
         api_key: str | None = None,

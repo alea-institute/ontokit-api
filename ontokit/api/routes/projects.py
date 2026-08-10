@@ -61,6 +61,7 @@ from ontokit.schemas.pull_request import (
     GitHubRepoFilesResponse,
     ProjectCreateFromGitHub,
 )
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.change_event_service import ChangeEventService
 from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.github_service import get_github_service
@@ -1269,6 +1270,7 @@ async def delete_branch(
 async def save_source_content(
     project_id: UUID,
     data: SourceContentSave,
+    db: Annotated[AsyncSession, Depends(get_db)],
     service: Annotated[ProjectService, Depends(get_service)],
     storage: Annotated[StorageService, Depends(get_storage)],
     ontology: Annotated[OntologyService, Depends(get_ontology)],
@@ -1338,56 +1340,53 @@ async def save_source_content(
             detail=f"Failed to save to storage: {e}",
         ) from e
 
-    # Capture old graph for change event diffing (before the commit)
-    old_graph = None
-    was_loaded = ontology.is_loaded(project_id, current_branch)
-    try:
-        if not was_loaded:
+    async with branch_write_lock(db, project_id, current_branch):
+        # Capture old graph for change event diffing (before the commit).
+        old_graph = None
+        was_loaded = ontology.is_loaded(project_id, current_branch)
+        try:
+            if not was_loaded:
+                await ontology.load_from_git(project_id, current_branch, filename, git)
+            old_graph = await ontology._get_graph(project_id, current_branch)
+        except Exception:
+            logger.debug("Could not capture pre-commit graph for diff", exc_info=True)
+
+        try:
+            commit_info = git.commit_changes(
+                project_id=project_id,
+                ontology_content=content_bytes,
+                filename=filename,
+                message=data.commit_message,
+                author_name=user.name,
+                author_email=user.email,
+                branch_name=current_branch,
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to commit changes: {e}",
+            ) from e
+
+        try:
+            ontology.unload(project_id, current_branch)
             await ontology.load_from_git(project_id, current_branch, filename, git)
-        old_graph = await ontology._get_graph(project_id, current_branch)
-    except Exception:
-        logger.debug("Could not capture pre-commit graph for diff", exc_info=True)
+        except Exception as e:
+            logger.warning("Failed to reload ontology after save: %s", e)
 
-    # Commit to git on the specified branch
-    try:
-        commit_info = git.commit_changes(
-            project_id=project_id,
-            ontology_content=content_bytes,
-            filename=filename,
-            message=data.commit_message,
-            author_name=user.name,
-            author_email=user.email,
-            branch_name=current_branch,
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to commit changes: {e}",
-        ) from e
-
-    # Reload the ontology in memory to reflect changes
-    try:
-        ontology.unload(project_id, current_branch)
-        await ontology.load_from_git(project_id, current_branch, filename, git)
-    except Exception as e:
-        # Log but don't fail - the commit succeeded
-        logger.warning("Failed to reload ontology after save: %s", e)
-
-    # Record change events (analytics)
-    change_events = []
-    try:
-        new_graph = await ontology._get_graph(project_id, current_branch)
-        change_events = await change_service.record_events_from_diff(
-            project_id,
-            current_branch,
-            old_graph,
-            new_graph,
-            user.id,
-            user.name,
-            commit_info.hash,
-        )
-    except Exception:
-        logger.warning("Failed to record change events", exc_info=True)
+        change_events = []
+        try:
+            new_graph = await ontology._get_graph(project_id, current_branch)
+            change_events = await change_service.record_events_from_diff(
+                project_id,
+                current_branch,
+                old_graph,
+                new_graph,
+                user.id,
+                user.name,
+                commit_info.hash,
+            )
+        except Exception:
+            logger.warning("Failed to record change events", exc_info=True)
 
     # Auto-embed changed entities if configured
     if change_events:
@@ -1430,6 +1429,20 @@ async def save_source_content(
             )
     except Exception:
         logger.warning("Failed to queue ontology re-index", exc_info=True)
+
+    # Commit-before-enqueue: translation discovery always observes a durable tree.
+    try:
+        from ontokit.services.translation_jobs import enqueue_label_diff_after_commit
+
+        await enqueue_label_diff_after_commit(
+            project_id=project_id,
+            branch=current_branch,
+            commit_hash=commit_info.hash,
+            actor_id=user.id,
+            role=project.user_role or "viewer",
+        )
+    except Exception:
+        logger.warning("Failed to queue translation label diff", exc_info=True)
 
     return SourceContentSaveResponse(
         success=True,

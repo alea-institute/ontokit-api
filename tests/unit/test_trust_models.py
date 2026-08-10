@@ -18,7 +18,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-from sqlalchemy import Table
+from sqlalchemy import DateTime, String, Table
 
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.suggestion_outcome import SuggestionOutcome, SuggestionOutcomeType
@@ -30,6 +30,12 @@ MIGRATION_PATH = (
     / "alembic"
     / "versions"
     / "w0x1y2z3a4b5_add_trust_ladder.py"
+)
+SNAPSHOT_MIGRATION_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "alembic"
+    / "versions"
+    / "b1c2d3e4f5g6_add_outcome_snapshot_columns.py"
 )
 
 
@@ -50,6 +56,17 @@ def _server_default_text(table: Table, name: str) -> str:
 @pytest.fixture(scope="module")
 def migration_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("trust_ladder_migration", MIGRATION_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def snapshot_migration_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "outcome_snapshot_migration", SNAPSHOT_MIGRATION_PATH
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -139,6 +156,41 @@ class TestSuggestionOutcome:
         assert _column_default(table, "counts_toward_promotion") is True
         assert _column_default(table, "is_anonymous") is False
 
+    def test_snapshot_columns_are_nullable_without_defaults(self) -> None:
+        table = SuggestionOutcome.__table__
+        string_lengths = {
+            "snapshot_tier": 20,
+            "snapshot_role": 50,
+            "submitter_name": 255,
+            "submitter_email": 255,
+            "decided_by_name": 255,
+        }
+
+        for name, length in string_lengths.items():
+            column = table.columns[name]
+            assert column.nullable is True
+            assert column.default is None
+            assert column.server_default is None
+            assert isinstance(column.type, String)
+            assert column.type.length == length
+
+        captured_at = table.columns["snapshot_captured_at"]
+        assert captured_at.nullable is True
+        assert captured_at.default is None
+        assert captured_at.server_default is None
+        assert isinstance(captured_at.type, DateTime)
+        assert captured_at.type.timezone is True
+
+    def test_pre_feature_shape_does_not_require_snapshot_values(self) -> None:
+        row = SuggestionOutcome(user_id="u1", outcome=SuggestionOutcomeType.REJECTED.value)
+
+        assert row.snapshot_tier is None
+        assert row.snapshot_role is None
+        assert row.submitter_name is None
+        assert row.submitter_email is None
+        assert row.decided_by_name is None
+        assert row.snapshot_captured_at is None
+
     def test_session_fk_survives_session_deletion(self) -> None:
         """Append-only: the log must outlive the session it describes."""
         fk = next(iter(SuggestionOutcome.__table__.columns["session_id"].foreign_keys))
@@ -157,6 +209,16 @@ class TestSuggestionOutcome:
         where = promo.dialect_options["postgresql"]["where"]
         assert where is not None
         assert "counts_toward_promotion" in str(where)
+
+    def test_audit_cursor_index_is_descending(self) -> None:
+        by_name = {ix.name: ix for ix in SuggestionOutcome.__table__.indexes}
+        audit = by_name["ix_suggestion_outcomes_audit_cursor"]
+
+        assert [str(expression).lower() for expression in audit.expressions] == [
+            "suggestion_outcomes.project_id desc",
+            "suggestion_outcomes.created_at desc",
+            "suggestion_outcomes.id desc",
+        ]
 
 
 class TestUserCommitIdentityDefaults:
@@ -184,3 +246,28 @@ class TestMigration:
     def test_migration_is_reversible(self, migration_module: ModuleType) -> None:
         assert callable(migration_module.upgrade)
         assert callable(migration_module.downgrade)
+
+
+class TestSnapshotMigration:
+    """The snapshot migration extends the current head without erasing audit data."""
+
+    def test_migration_chains_onto_current_head(
+        self, snapshot_migration_module: ModuleType
+    ) -> None:
+        assert snapshot_migration_module.revision == "b1c2d3e4f5g6"
+        assert snapshot_migration_module.down_revision == "a0b1c2d3e4f5"
+
+    def test_downgrade_refuses_to_drop_snapshot_columns(
+        self, snapshot_migration_module: ModuleType, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dropped_indexes: list[tuple[str, str]] = []
+
+        def record_drop_index(name: str, *, table_name: str) -> None:
+            dropped_indexes.append((name, table_name))
+
+        monkeypatch.setattr(snapshot_migration_module.op, "drop_index", record_drop_index)
+
+        with pytest.raises(RuntimeError, match="ix_suggestion_outcomes_audit_cursor"):
+            snapshot_migration_module.downgrade()
+
+        assert dropped_indexes == []

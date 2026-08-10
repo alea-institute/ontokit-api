@@ -1,0 +1,14 @@
+[
+  {"source":"Cat","language":"es","candidate":"Gato","verifier_candidate":"Gato","back_translation":"Cat","verifier_agreement":1.0,"known_good":true},
+  {"source":"House","language":"es","candidate":"Casa","verifier_candidate":"Casa","back_translation":"House","verifier_agreement":1.0,"known_good":true},
+  {"source":"Water","language":"es","candidate":"Agua","verifier_candidate":"Agua","back_translation":"Water","verifier_agreement":1.0,"known_good":true},
+  {"source":"Cat","language":"fr","candidate":"Chat","verifier_candidate":"Chat","back_translation":"Cat","verifier_agreement":1.0,"known_good":true},
+  {"source":"House","language":"fr","candidate":"Maison","verifier_candidate":"Maison","back_translation":"House","verifier_agreement":1.0,"known_good":true},
+  {"source":"Water","language":"fr","candidate":"Eau","verifier_candidate":"Eau","back_translation":"Water","verifier_agreement":1.0,"known_good":true},
+  {"source":"Cat","language":"sw","candidate":"Paka","verifier_candidate":"Paka","back_translation":"Cat","verifier_agreement":1.0,"known_good":true},
+  {"source":"House","language":"sw","candidate":"Nyumba","verifier_candidate":"Nyumba","back_translation":"House","verifier_agreement":1.0,"known_good":true},
+  {"source":"Water","language":"sw","candidate":"Maji","verifier_candidate":"Maji","back_translation":"Water","verifier_agreement":1.0,"known_good":true},
+  {"source":"Cat","language":"es","candidate":"Perro","verifier_candidate":"Gato","back_translation":"Dog","verifier_agreement":0.0,"known_good":false},
+  {"source":"House","language":"fr","candidate":"Voiture","verifier_candidate":"Maison","back_translation":"Car","verifier_agreement":0.0,"known_good":false},
+  {"source":"Water","language":"sw","candidate":"Moto","verifier_candidate":"Maji","back_translation":"Fire","verifier_agreement":0.0,"known_good":false}
+]

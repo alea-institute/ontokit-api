@@ -26,6 +26,7 @@ from ontokit.api.routes import (
     search,
     semantic_search,
     suggestions,
+    translation,
     trust,
     user_settings,
 )
@@ -90,6 +91,8 @@ router.include_router(user_settings.router, prefix="/users", tags=["User Setting
 # LLM: project-scoped routes under /projects; public catalogue routes at root
 router.include_router(llm_routes.router, prefix="/projects", tags=["LLM"])
 router.include_router(llm_routes.public_router, tags=["LLM"])
+router.include_router(translation.router, prefix="/projects", tags=["Translations"])
+router.include_router(translation.public_router, tags=["Translations"])
 # Generation: LLM suggestion generation + entity validation (Phase 13)
 router.include_router(generation.router, tags=["Generation"])
 # Duplicate check: composite scoring endpoint for pre-submission duplicate detection (DEDUP-04)

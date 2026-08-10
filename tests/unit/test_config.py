@@ -6,8 +6,20 @@ from ontokit.core.config import Settings
 
 
 @pytest.fixture
-def default_settings() -> Settings:
+def default_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     """Create a Settings instance with defaults (ignoring .env file)."""
+    for env_var in (
+        "APP_NAME",
+        "APP_ENV",
+        "DEBUG",
+        "HOST",
+        "PORT",
+        "CORS_ORIGINS",
+        "SUPERADMIN_USER_IDS",
+        "GIT_REPOS_BASE_PATH",
+    ):
+        monkeypatch.delenv(env_var, raising=False)
+
     return Settings(
         _env_file=None,
         database_url="postgresql+asyncpg://test:test@localhost:5432/test",  # type: ignore[arg-type]

@@ -200,6 +200,8 @@ class BareOntologyRepository:
         message: str,
         author_name: str | None = None,
         author_email: str | None = None,
+        committer_name: str | None = None,
+        committer_email: str | None = None,
     ) -> CommitInfo:
         """
         Write a file to a branch and create a commit.
@@ -248,7 +250,11 @@ class BareOntologyRepository:
 
         # Create commit
         author = self._get_signature(author_name, author_email)
-        committer = author
+        committer = (
+            self._get_signature(committer_name, committer_email)
+            if committer_name is not None or committer_email is not None
+            else author
+        )
 
         parents = [parent_commit.id] if parent_commit else []
 
@@ -945,6 +951,8 @@ class BareGitRepositoryService:
         author_name: str | None = None,
         author_email: str | None = None,
         branch_name: str | None = None,
+        committer_name: str | None = None,
+        committer_email: str | None = None,
     ) -> CommitInfo:
         """
         Commit changes to a branch.
@@ -973,6 +981,8 @@ class BareGitRepositoryService:
             message=message,
             author_name=author_name,
             author_email=author_email,
+            committer_name=committer_name,
+            committer_email=committer_email,
         )
 
     def get_history(

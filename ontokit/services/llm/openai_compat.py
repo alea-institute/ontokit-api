@@ -24,6 +24,9 @@ class OpenAICompatProvider(LLMProvider):
     which allows a single implementation to cover nine different providers.
     """
 
+    # This adapter currently uses chat.completions, not OpenAI Batch.
+    supports_true_batch_api = False
+
     def __init__(
         self,
         api_key: str | None = None,
