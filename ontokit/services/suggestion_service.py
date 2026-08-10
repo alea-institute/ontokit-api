@@ -900,7 +900,15 @@ class SuggestionService:
 
         from ontokit.models.pull_request import PRStatus, PullRequest
 
+        # A failed allocation rolls back the session and expires ORM-backed
+        # attributes. Keep every value needed by later attempts detached from
+        # the SuggestionSession before the first flush can trigger rollback.
+        author_id = session.user_id
+        author_name = session.user_name
+        author_email = session.user_email
+
         max_retries = 3
+        rolled_back = False
         for attempt in range(max_retries):
             max_number_result = await self.db.execute(
                 select(sa_func.max(PullRequest.pr_number)).where(
@@ -917,9 +925,9 @@ class SuggestionService:
                 description=pr_create.description,
                 source_branch=pr_create.source_branch,
                 target_branch=pr_create.target_branch,
-                author_id=session.user_id,
-                author_name=session.user_name,
-                author_email=session.user_email,
+                author_id=author_id,
+                author_name=author_name,
+                author_email=author_email,
                 status=PRStatus.OPEN.value,
             )
             self.db.add(db_pr)
@@ -927,9 +935,14 @@ class SuggestionService:
                 await self.db.flush()
             except IntegrityError:
                 await self.db.rollback()
+                rolled_back = True
                 if attempt == max_retries - 1:
                     raise
                 continue
+            if rolled_back:
+                # The caller continues using this ORM instance after the
+                # helper returns (including stale auto-submit logging).
+                await self.db.refresh(session)
             await self.db.refresh(db_pr)
             return db_pr
 
