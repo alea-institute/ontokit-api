@@ -7,6 +7,7 @@ as much as the behavior.
 
 from __future__ import annotations
 
+import base64
 import uuid
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -412,10 +413,11 @@ class TestSuggestionOutcomeAudit:
         [
             (_project([], owner_id="test-user-id"), 200),
             (_project([_member("test-user-id", "admin")]), 200),
+            (_project([_member("test-user-id", "editor")]), 403),
             (_project([_member("test-user-id", "member")]), 403),
             (_project([_member("test-user-id", "suggester")]), 403),
         ],
-        ids=["owner", "admin", "member", "suggester"],
+        ids=["owner", "admin", "editor", "member", "suggester"],
     )
     def test_access_is_limited_to_owner_and_admin(
         self,
@@ -542,9 +544,22 @@ class TestSuggestionOutcomeAudit:
         client, _ = authed_client
         assert client.get(f"{BASE}/outcomes", params={"limit": limit}).status_code == 422
 
-    def test_malformed_cursor_is_rejected(
-        self, authed_client: tuple[TestClient, AsyncMock], admin_project: MagicMock
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            "2026-08-10T12:00:00|00000000-0000-0000-0000-000000000001",
+            "2026-08-10T12:00:00+00:00|not-a-uuid",
+            "2026-08-10T12:00:00+00:00",
+        ],
+        ids=["naive-timestamp", "bad-uuid", "missing-separator"],
+    )
+    def test_malformed_cursor_deep_branches_are_rejected(
+        self,
+        authed_client: tuple[TestClient, AsyncMock],
+        admin_project: MagicMock,
+        payload: str,
     ) -> None:
         client, session = authed_client
         session.execute.side_effect = _outcome_results(admin_project, [], 0)
-        assert client.get(f"{BASE}/outcomes", params={"cursor": "not-a-cursor"}).status_code == 422
+        cursor = base64.urlsafe_b64encode(payload.encode()).decode()
+        assert client.get(f"{BASE}/outcomes", params={"cursor": cursor}).status_code == 422

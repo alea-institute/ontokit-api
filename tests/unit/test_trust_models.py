@@ -160,7 +160,7 @@ class TestSuggestionOutcome:
         table = SuggestionOutcome.__table__
         string_lengths = {
             "snapshot_tier": 20,
-            "snapshot_role": 20,
+            "snapshot_role": 50,
             "submitter_name": 255,
             "submitter_email": 255,
             "decided_by_name": 255,
@@ -277,7 +277,7 @@ class TestSnapshotMigration:
 
         monkeypatch.setattr(snapshot_migration_module.op, "drop_index", record_drop_index)
 
-        with pytest.raises(RuntimeError, match="Manual data-preserving rollback"):
+        with pytest.raises(RuntimeError, match="ix_suggestion_outcomes_audit_cursor"):
             snapshot_migration_module.downgrade()
 
-        assert dropped_indexes == [("ix_suggestion_outcomes_audit_cursor", "suggestion_outcomes")]
+        assert dropped_indexes == []

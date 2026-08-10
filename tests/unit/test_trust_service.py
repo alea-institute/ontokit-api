@@ -301,6 +301,8 @@ class TestRecordOutcome:
         assert row.snapshot_role is None
         assert row.snapshot_captured_at is not None
         assert "suggestion outcome snapshot resolution failed" in caplog.text
+        assert "RuntimeError" in caplog.text
+        assert "boom" not in caplog.text
         assert "Private Submitter" not in caplog.text
         assert "private@example.com" not in caplog.text
 

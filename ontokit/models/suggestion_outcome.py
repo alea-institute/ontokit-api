@@ -80,7 +80,7 @@ class SuggestionOutcome(Base):
     # NULL means the row predates snapshot capture; no defaults may fabricate history.
     # Display fields remain nullable so authorized erasure/takedown requests can clear them.
     snapshot_tier: Mapped[str | None] = mapped_column(String(20), nullable=True)
-    snapshot_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    snapshot_role: Mapped[str | None] = mapped_column(String(50), nullable=True)
     submitter_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     submitter_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     decided_by_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

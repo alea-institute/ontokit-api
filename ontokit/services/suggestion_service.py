@@ -1219,7 +1219,6 @@ class SuggestionService:
 
     async def _record_terminal_outcome(
         self,
-        project_id: UUID,
         project: Project,
         session: SuggestionSession,
         outcome: SuggestionOutcomeType,
@@ -1233,6 +1232,7 @@ class SuggestionService:
         session's status change, so a resolved suggestion can never exist
         without its outcome row (which would silently break promotion counting).
         """
+        project_id = project.id
         await self.trust.record_outcome(
             project_id,
             session,
@@ -1441,11 +1441,10 @@ class SuggestionService:
         one path (and therefore the outcome log and promotion evaluation).
         """
         project = await self._verify_reviewer_access(project_id, user)
-        await self._approve_unchecked(project_id, session_id, user, project, decided_by)
+        await self._approve_unchecked(session_id, user, project, decided_by)
 
     async def _approve_unchecked(
         self,
-        project_id: UUID,
         session_id: str,
         user: CurrentUser,
         project: Project,
@@ -1457,6 +1456,7 @@ class SuggestionService:
         sweep is the sole other caller, and its authorization is the trust tier
         re-check it performs immediately before calling in.
         """
+        project_id = project.id
         session = await self._get_session(project_id, session_id)
 
         if session.status not in (
@@ -1520,7 +1520,6 @@ class SuggestionService:
         outcome_actor = decided_by or user.id
         outcome_actor_name = None if outcome_actor == SYSTEM_AUTO_ACCEPT_ACTOR else user.name
         await self._record_terminal_outcome(
-            project_id,
             project,
             session,
             SuggestionOutcomeType.ACCEPTED,
@@ -1533,7 +1532,6 @@ class SuggestionService:
             try:
                 from ontokit.services.translation_jobs import enqueue_label_diff_after_commit
 
-                project = await self._get_project(project_id)
                 await enqueue_label_diff_after_commit(
                     project_id=project_id,
                     branch=default_branch,
@@ -1585,7 +1583,6 @@ class SuggestionService:
         session.last_activity = datetime.now(UTC)
         self._halt_auto_accept(session)
         await self._record_terminal_outcome(
-            project_id,
             project,
             session,
             SuggestionOutcomeType.DISMISSED,
@@ -1621,7 +1618,6 @@ class SuggestionService:
         # An objection halts the quiet-period clock (R12).
         self._halt_auto_accept(session)
         await self._record_terminal_outcome(
-            project_id,
             project,
             session,
             SuggestionOutcomeType.REJECTED,
@@ -2302,7 +2298,6 @@ class SuggestionService:
             )
             try:
                 await self._approve_unchecked(
-                    session.project_id,
                     session.session_id,
                     system_actor,
                     project,

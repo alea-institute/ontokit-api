@@ -428,7 +428,10 @@ async def test_ae6_promotion_acceptance_snapshots_pre_promotion_tier(
 
 @pytest.mark.asyncio
 async def test_ae7_snapshot_resolution_failure_degrades_and_merge_proceeds(
-    real_db_session: AsyncSession, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    real_db_session: AsyncSession,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     seeded = await _seed_project(real_db_session, tmp_path, submitter_trusted=True)
     session = await _add_submitted_session(real_db_session, seeded)
@@ -458,10 +461,73 @@ async def test_ae7_snapshot_resolution_failure_degrades_and_merge_proceeds(
         assert served.snapshot_tier is None
         assert served.snapshot_role is None
         assert served.snapshot_captured_at is not None
+        assert served.is_anonymous is False
+        assert "suggestion outcome snapshot resolution failed (RuntimeError)" in caplog.text
         assert response.total == 1
         assert response.next_cursor is None
         assert served.outcome == SuggestionOutcomeType.ACCEPTED
         assert seeded.git.get_file_from_branch(seeded.project.id, "main", FILE) == MERGED_CONTENT
+    finally:
+        await _cleanup(real_db_session, seeded.project.id)
+
+
+@pytest.mark.asyncio
+async def test_outcome_cursor_walk_survives_newer_insert_and_equal_timestamps(
+    real_db_session: AsyncSession, tmp_path: Path
+) -> None:
+    seeded = await _seed_project(real_db_session, tmp_path, submitter_trusted=True)
+    newest_time = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    tied_time = newest_time - timedelta(minutes=1)
+    rows = [
+        ("00000000-0000-0000-0000-000000000005", "walk-5", newest_time),
+        ("00000000-0000-0000-0000-000000000004", "walk-4", tied_time),
+        ("00000000-0000-0000-0000-000000000003", "walk-3", tied_time),
+        ("00000000-0000-0000-0000-000000000002", "walk-2", tied_time - timedelta(minutes=1)),
+        ("00000000-0000-0000-0000-000000000001", "walk-1", tied_time - timedelta(minutes=2)),
+    ]
+    try:
+        for outcome_id, user_id, created_at in rows:
+            real_db_session.add(
+                SuggestionOutcome(
+                    id=UUID(outcome_id),
+                    project_id=seeded.project.id,
+                    user_id=user_id,
+                    outcome=SuggestionOutcomeType.REJECTED.value,
+                    is_anonymous=False,
+                    created_at=created_at,
+                )
+            )
+        await real_db_session.commit()
+
+        first = await list_suggestion_outcomes(
+            seeded.project.id, real_db_session, seeded.owner, cursor=None, limit=2
+        )
+        assert [item.user_id for item in first.items] == ["walk-5", "walk-4"]
+        assert first.next_cursor is not None
+
+        real_db_session.add(
+            SuggestionOutcome(
+                project_id=seeded.project.id,
+                user_id="inserted-newer",
+                outcome=SuggestionOutcomeType.ACCEPTED.value,
+                is_anonymous=False,
+                created_at=newest_time + timedelta(minutes=1),
+            )
+        )
+        await real_db_session.commit()
+
+        second = await list_suggestion_outcomes(
+            seeded.project.id,
+            real_db_session,
+            seeded.owner,
+            cursor=first.next_cursor,
+            limit=2,
+        )
+        assert second.total == 6
+        assert [item.user_id for item in second.items] == ["walk-3", "walk-2"]
+        assert not {item.user_id for item in first.items} & {
+            item.user_id for item in second.items
+        }
     finally:
         await _cleanup(real_db_session, seeded.project.id)
 
