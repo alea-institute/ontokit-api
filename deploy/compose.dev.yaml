@@ -1,0 +1,230 @@
+# Source of truth captured 2026-08-10 from CPX41 /opt/ontokit/compose.yaml.
+# Deployed SHAs: api 20cb6aa7 / web cfa91623.
+# Secrets arrive via the server-side .env in the same directory.
+services:
+  postgres:
+    image: pgvector/pgvector@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38 # pgvector/pgvector:pg17
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: postgres
+      PGUSER: postgres
+      # Forwarded to the deploy-owned entrypoint init script on fresh volumes.
+      ZITADEL_DB_PASSWORD: ${ZITADEL_DB_PASSWORD}
+      ONTOKIT_DB_PASSWORD: ${ONTOKIT_DB_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./ontokit-api/deploy/init-db.dev.sh:/docker-entrypoint-initdb.d/init-db.dev.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d ontokit -U ontokit"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks: [ontokit]
+
+  redis:
+    image: redis@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2 # redis:7-alpine
+    restart: unless-stopped
+    volumes: [redis_data:/data]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks: [ontokit]
+
+  minio:
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e # minio/minio:latest
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    volumes: [minio_data:/data]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks: [ontokit]
+
+  api:
+    build: {context: ./ontokit-api, dockerfile: Dockerfile}
+    image: ontokit/api:dev
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      APP_ENV: staging
+      DEBUG: "false"
+      HOST: 0.0.0.0
+      PORT: 8000
+      DATABASE_URL: postgresql+asyncpg://ontokit:${ONTOKIT_DB_PASSWORD}@postgres:5432/ontokit
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ontokit
+      MINIO_SECURE: "false"
+      AUTH_MODE: optional
+      CORS_ORIGINS: '["https://ontokit.dev.openlegalstandard.org"]'
+      GIT_REPOS_BASE_PATH: /data/repos
+      FRONTEND_URL: https://ontokit.dev.openlegalstandard.org
+    ports: ["8000:8000"]
+    volumes: [git_repos:/data/repos]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      start_period: 15s
+      retries: 3
+    networks: [ontokit]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+
+  worker:
+    image: ontokit/api:dev
+    restart: unless-stopped
+    command: ["arq", "ontokit.worker.WorkerSettings"]
+    env_file: .env
+    environment:
+      APP_ENV: staging
+      DEBUG: "false"
+      DATABASE_URL: postgresql+asyncpg://ontokit:${ONTOKIT_DB_PASSWORD}@postgres:5432/ontokit
+      REDIS_URL: redis://redis:6379/0
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
+      MINIO_BUCKET: ontokit
+      MINIO_SECURE: "false"
+      GIT_REPOS_BASE_PATH: /data/repos
+    volumes: [git_repos:/data/repos]
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q arq /proc/1/cmdline"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    networks: [ontokit]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio: {condition: service_healthy}
+
+  web:
+    build:
+      context: ./ontokit-web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://ontokit.dev.openlegalstandard.org
+        NEXT_PUBLIC_WS_URL: wss://ontokit.dev.openlegalstandard.org
+        AUTH_MODE: optional
+        ZITADEL_ISSUER: ${ZITADEL_ISSUER}
+        ZITADEL_CLIENT_ID: ${ZITADEL_CLIENT_ID}
+    image: ontokit/web:dev
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      AUTH_MODE: optional
+      AUTH_URL: https://ontokit.dev.openlegalstandard.org
+      AUTH_TRUST_HOST: "true"
+      NEXT_PUBLIC_API_URL: https://ontokit.dev.openlegalstandard.org
+    ports: ["3000:3000"]
+    networks: [ontokit]
+
+
+  mailpit:
+    image: axllent/mailpit@sha256:d5ecbb067db3705fa953d79e1b7f81ef84038df67aba6c52825d8c02a1ea748a # axllent/mailpit:latest
+    restart: unless-stopped
+    networks: [ontokit]
+
+  zitadel:
+    image: ghcr.io/zitadel/zitadel@sha256:f3738fd984131d3f02e386d37fa480d1a30e42b7d4202e2b322f12f7cf556b64 # ghcr.io/zitadel/zitadel:latest
+    restart: unless-stopped
+    command: 'start-from-init --masterkey "${ZITADEL_MASTERKEY}" --tlsMode external'
+    environment:
+      ZITADEL_EXTERNALDOMAIN: ontokit-auth.dev.openlegalstandard.org
+      ZITADEL_EXTERNALPORT: 443
+      ZITADEL_EXTERNALSECURE: "true"
+      ZITADEL_TLS_ENABLED: "false"
+      ZITADEL_DATABASE_POSTGRES_HOST: postgres
+      ZITADEL_DATABASE_POSTGRES_PORT: 5432
+      ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
+      ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${POSTGRES_PASSWORD}
+      ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
+      ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
+      ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${ZITADEL_DB_PASSWORD}
+      ZITADEL_DATABASE_POSTGRES_USER_SSL_MODE: disable
+      ZITADEL_FIRSTINSTANCE_LOGINCLIENTPATPATH: /zitadel-data/login-client.pat
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORDCHANGEREQUIRED: "false"
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_USERNAME: login-client
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_MACHINE_NAME: Login V2 Client
+      ZITADEL_FIRSTINSTANCE_ORG_LOGINCLIENT_PAT_EXPIRATIONDATE: '2026-09-15T00:00:00Z'
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_REQUIRED: "true"
+      ZITADEL_DEFAULTINSTANCE_FEATURES_LOGINV2_BASEURI: https://ontokit-auth.dev.openlegalstandard.org/ui/v2/login
+      ZITADEL_OIDC_DEFAULTLOGINURLV2: 'https://ontokit-auth.dev.openlegalstandard.org/ui/v2/login/login?authRequest='
+      ZITADEL_OIDC_DEFAULTLOGOUTURLV2: 'https://ontokit-auth.dev.openlegalstandard.org/ui/v2/login/logout?post_logout_redirect='
+      ZITADEL_SAML_DEFAULTLOGINURLV2: 'https://ontokit-auth.dev.openlegalstandard.org/ui/v2/login/login?samlRequest='
+      ZITADEL_FIRSTINSTANCE_PATPATH: /zitadel-data/admin.pat
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_USERNAME: api-admin
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_MACHINE_NAME: API Admin Machine User
+      ZITADEL_FIRSTINSTANCE_ORG_MACHINE_PAT_EXPIRATIONDATE: '2026-09-15T00:00:00Z'
+      ZITADEL_FIRSTINSTANCE_ORG_NAME: OntoKit
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_USERNAME: admin
+      ZITADEL_FIRSTINSTANCE_ORG_HUMAN_PASSWORD: ${ZITADEL_ADMIN_PASSWORD}
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_SMTP_HOST: mailpit:1025
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_SMTP_TLS: "false"
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROM: noreply@ontokit.dev.openlegalstandard.org
+      ZITADEL_DEFAULTINSTANCE_SMTPCONFIGURATION_FROMNAME: OntoKit DEV
+      ZITADEL_LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "/app/zitadel", "ready"]
+      interval: 10s
+      timeout: 60s
+      retries: 5
+      start_period: 10s
+    user: "0"
+    volumes: [zitadel_data:/zitadel-data]
+    ports: ["8080:8080", "8081:3000"]
+    networks: [ontokit]
+    depends_on:
+      postgres: {condition: service_healthy}
+      mailpit: {condition: service_started}
+
+  login:
+    image: ghcr.io/zitadel/zitadel-login@sha256:7c210b79ae78ae74d76092154fa664601852ce79675a747a1085c2656b195648 # ghcr.io/zitadel/zitadel-login:latest
+    restart: unless-stopped
+    # zitadel-login:latest dropped ZITADEL_SERVICE_USER_TOKEN_FILE support; the
+    # credential chain wants the token VALUE, so read the PAT at start.
+    entrypoint: ["/bin/sh", "-c", "export ZITADEL_SERVICE_USER_TOKEN=$(cat /zitadel-data/login-client.pat) && exec /app/entrypoint.sh node apps/login/server.js"]
+    environment:
+      ZITADEL_API_URL: https://ontokit-auth.dev.openlegalstandard.org
+      NEXT_PUBLIC_BASE_PATH: /ui/v2/login
+      ZITADEL_SERVICE_USER_TOKEN_FILE: /zitadel-data/login-client.pat
+      EMAIL_VERIFICATION: "true"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "const http = require('http'); const req = http.request({host: '127.0.0.1', port: 3000, path: '/ui/v2/login/loginname', headers: {Host: 'ontokit-auth.dev.openlegalstandard.org'}, timeout: 5000}, res => { let b=''; res.on('data', d => b+=d); res.on('end', () => process.exit(res.statusCode === 200 && b.includes('data-testid=\"username-text-input\"') ? 0 : 1)); }); req.on('error', () => process.exit(1)); req.on('timeout', () => process.exit(1)); req.end();"
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    network_mode: service:zitadel
+    user: "0"
+    volumes: [zitadel_data:/zitadel-data:ro]
+    depends_on:
+      zitadel: {condition: service_healthy, restart: false}
+
+networks:
+  ontokit: {driver: bridge}
+volumes:
+  postgres_data: {}
+  zitadel_data: {}
+  redis_data: {}
+  minio_data: {}
+  git_repos: {}
