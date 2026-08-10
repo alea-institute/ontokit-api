@@ -111,5 +111,12 @@ class SuggestionOutcomeListResponse(BaseModel):
     """Keyset-paginated suggestion outcome audit trail."""
 
     items: list[SuggestionOutcomeItem]
-    total: int
-    next_cursor: str | None
+    total: int = Field(
+        description=(
+            "Live, unpaginated display count; it can exceed the rows reachable during an "
+            "in-flight cursor walk."
+        )
+    )
+    next_cursor: str | None = Field(
+        description="A value of None is the sole signal that the end of the list was reached."
+    )

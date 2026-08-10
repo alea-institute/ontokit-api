@@ -143,12 +143,14 @@ class TrustService:
                 snapshot_tier = self.resolve_tier(project, submitter).value
                 member = self.get_member(project, session.user_id)
                 snapshot_role = member.role if member is not None else None
-            except Exception:  # noqa: BLE001 — audit capture must never block the outcome
+            except Exception as exc:  # noqa: BLE001 — audit capture must never block the outcome
                 snapshot_tier = None
                 snapshot_role = None
                 # Metadata only: do not leak display attribution into logs.
                 logger.warning(
-                    "suggestion outcome snapshot resolution failed: project=%s session=%s user=%s",
+                    "suggestion outcome snapshot resolution failed (%s): "
+                    "project=%s session=%s user=%s",
+                    type(exc).__name__,
                     project_id,
                     session.id,
                     session.user_id,

@@ -3,6 +3,8 @@
 This migration is safe on populated tables because it is purely additive and
 every new column is nullable with no server default. Existing outcomes therefore
 retain an explicit NULL pre-feature snapshot rather than fabricated history.
+Downgrade is a pure refusal: operators must preserve the audit data, then
+manually drop the audit cursor index and six snapshot columns if appropriate.
 
 Revision ID: b1c2d3e4f5g6
 Revises: a0b1c2d3e4f5
@@ -28,7 +30,7 @@ def upgrade() -> None:
     )
     op.add_column(
         "suggestion_outcomes",
-        sa.Column("snapshot_role", sa.String(length=20), nullable=True),
+        sa.Column("snapshot_role", sa.String(length=50), nullable=True),
     )
     op.add_column(
         "suggestion_outcomes",
@@ -58,12 +60,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_suggestion_outcomes_audit_cursor",
-        table_name="suggestion_outcomes",
-    )
     raise RuntimeError(
         "Snapshot columns contain append-only audit data and cannot be dropped automatically. "
         "Manual data-preserving rollback procedure: export and verify the six snapshot columns, "
-        "then explicitly drop them only after the preserved data is secured."
+        "then explicitly drop ix_suggestion_outcomes_audit_cursor and the six columns only after "
+        "the preserved data is secured."
     )
