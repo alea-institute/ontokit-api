@@ -369,9 +369,7 @@ async def run_translation_backfill_job(
         await db.commit()
         for literal in literals:
             await task_runner(ctx, project_id, branch, actor_id, literal)
-            job.completed_literals = min(
-                job.total_literals, (job.completed_literals or 0) + 1
-            )
+            job.completed_literals = min(job.total_literals, (job.completed_literals or 0) + 1)
             await db.commit()
     except Exception as exc:
         job.status = "failed"

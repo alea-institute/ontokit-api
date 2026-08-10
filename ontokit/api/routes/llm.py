@@ -79,9 +79,8 @@ _LOCAL_PROVIDERS = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _get_member_role(
-    db: AsyncSession, project_id: UUID, user_id: str
-) -> str | None:
+
+async def _get_member_role(db: AsyncSession, project_id: UUID, user_id: str) -> str | None:
     """Return the user's role in the project, or None if not a member."""
     result = await db.execute(
         select(ProjectMember).where(
@@ -121,9 +120,7 @@ async def _require_owner_or_admin(
     return role
 
 
-async def _get_llm_config(
-    db: AsyncSession, project_id: UUID
-) -> ProjectLLMConfig | None:
+async def _get_llm_config(db: AsyncSession, project_id: UUID) -> ProjectLLMConfig | None:
     """Fetch the project's LLM config row, or None if not configured."""
     result = await db.execute(
         select(ProjectLLMConfig).where(ProjectLLMConfig.project_id == project_id)
@@ -191,12 +188,8 @@ async def update_llm_config(
     # private/local URLs are allowed; on a base_url-only update, fall back to the
     # stored provider so an existing local (e.g. Ollama) config isn't rejected.
     if data.base_url:
-        effective_provider = data.provider or (
-            LLMProviderType(config.provider) if config else None
-        )
-        allow_private = (
-            effective_provider in _LOCAL_PROVIDERS if effective_provider else False
-        )
+        effective_provider = data.provider or (LLMProviderType(config.provider) if config else None)
+        allow_private = effective_provider in _LOCAL_PROVIDERS if effective_provider else False
         try:
             validate_base_url(data.base_url, allow_private=allow_private)
         except ValueError as e:

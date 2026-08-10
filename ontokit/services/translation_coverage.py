@@ -243,12 +243,12 @@ class TranslationCoverageService:
     def provisional_from_data(
         cls, language: str | None, labels: list[LabelValue], records: list[TranslationRecord]
     ) -> list[dict[str, Any]]:
-        current_hashes = {
-            (label.entity_iri, label.predicate, label.value_hash) for label in labels
-        }
+        current_hashes = {(label.entity_iri, label.predicate, label.value_hash) for label in labels}
         rows = []
         for record in records:
-            if (language is not None and record.language != language) or record.state != "provisional":
+            if (
+                language is not None and record.language != language
+            ) or record.state != "provisional":
                 continue
             if record.source_value is None or record.proposed_value is None:
                 continue
@@ -308,9 +308,7 @@ class TranslationCoverageService:
             ): label
             for label in labels
         }
-        source_hashes = {
-            (label.entity_iri, label.predicate, label.value_hash) for label in labels
-        }
+        source_hashes = {(label.entity_iri, label.predicate, label.value_hash) for label in labels}
         records_by_slot: dict[tuple[str, str, str], list[TranslationRecord]] = {}
         for record in records:
             records_by_slot.setdefault(

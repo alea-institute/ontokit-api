@@ -139,9 +139,7 @@ class SuggestionService:
 
         default_branch = self.git_service.get_default_branch(project.id)
         candidates = list(
-            dict.fromkeys(
-                (configured_path, os.path.basename(configured_path), "ontology.ttl")
-            )
+            dict.fromkeys((configured_path, os.path.basename(configured_path), "ontology.ttl"))
         )
         for candidate in candidates:
             try:
@@ -316,8 +314,7 @@ class SuggestionService:
                         "iri": str(entity),
                         "parent_iris": parents,
                         "labels": [
-                            {"value": str(label), "lang": label.language or ""}
-                            for label in labels
+                            {"value": str(label), "lang": label.language or ""} for label in labels
                         ],
                     },
                     project_namespace,
@@ -616,9 +613,7 @@ class SuggestionService:
                     detail="Saved to branch but failed to update session metadata",
                 ) from e
 
-        await self._enqueue_branch_refresh(
-            project_id, session.branch, entity_iri=data.entity_iri
-        )
+        await self._enqueue_branch_refresh(project_id, session.branch, entity_iri=data.entity_iri)
         return SuggestionSaveResponse(
             commit_hash=commit_info.hash,
             branch=session.branch,
@@ -661,9 +656,7 @@ class SuggestionService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Session is {session.status}, cannot submit",
                 )
-            content = self.git_service.get_file_from_branch(
-                project_id, session.branch, filename
-            )
+            content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
             await self._validate_submission_content(
                 project_id, session.branch, filename, content.decode("utf-8")
             )
@@ -779,16 +772,19 @@ class SuggestionService:
         existing_pr = existing_pr_result.scalar_one_or_none()
         if existing_pr:
             # PR already created (previous attempt failed after PR but before session update)
+            existing_pr_id = existing_pr.id
+            existing_pr_number = existing_pr.pr_number
+            existing_pr_url = existing_pr.github_pr_url
             session.status = new_status
-            session.pr_number = existing_pr.pr_number
-            session.pr_id = existing_pr.id
+            session.pr_number = existing_pr_number
+            session.pr_id = existing_pr_id
             session.last_activity = datetime.now(UTC)
             await self._schedule_auto_accept(project_id, session, user)
             await self.db.commit()
 
             return SuggestionSubmitResponse(
-                pr_number=existing_pr.pr_number,
-                pr_url=existing_pr.github_pr_url,
+                pr_number=existing_pr_number,
+                pr_url=existing_pr_url,
                 status=new_status,
             )
 
@@ -814,10 +810,19 @@ class SuggestionService:
             else:
                 raise
 
+        # The editor path returns a Pydantic response, while the suggester
+        # fallback returns an ORM instance. Snapshot every value needed below
+        # before subsequent database work can expire ORM-backed attributes.
+        pr_id = pr_response.id
+        pr_number = pr_response.pr_number
+        pr_title = pr_response.title
+        pr_url = pr_response.github_pr_url
+        user_id = user.id
+
         # Update session
         session.status = new_status
-        session.pr_number = pr_response.pr_number
-        session.pr_id = pr_response.id
+        session.pr_number = pr_number
+        session.pr_id = pr_id
         session.last_activity = datetime.now(UTC)
 
         # Start the auto-accept quiet clock if — and only if — this submission
@@ -837,20 +842,18 @@ class SuggestionService:
             project_name=project.name,
             roles=["owner", "admin", "editor"],
             notification_type=notification_type,
-            title=f"Suggestion submitted: {pr_response.title[:80]}",
+            title=f"Suggestion submitted: {pr_title[:80]}",
             body=summary[:200] if summary else None,
-            target_id=str(pr_response.id),
-            exclude_user_id=user.id,
+            target_id=str(pr_id),
+            exclude_user_id=user_id,
         )
 
         await self.db.commit()
-        await self._enqueue_branch_refresh(
-            project_id, session.branch, full_embedding=True
-        )
+        await self._enqueue_branch_refresh(project_id, session.branch, full_embedding=True)
 
         return SuggestionSubmitResponse(
-            pr_number=pr_response.pr_number,
-            pr_url=pr_response.github_pr_url,
+            pr_number=pr_number,
+            pr_url=pr_url,
             status=new_status,
         )
 
@@ -865,7 +868,15 @@ class SuggestionService:
 
         from ontokit.models.pull_request import PRStatus, PullRequest
 
+        # A failed allocation rolls back the session and expires ORM-backed
+        # attributes. Keep every value needed by later attempts detached from
+        # the SuggestionSession before the first flush can trigger rollback.
+        author_id = session.user_id
+        author_name = session.user_name
+        author_email = session.user_email
+
         max_retries = 3
+        rolled_back = False
         for attempt in range(max_retries):
             max_number_result = await self.db.execute(
                 select(sa_func.max(PullRequest.pr_number)).where(
@@ -882,9 +893,9 @@ class SuggestionService:
                 description=pr_create.description,
                 source_branch=pr_create.source_branch,
                 target_branch=pr_create.target_branch,
-                author_id=session.user_id,
-                author_name=session.user_name,
-                author_email=session.user_email,
+                author_id=author_id,
+                author_name=author_name,
+                author_email=author_email,
                 status=PRStatus.OPEN.value,
             )
             self.db.add(db_pr)
@@ -892,9 +903,14 @@ class SuggestionService:
                 await self.db.flush()
             except IntegrityError:
                 await self.db.rollback()
+                rolled_back = True
                 if attempt == max_retries - 1:
                     raise
                 continue
+            if rolled_back:
+                # The caller continues using this ORM instance after the
+                # helper returns (including stale auto-submit logging).
+                await self.db.refresh(session)
             await self.db.refresh(db_pr)
             return db_pr
 

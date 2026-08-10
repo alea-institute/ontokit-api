@@ -152,8 +152,8 @@ class EdgeSuggestion(GeneratedSuggestion):
     there). Tightens the two edge fields to required.
     """
 
-    target_iri: str
-    relationship_type: str  # one of CONTROLLED_RELATIONSHIP_TYPES
+    target_iri: str  # pyright: ignore[reportGeneralTypeIssues, reportIncompatibleVariableOverride]
+    relationship_type: str  # pyright: ignore[reportGeneralTypeIssues, reportIncompatibleVariableOverride]
 
 
 class AnnotationSuggestion(GeneratedSuggestion):
@@ -163,8 +163,8 @@ class AnnotationSuggestion(GeneratedSuggestion):
     `GeneratedSuggestion` (property_iri/value optional there).
     """
 
-    property_iri: str
-    value: str
+    property_iri: str  # pyright: ignore[reportGeneralTypeIssues, reportIncompatibleVariableOverride]
+    value: str  # pyright: ignore[reportGeneralTypeIssues, reportIncompatibleVariableOverride]
 
 
 # ---------------------------------------------------------------------------

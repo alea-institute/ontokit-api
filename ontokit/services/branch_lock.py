@@ -15,9 +15,7 @@ _branch_locks: WeakValueDictionary[tuple[UUID, str], asyncio.Lock] = WeakValueDi
 
 
 @asynccontextmanager
-async def branch_write_lock(
-    db: AsyncSession, project_id: UUID, branch: str
-) -> AsyncIterator[None]:
+async def branch_write_lock(db: AsyncSession, project_id: UUID, branch: str) -> AsyncIterator[None]:
     """Exclude concurrent writers to a branch in this process and every DB-sharing process.
 
     The process-local asyncio lock is paired with a transaction-scoped PostgreSQL advisory

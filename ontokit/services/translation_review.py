@@ -134,10 +134,11 @@ class TranslationReviewService:
         existing = (subject, predicate, literal) in graph
         annotation = read_annotation(graph, subject, predicate, literal)
         if existing and (
-            annotation is None
-            or annotation.record_digest != translation_record_digest(record)
+            annotation is None or annotation.record_digest != translation_record_digest(record)
         ):
-            raise TranslationReviewConflict("translation target belongs to another author or record")
+            raise TranslationReviewConflict(
+                "translation target belongs to another author or record"
+            )
         graph.add((subject, predicate, literal))
         annotate(
             graph,

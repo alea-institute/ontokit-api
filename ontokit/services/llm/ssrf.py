@@ -87,9 +87,7 @@ def validate_base_url(url: str, allow_private: bool = False) -> str:
         raise ValueError(f"URL must include a scheme (http:// or https://): {url!r}")
 
     if parsed.scheme not in ("http", "https"):
-        raise ValueError(
-            f"Only http:// and https:// are allowed. Got scheme: {parsed.scheme!r}"
-        )
+        raise ValueError(f"Only http:// and https:// are allowed. Got scheme: {parsed.scheme!r}")
 
     if not parsed.hostname:
         raise ValueError(f"URL must include a hostname: {url!r}")
@@ -97,7 +95,8 @@ def validate_base_url(url: str, allow_private: bool = False) -> str:
     # Always block the cloud metadata endpoint regardless of provider type
     try:
         results = socket.getaddrinfo(
-            parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80),
+            parsed.hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
             proto=socket.IPPROTO_TCP,
         )
         for _family, _type, _proto, _canonname, sockaddr in results:
@@ -127,9 +126,7 @@ def validate_base_url(url: str, allow_private: bool = False) -> str:
 
     # Resolve and check for private IPs
     try:
-        results = socket.getaddrinfo(
-            parsed.hostname, parsed.port or 443, proto=socket.IPPROTO_TCP
-        )
+        results = socket.getaddrinfo(parsed.hostname, parsed.port or 443, proto=socket.IPPROTO_TCP)
         for _family, _type, _proto, _canonname, sockaddr in results:
             addr = str(sockaddr[0])
             if _is_private_ip(addr):
@@ -138,9 +135,7 @@ def validate_base_url(url: str, allow_private: bool = False) -> str:
                     "Set ONTOKIT_ALLOW_PRIVATE_URLS=true to allow (development only)."
                 )
     except socket.gaierror:
-        raise ValueError(
-            f"Cannot resolve hostname: {parsed.hostname!r}"
-        ) from None
+        raise ValueError(f"Cannot resolve hostname: {parsed.hostname!r}") from None
 
     return url
 
@@ -178,9 +173,7 @@ def resolve_and_validate(url: str, *, allow_private: bool = False) -> list[str]:
 
     # Cloud endpoints must be HTTPS (plaintext is only for explicit local providers).
     if not allow and parsed.scheme != "https":
-        raise ValueError(
-            f"Cloud provider endpoints require HTTPS. Got: {parsed.scheme!r}."
-        )
+        raise ValueError(f"Cloud provider endpoints require HTTPS. Got: {parsed.scheme!r}.")
 
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     try:

@@ -176,17 +176,19 @@ KNOWN_MODELS: dict[LLMProviderType, list[dict[str, str]]] = {
 }
 
 # Providers handled by the single OpenAI-compatible client
-_OPENAI_COMPAT_PROVIDERS: frozenset[LLMProviderType] = frozenset({
-    LLMProviderType.openai,
-    LLMProviderType.mistral,
-    LLMProviderType.meta_llama,
-    LLMProviderType.ollama,
-    LLMProviderType.lmstudio,
-    LLMProviderType.custom,
-    LLMProviderType.groq,
-    LLMProviderType.xai,
-    LLMProviderType.llamafile,
-})
+_OPENAI_COMPAT_PROVIDERS: frozenset[LLMProviderType] = frozenset(
+    {
+        LLMProviderType.openai,
+        LLMProviderType.mistral,
+        LLMProviderType.meta_llama,
+        LLMProviderType.ollama,
+        LLMProviderType.lmstudio,
+        LLMProviderType.custom,
+        LLMProviderType.groq,
+        LLMProviderType.xai,
+        LLMProviderType.llamafile,
+    }
+)
 
 
 def get_provider(
@@ -221,9 +223,7 @@ def get_provider(
             provider_type = LLMProviderType(name)
         except ValueError:
             available = [p.value for p in LLMProviderType]
-            raise ValueError(
-                f"Unknown LLM provider: {name!r}. Available: {available}"
-            ) from None
+            raise ValueError(f"Unknown LLM provider: {name!r}. Available: {available}") from None
 
     # Resolve defaults
     resolved_base_url = base_url or DEFAULT_BASE_URLS.get(provider_type)

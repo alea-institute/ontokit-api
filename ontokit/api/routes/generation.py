@@ -295,7 +295,8 @@ async def generate_suggestions(
         ):
             logger.warning(
                 "generate_suggestions: provider auth error for project %s: %s",
-                project_id, error_msg,
+                project_id,
+                error_msg,
             )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -308,7 +309,8 @@ async def generate_suggestions(
         if isinstance(exc, TimeoutError | ConnectionError):
             logger.warning(
                 "generate_suggestions: transient provider error for project %s: %s",
-                project_id, error_msg,
+                project_id,
+                error_msg,
             )
             return GenerateSuggestionsResponse(
                 suggestions=[],
@@ -321,7 +323,9 @@ async def generate_suggestions(
         # Let it surface as a 500 so regressions are visible (review MEDIUM #5).
         logger.error(
             "generate_suggestions: unexpected error for project %s: %s",
-            project_id, error_msg, exc_info=True,
+            project_id,
+            error_msg,
+            exc_info=True,
         )
         raise
 
