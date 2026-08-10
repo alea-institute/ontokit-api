@@ -6,7 +6,7 @@ import hashlib
 import unicodedata
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Self
 
 from sqlalchemy import (
     JSON,
@@ -156,7 +156,7 @@ class TranslationRecord(Base):
     @classmethod
     def unconfirmed_machine_records_before(
         cls, project_id: uuid.UUID, cutoff: datetime
-    ) -> Select[tuple[TranslationRecord]]:
+    ) -> Select[tuple[Self]]:
         """Select this project's unconfirmed machine records created before an era cutoff."""
         return (
             select(cls)
