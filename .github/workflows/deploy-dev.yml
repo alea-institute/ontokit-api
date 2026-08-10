@@ -22,7 +22,27 @@ permissions:
   contents: read
 
 jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.deploy-key.outputs.configured }}
+    steps:
+      - name: Check deploy key configuration
+        id: deploy-key
+        env:
+          DEV_DEPLOY_SSH_KEY: ${{ secrets.DEV_DEPLOY_SSH_KEY }}
+          DEV_DEPLOY_KNOWN_HOSTS: ${{ secrets.DEV_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          if [[ -n "$DEV_DEPLOY_SSH_KEY" && -n "$DEV_DEPLOY_KNOWN_HOSTS" ]]; then
+            echo 'configured=true' >>"$GITHUB_OUTPUT"
+          else
+            echo 'configured=false' >>"$GITHUB_OUTPUT"
+            echo 'DEV deploy skipped: the deploy key is not yet installed; see deploy/RUNBOOK.md.'
+          fi
+
   deploy:
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
     runs-on: ubuntu-latest
     environment: dev-deploy
     env:
