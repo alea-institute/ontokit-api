@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
+
+from ontokit.models.suggestion_outcome import SuggestionOutcomeType
 
 
 class TrustTier(StrEnum):
@@ -85,3 +87,29 @@ class ProjectTrustSettingsUpdate(BaseModel):
     trust_promotion_threshold: int | None = Field(default=None, ge=1, le=1000)
     auto_accept_enabled: bool | None = Field(default=None)
     auto_accept_quiet_days: int | None = Field(default=None, ge=1, le=365)
+
+
+class SuggestionOutcomeItem(BaseModel):
+    """Stored audit facts for one terminal suggestion outcome."""
+
+    user_id: str
+    is_anonymous: bool
+    submitter_name: str | None
+    submitter_email: str | None
+    snapshot_tier: TrustTier | None
+    snapshot_role: str | None
+    snapshot_captured_at: datetime | None
+    outcome: SuggestionOutcomeType
+    decided_by: str | None
+    decided_by_name: str | None
+    created_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class SuggestionOutcomeListResponse(BaseModel):
+    """Keyset-paginated suggestion outcome audit trail."""
+
+    items: list[SuggestionOutcomeItem]
+    total: int
+    next_cursor: str | None
