@@ -3,6 +3,12 @@ name: Deploy DEV
 on:
   push:
     branches: [feat/pr-party]
+    paths-ignore:
+      - docs/**
+      - "**/*.md"
+      - deploy/RUNBOOK.md
+      - .github/ISSUE_TEMPLATE/**
+      - LICENSE
   workflow_dispatch:
     inputs:
       api_sha:
