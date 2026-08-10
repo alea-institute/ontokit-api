@@ -147,9 +147,7 @@ _ECHO_MARKERS: Final[tuple[str, ...]] = (
     "disregard previous instructions",
     "disregard all previous instructions",
 )
-_DELIMITER_ECHO: Final = re.compile(
-    r"<\s*/?\s*untrusted\s*-\s*pr\s*-\s*content\b", re.IGNORECASE
-)
+_DELIMITER_ECHO: Final = re.compile(r"<\s*/?\s*untrusted\s*-\s*pr\s*-\s*content\b", re.IGNORECASE)
 
 MAX_ATTEMPTS: Final = 2
 MAX_FIELD_CHARS: Final = 1200

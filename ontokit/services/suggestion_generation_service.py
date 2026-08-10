@@ -163,7 +163,9 @@ class SuggestionGenerationService:
                 except Exception as exc:
                     logger.warning(
                         "Validation failed for %s suggestion %r: %s",
-                        suggestion_type, parsed["label"], exc,
+                        suggestion_type,
+                        parsed["label"],
+                        exc,
                     )
 
             # Duplicate check (D-09) — SEQUENTIAL, one await at a time
@@ -186,7 +188,9 @@ class SuggestionGenerationService:
                     # so ops can alert on silently-disabled duplicate blocking.
                     logger.warning(
                         "Dedup check unavailable for %s suggestion %r — allowing (verdict=pass): %s",
-                        suggestion_type, parsed["dedup_label"], exc,
+                        suggestion_type,
+                        parsed["dedup_label"],
+                        exc,
                     )
 
             # Build final suggestion (GEN-09: provenance="llm-proposed")

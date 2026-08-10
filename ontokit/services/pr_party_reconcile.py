@@ -668,8 +668,7 @@ def _approval_was_dismissed(ctx: ActionContext, reviews: Sequence[PRPartyReview]
     matches = [
         review
         for review in reviews
-        if review_matches_reviewer(review, ctx.reviewer)
-        and review.commit_id == ctx.action.head_sha
+        if review_matches_reviewer(review, ctx.reviewer) and review.commit_id == ctx.action.head_sha
     ]
     if any(_review_state(review) != REVIEW_STATE_DISMISSED for review in matches):
         return False

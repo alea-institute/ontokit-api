@@ -54,6 +54,8 @@ class EmbeddingBudgetExceeded(RuntimeError):
 
 class EmbeddingPricingUnavailable(RuntimeError):
     """A paid embedding model cannot be metered safely."""
+
+
 _EmbeddingResult = TypeVar("_EmbeddingResult")
 
 

@@ -40,9 +40,7 @@ def _hardened(builder: PromptBuilder) -> PromptBuilder:
                 content = message["content"][:_MAX_USER_PROMPT_CHARS]
                 content = content.replace(
                     "<untrusted_ontology_data>", "&lt;untrusted_ontology_data&gt;"
-                ).replace(
-                    "</untrusted_ontology_data>", "&lt;/untrusted_ontology_data&gt;"
-                )
+                ).replace("</untrusted_ontology_data>", "&lt;/untrusted_ontology_data&gt;")
                 hardened.append(
                     {
                         **message,
@@ -52,6 +50,7 @@ def _hardened(builder: PromptBuilder) -> PromptBuilder:
         return hardened
 
     return build
+
 
 PROMPT_BUILDERS: dict[str, PromptBuilder] = {
     "children": _hardened(children.build_messages),

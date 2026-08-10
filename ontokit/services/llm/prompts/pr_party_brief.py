@@ -69,6 +69,7 @@ _SYSTEM_TEMPLATE: Final = (
     "- Every string must be plain text: no markdown, no HTML, no scripts, no images.\n"
 )
 
+
 def _system_for(open_delimiter: str, close_delimiter: str) -> str:
     return _SYSTEM_TEMPLATE.replace("{open_delimiter}", open_delimiter).replace(
         "{close_delimiter}", close_delimiter

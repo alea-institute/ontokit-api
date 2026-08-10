@@ -40,7 +40,9 @@ def _previous_secrets() -> list[str]:
     raw = settings.secret_key_previous or ""
     # Ignore the shipped default even if it leaks into the rotation list —
     # a publicly-known key must never be trusted to authenticate ciphertext.
-    return [s.strip() for s in raw.split(",") if s.strip() and s.strip() != _INSECURE_DEFAULT_SECRET]
+    return [
+        s.strip() for s in raw.split(",") if s.strip() and s.strip() != _INSECURE_DEFAULT_SECRET
+    ]
 
 
 def _get_fernet() -> MultiFernet:
