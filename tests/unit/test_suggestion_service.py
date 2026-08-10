@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy.exc import MissingGreenlet
+from sqlalchemy.exc import IntegrityError, MissingGreenlet
 
 from ontokit.core.auth import CurrentUser
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
@@ -1202,6 +1202,72 @@ class TestSubmit:
 
         assert result.pr_number == 6
         assert result.status == SuggestionSessionStatus.SUBMITTED.value
+
+    @pytest.mark.asyncio
+    async def test_direct_pr_retry_uses_session_snapshot_after_rollback_expiry(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+    ) -> None:
+        """A colliding allocation retries without reading the expired session."""
+
+        class ExpiringSession:
+            expired = False
+
+            def _read(self, value: str) -> str:
+                if self.expired:
+                    raise MissingGreenlet("expired ORM attribute required async refresh")
+                return value
+
+            @property
+            def user_id(self) -> str:
+                return self._read("test-user-id")
+
+            @property
+            def user_name(self) -> str:
+                return self._read("Test User")
+
+            @property
+            def user_email(self) -> str:
+                return self._read("test@example.com")
+
+        session = ExpiringSession()
+        max_result = MagicMock()
+        max_result.scalar.side_effect = [5, 6]
+        mock_db.execute.return_value = max_result
+        mock_db.flush.side_effect = [IntegrityError("duplicate", {}, Exception()), None]
+
+        async def expire_session() -> None:
+            session.expired = True
+
+        mock_db.rollback.side_effect = expire_session
+
+        async def refresh_after_retry(obj: object) -> None:
+            if obj is session:
+                session.expired = False
+
+        mock_db.refresh.side_effect = refresh_after_retry
+
+        from ontokit.schemas.pull_request import PRCreate
+
+        pr = await service._create_pr_directly(
+            PROJECT_ID,
+            PRCreate(
+                title="Suggestion: Update Person",
+                description="changes",
+                source_branch="suggest/test-user/s_abc12345",
+                target_branch="main",
+            ),
+            session,  # type: ignore[arg-type]
+        )
+
+        assert pr.pr_number == 7
+        assert pr.author_id == "test-user-id"
+        assert pr.author_name == "Test User"
+        assert pr.author_email == "test@example.com"
+        assert mock_db.flush.await_count == 2
+        mock_db.rollback.assert_awaited_once()
+        assert mock_db.refresh.await_count == 2
 
 
 # ---------------------------------------------------------------------------
