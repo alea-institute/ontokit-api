@@ -64,6 +64,8 @@ jobs:
     env:
       DATABASE_URL: postgresql+asyncpg://ontokit_test:ontokit_test@localhost:5432/ontokit_test
       REDIS_URL: redis://localhost:6379/0
+      TEST_DATABASE_URL: postgresql+asyncpg://ontokit_test:ontokit_test@localhost:5432/ontokit_test
+      TEST_REDIS_URL: redis://localhost:6379/0
       # CI dummy — tests only
       SECRET_KEY: ci-only-dummy-secret-key-0000
     steps:
