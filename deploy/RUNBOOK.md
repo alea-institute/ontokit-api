@@ -104,13 +104,42 @@ omitted API SHA uses the workflow commit, while an omitted web SHA resolves the
 current `alea-institute/ontokit-web` `feat/pr-party` head and fails closed if
 that head cannot be resolved.
 
-The CI key is restricted to the forced command installed from
-`deploy/ontokit-deploy.sh` at `/usr/local/sbin/ontokit-deploy` (root-owned,
-mode `0755`). As a one-time provisioning step, the orchestrator installs that
-script and adds the CI public key to root's `authorized_keys` with a forced
-`command="/usr/local/sbin/ontokit-deploy"` plus SSH forwarding/PTY restrictions.
-The private key and pinned host keys are stored only in GitHub secrets named
-`DEV_DEPLOY_SSH_KEY` and `DEV_DEPLOY_KNOWN_HOSTS`.
+### One-time: mint the deploy key (Damien only)
+
+This is the only step an agent may not perform (credential material);
+everything else is already installed and verified.
+
+```bash
+set -e; D=~/.config/ontokit-dev; mkdir -p $D; chmod 700 $D; if [ -f $D/deploy-key ]; then echo "REFUSED: $D/deploy-key already exists — rotate deliberately"; exit 1; fi; ssh-keygen -t ed25519 -N '' -C github-actions-deploy -f $D/deploy-key >/dev/null; chmod 600 $D/deploy-key; ssh-keyscan -t ed25519 178.156.208.239 2>/dev/null > $D/known_hosts; [ -s $D/known_hosts ] || { echo 'REFUSED: could not read box host key'; exit 1; }; ssh -i ~/.ssh/hetzner_dev root@178.156.208.239 "grep -q github-actions-deploy /root/.ssh/authorized_keys || echo 'restrict,command=\"/usr/local/sbin/ontokit-deploy\" $(cat $D/deploy-key.pub)' >> /root/.ssh/authorized_keys"; for r in ontokit-api ontokit-web; do gh secret set DEV_DEPLOY_SSH_KEY --repo alea-institute/$r < $D/deploy-key; gh secret set DEV_DEPLOY_KNOWN_HOSTS --repo alea-institute/$r < $D/known_hosts; done; ssh -i $D/deploy-key -o UserKnownHostsFile=$D/known_hosts -o StrictHostKeyChecking=yes root@178.156.208.239 status && echo 'SELF-CHECK OK — key works and is locked to the deploy command' || echo 'SELF-CHECK FAILED — key installed but deploy command did not answer; tell the session'
+```
+
+It:
+
+- generates an ed25519 key at `~/.config/ontokit-dev/deploy-key` (mode 600,
+  outside every git tree)
+- installs the public half into root's `authorized_keys` wrapped in `restrict`
+  + `command="/usr/local/sbin/ontokit-deploy"`
+- publishes `DEV_DEPLOY_SSH_KEY` and `DEV_DEPLOY_KNOWN_HOSTS` to both
+  alea-institute forks
+- ends with a self-check that prints OK without revealing key material
+- refuses rather than overwrites an existing key
+
+Until this runs, the Deploy DEV workflow's `preflight` job skips every push
+cleanly, so no approval tap is consumed and nothing fails noisily.
+
+The settled posture is a root key locked to one forced command. This was chosen
+over a deploy-user account because the `deploy` account is in the **docker
+group, which is root-equivalent** — so a shell-capable deploy account would grant
+strictly MORE power than a key that can only invoke one validated script.
+Decision: ask `ontokit-web-2026-08-10-u12-deploy-prereqs`, 2026-08-10.
+
+The `dev-deploy` GitHub Environment with `damienriehl` as required reviewer
+already exists on both forks.
+
+`/usr/local/sbin/ontokit-deploy` is already installed on the box, verified
+2026-08-10: the `status` verb reported live SHAs and all nine containers
+healthy, and hostile inputs (`deploy; rm -rf /`, unknown verb, malformed SHAs)
+were refused with rc=64.
 
 To restore the pair recorded immediately before the last deploy, invoke the
 same restricted key with the `rollback` verb. Each `status`, `deploy`, and
