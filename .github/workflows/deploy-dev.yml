@@ -1,0 +1,113 @@
+name: Deploy DEV
+
+on:
+  push:
+    branches: [feat/pr-party]
+  workflow_dispatch:
+    inputs:
+      api_sha:
+        description: API commit SHA (defaults to this repository's current SHA)
+        required: false
+        type: string
+      web_sha:
+        description: Web commit SHA (defaults to alea-institute/ontokit-web feat/pr-party head)
+        required: false
+        type: string
+
+concurrency:
+  group: dev-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.deploy-key.outputs.configured }}
+    steps:
+      - name: Check deploy key configuration
+        id: deploy-key
+        env:
+          DEV_DEPLOY_SSH_KEY: ${{ secrets.DEV_DEPLOY_SSH_KEY }}
+          DEV_DEPLOY_KNOWN_HOSTS: ${{ secrets.DEV_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          if [[ -n "$DEV_DEPLOY_SSH_KEY" && -n "$DEV_DEPLOY_KNOWN_HOSTS" ]]; then
+            echo 'configured=true' >>"$GITHUB_OUTPUT"
+          else
+            echo 'configured=false' >>"$GITHUB_OUTPUT"
+            echo 'DEV deploy skipped: the deploy key is not yet installed; see deploy/RUNBOOK.md.'
+          fi
+
+  deploy:
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    environment: dev-deploy
+    env:
+      DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST || '178.156.208.239' }}
+      DEPLOY_KEY_FILE: ${{ runner.temp }}/ontokit-deploy-key
+      DEPLOY_KNOWN_HOSTS_FILE: ${{ runner.temp }}/ontokit-deploy-known-hosts
+    steps:
+      - name: Resolve matched commit pair
+        id: pair
+        env:
+          GH_TOKEN: ${{ github.token }}
+          API_INPUT: ${{ inputs.api_sha }}
+          WEB_INPUT: ${{ inputs.web_sha }}
+        run: |
+          set -euo pipefail
+
+          api_sha="${API_INPUT:-${GITHUB_SHA}}"
+          web_sha="${WEB_INPUT:-}"
+          if [[ -z "$web_sha" ]]; then
+            web_sha=$(gh api \
+              'repos/alea-institute/ontokit-web/commits/feat%2Fpr-party' \
+              --jq '.sha') || {
+                echo 'Unable to resolve alea-institute/ontokit-web feat/pr-party head.' >&2
+                exit 1
+              }
+          fi
+
+          sha_pattern='^[0-9a-f]{40}$'
+          [[ $api_sha =~ $sha_pattern ]] || {
+            echo 'Resolved API SHA is not a full lowercase commit SHA.' >&2
+            exit 1
+          }
+          [[ $web_sha =~ $sha_pattern ]] || {
+            echo 'Resolved web SHA is not a full lowercase commit SHA.' >&2
+            exit 1
+          }
+
+          printf 'api_sha=%s\n' "$api_sha" >>"$GITHUB_OUTPUT"
+          printf 'web_sha=%s\n' "$web_sha" >>"$GITHUB_OUTPUT"
+
+      - name: Install SSH credentials
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEV_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEV_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -m 600 /dev/null "$DEPLOY_KEY_FILE"
+          install -m 600 /dev/null "$DEPLOY_KNOWN_HOSTS_FILE"
+          printf '%s' "$DEPLOY_SSH_KEY" >"$DEPLOY_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" >"$DEPLOY_KNOWN_HOSTS_FILE"
+
+      - name: Deploy approved pair
+        env:
+          API_SHA: ${{ steps.pair.outputs.api_sha }}
+          WEB_SHA: ${{ steps.pair.outputs.web_sha }}
+        run: |
+          set -euo pipefail
+          ssh \
+            -i "$DEPLOY_KEY_FILE" \
+            -o "UserKnownHostsFile=$DEPLOY_KNOWN_HOSTS_FILE" \
+            -o StrictHostKeyChecking=yes \
+            "root@$DEPLOY_HOST" \
+            "deploy $API_SHA $WEB_SHA"
+
+      - name: Remove SSH credentials
+        if: always()
+        run: |
+          rm -f -- "$DEPLOY_KEY_FILE" "$DEPLOY_KNOWN_HOSTS_FILE"
