@@ -26,9 +26,7 @@ _REDIS_INFRA_ERRORS = (RedisError, ConnectionError, TimeoutError, OSError)
 FAIL_OPEN_EVENT = "llm_rate_limiter_fail_open"
 
 
-def _alert_fail_open(
-    operation: str, project_id: str, user_id: str, error: BaseException
-) -> None:
+def _alert_fail_open(operation: str, project_id: str, user_id: str, error: BaseException) -> None:
     """Emit the single actionable fail-open alert shared by every degraded path."""
     logger.warning(
         "ALERT %s: rate limiter failed open during %s (metering disabled, call allowed) "
@@ -45,6 +43,7 @@ def _alert_fail_open(
             "user_id": user_id,
         },
     )
+
 
 # Per-role daily call limits. None means unlimited; 0 means no access.
 # COST-03: editors 500/day, COST-04: suggesters 100/day

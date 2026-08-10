@@ -56,9 +56,7 @@ class OpenAICompatProvider(LLMProvider):
             )
         return self._client
 
-    async def chat(
-        self, messages: list[dict[str, str]], **kwargs: Any
-    ) -> tuple[str, int, int]:
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> tuple[str, int, int]:
         client = self._get_client()
         response = await client.chat.completions.create(
             model=kwargs.pop("model", self.model or "gpt-4o-mini"),

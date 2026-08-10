@@ -62,9 +62,7 @@ def build_messages(context: dict[str, Any], batch_size: int = 3) -> list[dict[st
                 parts.append(f"{prop_label}: {val.get('value', '')}")
 
     if parents:
-        parent_labels = ", ".join(
-            f"{p['label']} <{p['iri']}>" for p in parents
-        )
+        parent_labels = ", ".join(f"{p['label']} <{p['iri']}>" for p in parents)
         parts.append(f"Current parent classes: {parent_labels}")
 
     if siblings:
