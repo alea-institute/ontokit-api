@@ -41,8 +41,10 @@ _FORBIDDEN_IRI_CHARS = frozenset('<>"{}|\\^`')
 
 def _is_well_formed_absolute_iri(value: str) -> bool:
     """Return whether an IRI is safe, absolute, and resolvable by supported knowledge."""
-    return bool(value) and value.startswith(_ALLOWED_IRI_SCHEMES) and not any(
-        char.isspace() or char in _FORBIDDEN_IRI_CHARS for char in value
+    return (
+        bool(value)
+        and value.startswith(_ALLOWED_IRI_SCHEMES)
+        and not any(char.isspace() or char in _FORBIDDEN_IRI_CHARS for char in value)
     )
 
 
@@ -99,10 +101,12 @@ async def detect_project_namespace(
     # 2. Query DB for most common namespace prefix
     try:
         result = await db.execute(
-            select(IndexedEntity.iri).where(
+            select(IndexedEntity.iri)
+            .where(
                 IndexedEntity.project_id == project_id,
                 IndexedEntity.branch == branch,
-            ).limit(500)
+            )
+            .limit(500)
         )
         iris = [row[0] for row in result.all()]
         if iris:
@@ -200,9 +204,7 @@ class ValidationService:
         """
         labels: list[dict[str, Any]] = entity.get("labels", [])
         has_english = any(
-            label.get("lang") in ("en", "")
-            for label in labels
-            if isinstance(label, dict)
+            label.get("lang") in ("en", "") for label in labels if isinstance(label, dict)
         )
         if not has_english:
             return [
@@ -210,8 +212,7 @@ class ValidationService:
                     field="labels",
                     code="VALID-02",
                     message=(
-                        "An English rdfs:label is required. "
-                        "Add a label with language tag 'en'."
+                        "An English rdfs:label is required. Add a label with language tag 'en'."
                     ),
                 )
             ]
@@ -241,10 +242,10 @@ class ValidationService:
         parent_iris: list[str] = entity.get("parent_iris", [])
         for parent_iri in parent_iris:
             try:
-                ancestor_path = await self._index.get_ancestor_path(
-                    project_id, branch, parent_iri
-                )
-                ancestor_iris = {node.get("iri") for node in ancestor_path if isinstance(node, dict)}
+                ancestor_path = await self._index.get_ancestor_path(project_id, branch, parent_iri)
+                ancestor_iris = {
+                    node.get("iri") for node in ancestor_path if isinstance(node, dict)
+                }
                 if entity_iri in ancestor_iris:
                     errors.append(
                         ValidationError(
@@ -257,9 +258,7 @@ class ValidationService:
                         )
                     )
             except Exception as exc:
-                logger.warning(
-                    "VALID-03 cycle check failed for parent %s: %s", parent_iri, exc
-                )
+                logger.warning("VALID-03 cycle check failed for parent %s: %s", parent_iri, exc)
                 # Fail open — don't block on DB errors (consistent with rate_limiter pattern)
 
         return errors
@@ -291,9 +290,7 @@ class ValidationService:
                     ValidationError(
                         field="parent_iris",
                         code="VALID-04",
-                        message=(
-                            f"Parent IRI '{parent_iri}' is not a well-formed absolute IRI."
-                        ),
+                        message=(f"Parent IRI '{parent_iri}' is not a well-formed absolute IRI."),
                     )
                 )
         return errors

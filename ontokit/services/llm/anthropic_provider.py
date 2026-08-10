@@ -52,9 +52,7 @@ class AnthropicProvider(LLMProvider):
             self._client = anthropic.AsyncAnthropic(**kwargs)
         return self._client
 
-    async def chat(
-        self, messages: list[dict[str, str]], **kwargs: Any
-    ) -> tuple[str, int, int]:
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> tuple[str, int, int]:
         client = self._get_client()
         max_tokens = kwargs.pop("max_tokens", 4096)
 
@@ -79,13 +77,9 @@ class AnthropicProvider(LLMProvider):
         response = await client.messages.create(**create_kwargs)
         text = response.content[0].text if response.content else ""
         input_tokens = (
-            response.usage.input_tokens
-            if response.usage
-            else estimate_message_tokens(messages)
+            response.usage.input_tokens if response.usage else estimate_message_tokens(messages)
         )
-        output_tokens = (
-            response.usage.output_tokens if response.usage else estimate_tokens(text)
-        )
+        output_tokens = response.usage.output_tokens if response.usage else estimate_tokens(text)
         return text, input_tokens, output_tokens
 
     async def test_connection(self) -> bool:

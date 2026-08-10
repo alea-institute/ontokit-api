@@ -641,14 +641,18 @@ def _check_lifecycle(pr: PRPartyPR) -> None:
     if pr.state == PR_STATE_OPEN:
         return
     if pr.state == "merged":
-        message = "This pull request was already merged on GitHub, so there is nothing left to decide."
+        message = (
+            "This pull request was already merged on GitHub, so there is nothing left to decide."
+        )
     elif pr.state == PR_STATE_DRAFT:
         message = (
             "This pull request was converted back to draft on GitHub, so it is not ready "
             "for a decision."
         )
     else:
-        message = "This pull request was already closed on GitHub, so there is nothing left to decide."
+        message = (
+            "This pull request was already closed on GitHub, so there is nothing left to decide."
+        )
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail=_refusal(message, retire=True),

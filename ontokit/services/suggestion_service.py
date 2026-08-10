@@ -153,9 +153,7 @@ class SuggestionService:
 
         default_branch = self.git_service.get_default_branch(project.id)
         candidates = list(
-            dict.fromkeys(
-                (configured_path, os.path.basename(configured_path), "ontology.ttl")
-            )
+            dict.fromkeys((configured_path, os.path.basename(configured_path), "ontology.ttl"))
         )
         for candidate in candidates:
             try:
@@ -330,8 +328,7 @@ class SuggestionService:
                         "iri": str(entity),
                         "parent_iris": parents,
                         "labels": [
-                            {"value": str(label), "lang": label.language or ""}
-                            for label in labels
+                            {"value": str(label), "lang": label.language or ""} for label in labels
                         ],
                     },
                     project_namespace,
@@ -638,9 +635,7 @@ class SuggestionService:
                     detail="Saved to branch but failed to update session metadata",
                 ) from e
 
-        await self._enqueue_branch_refresh(
-            project_id, session.branch, entity_iri=data.entity_iri
-        )
+        await self._enqueue_branch_refresh(project_id, session.branch, entity_iri=data.entity_iri)
         return SuggestionSaveResponse(
             commit_hash=commit_info.hash,
             branch=session.branch,
@@ -684,9 +679,7 @@ class SuggestionService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Session is {session.status}, cannot submit",
                 )
-            content = self.git_service.get_file_from_branch(
-                project_id, session.branch, filename
-            )
+            content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
             await self._validate_submission_content(
                 project_id, session.branch, filename, content.decode("utf-8")
             )
@@ -879,9 +872,7 @@ class SuggestionService:
         )
 
         await self.db.commit()
-        await self._enqueue_branch_refresh(
-            project_id, session.branch, full_embedding=True
-        )
+        await self._enqueue_branch_refresh(project_id, session.branch, full_embedding=True)
 
         return SuggestionSubmitResponse(
             pr_number=pr_number,

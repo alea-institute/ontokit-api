@@ -36,9 +36,7 @@ class CohereProvider(LLMProvider):
             "Authorization": f"Bearer {self.api_key or ''}",
         }
 
-    async def chat(
-        self, messages: list[dict[str, str]], **kwargs: Any
-    ) -> tuple[str, int, int]:
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> tuple[str, int, int]:
         model = kwargs.pop("model", self.model or "command-a-03-2025")
 
         body: dict[str, Any] = {
@@ -63,9 +61,7 @@ class CohereProvider(LLMProvider):
         output_tokens = usage.get("output_tokens", 0)
         # Fallback estimation
         if input_tokens == 0:
-            input_tokens = int(
-                sum(len(m.get("content", "").split()) for m in messages) * 1.3
-            )
+            input_tokens = int(sum(len(m.get("content", "").split()) for m in messages) * 1.3)
         if output_tokens == 0:
             output_tokens = int(len(text.split()) * 1.3)
 

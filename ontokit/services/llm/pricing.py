@@ -19,8 +19,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 LITELLM_PRICING_URL = (
-    "https://raw.githubusercontent.com/BerriAI/litellm/main/"
-    "model_prices_and_context_window.json"
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 )
 
 CACHE_TTL_SECONDS = 7 * 24 * 60 * 60  # 7 days
@@ -37,9 +36,7 @@ class PricingUnavailableError(RuntimeError):
 
 
 def _is_cache_valid() -> bool:
-    return _pricing_cache is not None and (
-        time.time() - _pricing_fetched_at
-    ) < CACHE_TTL_SECONDS
+    return _pricing_cache is not None and (time.time() - _pricing_fetched_at) < CACHE_TTL_SECONDS
 
 
 async def _fetch_and_cache() -> None:
