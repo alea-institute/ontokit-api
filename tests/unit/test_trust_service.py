@@ -76,6 +76,10 @@ def _session(
     session.id = uuid.uuid4()
     session.project_id = PROJECT_ID
     session.user_id = user_id
+    session.user_name = "Account Name"
+    session.user_email = "account@example.com"
+    session.submitter_name = "Self-Reported Name"
+    session.submitter_email = "self-reported@example.com"
     session.is_anonymous = is_anonymous
     session.is_llm_generated = is_llm_generated
     return session
@@ -215,6 +219,111 @@ class TestRecordOutcome:
             PROJECT_ID, _session("u1"), SuggestionOutcomeType.REJECTED, "r"
         )
         db.commit.assert_not_called()
+
+    async def test_rejected_outcome_snapshots_submitter_standing_and_identity(self) -> None:
+        """Covers AE1 and authenticated attribution."""
+        db = _db_with_count(0)
+        project = _project([_member("u1", "suggester", is_trusted=True)])
+
+        row = await _svc(db).record_outcome(
+            PROJECT_ID,
+            _session("u1"),
+            SuggestionOutcomeType.REJECTED,
+            "reviewer-1",
+            project=project,
+            decided_by_name="Review Person",
+        )
+
+        assert row.snapshot_tier == TrustTier.TRUSTED.value
+        assert row.snapshot_role == "suggester"
+        assert row.submitter_name == "Account Name"
+        assert row.submitter_email == "account@example.com"
+        assert row.decided_by_name == "Review Person"
+        assert row.snapshot_captured_at is not None
+
+    async def test_snapshot_does_not_follow_later_member_changes(self) -> None:
+        """Covers AE2: the stored values reflect decision-time standing."""
+        member = _member("u1", "suggester", is_trusted=True)
+        row = await _svc().record_outcome(
+            PROJECT_ID,
+            _session("u1"),
+            SuggestionOutcomeType.REJECTED,
+            "reviewer-1",
+            project=_project([member]),
+        )
+
+        member.role = "editor"
+        member.is_trusted = False
+
+        assert row.snapshot_tier == TrustTier.TRUSTED.value
+        assert row.snapshot_role == "suggester"
+
+    async def test_anonymous_snapshot_uses_self_reported_identity(self) -> None:
+        """Covers AE4: anonymous standing is not invented."""
+        row = await _svc().record_outcome(
+            PROJECT_ID,
+            _session("anonymous-abc", is_anonymous=True),
+            SuggestionOutcomeType.DISMISSED,
+            "reviewer-1",
+            project=_project(),
+            decided_by_name="Review Person",
+        )
+
+        assert row.is_anonymous is True
+        assert row.snapshot_tier is None
+        assert row.snapshot_role is None
+        assert row.submitter_name == "Self-Reported Name"
+        assert row.submitter_email == "self-reported@example.com"
+        assert row.snapshot_captured_at is not None
+
+    async def test_snapshot_resolution_failure_degrades_without_pii(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Covers AE7: audit capture never blocks the terminal outcome."""
+        service = _svc()
+        session = _session("u1")
+        session.user_name = "Private Submitter"
+        session.user_email = "private@example.com"
+        monkeypatch.setattr(service, "resolve_tier", MagicMock(side_effect=RuntimeError("boom")))
+
+        row = await service.record_outcome(
+            PROJECT_ID,
+            session,
+            SuggestionOutcomeType.REJECTED,
+            "reviewer-1",
+            project=_project([_member("u1")]),
+        )
+
+        assert row.snapshot_tier is None
+        assert row.snapshot_role is None
+        assert row.snapshot_captured_at is not None
+        assert "suggestion outcome snapshot resolution failed" in caplog.text
+        assert "RuntimeError" in caplog.text
+        assert "boom" not in caplog.text
+        assert "Private Submitter" not in caplog.text
+        assert "private@example.com" not in caplog.text
+
+    async def test_acceptance_snapshots_pre_promotion_tier(self) -> None:
+        """AE6: capture precedes promotion evaluation in the transaction."""
+        member = _member("u1", "suggester", is_trusted=False)
+        project = _project([member], threshold=1)
+        service = _svc(_db_with_count(1))
+
+        row = await service.record_outcome(
+            PROJECT_ID,
+            _session("u1"),
+            SuggestionOutcomeType.ACCEPTED,
+            "reviewer-1",
+            project=project,
+        )
+        promoted = await service.evaluate_promotion(project, "u1")
+
+        assert promoted is True
+        assert member.is_trusted is True
+        assert row.snapshot_tier == TrustTier.UNTRUSTED.value
+        assert row.snapshot_role == "suggester"
 
     async def test_count_accepted_reads_the_log(self) -> None:
         db = _db_with_count(4)
