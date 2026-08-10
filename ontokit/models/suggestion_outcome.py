@@ -1,9 +1,11 @@
 """Append-only suggestion outcome log (trust ladder, R5).
 
 Every terminal review action on a suggestion session — accepted, rejected, or
-dismissed — appends exactly one row here. Rows are NEVER updated or deleted:
-the log is the single source of truth for promotion counting (R6) and the
-substrate the future contributor-standing UI reads without needing a migration.
+dismissed — appends exactly one row here. Rows are never deleted, and their
+standing snapshot is never updated. The only permitted mutation is clearing the
+three display-attribution fields for an authorized erasure or abuse takedown.
+The log is the single source of truth for promotion counting (R6) and the
+substrate the contributor-standing UI reads.
 
 `counts_toward_promotion` encodes R7 ("anonymous contributions are credited but
 never counted") as a data property rather than a query-site convention, so a new
@@ -64,6 +66,18 @@ class SuggestionOutcome(Base):
     decided_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Standing and attribution captured when this terminal outcome was decided.
+    # NULL means the row predates snapshot capture; no defaults may fabricate history.
+    # Display fields remain nullable so authorized erasure/takedown requests can clear them.
+    snapshot_tier: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    snapshot_role: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    submitter_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    submitter_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    decided_by_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    snapshot_captured_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     project: Mapped["Project"] = relationship()
@@ -76,6 +90,12 @@ class SuggestionOutcome(Base):
             "project_id",
             "user_id",
             postgresql_where=text("outcome = 'accepted' AND counts_toward_promotion"),
+        ),
+        Index(
+            "ix_suggestion_outcomes_audit_cursor",
+            project_id.desc(),
+            created_at.desc(),
+            id.desc(),
         ),
     )
 
