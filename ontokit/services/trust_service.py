@@ -156,6 +156,9 @@ class TrustService:
         outcome: SuggestionOutcomeType | str,
         decided_by: str | None,
         note: str | None = None,
+        *,
+        project: Project | None = None,
+        decided_by_name: str | None = None,
     ) -> SuggestionOutcome:
         """Append one terminal outcome for a suggestion session (R5).
 
@@ -166,6 +169,38 @@ class TrustService:
         is_anonymous = bool(getattr(session, "is_anonymous", False)) or is_anonymous_user_id(
             session.user_id
         )
+        snapshot_captured_at = datetime.now(UTC)
+        snapshot_tier: str | None = None
+        snapshot_role: str | None = None
+
+        if project is not None and not is_anonymous:
+            try:
+                submitter = CurrentUser(
+                    id=session.user_id,
+                    email=session.user_email,
+                    name=session.user_name,
+                )
+                snapshot_tier = self.resolve_tier(project, submitter).value
+                member = self.get_member(project, session.user_id)
+                snapshot_role = member.role if member is not None else None
+            except Exception:  # noqa: BLE001 — audit capture must never block the outcome
+                snapshot_tier = None
+                snapshot_role = None
+                # Metadata only: do not leak display attribution into logs.
+                logger.warning(
+                    "suggestion outcome snapshot resolution failed: project=%s session=%s user=%s",
+                    project_id,
+                    session.id,
+                    session.user_id,
+                )
+
+        if is_anonymous:
+            submitter_name = session.submitter_name
+            submitter_email = session.submitter_email
+        else:
+            submitter_name = session.user_name
+            submitter_email = session.user_email
+
         row = SuggestionOutcome(
             project_id=project_id,
             user_id=session.user_id,
@@ -176,6 +211,12 @@ class TrustService:
             is_anonymous=is_anonymous,
             decided_by=decided_by,
             note=note,
+            snapshot_tier=snapshot_tier,
+            snapshot_role=snapshot_role,
+            submitter_name=submitter_name,
+            submitter_email=submitter_email,
+            decided_by_name=decided_by_name,
+            snapshot_captured_at=snapshot_captured_at,
         )
         self.db.add(row)
         return row

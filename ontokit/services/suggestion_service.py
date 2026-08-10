@@ -1220,9 +1220,11 @@ class SuggestionService:
     async def _record_terminal_outcome(
         self,
         project_id: UUID,
+        project: Project,
         session: SuggestionSession,
         outcome: SuggestionOutcomeType,
         decided_by: str | None,
+        decided_by_name: str | None,
         note: str | None = None,
     ) -> None:
         """Append the outcome row and, on acceptance, run auto-promotion.
@@ -1231,12 +1233,19 @@ class SuggestionService:
         session's status change, so a resolved suggestion can never exist
         without its outcome row (which would silently break promotion counting).
         """
-        await self.trust.record_outcome(project_id, session, outcome, decided_by, note)
+        await self.trust.record_outcome(
+            project_id,
+            session,
+            outcome,
+            decided_by,
+            note,
+            project=project,
+            decided_by_name=decided_by_name,
+        )
 
         if outcome is not SuggestionOutcomeType.ACCEPTED:
             return
 
-        project = await self._get_project(project_id)
         promoted = await self.trust.evaluate_promotion(project, session.user_id)
         if not promoted:
             return
@@ -1396,16 +1405,16 @@ class SuggestionService:
         failures are reported per item, because one stale session must never
         abort a forty-item dismissal.
         """
-        await self._verify_reviewer_access(project_id, user)
+        project = await self._verify_reviewer_access(project_id, user)
 
         succeeded: list[str] = []
         failed: list[BulkReviewFailure] = []
         for session_id in data.session_ids:
             try:
                 if data.action is BulkReviewAction.ACCEPT:
-                    await self._approve_unchecked(project_id, session_id, user)
+                    await self._approve_unchecked(project_id, session_id, user, project)
                 else:
-                    await self._dismiss_unchecked(project_id, session_id, user, data.note)
+                    await self._dismiss_unchecked(project_id, session_id, user, project, data.note)
                 succeeded.append(session_id)
             except HTTPException as e:
                 await self.db.rollback()
@@ -1431,14 +1440,15 @@ class SuggestionService:
         attribute its own merges to ``system:auto-accept`` while reusing this
         one path (and therefore the outcome log and promotion evaluation).
         """
-        await self._verify_reviewer_access(project_id, user)
-        await self._approve_unchecked(project_id, session_id, user, decided_by)
+        project = await self._verify_reviewer_access(project_id, user)
+        await self._approve_unchecked(project_id, session_id, user, project, decided_by)
 
     async def _approve_unchecked(
         self,
         project_id: UUID,
         session_id: str,
         user: CurrentUser,
+        project: Project,
         decided_by: str | None = None,
     ) -> None:
         """Approve without the reviewer-role gate.
@@ -1507,8 +1517,15 @@ class SuggestionService:
         session.last_activity = datetime.now(UTC)
         session.auto_accept_after = None
         session.auto_accept_claimed_until = None
+        outcome_actor = decided_by or user.id
+        outcome_actor_name = None if outcome_actor == SYSTEM_AUTO_ACCEPT_ACTOR else user.name
         await self._record_terminal_outcome(
-            project_id, session, SuggestionOutcomeType.ACCEPTED, decided_by or user.id
+            project_id,
+            project,
+            session,
+            SuggestionOutcomeType.ACCEPTED,
+            outcome_actor,
+            outcome_actor_name,
         )
         await self.db.commit()
         default_branch = self.git_service.get_default_branch(project_id)
@@ -1537,14 +1554,15 @@ class SuggestionService:
         carries no feedback obligation, where rejection is a considered review
         outcome with a reason the contributor sees.
         """
-        await self._verify_reviewer_access(project_id, user)
-        await self._dismiss_unchecked(project_id, session_id, user, note)
+        project = await self._verify_reviewer_access(project_id, user)
+        await self._dismiss_unchecked(project_id, session_id, user, project, note)
 
     async def _dismiss_unchecked(
         self,
         project_id: UUID,
         session_id: str,
         user: CurrentUser,
+        project: Project,
         note: str | None = None,
     ) -> None:
         """Dismiss after the caller has completed the reviewer-role gate."""
@@ -1567,7 +1585,13 @@ class SuggestionService:
         session.last_activity = datetime.now(UTC)
         self._halt_auto_accept(session)
         await self._record_terminal_outcome(
-            project_id, session, SuggestionOutcomeType.DISMISSED, user.id, note
+            project_id,
+            project,
+            session,
+            SuggestionOutcomeType.DISMISSED,
+            user.id,
+            user.name,
+            note,
         )
         await self.db.commit()
 
@@ -1575,7 +1599,7 @@ class SuggestionService:
         self, project_id: UUID, session_id: str, data: SuggestionRejectRequest, user: CurrentUser
     ) -> None:
         """Reject a suggestion session with a reason."""
-        await self._verify_reviewer_access(project_id, user)
+        project = await self._verify_reviewer_access(project_id, user)
         session = await self._get_session(project_id, session_id)
 
         if session.status not in (
@@ -1597,7 +1621,13 @@ class SuggestionService:
         # An objection halts the quiet-period clock (R12).
         self._halt_auto_accept(session)
         await self._record_terminal_outcome(
-            project_id, session, SuggestionOutcomeType.REJECTED, user.id, data.reason
+            project_id,
+            project,
+            session,
+            SuggestionOutcomeType.REJECTED,
+            user.id,
+            user.name,
+            data.reason,
         )
         await self.db.commit()
 
@@ -2275,6 +2305,7 @@ class SuggestionService:
                     session.project_id,
                     session.session_id,
                     system_actor,
+                    project,
                     SYSTEM_AUTO_ACCEPT_ACTOR,
                 )
                 count += 1
