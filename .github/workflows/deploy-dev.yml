@@ -47,9 +47,12 @@ jobs:
     environment: dev-deploy
     env:
       DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST || '178.156.208.239' }}
-      DEPLOY_KEY_FILE: ${{ runner.temp }}/ontokit-deploy-key
-      DEPLOY_KNOWN_HOSTS_FILE: ${{ runner.temp }}/ontokit-deploy-known-hosts
     steps:
+      - name: Resolve deployment paths
+        run: |
+          printf 'DEPLOY_KEY_FILE=%s/ontokit-deploy-key\n' "$RUNNER_TEMP" >>"$GITHUB_ENV"
+          printf 'DEPLOY_KNOWN_HOSTS_FILE=%s/ontokit-deploy-known-hosts\n' "$RUNNER_TEMP" >>"$GITHUB_ENV"
+
       - name: Resolve matched commit pair
         id: pair
         env:
