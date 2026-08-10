@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.exc import MissingGreenlet
 
 from ontokit.core.auth import CurrentUser
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
@@ -1111,6 +1112,96 @@ class TestSubmit:
 
         assert result.pr_number == 6
         assert result.status == "submitted"
+
+    @pytest.mark.asyncio
+    async def test_suggester_submit_snapshots_direct_pr_before_later_db_work(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+    ) -> None:
+        """A suggester submission does not reread an expired direct-PR ORM instance."""
+        session = _make_session(
+            status=SuggestionSessionStatus.ACTIVE.value,
+            changes_count=2,
+            entities_modified=json.dumps(["Person"]),
+        )
+        project = _make_project()
+        project.members[0].role = "suggester"
+
+        class ExpiringDirectPR:
+            expired = False
+
+            def __init__(self) -> None:
+                self._id = uuid.uuid4()
+
+            def _read(self, value: object) -> object:
+                if self.expired:
+                    raise MissingGreenlet("expired ORM attribute required async refresh")
+                return value
+
+            @property
+            def id(self) -> uuid.UUID:
+                return self._read(self._id)  # type: ignore[return-value]
+
+            @property
+            def pr_number(self) -> int:
+                return self._read(6)  # type: ignore[return-value]
+
+            @property
+            def github_pr_url(self) -> None:
+                return self._read(None)  # type: ignore[return-value]
+
+            @property
+            def title(self) -> str:
+                return self._read("Suggestion: Update Person")  # type: ignore[return-value]
+
+        direct_pr = ExpiringDirectPR()
+        mock_session_result = MagicMock()
+        mock_session_result.scalar_one_or_none.return_value = session
+        mock_project_result = MagicMock()
+        mock_project_result.scalar_one_or_none.return_value = project
+        mock_no_pr_result = MagicMock()
+        mock_no_pr_result.scalar_one_or_none.return_value = None
+
+        query_count = 0
+
+        async def execute_with_expiry(*args: object, **kwargs: object) -> MagicMock:
+            nonlocal query_count
+            del args, kwargs
+            query_count += 1
+            results = [mock_session_result, mock_project_result, mock_no_pr_result]
+            if query_count <= len(results):
+                return results[query_count - 1]
+            direct_pr.expired = True
+            return mock_project_result
+
+        mock_db.execute.side_effect = execute_with_expiry
+        mock_git.get_default_branch.return_value = "main"
+
+        from ontokit.schemas.suggestion import SuggestionSubmitRequest
+
+        data = SuggestionSubmitRequest(summary="changes")
+        user = _make_user()
+
+        with (
+            patch(
+                "ontokit.services.suggestion_service.get_pull_request_service"
+            ) as mock_pr_svc_factory,
+            patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
+            patch.object(service, "_create_pr_directly", AsyncMock(return_value=direct_pr)),
+        ):
+            mock_pr_svc = AsyncMock()
+            mock_pr_svc.create_pull_request.side_effect = HTTPException(
+                status_code=403, detail="Forbidden"
+            )
+            mock_pr_svc_factory.return_value = mock_pr_svc
+            mock_notif_cls.return_value = AsyncMock()
+
+            result = await service.submit(PROJECT_ID, session.session_id, data, user)
+
+        assert result.pr_number == 6
+        assert result.status == SuggestionSessionStatus.SUBMITTED.value
 
 
 # ---------------------------------------------------------------------------
