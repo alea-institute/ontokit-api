@@ -1208,6 +1208,10 @@ class TestSubmit:
                 "ontokit.services.suggestion_service.get_pull_request_service"
             ) as mock_pr_svc_factory,
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
+            patch(
+                "ontokit.services.suggestion_service.check_and_consume",
+                AsyncMock(return_value=(True, 9)),
+            ),
             patch.object(service, "_create_pr_directly", AsyncMock(return_value=direct_pr)),
         ):
             mock_pr_svc = AsyncMock()
