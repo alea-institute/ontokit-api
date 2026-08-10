@@ -3,16 +3,19 @@
 # Secrets arrive via the server-side .env in the same directory.
 services:
   postgres:
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38 # pgvector/pgvector:pg17
     restart: unless-stopped
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: postgres
       PGUSER: postgres
+      # Forwarded to the deploy-owned entrypoint init script on fresh volumes.
+      ZITADEL_DB_PASSWORD: ${ZITADEL_DB_PASSWORD}
+      ONTOKIT_DB_PASSWORD: ${ONTOKIT_DB_PASSWORD}
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./ontokit-api/scripts/init-db.sh:/docker-entrypoint-initdb.d/init-db.sh:ro
+      - ./ontokit-api/deploy/init-db.dev.sh:/docker-entrypoint-initdb.d/init-db.dev.sh:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -d ontokit -U ontokit"]
       interval: 10s
@@ -21,7 +24,7 @@ services:
     networks: [ontokit]
 
   redis:
-    image: redis:7-alpine
+    image: redis@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2 # redis:7-alpine
     restart: unless-stopped
     volumes: [redis_data:/data]
     healthcheck:
@@ -32,12 +35,12 @@ services:
     networks: [ontokit]
 
   minio:
-    image: minio/minio:latest
+    image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e # minio/minio:latest
     restart: unless-stopped
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: minio
-      MINIO_ROOT_PASSWORD: minio123
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     volumes: [minio_data:/data]
     healthcheck:
       test: ["CMD", "mc", "ready", "local"]
@@ -56,11 +59,11 @@ services:
       DEBUG: "false"
       HOST: 0.0.0.0
       PORT: 8000
-      DATABASE_URL: postgresql+asyncpg://ontokit:ontokit@postgres:5432/ontokit
+      DATABASE_URL: postgresql+asyncpg://ontokit:${ONTOKIT_DB_PASSWORD}@postgres:5432/ontokit
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minio
-      MINIO_SECRET_KEY: minio123
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ontokit
       MINIO_SECURE: "false"
       AUTH_MODE: optional
@@ -88,11 +91,11 @@ services:
     environment:
       APP_ENV: staging
       DEBUG: "false"
-      DATABASE_URL: postgresql+asyncpg://ontokit:ontokit@postgres:5432/ontokit
+      DATABASE_URL: postgresql+asyncpg://ontokit:${ONTOKIT_DB_PASSWORD}@postgres:5432/ontokit
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: minio
-      MINIO_SECRET_KEY: minio123
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD}
       MINIO_BUCKET: ontokit
       MINIO_SECURE: "false"
       GIT_REPOS_BASE_PATH: /data/repos
@@ -132,12 +135,12 @@ services:
 
 
   mailpit:
-    image: axllent/mailpit:latest
+    image: axllent/mailpit@sha256:d5ecbb067db3705fa953d79e1b7f81ef84038df67aba6c52825d8c02a1ea748a # axllent/mailpit:latest
     restart: unless-stopped
     networks: [ontokit]
 
   zitadel:
-    image: ghcr.io/zitadel/zitadel:latest
+    image: ghcr.io/zitadel/zitadel@sha256:f3738fd984131d3f02e386d37fa480d1a30e42b7d4202e2b322f12f7cf556b64 # ghcr.io/zitadel/zitadel:latest
     restart: unless-stopped
     command: 'start-from-init --masterkey "${ZITADEL_MASTERKEY}" --tlsMode external'
     environment:
@@ -149,7 +152,7 @@ services:
       ZITADEL_DATABASE_POSTGRES_PORT: 5432
       ZITADEL_DATABASE_POSTGRES_DATABASE: zitadel
       ZITADEL_DATABASE_POSTGRES_ADMIN_USERNAME: postgres
-      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: postgres
+      ZITADEL_DATABASE_POSTGRES_ADMIN_PASSWORD: ${POSTGRES_PASSWORD}
       ZITADEL_DATABASE_POSTGRES_ADMIN_SSL_MODE: disable
       ZITADEL_DATABASE_POSTGRES_USER_USERNAME: zitadel
       ZITADEL_DATABASE_POSTGRES_USER_PASSWORD: ${ZITADEL_DB_PASSWORD}
@@ -191,7 +194,7 @@ services:
       mailpit: {condition: service_started}
 
   login:
-    image: ghcr.io/zitadel/zitadel-login:latest
+    image: ghcr.io/zitadel/zitadel-login@sha256:7c210b79ae78ae74d76092154fa664601852ce79675a747a1085c2656b195648 # ghcr.io/zitadel/zitadel-login:latest
     restart: unless-stopped
     # zitadel-login:latest dropped ZITADEL_SERVICE_USER_TOKEN_FILE support; the
     # credential chain wants the token VALUE, so read the PAT at start.

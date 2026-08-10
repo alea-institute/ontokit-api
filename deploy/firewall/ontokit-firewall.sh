@@ -5,6 +5,13 @@
 # avoided because it can restore stale Docker chains.
 # OntoKit DEV ingress lockdown (F9 + U7): app ports reachable only from the
 # hetzner-dev proxy (v4) and never via v6 (proxy is v4-only). Idempotent.
+#
+# F9-v6 live evidence: this proxy is IPv4-only, and Docker's published IPv6
+# traffic on this box terminates at userland docker-proxy sockets. Those sockets
+# are filtered by INPUT; external IPv6 connections were refused with these
+# rules installed. If Docker native IPv6 forwarding is ever enabled with
+# `"ip6tables": true` in daemon.json, INPUT will no longer cover published
+# ports and a DOCKER-USER-equivalent IPv6 forwarding rule set will be required.
 PROXY=204.168.246.227; SELF=178.156.208.239
 for p in 3000 8000 8080 8081; do
   iptables -C DOCKER-USER ! -s $PROXY/32 -p tcp --dport $p -m conntrack --ctorigdst $SELF -j DROP 2>/dev/null || \
