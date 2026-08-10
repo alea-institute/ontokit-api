@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any
+from typing import Literal as TypeLiteral
 from uuid import UUID
 
 from rdflib import Graph, Literal, URIRef
@@ -19,6 +20,8 @@ from ontokit.models.translation import (
     hash_literal_value,
 )
 from ontokit.services.translation_annotations import read_annotation, translation_record_digest
+
+CoverageState = TypeLiteral["verified", "provisional", "pending", "missing"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,7 +301,7 @@ class TranslationCoverageService:
         records: list[TranslationRecord],
         graph: Graph,
         pending: set[tuple[str, str, str]],
-    ) -> dict[tuple[str, str, str], tuple[str, TranslationRecord | None]]:
+    ) -> dict[tuple[str, str, str], tuple[CoverageState, TranslationRecord | None]]:
         label_lookup = {
             (
                 label.entity_iri,
@@ -314,7 +317,7 @@ class TranslationCoverageService:
             records_by_slot.setdefault(
                 (record.entity_iri, record.predicate, record.language), []
             ).append(record)
-        output: dict[tuple[str, str, str], tuple[str, TranslationRecord | None]] = {}
+        output: dict[tuple[str, str, str], tuple[CoverageState, TranslationRecord | None]] = {}
         for entity, predicate in slots:
             for language in languages:
                 key = (entity, predicate, language)

@@ -396,8 +396,11 @@ async def update_translation_config(
 
     values = data.model_dump(exclude_unset=True, exclude={"verifier_api_key"})
     for field, value in values.items():
-        if value is not None or field in {"primary_provider", "primary_model"}:
-            setattr(config, field, value.value if hasattr(value, "value") else value)
+        if value is None:
+            if field in {"primary_provider", "primary_model"}:
+                setattr(config, field, None)
+            continue
+        setattr(config, field, value.value if hasattr(value, "value") else value)
     if data.verifier_api_key:
         config.verifier_api_key_encrypted = encrypt_secret(data.verifier_api_key)
 
