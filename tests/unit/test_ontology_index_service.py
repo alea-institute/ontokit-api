@@ -6,11 +6,18 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
-from rdflib import Graph
+from rdflib import Graph, URIRef
 from rdflib import Literal as RDFLiteral
-from rdflib.namespace import RDFS
+from rdflib.namespace import DC, DCTERMS, OWL, RDF, RDFS, SKOS
 
-from ontokit.models.ontology_index import IndexingStatus, OntologyIndexStatus
+from ontokit.models.ontology_index import (
+    IndexedAnnotation,
+    IndexedEntity,
+    IndexedLabel,
+    IndexingStatus,
+    OntologyIndexStatus,
+)
+from ontokit.services.ontology import OntologyService
 from ontokit.services.ontology_index import (
     OntologyIndexService,
     _extract_local_name,
@@ -888,6 +895,175 @@ class TestIndexGraphDeprecated:
 
 
 class TestGetClassDetailAnnotations:
+    @staticmethod
+    def _detail_db_for_graph(graph: Graph, class_iri: URIRef) -> AsyncMock:
+        """Build an index-query mock whose annotation filtering follows the SQL statement."""
+        db = AsyncMock()
+        entity_id = uuid.uuid4()
+        entity = IndexedEntity(
+            id=entity_id,
+            project_id=PROJECT_ID,
+            branch=BRANCH,
+            iri=str(class_iri),
+            local_name="Thing",
+            entity_type="class",
+            deprecated=False,
+        )
+        labels = [
+            IndexedLabel(
+                entity_id=entity_id,
+                property_iri=str(RDFS.label),
+                value=str(value),
+                lang=value.language,
+            )
+            for value in graph.objects(class_iri, RDFS.label)
+        ]
+        annotations = [
+            IndexedAnnotation(
+                entity_id=entity_id,
+                property_iri=str(predicate),
+                value=str(value),
+                lang=value.language if isinstance(value, RDFLiteral) else None,
+            )
+            for predicate, value in graph.predicate_objects(class_iri)
+            if predicate not in {RDF.type, RDFS.label, RDFS.subClassOf, OWL.deprecated}
+        ]
+
+        entity_result = MagicMock()
+        entity_result.scalar_one_or_none.return_value = entity
+        labels_result = MagicMock()
+        labels_result.scalars.return_value.all.return_value = labels
+        comments_result = MagicMock()
+        comments_result.scalars.return_value.all.return_value = [
+            annotation for annotation in annotations if annotation.property_iri == str(RDFS.comment)
+        ]
+        parents_result = MagicMock()
+        parents_result.all.return_value = []
+        child_count_result = MagicMock()
+        child_count_result.scalar.return_value = 0
+
+        calls = 0
+
+        async def execute(statement: object) -> MagicMock:
+            nonlocal calls
+            fixed_results = [
+                entity_result,
+                labels_result,
+                comments_result,
+                parents_result,
+                child_count_result,
+            ]
+            if calls < len(fixed_results):
+                result = fixed_results[calls]
+            else:
+                sql = str(statement.compile(compile_kwargs={"literal_binds": True}))  # type: ignore[attr-defined]
+                result = MagicMock()
+                result.scalars.return_value.all.return_value = [
+                    annotation for annotation in annotations if annotation.property_iri not in sql
+                ]
+            calls += 1
+            return result
+
+        db.execute = AsyncMock(side_effect=execute)
+        return db
+
+    @staticmethod
+    def _predicate_values(detail: object) -> set[tuple[str, str, str]]:
+        """Flatten a class detail response into predicate/value/language triples."""
+        if isinstance(detail, dict):
+            labels = detail["labels"]
+            comments = detail["comments"]
+            annotations = detail["annotations"]
+        else:
+            labels = detail.labels
+            comments = detail.comments
+            annotations = detail.annotations
+
+        triples = {
+            (str(RDFS.label), value["value"], value["lang"])
+            if isinstance(value, dict)
+            else (str(RDFS.label), value.value, value.lang)
+            for value in labels
+        }
+        triples.update(
+            (str(RDFS.comment), value["value"], value["lang"])
+            if isinstance(value, dict)
+            else (str(RDFS.comment), value.value, value.lang)
+            for value in comments
+        )
+        for annotation in annotations:
+            property_iri = (
+                annotation["property_iri"]
+                if isinstance(annotation, dict)
+                else str(annotation.property_iri)
+            )
+            values = annotation["values"] if isinstance(annotation, dict) else annotation.values
+            triples.update(
+                (property_iri, value["value"], value["lang"])
+                if isinstance(value, dict)
+                else (property_iri, value.value, value.lang)
+                for value in values
+            )
+        return triples
+
+    @pytest.mark.asyncio
+    async def test_label_properties_are_preserved_in_annotations(self) -> None:
+        """Non-rdfs label properties remain annotations without duplicating labels/comments."""
+        class_iri = URIRef("http://example.org/Thing")
+        graph = Graph()
+        graph.add((class_iri, RDF.type, OWL.Class))
+        graph.add((class_iri, RDFS.label, RDFLiteral("Thing", lang="en")))
+        graph.add((class_iri, RDFS.comment, RDFLiteral("A comment", lang="en")))
+        for text, lang in [("Alternate", "en"), ("Alternatif", "fr"), ("Alternativ", "de")]:
+            graph.add((class_iri, SKOS.altLabel, RDFLiteral(text, lang=lang)))
+        graph.add((class_iri, SKOS.prefLabel, RDFLiteral("Preferred", lang="en")))
+        graph.add((class_iri, DCTERMS.title, RDFLiteral("DCT title", lang="cy")))
+        graph.add((class_iri, DC.title, RDFLiteral("DC title", lang="ga")))
+
+        detail = await OntologyIndexService(
+            self._detail_db_for_graph(graph, class_iri)
+        ).get_class_detail(PROJECT_ID, BRANCH, str(class_iri))
+
+        assert detail is not None
+        triples = self._predicate_values(detail)
+        assert {
+            (predicate, value, lang)
+            for predicate, value, lang in triples
+            if predicate == str(SKOS.altLabel)
+        } == {
+            (str(SKOS.altLabel), "Alternate", "en"),
+            (str(SKOS.altLabel), "Alternatif", "fr"),
+            (str(SKOS.altLabel), "Alternativ", "de"),
+        }
+        assert (str(SKOS.prefLabel), "Preferred", "en") in triples
+        assert (str(DCTERMS.title), "DCT title", "cy") in triples
+        assert (str(DC.title), "DC title", "ga") in triples
+        assert sum(predicate == str(RDFS.label) for predicate, _, _ in triples) == 1
+        assert sum(predicate == str(RDFS.comment) for predicate, _, _ in triples) == 1
+
+    @pytest.mark.asyncio
+    async def test_indexed_and_rdflib_class_detail_predicates_and_values_match(self) -> None:
+        """Warm-index and RDFLib fallback paths expose the same annotation data."""
+        class_iri = URIRef("http://example.org/Thing")
+        graph = Graph()
+        graph.add((class_iri, RDF.type, OWL.Class))
+        graph.add((class_iri, RDFS.label, RDFLiteral("Thing", lang="en")))
+        graph.add((class_iri, RDFS.comment, RDFLiteral("A comment", lang="en")))
+        for text, lang in [("Alternate", "en"), ("Alternatif", "fr"), ("Alternativ", "de")]:
+            graph.add((class_iri, SKOS.altLabel, RDFLiteral(text, lang=lang)))
+        graph.add((class_iri, SKOS.prefLabel, RDFLiteral("Preferred", lang="en")))
+        graph.add((class_iri, DCTERMS.title, RDFLiteral("DCT title", lang="cy")))
+        graph.add((class_iri, DC.title, RDFLiteral("DC title", lang="ga")))
+        graph.add((class_iri, SKOS.definition, RDFLiteral("Definition", lang="en")))
+
+        indexed = await OntologyIndexService(
+            self._detail_db_for_graph(graph, class_iri)
+        ).get_class_detail(PROJECT_ID, BRANCH, str(class_iri))
+        fallback = await OntologyService()._class_to_response(graph, class_iri)
+
+        assert indexed is not None
+        assert self._predicate_values(indexed) == self._predicate_values(fallback)
+
     @pytest.mark.asyncio
     async def test_get_class_detail_with_annotations(
         self, service: OntologyIndexService, mock_db: AsyncMock
