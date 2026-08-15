@@ -621,6 +621,10 @@ class OntologyIndexService:
             {"value": a.value, "lang": a.lang or "en"} for a in comments_result.scalars().all()
         ]
 
+        # Invariant: a property is excluded from annotations iff it is returned
+        # elsewhere in this response by the labels or comments queries above.
+        annotation_excluded_iris = {rdfs_label_iri, rdfs_comment_iri}
+
         # Get parent IRIs
         parents_result = await self.db.execute(
             select(IndexedHierarchy.parent_iri).where(
@@ -654,14 +658,11 @@ class OntologyIndexService:
         # Return None so the frontend can distinguish "not indexed" from "zero".
         instance_count = None
 
-        # Get annotations (excluding rdfs:comment and label properties
-        # which are already returned via IndexedLabel)
-        label_property_iris = {str(uri) for _, uri in LABEL_PROPERTIES}
-        excluded_iris = label_property_iris | {rdfs_comment_iri}
+        # Get all annotations not already represented by labels or comments.
         annotations_result = await self.db.execute(
             select(IndexedAnnotation).where(
                 IndexedAnnotation.entity_id == entity.id,
-                IndexedAnnotation.property_iri.notin_(excluded_iris),
+                IndexedAnnotation.property_iri.notin_(annotation_excluded_iris),
             )
         )
         annotations_by_prop: dict[str, list[dict[str, str]]] = {}
