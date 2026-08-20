@@ -107,6 +107,7 @@ async def ensure_demo_projects(db: AsyncSession) -> tuple[ProvisionedDemo, ...]:
                 demo_source_project_id=source.project_id,
                 owner_id=source.project.owner_id,
                 ontology_iri=source.project.ontology_iri,
+                source_file_path=source.project.source_file_path,
             )
             db.add(demo)
             await db.flush()
@@ -144,6 +145,7 @@ async def ensure_demo_projects(db: AsyncSession) -> tuple[ProvisionedDemo, ...]:
         demo.is_public = True
         demo.is_demo = True
         demo.demo_source_project_id = source.project_id
+        demo.source_file_path = source.project.source_file_path
         provisioned.append(
             ProvisionedDemo(
                 project_id=demo.id,
