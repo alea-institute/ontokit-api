@@ -1,0 +1,201 @@
+"""Security and sequencing tests for the demo repository refresh job."""
+
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from deploy import refresh_demo_repositories as refresh
+
+
+def _git(*arguments: str, cwd: Path | None = None) -> str:
+    return subprocess.run(  # noqa: S603
+        ["git", *arguments],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _manifest(tmp_path: Path, **mirror_override: str) -> Path:
+    mirrors = [
+        {
+            "name": "folio",
+            "source_repository": "alea-institute/FOLIO",
+            "destination_repository": "alea-institute/ontokit-demo-folio",
+            "default_branch": "main",
+        },
+        {
+            "name": "semantic-canon",
+            "source_repository": "CatholicOS/ontology-semantic-canon",
+            "destination_repository": "alea-institute/ontokit-demo-semantic-canon",
+            "default_branch": "main",
+        },
+    ]
+    mirrors[0].update(mirror_override)
+    path = tmp_path / "mirrors.json"
+    path.write_text(json.dumps({"schema_version": 1, "mirrors": mirrors}), encoding="utf-8")
+    return path
+
+
+def test_manifest_accepts_only_the_two_approved_routes(tmp_path: Path) -> None:
+    mirrors = refresh.load_manifest(_manifest(tmp_path))
+    assert [mirror.name for mirror in mirrors] == ["folio", "semantic-canon"]
+
+    with pytest.raises(SystemExit):
+        refresh.load_manifest(
+            _manifest(tmp_path, destination_repository="alea-institute/unapproved-target")
+        )
+
+
+def test_tokens_must_exist_and_be_distinct() -> None:
+    with pytest.raises(SystemExit):
+        refresh.require_tokens({})
+    with pytest.raises(SystemExit):
+        refresh.require_tokens(
+            {
+                refresh.SOURCE_TOKEN_ENV: "same-token",
+                refresh.DESTINATION_TOKEN_ENV: "same-token",
+            }
+        )
+    assert refresh.require_tokens(
+        {
+            refresh.SOURCE_TOKEN_ENV: "read-only-token",
+            refresh.DESTINATION_TOKEN_ENV: "two-repo-write-token",
+        }
+    ) == ("read-only-token", "two-repo-write-token")
+
+
+def test_git_credentials_use_askpass_not_command_arguments(tmp_path: Path) -> None:
+    environment = refresh.git_environment("secret-token", tmp_path / "askpass")
+    assert environment["DEMO_GIT_TOKEN"] == "secret-token"
+    assert environment["GIT_TERMINAL_PROMPT"] == "0"
+    assert environment["GIT_CONFIG_KEY_0"] == "credential.helper"
+    assert environment["GIT_CONFIG_VALUE_0"] == ""
+    assert "secret-token" not in refresh.repository_url("alea-institute/FOLIO")
+
+
+def test_resync_environment_never_receives_git_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(refresh.SOURCE_TOKEN_ENV, "read-only-token")
+    monkeypatch.setenv(refresh.DESTINATION_TOKEN_ENV, "write-token")
+    monkeypatch.setenv("DEMO_GIT_TOKEN", "transient-token")
+
+    environment = refresh.scrubbed_environment()
+
+    assert refresh.SOURCE_TOKEN_ENV not in environment
+    assert refresh.DESTINATION_TOKEN_ENV not in environment
+    assert "DEMO_GIT_TOKEN" not in environment
+
+
+def test_destination_push_updates_only_the_default_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commands: list[tuple[list[str], str | None]] = []
+    checkout = tmp_path / "folio"
+
+    def fake_run(
+        command: list[str] | tuple[str, ...],
+        *,
+        cwd: Path | None = None,
+        environment: object = None,
+    ) -> None:
+        del environment
+        commands.append((list(command), None if cwd is None else str(cwd)))
+        if command[:2] == ["git", "clone"]:
+            checkout.mkdir()
+
+    class RevisionResult:
+        stdout = "a" * 40 + "\n"
+
+    def fake_revision_run(*args: object, **kwargs: object) -> RevisionResult:
+        del args, kwargs
+        return RevisionResult()
+
+    monkeypatch.setattr(refresh, "run_command", fake_run)
+    monkeypatch.setattr(refresh.subprocess, "run", fake_revision_run)
+    mirror = refresh.load_manifest(_manifest(tmp_path))[0]
+
+    refresh.refresh_one(
+        mirror,
+        tmp_path,
+        tmp_path / "askpass",
+        "read-token",
+        "write-token",
+        "2026-08-20T12:00:00+00:00",
+    )
+
+    push = next(command for command, _ in commands if command[:2] == ["git", "push"])
+    assert push[-1] == "HEAD:refs/heads/main"
+    assert "--force" in push
+    assert "--mirror" not in push
+    assert "--all" not in push
+
+
+def test_real_refresh_preserves_demo_authored_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination.git"
+    source.mkdir()
+    _git("init", "--initial-branch=main", cwd=source)
+    (source / "ontology.ttl").write_text("first\n", encoding="utf-8")
+    _git("add", "ontology.ttl", cwd=source)
+    _git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "-m",
+        "first",
+        cwd=source,
+    )
+    first_sha = _git("rev-parse", "HEAD", cwd=source)
+    _git("clone", "--bare", str(source), str(destination))
+    _git("--git-dir", str(destination), "update-ref", "refs/heads/demo-work", first_sha)
+
+    (source / "ontology.ttl").write_text("second\n", encoding="utf-8")
+    _git("add", "ontology.ttl", cwd=source)
+    _git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.test",
+        "commit",
+        "-m",
+        "second",
+        cwd=source,
+    )
+
+    urls = {
+        "alea-institute/FOLIO": source.as_uri(),
+        "alea-institute/ontokit-demo-folio": destination.as_uri(),
+    }
+    monkeypatch.setattr(refresh, "repository_url", urls.__getitem__)
+    mirror = refresh.load_manifest(_manifest(tmp_path))[0]
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    refresh.refresh_one(
+        mirror,
+        workspace,
+        tmp_path / "unused-askpass",
+        "read-token",
+        "write-token",
+        "2026-08-20T12:00:00+00:00",
+    )
+
+    assert _git("--git-dir", str(destination), "rev-parse", "refs/heads/demo-work") == first_sha
+    refreshed_main = _git("--git-dir", str(destination), "rev-parse", "refs/heads/main")
+    assert refreshed_main != first_sha
+    readme = _git(
+        "--git-dir",
+        str(destination),
+        "show",
+        "refs/heads/main:DEMO-README.md",
+    )
+    assert "demo-authored non-default branches are preserved" in readme

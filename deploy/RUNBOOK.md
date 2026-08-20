@@ -260,6 +260,49 @@ Stage A changes no AWS host, GitHub Environment, secret, branch protection, or
 DNS state. A local fake-endpoint rehearsal proves failure/gate behavior; live
 writes and activation remain Stage B evidence.
 
+## Demo repository refresh (prepared; not activated)
+
+`deploy/refresh_demo_repositories.py` owns the U8 refresh contract for the two
+approved routes in `deploy/demo-mirrors.json`:
+
+- `alea-institute/FOLIO` → `alea-institute/ontokit-demo-folio`
+- `CatholicOS/ontology-semantic-canon` →
+  `alea-institute/ontokit-demo-semantic-canon`
+
+The job refuses any other source/destination pair. It also refuses missing or
+identical source/destination tokens. Git receives each token through a temporary
+askpass helper rather than a URL or command argument. Each refresh clones only
+the source default branch, adds `DEMO-README.md` with the exact source revision
+and UTC refresh time, and force-updates only `HEAD:refs/heads/main` on the demo
+target. It never uses `--mirror` or `--all`, so demo-authored non-default branches
+remain untouched.
+
+Both pushes finish before the required project-resync executable runs. The
+resync child receives neither Git token. A nonblocking host lock refuses overlap,
+so cron runs cannot interleave. If either repository refresh fails, project
+resync does not start; the previously provisioned demo projects therefore never
+read a partially refreshed pair.
+
+Activation remains gated. Before installing `deploy/demo-refresh.cron.example`:
+
+1. Create both private destination repositories and seed their branch
+   protection/default-branch settings.
+2. Mint `GITHUB_DEMO_SOURCE_TOKEN` with contents-read access only to the two
+   source repositories. Prove that identity cannot push to either source.
+3. Mint `GITHUB_DEMO_MIRROR_TOKEN` with contents-write access only to the two
+   destination repositories. Prove that it cannot write anywhere else.
+4. Install the U9 idempotent project-resync executable. It receives the mirror
+   manifest path and must update both demo projects as one serialized operation.
+5. Store the three values in root-owned mode-0600
+   `/etc/ontokit/demo-refresh.env`; never put token values in cron, Git URLs,
+   logs, or this repository.
+6. Run one manual refresh, verify both default branches and README receipts,
+   verify an existing non-default demo branch is unchanged, and record the
+   negative token-scope push tests before enabling the daily cron.
+
+The checked-in cron example is inert. No demo repository, token, host cron, or
+project is created by committing these assets.
+
 ## Logs and health
 
 Use `docker logs <container-name>` (optionally with `--tail` or `--follow`) for
