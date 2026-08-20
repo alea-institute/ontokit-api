@@ -58,17 +58,20 @@ def _require_owner_or_admin(project: Project, user: RequiredUser) -> None:
         )
 
 
-def _encode_outcome_cursor(created_at: datetime, outcome_id: UUID) -> str:
-    payload = f"{created_at.isoformat()}|{outcome_id}".encode()
+def _encode_outcome_cursor(project_id: UUID, created_at: datetime, outcome_id: UUID) -> str:
+    payload = f"{project_id}|{created_at.isoformat()}|{outcome_id}".encode()
     return base64.urlsafe_b64encode(payload).decode()
 
 
-def _decode_outcome_cursor(cursor: str) -> tuple[datetime, UUID]:
+def _decode_outcome_cursor(cursor: str, expected_project_id: UUID) -> tuple[datetime, UUID]:
     try:
         payload = base64.b64decode(cursor.encode(), altchars=b"-_", validate=True).decode()
-        created_at_raw, outcome_id_raw = payload.rsplit("|", 1)
+        project_id_raw, created_at_raw, outcome_id_raw = payload.split("|")
+        project_id = UUID(project_id_raw)
         created_at = datetime.fromisoformat(created_at_raw)
         outcome_id = UUID(outcome_id_raw)
+        if project_id != expected_project_id:
+            raise ValueError("cursor project mismatch")
         if created_at.tzinfo is None:
             raise ValueError("cursor timestamp must include a timezone")
     except (binascii.Error, UnicodeDecodeError, ValueError) as exc:
@@ -185,7 +188,7 @@ async def list_suggestion_outcomes(
 
     query = select(SuggestionOutcome).where(SuggestionOutcome.project_id == project_id)
     if cursor is not None:
-        cursor_created_at, cursor_id = _decode_outcome_cursor(cursor)
+        cursor_created_at, cursor_id = _decode_outcome_cursor(cursor, project_id)
         query = query.where(
             or_(
                 SuggestionOutcome.created_at < cursor_created_at,
@@ -205,7 +208,9 @@ async def list_suggestion_outcomes(
     page_rows = rows[:limit]
     items = [SuggestionOutcomeItem.model_validate(row) for row in page_rows]
     next_cursor = (
-        _encode_outcome_cursor(page_rows[-1].created_at, page_rows[-1].id) if has_more else None
+        _encode_outcome_cursor(project_id, page_rows[-1].created_at, page_rows[-1].id)
+        if has_more
+        else None
     )
     return SuggestionOutcomeListResponse(items=items, total=total, next_cursor=next_cursor)
 

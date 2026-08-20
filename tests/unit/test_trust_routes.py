@@ -22,6 +22,7 @@ from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.schemas.trust import ProjectTrustSettingsUpdate
 
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+OTHER_PROJECT_ID = uuid.UUID("87654321-4321-8765-4321-876543218765")
 BASE = f"/api/v1/projects/{PROJECT_ID}/trust"
 
 
@@ -435,37 +436,105 @@ class TestSuggestionOutcomeAudit:
     def test_unauthenticated_is_rejected(self, client: TestClient) -> None:
         assert client.get(f"{BASE}/outcomes").status_code == 401
 
-    def test_keyset_cursor_survives_a_newer_insert(
+    @pytest.mark.parametrize(
+        "cursor",
+        [
+            "%%%not-base64%%%",
+            base64.urlsafe_b64encode(b"\xff").decode(),
+        ],
+        ids=["invalid-base64", "invalid-utf8"],
+    )
+    def test_invalid_cursor_returns_typed_client_error(
+        self,
+        authed_client: tuple[TestClient, AsyncMock],
+        admin_project: MagicMock,
+        cursor: str,
+    ) -> None:
+        client, session = authed_client
+        session.execute.side_effect = _outcome_results(admin_project, [], 0)
+
+        response = client.get(f"{BASE}/outcomes", params={"cursor": cursor})
+
+        assert response.status_code == 422
+        assert response.json() == {"detail": "Invalid outcome cursor"}
+
+    def test_three_page_keyset_cursor_walk_survives_a_newer_insert(
         self, authed_client: tuple[TestClient, AsyncMock], admin_project: MagicMock
     ) -> None:
         client, session = authed_client
         now = datetime(2026, 8, 10, 12, tzinfo=UTC)
-        newest = _outcome("00000000-0000-0000-0000-000000000004", now)
-        second = _outcome("00000000-0000-0000-0000-000000000003", now - timedelta(minutes=1))
-        third = _outcome("00000000-0000-0000-0000-000000000002", now - timedelta(minutes=2))
-        oldest = _outcome("00000000-0000-0000-0000-000000000001", now - timedelta(minutes=3))
+        newest = _outcome("00000000-0000-0000-0000-000000000005", now)
+        second = _outcome("00000000-0000-0000-0000-000000000004", now - timedelta(minutes=1))
+        third = _outcome("00000000-0000-0000-0000-000000000003", now - timedelta(minutes=2))
+        fourth = _outcome("00000000-0000-0000-0000-000000000002", now - timedelta(minutes=3))
+        oldest = _outcome("00000000-0000-0000-0000-000000000001", now - timedelta(minutes=4))
         session.execute.side_effect = [
-            *_outcome_results(admin_project, [newest, second, third], 4),
-            *_outcome_results(admin_project, [third, oldest], 5),
+            *_outcome_results(admin_project, [newest, second, third], 5),
+            *_outcome_results(admin_project, [third, fourth, oldest], 6),
+            *_outcome_results(admin_project, [oldest], 6),
         ]
 
         first = client.get(f"{BASE}/outcomes", params={"limit": 2})
         assert first.status_code == 200
-        assert [item["user_id"] for item in first.json()["items"]] == ["user-4", "user-3"]
-        cursor = first.json()["next_cursor"]
-        assert cursor is not None
+        assert [item["user_id"] for item in first.json()["items"]] == ["user-5", "user-4"]
+        first_cursor = first.json()["next_cursor"]
+        assert first_cursor is not None
 
         # The total grows because a newer row was inserted, but that row is before
         # the saved keyset boundary and cannot duplicate or displace older rows.
-        second_page = client.get(f"{BASE}/outcomes", params={"limit": 2, "cursor": cursor})
+        second_page = client.get(
+            f"{BASE}/outcomes", params={"limit": 2, "cursor": first_cursor}
+        )
         assert second_page.status_code == 200
-        assert second_page.json()["total"] == 5
+        assert second_page.json()["total"] == 6
         assert [item["user_id"] for item in second_page.json()["items"]] == [
+            "user-3",
             "user-2",
-            "user-1",
         ]
-        assert second_page.json()["next_cursor"] is None
-        assert not {"user-4", "user-3"} & {item["user_id"] for item in second_page.json()["items"]}
+        second_cursor = second_page.json()["next_cursor"]
+        assert second_cursor is not None
+
+        third_page = client.get(
+            f"{BASE}/outcomes", params={"limit": 2, "cursor": second_cursor}
+        )
+        assert third_page.status_code == 200
+        assert [item["user_id"] for item in third_page.json()["items"]] == ["user-1"]
+        assert third_page.json()["next_cursor"] is None
+
+        walked_ids = [
+            item["user_id"]
+            for page in (first, second_page, third_page)
+            for item in page.json()["items"]
+        ]
+        assert walked_ids == ["user-5", "user-4", "user-3", "user-2", "user-1"]
+        assert len(walked_ids) == len(set(walked_ids))
+
+    def test_cursor_cannot_be_replayed_across_projects(
+        self, authed_client: tuple[TestClient, AsyncMock], admin_project: MagicMock
+    ) -> None:
+        client, session = authed_client
+        now = datetime(2026, 8, 10, 12, tzinfo=UTC)
+        newest = _outcome("00000000-0000-0000-0000-000000000002", now)
+        older = _outcome(
+            "00000000-0000-0000-0000-000000000001", now - timedelta(minutes=1)
+        )
+        session.execute.side_effect = [
+            *_outcome_results(admin_project, [newest, older], 2),
+            *_outcome_results(admin_project, [], 0),
+        ]
+
+        first = client.get(f"{BASE}/outcomes", params={"limit": 1})
+        assert first.status_code == 200
+        cursor = first.json()["next_cursor"]
+        assert cursor is not None
+
+        replay = client.get(
+            f"/api/v1/projects/{OTHER_PROJECT_ID}/trust/outcomes",
+            params={"cursor": cursor},
+        )
+
+        assert replay.status_code == 422
+        assert replay.json() == {"detail": "Invalid outcome cursor"}
 
     def test_query_asserts_tenant_filter_and_cursor_ordering(
         self, authed_client: tuple[TestClient, AsyncMock], admin_project: MagicMock

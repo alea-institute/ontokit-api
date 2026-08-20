@@ -16,7 +16,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import delete, insert, select
+from sqlalchemy import delete, insert, inspect, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.routes.trust import list_suggestion_outcomes
@@ -237,6 +237,8 @@ async def test_ae1_live_reject_snapshots_trusted_suggester(
         assert outcome.snapshot_role == "suggester"
         assert outcome.submitter_name == seeded.submitter.name
         assert outcome.submitter_email == seeded.submitter.email
+        assert outcome.decided_by == seeded.owner.id
+        assert outcome.decided_by_name == seeded.owner.name
         assert outcome.snapshot_captured_at is not None
     finally:
         await _cleanup(real_db_session, seeded.project.id)
@@ -525,9 +527,21 @@ async def test_outcome_cursor_walk_survives_newer_insert_and_equal_timestamps(
         )
         assert second.total == 6
         assert [item.user_id for item in second.items] == ["walk-3", "walk-2"]
-        assert not {item.user_id for item in first.items} & {
-            item.user_id for item in second.items
-        }
+        assert second.next_cursor is not None
+
+        third = await list_suggestion_outcomes(
+            seeded.project.id,
+            real_db_session,
+            seeded.owner,
+            cursor=second.next_cursor,
+            limit=2,
+        )
+        assert [item.user_id for item in third.items] == ["walk-1"]
+        assert third.next_cursor is None
+
+        walked_ids = [item.user_id for page in (first, second, third) for item in page.items]
+        assert walked_ids == ["walk-5", "walk-4", "walk-3", "walk-2", "walk-1"]
+        assert len(walked_ids) == len(set(walked_ids))
     finally:
         await _cleanup(real_db_session, seeded.project.id)
 
@@ -592,3 +606,80 @@ async def test_outcome_endpoint_isolates_projects(
         assert project_b.submitter.id not in {item.user_id for item in response.items}
     finally:
         await _cleanup(real_db_session, project_a.project.id, project_b.project.id)
+
+
+@pytest.mark.asyncio
+async def test_outcome_cursor_cannot_be_replayed_across_projects(
+    real_db_session: AsyncSession, tmp_path: Path
+) -> None:
+    project_a = await _seed_project(real_db_session, tmp_path / "a", submitter_trusted=True)
+    project_b = await _seed_project(real_db_session, tmp_path / "b", submitter_trusted=True)
+    newest_time = datetime(2026, 8, 10, 12, tzinfo=UTC)
+    try:
+        real_db_session.add_all(
+            [
+                SuggestionOutcome(
+                    project_id=project_a.project.id,
+                    user_id="project-a-newest",
+                    outcome=SuggestionOutcomeType.REJECTED.value,
+                    is_anonymous=False,
+                    created_at=newest_time,
+                ),
+                SuggestionOutcome(
+                    project_id=project_a.project.id,
+                    user_id="project-a-older",
+                    outcome=SuggestionOutcomeType.REJECTED.value,
+                    is_anonymous=False,
+                    created_at=newest_time - timedelta(minutes=1),
+                ),
+                SuggestionOutcome(
+                    project_id=project_b.project.id,
+                    user_id="project-b-row",
+                    outcome=SuggestionOutcomeType.REJECTED.value,
+                    is_anonymous=False,
+                    created_at=newest_time - timedelta(minutes=2),
+                ),
+            ]
+        )
+        await real_db_session.commit()
+
+        project_a_page = await list_suggestion_outcomes(
+            project_a.project.id,
+            real_db_session,
+            project_a.owner,
+            cursor=None,
+            limit=1,
+        )
+        assert project_a_page.next_cursor is not None
+
+        with pytest.raises(HTTPException) as exc_info:
+            await list_suggestion_outcomes(
+                project_b.project.id,
+                real_db_session,
+                project_b.owner,
+                cursor=project_a_page.next_cursor,
+                limit=1,
+            )
+
+        assert exc_info.value.status_code == 422
+        assert exc_info.value.detail == "Invalid outcome cursor"
+    finally:
+        await _cleanup(real_db_session, project_a.project.id, project_b.project.id)
+
+
+@pytest.mark.asyncio
+async def test_live_postgres_exposes_declared_audit_cursor_index(
+    real_db_session: AsyncSession,
+) -> None:
+    declared = next(
+        index
+        for index in SuggestionOutcome.__table__.indexes
+        if index.name == "ix_suggestion_outcomes_audit_cursor"
+    )
+    connection = await real_db_session.connection()
+    live_indexes = await connection.run_sync(
+        lambda sync_connection: inspect(sync_connection).get_indexes("suggestion_outcomes")
+    )
+    live = next(index for index in live_indexes if index["name"] == declared.name)
+
+    assert live["column_names"] == list(declared.columns.keys())
