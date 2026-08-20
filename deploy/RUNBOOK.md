@@ -15,25 +15,41 @@ Run these steps in order:
 2. Create `/opt/ontokit/.env` from `deploy/.env.example`. Generate a distinct,
    high-entropy value for every secret and replace every placeholder;
    `ZITADEL_MASTERKEY` must be exactly 32 characters. Keep this server-side file
-   out of Git.
-3. Install `deploy/firewall/ontokit-firewall.sh` at
+   out of Git. Keep `AUTH_MODE=optional` when anonymous reads should remain
+   available. Optional mode also works before Zitadel exists: leave
+   `ZITADEL_ISSUER`, `ZITADEL_CLIENT_ID`, and `ZITADEL_CLIENT_SECRET` empty
+   together. When any Zitadel value is present, all three plus the session
+   signing secret (`AUTH_SECRET`, mapped to the web's `NEXTAUTH_SECRET`) must be
+   present.
+3. In the deployment shell, record the exact source revisions that any manual
+   Compose build will stamp into its resulting images:
+
+   ```sh
+   export ONTOKIT_API_REVISION=$(git -C /opt/ontokit/ontokit-api rev-parse --verify HEAD)
+   export ONTOKIT_WEB_REVISION=$(git -C /opt/ontokit/ontokit-web rev-parse --verify HEAD)
+   ```
+
+   Both values must be full 40-character commit SHAs. The automated deploy
+   command supplies the approved pair itself; these exports are for manual
+   bootstrap and recovery commands only.
+4. Install `deploy/firewall/ontokit-firewall.sh` at
    `/usr/local/sbin/ontokit-firewall.sh` and the unit at
    `/etc/systemd/system/ontokit-firewall.service`. Make the script executable,
    run `systemctl daemon-reload`, then `systemctl enable --now ontokit-firewall`.
-4. From `/opt/ontokit`, start the backing services, Zitadel, API, and worker,
+5. From `/opt/ontokit`, start the backing services, Zitadel, API, and worker,
    but do not build or start web yet. The API is expected to run with
    `AUTH_MODE=optional` before the OIDC client exists:
 
    ```sh
    docker compose up -d postgres redis minio mailpit zitadel login api worker
    ```
-5. If the PostgreSQL volume already existed before `ZITADEL_DB_PASSWORD` or
+6. If the PostgreSQL volume already existed before `ZITADEL_DB_PASSWORD` or
    `ONTOKIT_DB_PASSWORD` was selected, update both existing roles explicitly:
    connect as the PostgreSQL administrator and run `ALTER ROLE` for `zitadel`
    and `ontokit` with their corresponding values from `.env`. Container
    environment changes do not alter roles already stored in the volume. Do not
    put either password in shell history or Git.
-6. From `/opt/ontokit`, run the setup script with the deployed URL, Compose
+7. From `/opt/ontokit`, run the setup script with the deployed URL, Compose
    volume, and shared deployment env file explicitly selected. `UPDATE_ENV=true`
    writes the generated OIDC values to `/opt/ontokit/.env` for both consumers:
 
@@ -50,21 +66,18 @@ Run these steps in order:
    ```
 
    Generated values belong only in the server-side `.env`.
-7. Load the updated environment, build web with every auth-sensitive build
-   argument stated explicitly, then recreate all credential consumers:
+8. Load the updated environment, retain the single effective `AUTH_MODE` from
+   that file, build web with the same value, then recreate all credential
+   consumers:
 
    ```sh
    set -a
    . /opt/ontokit/.env
    set +a
-   docker compose build \
-     --build-arg AUTH_MODE=optional \
-     --build-arg ZITADEL_ISSUER="$ZITADEL_ISSUER" \
-     --build-arg ZITADEL_CLIENT_ID="$ZITADEL_CLIENT_ID" \
-     web
+   docker compose build web
    docker compose up -d --force-recreate api worker web
    ```
-8. On the hetzner-dev proxy box, install the validated contents of
+9. On the hetzner-dev proxy box, install the validated contents of
    `deploy/traefik/ontokit-dev.yaml` at
    `/data/coolify/proxy/dynamic/ontokit-dev.yaml`. Rewrite and validate the
    complete file; never patch the live YAML by hand.
@@ -74,25 +87,35 @@ Run these steps in order:
 1. Push the intended API and web commits to their downstream forks.
 2. On CPX41, in each repository, run `git fetch`, verify the intended commit,
    and check out its exact SHA.
-3. From `/opt/ontokit`, rebuild and restart:
+3. From `/opt/ontokit`, load the deployment environment and export the exact
+   checked-out revisions before rebuilding and restarting:
 
    ```sh
+   set -a
+   . /opt/ontokit/.env
+   set +a
+   export ONTOKIT_API_REVISION=$(git -C /opt/ontokit/ontokit-api rev-parse --verify HEAD)
+   export ONTOKIT_WEB_REVISION=$(git -C /opt/ontokit/ontokit-web rev-parse --verify HEAD)
    docker compose build
-   docker compose up -d
+   docker compose up -d --wait --wait-timeout 240
    ```
 
 Use `docker compose build --no-cache web` when a clean web rebuild is needed.
-Every web build must receive `AUTH_MODE`, `ZITADEL_ISSUER`, and
-`ZITADEL_CLIENT_ID` through the compose build arguments. Next.js bakes these
-values into the image; omitting them can produce a UI that behaves as auth-off
-even when the runtime environment is correct.
+Every web build receives the one effective `AUTH_MODE` plus any configured
+`ZITADEL_ISSUER` and `ZITADEL_CLIENT_ID` through the Compose build arguments.
+Next.js bakes these values into the image; bypassing Compose can produce a UI
+whose auth behavior disagrees with the API. Compose also stamps each built API
+and web image with its corresponding `org.opencontainers.image.revision`
+label. A manual build therefore needs both `ONTOKIT_*_REVISION` exports above.
 
 ## Rollback
 
-Check out the previously known-good API and web SHA pair on CPX41, then run
-`docker compose build` and `docker compose up -d`. Rebuilding both images keeps
-the deployed pair internally consistent. Record both SHAs together before each
-deployment so the rollback target is unambiguous.
+Prefer the forced command's `rollback` verb, which preserves the known-good
+target if a rollback attempt fails and swaps the retry target only after a
+successful deployment. For manual recovery, check out the previously known-good
+API and web SHA pair, export those two revisions as described above, then run
+`docker compose build` and `docker compose up -d --wait --wait-timeout 240`.
+Rebuilding both images keeps the deployed pair internally consistent.
 
 ## Automated deploy
 
@@ -138,10 +161,15 @@ Decision: ask `ontokit-web-2026-08-10-u12-deploy-prereqs`, 2026-08-10.
 The `dev-deploy` GitHub Environment with `damienriehl` as required reviewer
 already exists on both forks.
 
-`/usr/local/sbin/ontokit-deploy` is already installed on the box, verified
-2026-08-10: the `status` verb reported live SHAs and all nine containers
-healthy, and hostile inputs (`deploy; rm -rf /`, unknown verb, malformed SHAs)
-were refused with rc=64.
+`/usr/local/sbin/ontokit-deploy` was installed and verified on 2026-08-10: all
+nine containers were healthy, and hostile inputs (`deploy; rm -rf /`, unknown
+verb, malformed SHAs) were refused with rc=64. The original `status` output
+called checkout heads "live" SHAs; that was not runtime proof. Install the
+current script before relying on revision reporting: it reads immutable labels
+from the images used by the running API, worker, and web containers, prints the
+checkout revisions separately, and returns nonzero when either pair drifts. The
+status path queries Docker's Compose labels directly, so missing or invalid
+deployment auth configuration cannot hide the running revision truth.
 
 To restore the pair recorded immediately before the last deploy, invoke the
 same restricted key with the `rollback` verb. Each `status`, `deploy`, and
@@ -162,9 +190,14 @@ Host overrides, so the captured check deliberately uses Node's `http` module.
 ## Authentication mode
 
 The API accepts only the literal enum values `required`, `optional`, or
-`disabled` for `AUTH_MODE`. DEV's terminal state is `optional`: anonymous reads
-remain available while protected operations use Zitadel. The former Traefik
-basic-auth gate is intentionally absent; Zitadel is the sole authentication
+`disabled` for `AUTH_MODE`. The deploy command validates this single server-side
+value before its first fetch, checkout, rollback-record, or build mutation;
+Compose supplies that same value to API runtime plus web build and runtime.
+DEV's terminal state is `optional`: anonymous reads remain available while
+protected operations use Zitadel when its issuer/client/client-secret set and
+session signing secret are configured.
+Optional mode without Zitadel remains supported. The former Traefik basic-auth
+gate is intentionally absent; Zitadel is the sole configured authentication
 system after the 2026-08-10 flip, superseding KTD2.
 
 ## Known gotchas
