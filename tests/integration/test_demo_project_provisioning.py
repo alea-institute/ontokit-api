@@ -23,7 +23,12 @@ async def test_provisions_exactly_one_demo_per_source(
             "ontology.ttl",
         ),
     ):
-        project = Project(name=name, owner_id="demo-test-owner", is_public=True)
+        project = Project(
+            name=name,
+            owner_id="demo-test-owner",
+            is_public=True,
+            source_file_path=f"projects/source/{path}",
+        )
         real_db_session.add(project)
         await real_db_session.flush()
         real_db_session.add(
@@ -56,6 +61,7 @@ async def test_provisions_exactly_one_demo_per_source(
         demos = list(result.scalars().all())
         assert len(demos) == 2
         assert all(project.is_demo and project.is_public for project in demos)
+        assert all(project.source_file_path for project in demos)
     finally:
         await real_db_session.rollback()
         demo_result = await real_db_session.execute(
