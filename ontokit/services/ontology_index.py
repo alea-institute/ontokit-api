@@ -29,9 +29,10 @@ from ontokit.models.ontology_index import (
     OntologyIndexStatus,
 )
 from ontokit.services.ontology import (
-    ANNOTATION_PROPERTIES,
     DEFAULT_LABEL_PREFERENCES,
     LABEL_PROPERTY_MAP,
+    annotation_properties_for_graph,
+    annotation_property_label,
 )
 
 logger = logging.getLogger(__name__)
@@ -263,6 +264,7 @@ class OntologyIndexService:
 
         # Track entity IDs by IRI for label/annotation FK
         entity_ids: dict[str, uuid.UUID] = {}
+        annotation_properties = annotation_properties_for_graph(graph)
 
         for rdf_type, entity_type in RDF_TYPE_MAP:
             for subject in graph.subjects(RDF.type, rdf_type):
@@ -329,9 +331,8 @@ class OntologyIndexService:
                                 }
                             )
 
-                # Extract rdfs:comment as annotation (handled separately from
-                # ANNOTATION_PROPERTIES in ontology.py, but we index it here
-                # so get_class_detail can retrieve comments)
+                # Index rdfs:comment separately so get_class_detail can expose
+                # it in the dedicated comments field.
                 for obj in graph.objects(subject, RDFS.comment):
                     if isinstance(obj, RDFLiteral):
                         annotation_rows.append(
@@ -345,8 +346,9 @@ class OntologyIndexService:
                             }
                         )
 
-                # Extract annotations (beyond labels)
-                for _prop_label, prop_uri in ANNOTATION_PROPERTIES.items():
+                # Extract annotations using the same declaration-aware classifier
+                # as the RDFLib fallback path.
+                for prop_uri in annotation_properties:
                     for obj in graph.objects(subject, prop_uri):
                         if isinstance(obj, RDFLiteral):
                             annotation_rows.append(
@@ -680,17 +682,10 @@ class OntologyIndexService:
         # Build annotation property list matching the response format
         annotation_list = []
         for prop_iri, values in annotations_by_prop.items():
-            # Find the short label for this property
-            prop_label = prop_iri
-            for short_name, uri in ANNOTATION_PROPERTIES.items():
-                if str(uri) == prop_iri:
-                    prop_label = short_name
-                    break
-
             annotation_list.append(
                 {
                     "property_iri": prop_iri,
-                    "property_label": prop_label,
+                    "property_label": annotation_property_label(prop_iri),
                     "values": values,
                 }
             )
