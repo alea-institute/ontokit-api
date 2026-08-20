@@ -122,10 +122,12 @@ Rebuilding both images keeps the deployed pair internally consistent.
 `.github/workflows/deploy-dev.yml` deploys after a push to `feat/pr-party` or a
 manual workflow dispatch. Every run targets the `dev-deploy` GitHub Environment,
 so GitHub pauses the deploy job until Damien approves it from the run's
-**Review deployments** prompt. A manual run may supply either exact SHA; an
-omitted API SHA uses the workflow commit, while an omitted web SHA resolves the
-current `alea-institute/ontokit-web` `feat/pr-party` head and fails closed if
-that head cannot be resolved.
+**Review deployments** prompt. Both trigger forms read
+`deploy/release-manifest.json`; there are no per-run SHA inputs and no branch-head
+fallback. The validator accepts only the declared ALEA repositories and full
+lowercase 40-character commit SHAs, and the workflow proves both commits are
+fetchable before the forced command sees them. Updating DEV therefore means
+reviewing and committing one matched API/web pair in the manifest.
 
 ### One-time: mint the deploy key (Damien only)
 
@@ -176,9 +178,87 @@ same restricted key with the `rollback` verb. Each `status`, `deploy`, and
 `rollback` invocation appends its verb, SHA pair, and outcome to
 `/var/log/ontokit-deploy.log`; it never logs the server-side `.env` values.
 
-KTD10's matched-pair release manifest remains known residual work. Today's
-automatic pairing uses the two integration-branch heads (or explicitly
-dispatched SHAs), not a manifest-defined release pair.
+## Dormant PROD promotion (Stage A)
+
+`.github/workflows/promote-prod.yml` follows a successful **Deploy DEV** run. It
+has no manual-dispatch path. It checks out the immutable workflow-run commit,
+validates the same committed release manifest, and uses the GitHub Actions API
+to require that the source run's `deploy` job actually succeeded rather than
+being skipped. It then runs the DEV smoke and reports whether the PROD gate is
+dormant. If `PROD_ENABLED` is not the exact string `true`, the final `promote`
+job is skipped. If it is true, the job enters the `production` GitHub
+Environment, refuses missing host/key prerequisites, and sends only
+`deploy <api-sha> <web-sha>` through the restricted SSH key. There is no
+separate approve button or manually supplied release pair; when activated,
+green DEV plus the protected authority chain promotes automatically.
+
+The smoke covers `/health`, the projects API, and the web `/projects` route. Its
+write proof imports a new private `ci-smoke-*` project, creates a suggestion
+session, adds a newly minted class, saves, submits, rejects HTTP 422 explicitly,
+and deletes that project on success or failure. It never selects or changes the
+seeded FOLIO project. Authenticated writes intentionally fail closed until the
+credential design is installed:
+
+- `DEV_SMOKE_BEARER_TOKEN` — a short-lived bearer credential for a dedicated
+  smoke principal that may create/delete its own project and exercise its own
+  suggestion path; store only in a branch-restricted `dev-smoke` GitHub
+  Environment, never as a repository-wide secret or in the manifest or logs.
+- Optional repository variables `DEV_API_URL` and `DEV_WEB_URL` override the
+  current public DEV defaults.
+- The credential must not grant repository-wide administration or access to
+  seeded projects. Rotate it according to the eventual identity-provider
+  policy; the scaffold does not mint or persist a token.
+
+The public web probe deliberately omits the API bearer token, including when
+the web and API currently share a hostname. Until the `dev-smoke` Environment
+and its secret exist, the smoke refuses before its first HTTP request. This is
+deliberate: public read checks alone did not catch the historical submit-422
+failure and cannot authorize a write rehearsal.
+
+### Parallel PROD activation checklist (Stage B; not yet executed)
+
+Keep the current public PROD untouched while standing up the replacement on a
+separate hostname. Complete every item before setting `PROD_ENABLED=true`:
+
+1. Protect `feat/pr-party` (or its replacement deploy branch) with required CI,
+   required review, and no direct pushes. Make `.github/workflows/**` owned by
+   CODEOWNERS whose approval is required, so a release cannot weaken its own
+   checks.
+2. Create the `dev-smoke` GitHub Environment, restrict it to that protected
+   deploy branch, and store `DEV_SMOKE_BEARER_TOKEN` only there. Then create the
+   `production` GitHub Environment and restrict it to the same protected
+   deploy branch, and place `PROD_DEPLOY_SSH_KEY` and
+   `PROD_DEPLOY_KNOWN_HOSTS` only there. Set repository/environment variables
+   `PROD_DEPLOY_HOST`, `PROD_DEPLOY_USER`, and finally `PROD_ENABLED`. Set the
+   environment-only marker `PROD_ENVIRONMENT_READY=parallel-uat-v1` after its
+   branch restrictions and secrets have been reviewed; the protected job
+   refuses without it and re-validates the effective host/user values after
+   entering the Environment. Do not add a workflow-level manual promotion input;
+   the intended policy is automatic on green. If organizational policy requires
+   an Environment reviewer, that is the sole allowed human authority gate.
+3. Install the deploy key under the least-privilege viable account with
+   `restrict,command="/usr/local/sbin/ontokit-deploy"`. From a clean client that
+   cannot offer any other key, use `IdentitiesOnly=yes` to prove `status` works
+   and hostile commands/full shells are refused. Do not enable the workflow for
+   an unrestricted shell key.
+4. Choose and record one clean data path before bootstrap: **seed a fresh
+   replacement** or **migrate and explicitly purge demo gibberish**. Never blend
+   the choices implicitly. Back up the current public service and retain its
+   immutable rollback pair.
+5. Commit a reviewed manifest containing the exact matched, fetchable API and
+   web SHAs; deploy that pair to DEV and verify the running image revisions are
+   identical to it. Install a scoped smoke credential and require the full
+   write-path smoke to pass.
+6. Build the parallel PROD host, run the same revision/status and smoke proofs
+   against its pre-cutover hostname, and complete UAT. Only then flip
+   `PROD_ENABLED=true` and observe an automatic green promotion.
+7. DNS cutover is a separate, explicitly approved final action after UAT. Keep
+   the old service and rollback DNS target available until the acceptance window
+   closes.
+
+Stage A changes no AWS host, GitHub Environment, secret, branch protection, or
+DNS state. A local fake-endpoint rehearsal proves failure/gate behavior; live
+writes and activation remain Stage B evidence.
 
 ## Logs and health
 
