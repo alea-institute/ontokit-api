@@ -17,6 +17,11 @@ from rdflib import Graph, URIRef
 from rdflib.compare import graph_diff, to_isomorphic
 
 from ontokit.core.config import settings
+from ontokit.core.demo_targets import (
+    DemoTargetAuthorization,
+    is_demo_repository,
+    repository_from_remote_url,
+)
 
 
 @dataclass
@@ -809,10 +814,21 @@ class BareOntologyRepository:
         branch: str | None = None,
         force: bool = False,
         token: str | None = None,
+        target_authorization: DemoTargetAuthorization | None = None,
     ) -> bool:
         """Push to a remote repository."""
         try:
             remote_obj = self.repo.remotes[remote]
+            target = repository_from_remote_url(remote_obj.url or "")
+            if (
+                target
+                and is_demo_repository(*target)
+                and (
+                    target_authorization is None
+                    or not target_authorization.permits(*target)
+                )
+            ):
+                return False
             branch = branch or self.get_default_branch()
             refspec = (
                 f"+refs/heads/{branch}:refs/heads/{branch}"
@@ -1221,6 +1237,7 @@ class BareGitRepositoryService:
         remote: str = "origin",
         force: bool = False,
         token: str | None = None,
+        target_authorization: DemoTargetAuthorization | None = None,
     ) -> bool:
         """
         Push a branch to remote.
@@ -1236,7 +1253,13 @@ class BareGitRepositoryService:
             True if push was successful
         """
         repo = self.get_repository(project_id)
-        return repo.push(remote, branch_name, force, token=token)
+        return repo.push(
+            remote,
+            branch_name,
+            force,
+            token=token,
+            target_authorization=target_authorization,
+        )
 
     def fetch_remote(
         self, project_id: UUID, remote: str = "origin", token: str | None = None

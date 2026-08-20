@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     # falls back to the connecting user's stored PAT with a deprecation
     # warning, so an in-flight deployment keeps working.
     github_mirror_token: str = ""
+    # Dedicated write credential for the two private demo mirrors. This token
+    # must never be reused for live-project mirrors or source-repository reads.
+    github_demo_mirror_token: str = ""
     # Outbound-only: the system identity pushes canonical history out, and
     # GitHub-side changes never enter the canonical repository. Set False to
     # restore the legacy bidirectional behavior.

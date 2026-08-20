@@ -28,6 +28,12 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_public: Mapped[bool] = mapped_column(Boolean, default=False)
+    is_demo: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    demo_source_project_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=True, unique=True
+    )
     owner_id: Mapped[str] = mapped_column(String(255), nullable=False)  # Zitadel user ID
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(
@@ -71,6 +77,9 @@ class Project(Base):
     )
     github_integration: Mapped["GitHubIntegration | None"] = relationship(
         back_populates="project", cascade="all, delete-orphan", uselist=False
+    )
+    demo_source_project: Mapped["Project | None"] = relationship(
+        remote_side=[id], foreign_keys=[demo_source_project_id]
     )
     lint_runs: Mapped[list["LintRun"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"

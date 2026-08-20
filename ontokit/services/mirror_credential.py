@@ -21,6 +21,10 @@ from ontokit.core.config import settings
 from ontokit.core.encryption import decrypt_token
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.models.user_github_token import UserGitHubToken
+from ontokit.services.demo_target_authorizer import (
+    DemoTargetDenied,
+    authorize_integration_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +38,16 @@ async def resolve_mirror_credential(db: AsyncSession, integration: GitHubIntegra
     Never raises: this runs inside the sync cron, where one project's missing
     credential must not abort the sweep for every other project.
     """
+    try:
+        authorization = await authorize_integration_target(
+            db, integration, operation="mirror credential resolution"
+        )
+    except DemoTargetDenied as exc:
+        logger.warning("%s", exc)
+        return None
+
+    if authorization.token:
+        return authorization.token
     if settings.github_mirror_token:
         return settings.github_mirror_token
 

@@ -427,6 +427,7 @@ class TestClosePullRequestGitHubSync:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -471,6 +472,7 @@ class TestReopenPullRequestGitHubSync:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -1093,6 +1095,7 @@ class TestSyncRemoteConfigForWebhooks:
     ) -> None:
         """Creates RemoteSyncConfig when webhooks_enabled=True and none exists."""
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.default_branch = "main"
@@ -1135,6 +1138,7 @@ class TestSyncRemoteConfigForWebhooks:
     ) -> None:
         """Updates existing sync config to 'webhook' when already present."""
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.default_branch = "main"
@@ -2026,6 +2030,7 @@ class TestCreateReviewGitHubSync:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -2108,6 +2113,7 @@ class TestUpdatePullRequestGitHubSync:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -2167,6 +2173,7 @@ class TestMergePullRequestGitHubSync:
         mock_git_service.merge_branch.return_value = merge_result_obj
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -2208,6 +2215,7 @@ class TestCloseReopenExceptionHandling:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -2246,6 +2254,7 @@ class TestCloseReopenExceptionHandling:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -2282,6 +2291,7 @@ class TestGetGitHubToken:
     ) -> None:
         """Returns None when connected_by_user_id is missing."""
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.sync_enabled = True
         integration.connected_by_user_id = None
 
@@ -2296,6 +2306,7 @@ class TestGetGitHubToken:
     ) -> None:
         """Returns None when user has no stored token."""
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.sync_enabled = True
         integration.connected_by_user_id = "user-123"
 
@@ -2313,6 +2324,7 @@ class TestGetGitHubToken:
     ) -> None:
         """Returns None when token decryption fails."""
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.sync_enabled = True
         integration.connected_by_user_id = "user-123"
 
