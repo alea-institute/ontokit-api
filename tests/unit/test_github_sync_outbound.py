@@ -38,6 +38,9 @@ def _integration(connected_by: str | None = "user-1") -> MagicMock:
     integration.sync_error = None
     integration.last_sync_at = None
     integration.connected_by_user_id = connected_by
+    integration.repo_owner = "CatholicOS"
+    integration.repo_name = "ontology-semantic-canon"
+    integration.project = MagicMock(is_demo=False)
     return integration
 
 

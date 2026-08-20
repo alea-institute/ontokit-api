@@ -259,6 +259,7 @@ services:
       GIT_REPOS_BASE_PATH: /data/repos
       # GitHub Integration
       GITHUB_TOKEN_ENCRYPTION_KEY: ${GITHUB_TOKEN_ENCRYPTION_KEY:-}
+      GITHUB_DEMO_MIRROR_TOKEN: ${GITHUB_DEMO_MIRROR_TOKEN:-}
       # Superadmin - comma-separated list of Zitadel user IDs with full system access
       SUPERADMIN_USER_IDS: ${SUPERADMIN_USER_IDS:-}
     entrypoint: ["/usr/local/bin/entrypoint.sh"]
@@ -318,6 +319,7 @@ services:
       GIT_REPOS_BASE_PATH: /data/repos
       # GitHub Integration
       GITHUB_TOKEN_ENCRYPTION_KEY: ${GITHUB_TOKEN_ENCRYPTION_KEY:-}
+      GITHUB_DEMO_MIRROR_TOKEN: ${GITHUB_DEMO_MIRROR_TOKEN:-}
     volumes:
       # Mount source code for hot reload in development
       - ./ontokit:/home/ontokit/app/ontokit:ro

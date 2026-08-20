@@ -53,6 +53,7 @@ from typing import Any, Final
 import httpx
 
 from ontokit.core.config import settings
+from ontokit.core.demo_targets import refuse_unscoped_demo_target
 from ontokit.services.github_service import _enc
 
 __all__ = [
@@ -820,6 +821,7 @@ class PRPartyGitHubClient:
         that lands mid-review cannot silently inherit the approval.
         """
         self._require_actuation("create_review")
+        refuse_unscoped_demo_target(owner, repo, "PR Party create_review")
 
         resolved_event = _validate_review_event(event)
         if not commit_id:
@@ -885,6 +887,7 @@ class PRPartyGitHubClient:
         stale card, and it is the whole reason ``sha`` is not optional here.
         """
         self._require_actuation("merge_pull_request")
+        refuse_unscoped_demo_target(owner, repo, "PR Party merge_pull_request")
 
         if not sha:
             raise ValueError("merge_pull_request requires the head sha it was authorized against.")
@@ -918,6 +921,7 @@ class PRPartyGitHubClient:
     ) -> IssueComment:
         """``POST .../issues/{n}/comments`` — a PR is an issue for comments (R13)."""
         self._require_actuation("create_comment")
+        refuse_unscoped_demo_target(owner, repo, "PR Party create_comment")
 
         if not body:
             raise ValueError("create_comment requires a non-empty body.")

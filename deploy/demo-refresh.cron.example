@@ -1,5 +1,7 @@
 # Install as /etc/cron.d/ontokit-demo-refresh only after the two scoped
 # credentials and the U9 resync executable exist. /etc/ontokit/demo-refresh.env
 # must be root-owned mode 0600 and define GITHUB_DEMO_SOURCE_TOKEN,
-# GITHUB_DEMO_MIRROR_TOKEN, and DEMO_PROJECT_RESYNC_EXECUTABLE.
+# GITHUB_DEMO_MIRROR_TOKEN, ONTOKIT_DEMO_TOKEN_FILE (the path to a separate
+# root-owned 0600 copy of the destination token), and
+# DEMO_PROJECT_RESYNC_EXECUTABLE=.../deploy/resync_demo_projects.py.
 17 3 * * * root /usr/bin/env bash -c 'set -a; . /etc/ontokit/demo-refresh.env; set +a; exec /opt/ontokit/ontokit-api/.venv/bin/python /opt/ontokit/ontokit-api/deploy/refresh_demo_repositories.py --manifest /opt/ontokit/ontokit-api/deploy/demo-mirrors.json --resync-executable "$DEMO_PROJECT_RESYNC_EXECUTABLE"'

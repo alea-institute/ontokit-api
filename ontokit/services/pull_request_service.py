@@ -58,6 +58,10 @@ from ontokit.schemas.pull_request import (
     ReviewListResponse,
     ReviewResponse,
 )
+from ontokit.services.demo_target_authorizer import (
+    DemoTargetDenied,
+    authorize_integration_target,
+)
 from ontokit.services.github_service import GitHubService, get_github_service
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.user_service import UserService, get_user_service
@@ -1715,6 +1719,15 @@ class PullRequestService:
         integration = await self._get_github_integration(project_id)
         if not integration or not integration.sync_enabled:
             return None
+        try:
+            authorization = await authorize_integration_target(
+                self.db, integration, operation="GitHub API credential resolution"
+            )
+        except DemoTargetDenied as exc:
+            logger.warning("%s", exc)
+            return None
+        if authorization.token:
+            return integration, authorization.token
         if not integration.connected_by_user_id:
             return None
         result = await self.db.execute(

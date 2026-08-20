@@ -1,6 +1,7 @@
 """GitHub sync service for periodic pull/push of GitHub-connected projects."""
 
 import logging
+import secrets
 from datetime import UTC, datetime
 from typing import cast
 
@@ -10,6 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.core.config import settings
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.pull_request import GitHubIntegration
+from ontokit.services.demo_target_authorizer import (
+    DemoTargetDenied,
+    authorize_integration_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,21 @@ async def sync_github_project(
     if outbound_only is None:
         outbound_only = settings.github_mirror_outbound_only
 
+    try:
+        authorization = await authorize_integration_target(
+            db, integration, operation="GitHub synchronization"
+        )
+    except DemoTargetDenied as exc:
+        integration.sync_status = "error"
+        integration.sync_error = str(exc)
+        await db.commit()
+        return {"status": "error", "reason": "target_refused"}
+    if authorization.token and not secrets.compare_digest(pat, authorization.token):
+        integration.sync_status = "error"
+        integration.sync_error = "GitHub synchronization refused: wrong credential class"
+        await db.commit()
+        return {"status": "error", "reason": "credential_refused"}
+
     # Check if repository exists
     if not git_service.repository_exists(project_id):
         integration.sync_status = "error"
@@ -94,7 +114,11 @@ async def sync_github_project(
             remote_oid = pygit2_repo.references[remote_ref_name].target
         except KeyError:
             # Remote branch doesn't exist yet — push local
-            if repo.push(branch=branch, token=pat):
+            if repo.push(
+                branch=branch,
+                token=pat,
+                target_authorization=authorization.capability,
+            ):
                 integration.sync_status = "idle"
                 integration.sync_error = None
                 integration.last_sync_at = datetime.now(UTC)
@@ -146,7 +170,11 @@ async def sync_github_project(
 
         elif ahead > 0 and behind == 0:
             # Local is ahead — push
-            if repo.push(branch=branch, token=pat):
+            if repo.push(
+                branch=branch,
+                token=pat,
+                target_authorization=authorization.capability,
+            ):
                 integration.sync_status = "idle"
                 integration.sync_error = None
                 integration.last_sync_at = datetime.now(UTC)
@@ -172,7 +200,11 @@ async def sync_github_project(
                 return {"status": "conflict", "ahead": ahead, "behind": behind}
 
             # Merge succeeded — push the merge commit
-            if repo.push(branch=branch, token=pat):
+            if repo.push(
+                branch=branch,
+                token=pat,
+                target_authorization=authorization.capability,
+            ):
                 integration.sync_status = "idle"
                 integration.sync_error = None
                 integration.last_sync_at = datetime.now(UTC)

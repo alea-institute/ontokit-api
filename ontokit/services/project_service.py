@@ -1189,6 +1189,12 @@ class ProjectService:
             member_count=len(project.members),
             user_role=user_role,
             is_superadmin=user.is_superadmin if user else False,
+            is_demo=project.is_demo if isinstance(project.is_demo, bool) else False,
+            demo_source_project_id=(
+                project.demo_source_project_id
+                if isinstance(project.demo_source_project_id, UUID)
+                else None
+            ),
             source_file_path=project.source_file_path,
             git_ontology_path=git_ontology_path,
             ontology_iri=project.ontology_iri,
@@ -1214,6 +1220,12 @@ class ProjectService:
             updated_at=project.updated_at,
             member_count=len(project.members),
             user_role=user_role,
+            is_demo=project.is_demo if isinstance(project.is_demo, bool) else False,
+            demo_source_project_id=(
+                project.demo_source_project_id
+                if isinstance(project.demo_source_project_id, UUID)
+                else None
+            ),
             ontology_iri=project.ontology_iri,
             file_path=file_path,
         )

@@ -277,8 +277,9 @@ and UTC refresh time, and force-updates only `HEAD:refs/heads/main` on the demo
 target. It never uses `--mirror` or `--all`, so demo-authored non-default branches
 remain untouched.
 
-Both pushes finish before the required project-resync executable runs. The
-resync child receives neither Git token. A nonblocking host lock refuses overlap,
+Both pushes finish before `deploy/resync_demo_projects.py` runs. The resync
+child receives neither Git token in its environment; it reopens the same scoped
+destination credential from a separate root-only token file. A nonblocking host lock refuses overlap,
 so cron runs cannot interleave. If either repository refresh fails, project
 resync does not start; the previously provisioned demo projects therefore never
 read a partially refreshed pair.
@@ -291,11 +292,17 @@ Activation remains gated. Before installing `deploy/demo-refresh.cron.example`:
    source repositories. Prove that identity cannot push to either source.
 3. Mint `GITHUB_DEMO_MIRROR_TOKEN` with contents-write access only to the two
    destination repositories. Prove that it cannot write anywhere else.
-4. Install the U9 idempotent project-resync executable. It receives the mirror
-   manifest path and must update both demo projects as one serialized operation.
-5. Store the three values in root-owned mode-0600
-   `/etc/ontokit/demo-refresh.env`; never put token values in cron, Git URLs,
-   logs, or this repository.
+4. Install `deploy/resync_demo_projects.py`. It idempotently provisions one
+   public demo Project per live source, refuses cross-target writes, swaps each
+   bare clone with rollback on failed reindex, and rebuilds the PostgreSQL
+   ontology index before accepting the new clone.
+5. Store the refresh environment in root-owned mode-0600
+   `/etc/ontokit/demo-refresh.env`. Also write the destination token value to
+   root-owned mode-0600 `/etc/ontokit/demo-project-token`, set
+   `ONTOKIT_DEMO_TOKEN_FILE` to that path, and set
+   `DEMO_PROJECT_RESYNC_EXECUTABLE` to the checked-in resync script. The API and
+   worker need the same scoped value as `GITHUB_DEMO_MIRROR_TOKEN`; never put a
+   token value in cron, Git URLs, logs, or this repository.
 6. Run one manual refresh, verify both default branches and README receipts,
    verify an existing non-default demo branch is unchanged, and record the
    negative token-scope push tests before enabling the daily cron.

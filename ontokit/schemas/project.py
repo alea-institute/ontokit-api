@@ -87,6 +87,8 @@ class ProjectResponse(ProjectBase):
     member_count: int = 0
     user_role: ProjectRole | None = None  # Current user's role in the project
     is_superadmin: bool = False  # Whether the current user is a superadmin
+    is_demo: bool = False
+    demo_source_project_id: UUID | None = None
     # Import-related fields (optional, only set when project was created via import)
     source_file_path: str | None = None
     git_ontology_path: str | None = None
