@@ -615,6 +615,24 @@ class TestToResponse:
 
         assert response.label_preferences == ["rdfs:label@en", "skos:prefLabel"]
 
+    def test_to_response_names_demo_repository(self, service: ProjectService) -> None:
+        """Public demo responses expose their exact resettable Git target."""
+        project = _make_project()
+        project.is_demo = True
+        project.demo_source_project_id = uuid.uuid4()
+        project.github_integration = MagicMock(
+            repo_owner="alea-institute",
+            repo_name="ontokit-demo-folio",
+            turtle_file_path=None,
+            ontology_file_path=None,
+        )
+
+        response = service._to_response(project, None)
+
+        assert response.demo_repository_full_name == (
+            "alea-institute/ontokit-demo-folio"
+        )
+
 
 # ---------------------------------------------------------------------------
 # list_accessible

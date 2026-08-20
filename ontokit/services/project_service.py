@@ -1145,6 +1145,16 @@ class ProjectService:
             return os.path.basename(project.source_file_path)
         return "ontology.ttl"
 
+    @staticmethod
+    def _demo_repository_full_name(project: Project) -> str | None:
+        """Return the immutable Git target identity for a demo project."""
+        if project.is_demo is not True or project.github_integration is None:
+            return None
+        return (
+            f"{project.github_integration.repo_owner}/"
+            f"{project.github_integration.repo_name}"
+        )
+
     def _to_response(self, project: Project, user: CurrentUser | None) -> ProjectResponse:
         """Convert Project model to response schema."""
         user_role = None
@@ -1195,6 +1205,7 @@ class ProjectService:
                 if isinstance(project.demo_source_project_id, UUID)
                 else None
             ),
+            demo_repository_full_name=self._demo_repository_full_name(project),
             source_file_path=project.source_file_path,
             git_ontology_path=git_ontology_path,
             ontology_iri=project.ontology_iri,
@@ -1226,6 +1237,7 @@ class ProjectService:
                 if isinstance(project.demo_source_project_id, UUID)
                 else None
             ),
+            demo_repository_full_name=self._demo_repository_full_name(project),
             ontology_iri=project.ontology_iri,
             file_path=file_path,
         )
