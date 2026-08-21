@@ -21,3 +21,9 @@ NORMALIZATION_UPDATES_CHANNEL = "normalization:updates"
 ONTOLOGY_INDEX_UPDATES_CHANNEL = "ontology_index:updates"
 QUALITY_UPDATES_CHANNEL = "quality:updates"
 REMOTE_SYNC_UPDATES_CHANNEL = "remote_sync:updates"
+
+# Operator-only ARQ control values shared by the worker seam and enqueue command.
+PR_PARTY_CREDENTIAL_REWRAP_TASK = "run_pr_party_credential_rewrap_task"
+PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID = "operator:pr-party-credential-rewrap:dry-run"
+PR_PARTY_CREDENTIAL_REWRAP_APPLY_JOB_ID = "operator:pr-party-credential-rewrap:apply"
+PR_PARTY_CREDENTIAL_REWRAP_CONFIRMATION = "REWRAP-PR-PARTY-CREDENTIALS"

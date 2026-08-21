@@ -36,6 +36,7 @@ COPY --chown=ontokit:ontokit alembic/ ./alembic/
 
 # Copy entrypoint script (runs migrations before starting the app)
 COPY --chown=ontokit:ontokit scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chown=ontokit:ontokit scripts/rewrap_pr_party_credentials.py /usr/local/bin/rewrap-pr-party-credentials
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Switch to non-root user

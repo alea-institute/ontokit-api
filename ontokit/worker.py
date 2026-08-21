@@ -8,7 +8,6 @@ from typing import Any
 from uuid import UUID
 
 from arq import ArqRedis, cron, func
-from arq.connections import RedisSettings
 from sqlalchemy import select
 from sqlalchemy.exc import ProgrammingError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -19,9 +18,14 @@ from ontokit.core.constants import (
     LINT_UPDATES_CHANNEL,
     NORMALIZATION_UPDATES_CHANNEL,
     ONTOLOGY_INDEX_UPDATES_CHANNEL,
+    PR_PARTY_CREDENTIAL_REWRAP_APPLY_JOB_ID,
+    PR_PARTY_CREDENTIAL_REWRAP_CONFIRMATION,
+    PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID,
+    PR_PARTY_CREDENTIAL_REWRAP_TASK,
     QUALITY_UPDATES_CHANNEL,
     REMOTE_SYNC_UPDATES_CHANNEL,
 )
+from ontokit.core.redis import get_redis_settings
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
@@ -1103,6 +1107,61 @@ async def sweep_pr_party_prs(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
 
 
+async def run_pr_party_credential_rewrap_task(
+    ctx: dict[str, Any],
+    apply: bool = False,
+    confirmation: str | None = None,
+) -> dict[str, Any]:
+    """Operator-only ARQ seam for an atomic reviewer-credential key rewrap.
+
+    ``apply`` defaults false so an accidentally enqueued task is a dry run.
+    The service sanitizes all failures before they reach this boundary; this
+    function likewise logs only the ARQ job id, safe error code, row UUIDs, and
+    aggregate counts.
+    """
+    from ontokit.services.pr_party_credentials import (
+        CredentialRewrapError,
+        rewrap_reviewer_credentials,
+    )
+
+    job_id = str(ctx.get("job_id", "unknown"))
+    expected_job_id = (
+        PR_PARTY_CREDENTIAL_REWRAP_APPLY_JOB_ID
+        if apply is True
+        else PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID
+    )
+    valid_confirmation = (
+        confirmation == PR_PARTY_CREDENTIAL_REWRAP_CONFIRMATION
+        if apply is True
+        else confirmation is None
+    )
+    if type(apply) is not bool or job_id != expected_job_id or not valid_confirmation:
+        logger.error(
+            "PR Party credential rewrap rejected: job_id=%s error_code=invalid_operator_request",
+            job_id,
+        )
+        raise RuntimeError("credential rewrap failed: invalid_operator_request")
+
+    try:
+        receipt = await rewrap_reviewer_credentials(ctx["db"], dry_run=not apply)
+    except CredentialRewrapError as exc:
+        logger.error(
+            "PR Party credential rewrap failed: job_id=%s error_code=%s credential_id=%s",
+            job_id,
+            exc.code,
+            exc.credential_id,
+        )
+        raise RuntimeError(str(exc)) from None
+
+    payload = receipt.as_dict()
+    logger.info(
+        "PR Party credential rewrap receipt: job_id=%s receipt=%s",
+        job_id,
+        json.dumps(payload, sort_keys=True),
+    )
+    return payload
+
+
 async def generate_pr_brief(
     ctx: dict[str, Any],
     pr_id: str,
@@ -1339,6 +1398,7 @@ async def startup(ctx: dict[str, Any]) -> None:
     engine = create_async_engine(
         str(settings.database_url),
         echo=settings.debug,
+        hide_parameters=True,
         pool_pre_ping=True,
     )
     session_factory = async_sessionmaker(
@@ -1387,36 +1447,6 @@ async def on_job_end(ctx: dict[str, Any]) -> None:
         await db.close()
 
 
-def get_redis_settings() -> RedisSettings:
-    """Get Redis settings from application config.
-
-    ARQ's RedisSettings takes the URL apart into fields, so every part of the
-    DSN has to be carried across explicitly. Dropping the credentials silently
-    produced a worker that could not authenticate against a password-protected
-    Redis (found on the FOLIO DEV deploy 2026-07-06); the repo's own compose
-    file uses a password-less Redis, which hid it.
-
-    Credentials are URL-decoded: a password containing reserved characters is
-    percent-encoded in the DSN and must be decoded before it reaches the wire.
-    """
-    from urllib.parse import unquote, urlparse
-
-    parsed = urlparse(str(settings.redis_url))
-    host = parsed.hostname or "localhost"
-    port = parsed.port or 6379
-    database = int(parsed.path.lstrip("/") or "0")
-
-    return RedisSettings(
-        host=host,
-        port=port,
-        database=database,
-        username=unquote(parsed.username) if parsed.username else None,
-        password=unquote(parsed.password) if parsed.password else None,
-        # rediss:// means TLS; without this the scheme was silently ignored.
-        ssl=parsed.scheme == "rediss",
-    )
-
-
 class WorkerSettings:
     """ARQ worker settings."""
 
@@ -1441,6 +1471,9 @@ class WorkerSettings:
         # KTD14: bounded under both the 300s worker default and the 5-minute
         # cadence, so a wedged sweep cannot overlap the next one.
         func(sweep_pr_party_prs, timeout=settings.pr_party_sweep_timeout_seconds),
+        # Explicit operator task: no cron/API caller and no automatic retry.
+        # A fixed enqueue job id prevents overlapping runs (see the script).
+        func(run_pr_party_credential_rewrap_task, max_tries=1),
         # U5: one brief per PR revision. max_tries=1 — see the docstring; the
         # brewing timeout is the retry mechanism, not arq.
         func(
@@ -1505,3 +1538,6 @@ class WorkerSettings:
 
     # Queue name
     queue_name = "arq:queue"
+
+
+assert run_pr_party_credential_rewrap_task.__name__ == PR_PARTY_CREDENTIAL_REWRAP_TASK
