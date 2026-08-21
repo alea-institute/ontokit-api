@@ -9,7 +9,17 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
+from ontokit.core.constants import (
+    PR_PARTY_CREDENTIAL_REWRAP_APPLY_JOB_ID,
+    PR_PARTY_CREDENTIAL_REWRAP_CONFIRMATION,
+    PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID,
+)
+from ontokit.services.pr_party_credentials import (
+    CredentialRewrapError,
+    CredentialRewrapErrorCode,
+)
 from ontokit.worker import (
+    WorkerSettings,
     auto_submit_stale_suggestions,
     check_all_projects_normalization,
     check_normalization_status_task,
@@ -20,6 +30,7 @@ from ontokit.worker import (
     run_lint_task,
     run_normalization_task,
     run_ontology_index_task,
+    run_pr_party_credential_rewrap_task,
     run_remote_check_task,
     run_single_entity_embed_task,
     shutdown,
@@ -38,6 +49,127 @@ def mock_ctx(mock_db_session: AsyncMock, mock_redis: AsyncMock) -> dict[str, Any
 def project_id() -> str:
     """A stable project UUID string for tests."""
     return str(uuid.UUID("12345678-1234-5678-1234-567812345678"))
+
+
+@pytest.mark.asyncio
+async def test_pr_party_credential_rewrap_task_returns_safe_receipt(
+    mock_ctx: dict[str, Any],
+) -> None:
+    """The ARQ seam returns the service receipt without credential material."""
+    receipt = MagicMock()
+    receipt.as_dict.return_value = {
+        "status": "completed",
+        "dry_run": True,
+        "credentials_scanned": 1,
+        "credentials_verified": 1,
+        "credentials_rewrapped": 0,
+        "credential_ids": ["aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"],
+    }
+
+    mock_ctx["job_id"] = PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID
+    with patch(
+        "ontokit.services.pr_party_credentials.rewrap_reviewer_credentials",
+        AsyncMock(return_value=receipt),
+    ) as rewrap:
+        result = await run_pr_party_credential_rewrap_task(mock_ctx, apply=False)
+
+    rewrap.assert_awaited_once_with(mock_ctx["db"], dry_run=True)
+    assert result == receipt.as_dict.return_value
+    assert "token" not in repr(result).lower()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("apply", "confirmation", "job_id"),
+    [
+        ("false", None, PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID),
+        (True, None, PR_PARTY_CREDENTIAL_REWRAP_APPLY_JOB_ID),
+        (True, "wrong", PR_PARTY_CREDENTIAL_REWRAP_APPLY_JOB_ID),
+        (True, PR_PARTY_CREDENTIAL_REWRAP_CONFIRMATION, "unexpected-job"),
+        (False, PR_PARTY_CREDENTIAL_REWRAP_CONFIRMATION, PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID),
+    ],
+)
+async def test_pr_party_credential_rewrap_task_rejects_invalid_operator_request(
+    mock_ctx: dict[str, Any],
+    apply: Any,
+    confirmation: str | None,
+    job_id: str,
+) -> None:
+    mock_ctx["job_id"] = job_id
+
+    with (
+        patch(
+            "ontokit.services.pr_party_credentials.rewrap_reviewer_credentials",
+            AsyncMock(),
+        ) as rewrap,
+        pytest.raises(RuntimeError, match="invalid_operator_request"),
+    ):
+        await run_pr_party_credential_rewrap_task(
+            mock_ctx,
+            apply=apply,
+            confirmation=confirmation,
+        )
+
+    rewrap.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_pr_party_credential_rewrap_task_accepts_confirmed_apply(
+    mock_ctx: dict[str, Any],
+) -> None:
+    receipt = MagicMock()
+    receipt.as_dict.return_value = {
+        "status": "completed",
+        "dry_run": False,
+        "credentials_scanned": 0,
+        "credentials_verified": 0,
+        "credentials_rewrapped": 0,
+        "credential_ids": [],
+    }
+    mock_ctx["job_id"] = PR_PARTY_CREDENTIAL_REWRAP_APPLY_JOB_ID
+
+    with patch(
+        "ontokit.services.pr_party_credentials.rewrap_reviewer_credentials",
+        AsyncMock(return_value=receipt),
+    ) as rewrap:
+        result = await run_pr_party_credential_rewrap_task(
+            mock_ctx,
+            apply=True,
+            confirmation=PR_PARTY_CREDENTIAL_REWRAP_CONFIRMATION,
+        )
+
+    rewrap.assert_awaited_once_with(mock_ctx["db"], dry_run=False)
+    assert result == receipt.as_dict.return_value
+
+
+@pytest.mark.asyncio
+async def test_pr_party_credential_rewrap_task_sanitizes_service_failure(
+    mock_ctx: dict[str, Any],
+) -> None:
+    mock_ctx["job_id"] = PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID
+    failure = CredentialRewrapError(CredentialRewrapErrorCode.transaction_failed)
+
+    with (
+        patch(
+            "ontokit.services.pr_party_credentials.rewrap_reviewer_credentials",
+            AsyncMock(side_effect=failure),
+        ),
+        pytest.raises(RuntimeError, match="transaction_failed") as caught,
+    ):
+        await run_pr_party_credential_rewrap_task(mock_ctx, apply=False)
+
+    assert caught.value.__cause__ is None
+    assert "token" not in str(caught.value).lower()
+
+
+def test_pr_party_credential_rewrap_task_is_registered_without_retries() -> None:
+    registered = {
+        getattr(item, "name", getattr(item, "__name__", "")): item
+        for item in WorkerSettings.functions
+    }
+
+    entry = registered[run_pr_party_credential_rewrap_task.__qualname__]
+    assert entry.max_tries == 1
 
 
 # ---------------------------------------------------------------------------
@@ -413,6 +545,7 @@ class TestStartupShutdown:
 
         assert ctx["engine"] is mock_engine
         assert ctx["session_factory"] is mock_factory
+        assert mock_engine_fn.call_args.kwargs["hide_parameters"] is True
 
     @pytest.mark.asyncio
     async def test_shutdown_disposes_engine(self) -> None:

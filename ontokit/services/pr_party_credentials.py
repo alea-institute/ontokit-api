@@ -56,11 +56,13 @@ import hashlib
 import logging
 import uuid
 from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from typing import Any, Protocol
 
-from cryptography.fernet import Fernet, MultiFernet
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -85,10 +87,13 @@ __all__ = [
     "GITHUB_TOKEN_SETTINGS_URL",
     "LOGIN_CHANGED_ERROR",
     "CredentialRejected",
+    "CredentialRewrapError",
+    "CredentialRewrapErrorCode",
     "CredentialResolver",
     "CredentialValidationUnavailable",
     "PRPartyCredentialError",
     "PRPartyCredentialService",
+    "ReviewerCredentialRewrapReceipt",
     "ReviewerReconcileResult",
     "credential_health",
     "decrypt_reviewer_token",
@@ -97,6 +102,7 @@ __all__ = [
     "is_degraded",
     "mark_credential_dead",
     "reconcile_reviewers",
+    "rewrap_reviewer_credentials",
     "reset_generation_token_cache",
     "rotate_reviewer_token",
 ]
@@ -196,6 +202,119 @@ class CredentialRejected(PRPartyCredentialError):
 
 class CredentialValidationUnavailable(PRPartyCredentialError):
     """GitHub could not be reached to validate. Not the caller's fault; retry."""
+
+
+class CredentialRewrapErrorCode(StrEnum):
+    previous_key_not_configured = "previous_key_not_configured"
+    credential_not_decryptable = "credential_not_decryptable"
+    transaction_failed = "transaction_failed"
+
+
+class CredentialRewrapError(PRPartyCredentialError):
+    """A bulk rewrap could not complete without risking partial key migration."""
+
+    def __init__(
+        self,
+        code: CredentialRewrapErrorCode,
+        credential_id: uuid.UUID | None = None,
+    ) -> None:
+        self.code = code
+        self.credential_id = credential_id
+        detail = f" for credential {credential_id}" if credential_id is not None else ""
+        super().__init__(f"PR Party credential rewrap failed ({code}){detail}")
+
+
+@dataclass(frozen=True)
+class ReviewerCredentialRewrapReceipt:
+    """Audit-safe proof of a dry run or committed credential rewrap."""
+
+    dry_run: bool
+    credentials_scanned: int
+    credentials_verified: int
+    credentials_rewrapped: int
+    credential_ids: tuple[uuid.UUID, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return an ARQ-serializable receipt containing no secret material."""
+        return {
+            "status": "completed",
+            "dry_run": self.dry_run,
+            "credentials_scanned": self.credentials_scanned,
+            "credentials_verified": self.credentials_verified,
+            "credentials_rewrapped": self.credentials_rewrapped,
+            "credential_ids": [str(value) for value in self.credential_ids],
+        }
+
+
+async def rewrap_reviewer_credentials(
+    db: AsyncSession,
+    *,
+    dry_run: bool,
+) -> ReviewerCredentialRewrapReceipt:
+    """Atomically re-encrypt every reviewer PAT under the current application key.
+
+    The previous key must remain configured while this runs. Rows are locked,
+    every proposed ciphertext is built and proven decryptable by the current
+    key, and only then are any ORM values changed. A single invalid row aborts
+    the batch and leaves the database untouched.
+
+    The receipt intentionally contains only credential-row UUIDs and counts.
+    It proves the PR Party credential domain only; other encrypted domains must
+    be migrated separately before ``SECRET_KEY_PREVIOUS`` is removed globally.
+    """
+    previous_keys = [value for value in _previous_secrets() if value != settings.secret_key]
+    if not previous_keys:
+        raise CredentialRewrapError(CredentialRewrapErrorCode.previous_key_not_configured)
+
+    try:
+        statement = select(PRPartyCredential).order_by(PRPartyCredential.id)
+        if not dry_run:
+            statement = statement.with_for_update()
+        result = await db.execute(statement)
+        credentials = list(result.scalars().all())
+        proposed: list[tuple[PRPartyCredential, str]] = []
+
+        for credential in credentials:
+            try:
+                rotated = rotate_reviewer_token(credential.encrypted_token)
+            except InvalidToken:
+                raise CredentialRewrapError(
+                    CredentialRewrapErrorCode.credential_not_decryptable,
+                    credential.id,
+                ) from None
+            proposed.append((credential, rotated))
+
+        credential_ids = tuple(credential.id for credential in credentials)
+        if dry_run:
+            await db.rollback()
+            return ReviewerCredentialRewrapReceipt(
+                dry_run=True,
+                credentials_scanned=len(credentials),
+                credentials_verified=len(proposed),
+                credentials_rewrapped=0,
+                credential_ids=credential_ids,
+            )
+
+        for credential, rotated in proposed:
+            credential.encrypted_token = rotated
+        await db.commit()
+        return ReviewerCredentialRewrapReceipt(
+            dry_run=False,
+            credentials_scanned=len(credentials),
+            credentials_verified=len(proposed),
+            credentials_rewrapped=len(proposed),
+            credential_ids=credential_ids,
+        )
+    except CredentialRewrapError:
+        with suppress(Exception):
+            await db.rollback()
+        raise
+    except Exception:
+        # Database/driver errors can include bound parameters. Never allow an
+        # exception carrying encrypted credential values to reach ARQ's logs.
+        with suppress(Exception):
+            await db.rollback()
+        raise CredentialRewrapError(CredentialRewrapErrorCode.transaction_failed) from None
 
 
 # --- Health -----------------------------------------------------------------
