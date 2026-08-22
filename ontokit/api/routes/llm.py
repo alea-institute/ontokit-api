@@ -518,7 +518,7 @@ async def get_llm_audit_history(
         query = query.where(tuple_(LLMAuditLog.created_at, LLMAuditLog.id) < (created_at, row_id))
     query = query.order_by(LLMAuditLog.created_at.desc(), LLMAuditLog.id.desc()).limit(limit + 1)
 
-    rows = list((await db.execute(query)).scalars().all())
+    rows = (await db.execute(query)).scalars().all()
     page = rows[:limit]
     next_cursor = _encode_audit_cursor(page[-1]) if len(rows) > limit and page else None
     return LLMAuditHistoryResponse(

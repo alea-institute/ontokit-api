@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.auth import CurrentUser
 from ontokit.models.project import Project
+from ontokit.schemas.project import ProjectResponse
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +96,7 @@ async def resolve_branch(project_id: UUID, branch: str | None) -> str:
 
 async def verify_project_access(
     project_id: UUID, db: AsyncSession, user: CurrentUser | None
-) -> None:
+) -> ProjectResponse:
     """Verify the user has access to the project.
 
     For public projects, unauthenticated users are allowed.
@@ -104,4 +105,4 @@ async def verify_project_access(
     from ontokit.services.project_service import get_project_service
 
     service = get_project_service(db)
-    await service.get(project_id, user)
+    return await service.get(project_id, user)

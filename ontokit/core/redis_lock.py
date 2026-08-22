@@ -1,6 +1,7 @@
 """Small ownership-safe Redis lock helpers for background-job admission."""
 
 from typing import Any
+from uuid import UUID
 
 _RELEASE_IF_OWNED = """
 if redis.call('get', KEYS[1]) == ARGV[1] then
@@ -17,6 +18,11 @@ if not owner or owner == ARGV[1] then
 end
 return 0
 """
+
+
+def quality_job_lock_key(project_id: UUID | str) -> str:
+    """Return the shared project-wide quality-job admission key."""
+    return f"quality_job_active:{project_id}"
 
 
 async def acquire_owned_lock(

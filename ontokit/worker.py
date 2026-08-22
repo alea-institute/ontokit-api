@@ -25,7 +25,11 @@ from ontokit.core.constants import (
     REMOTE_SYNC_UPDATES_CHANNEL,
 )
 from ontokit.core.encryption import decrypt_token
-from ontokit.core.redis_lock import release_owned_lock, renew_or_claim_owned_lock
+from ontokit.core.redis_lock import (
+    quality_job_lock_key,
+    release_owned_lock,
+    renew_or_claim_owned_lock,
+)
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
@@ -670,7 +674,7 @@ async def run_consistency_check_task(
     try:
         if job_id and not await renew_or_claim_owned_lock(
             redis,
-            f"quality_job_active:{project_id}",
+            quality_job_lock_key(project_id),
             job_id,
             ttl_seconds=QUALITY_JOB_TTL_SECONDS,
         ):
@@ -809,7 +813,7 @@ async def run_consistency_check_task(
             try:
                 await release_owned_lock(
                     redis,
-                    f"quality_job_active:{project_id}",
+                    quality_job_lock_key(project_id),
                     job_id,
                 )
             except Exception:
@@ -838,7 +842,7 @@ async def run_duplicate_detection_task(
     try:
         if job_id and not await renew_or_claim_owned_lock(
             redis,
-            f"quality_job_active:{project_id}",
+            quality_job_lock_key(project_id),
             job_id,
             ttl_seconds=QUALITY_JOB_TTL_SECONDS,
         ):
@@ -938,7 +942,7 @@ async def run_duplicate_detection_task(
             try:
                 await release_owned_lock(
                     redis,
-                    f"quality_job_active:{project_id}",
+                    quality_job_lock_key(project_id),
                     job_id,
                 )
             except Exception:

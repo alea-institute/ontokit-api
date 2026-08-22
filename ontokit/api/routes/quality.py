@@ -13,7 +13,6 @@ from arq import ArqRedis
 from arq.jobs import Job, JobStatus
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
@@ -22,8 +21,8 @@ from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser, require_authenticated_identity
 from ontokit.core.constants import QUALITY_JOB_TTL_SECONDS, QUALITY_UPDATES_CHANNEL
 from ontokit.core.database import get_db
-from ontokit.core.redis_lock import acquire_owned_lock, release_owned_lock
-from ontokit.models.project import ProjectMember
+from ontokit.core.redis_lock import acquire_owned_lock, quality_job_lock_key, release_owned_lock
+from ontokit.schemas.project import ProjectResponse
 from ontokit.schemas.quality import (
     ConsistencyCheckResult,
     ConsistencyCheckTriggerResponse,
@@ -39,14 +38,8 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _quality_job_lock_key(project_id: UUID | str) -> str:
-    """Share one expensive-analysis slot across all branches and job types."""
-    return f"quality_job_active:{project_id}"
-
-
 async def _require_quality_job_access(
-    db: AsyncSession,
-    project_id: UUID,
+    project: ProjectResponse,
     user: RequiredUser,
 ) -> None:
     """Require a real project membership before admitting expensive work."""
@@ -54,13 +47,7 @@ async def _require_quality_job_access(
     if user.is_superadmin:
         return
 
-    result = await db.execute(
-        select(ProjectMember.id).where(
-            ProjectMember.project_id == project_id,
-            ProjectMember.user_id == user.id,
-        )
-    )
-    if result.scalar_one_or_none() is None:
+    if project.user_role is None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Project membership required",
@@ -193,14 +180,14 @@ async def trigger_consistency_check(
     branch: str | None = Query(default=None, description="Branch name"),
 ) -> ConsistencyCheckTriggerResponse:
     """Enqueue a consistency check as a background job."""
-    await verify_project_access(project_id, db, user)
-    await _require_quality_job_access(db, project_id, user)
+    project = await verify_project_access(project_id, db, user)
+    await _require_quality_job_access(project, user)
     resolved_branch = await resolve_branch(project_id, branch)
 
     job_id = str(uuid.uuid4())
 
     redis = _get_redis()
-    lock_key = _quality_job_lock_key(project_id)
+    lock_key = quality_job_lock_key(project_id)
     if not await acquire_owned_lock(
         redis,
         lock_key,
@@ -329,14 +316,14 @@ async def detect_duplicates(
     threshold: float = Query(default=0.85, ge=0.5, le=1.0),
 ) -> DuplicateDetectionTriggerResponse:
     """Enqueue duplicate detection as a background job."""
-    await verify_project_access(project_id, db, user)
-    await _require_quality_job_access(db, project_id, user)
+    project = await verify_project_access(project_id, db, user)
+    await _require_quality_job_access(project, user)
     resolved_branch = await resolve_branch(project_id, branch)
 
     job_id = str(uuid.uuid4())
 
     redis = _get_redis()
-    lock_key = _quality_job_lock_key(project_id)
+    lock_key = quality_job_lock_key(project_id)
     if not await acquire_owned_lock(
         redis,
         lock_key,
