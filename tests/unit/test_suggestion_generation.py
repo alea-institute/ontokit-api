@@ -37,7 +37,13 @@ def _make_context(label: str = "Parent Class"):
             "labels": [{"value": label, "lang": "en"}],
             "annotations": [],
         },
-        "parents": [{"iri": "http://example.org/ontology#GrandParent", "label": "Grand Parent", "annotations": []}],
+        "parents": [
+            {
+                "iri": "http://example.org/ontology#GrandParent",
+                "label": "Grand Parent",
+                "annotations": [],
+            }
+        ],
         "siblings": [{"iri": "http://example.org/ontology#SiblingClass", "label": "Sibling Class"}],
         "existing_children": [],
     }
@@ -59,7 +65,12 @@ def _suggestion(label: str, confidence: float | None = 0.9) -> dict:
 
 def _parent_suggestion(label: str, iri: str | None = None, confidence: float | None = 0.9) -> dict:
     """parents-shaped raw suggestion — carries an optional existing-class `iri`."""
-    return {"label": label, "iri": iri, "definition": f"Definition of {label}", "confidence": confidence}
+    return {
+        "label": label,
+        "iri": iri,
+        "definition": f"Definition of {label}",
+        "confidence": confidence,
+    }
 
 
 def _annotation_suggestion(
@@ -105,7 +116,9 @@ async def test_gen01_generate_children(
         return_value=(_make_llm_json([_suggestion("Child A"), _suggestion("Child B")]), 120, 60)
     )
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -143,7 +156,9 @@ async def test_gen02_generate_siblings(
         return_value=(_make_llm_json([_suggestion("Sibling X")]), 100, 50)
     )
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -187,7 +202,9 @@ async def test_gen03_generate_annotations(
         )
     )
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -243,7 +260,9 @@ async def test_gen04_generate_parents(
         )
     )
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -295,7 +314,9 @@ async def test_gen05_generate_edges(
         )
     )
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -339,7 +360,9 @@ async def test_gen05_edges_flag_uncontrolled_type_and_missing_target(
         )
     )
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -380,7 +403,9 @@ async def test_gen06_context_included_in_prompt(
 
     mock_llm_provider.chat = capture_chat
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -422,7 +447,9 @@ async def test_gen07_prompt_templates_based_on_generative_folio(
 
     mock_llm_provider.chat = capture_chat
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -458,11 +485,11 @@ async def test_gen08_confidence_score_normalized(
 
     # LLM returns confidence as 85 (out of 100-scale) — should be normalized to 0.85
     raw = _suggestion("Child A", confidence=85)
-    mock_llm_provider.chat = AsyncMock(
-        return_value=(_make_llm_json([raw]), 100, 50)
-    )
+    mock_llm_provider.chat = AsyncMock(return_value=(_make_llm_json([raw]), 100, 50))
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -500,11 +527,14 @@ async def test_gen09_provenance_tagged(
     mock_llm_provider.chat = AsyncMock(
         return_value=(
             _make_llm_json([_suggestion("Child A"), _suggestion("Child B")]),
-            100, 50,
+            100,
+            50,
         )
     )
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -541,11 +571,14 @@ async def test_model_and_prompt_template_provenance(
             _make_llm_json(
                 [_suggestion("Child A", confidence=0.9), _suggestion("Child B", confidence=85)]
             ),
-            100, 50,
+            100,
+            50,
         )
     )
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -580,7 +613,9 @@ async def test_model_provenance_none_when_model_id_omitted(
         return_value=(_make_llm_json([_suggestion("Sibling A")]), 100, 50)
     )
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -616,11 +651,19 @@ async def test_batch_size_configurable(
 
     async def capture_chat(messages, **_kwargs):
         captured_messages.extend(messages)
-        return (_make_llm_json([_suggestion("Child A"), _suggestion("Child B"), _suggestion("Child C")]), 100, 50)
+        return (
+            _make_llm_json(
+                [_suggestion("Child A"), _suggestion("Child B"), _suggestion("Child C")]
+            ),
+            100,
+            50,
+        )
 
     mock_llm_provider.chat = capture_chat
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -654,11 +697,14 @@ async def test_auto_validate_in_pipeline(
     mock_llm_provider.chat = AsyncMock(
         return_value=(
             _make_llm_json([_suggestion("Child A"), _suggestion("Child B")]),
-            100, 50,
+            100,
+            50,
         )
     )
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -674,12 +720,55 @@ async def test_auto_validate_in_pipeline(
         assert hasattr(s, "validation_errors"), "Suggestion missing validation_errors"
         assert isinstance(s.validation_errors, list), "validation_errors must be a list"
         assert hasattr(s, "duplicate_verdict"), "Suggestion missing duplicate_verdict"
-        assert s.duplicate_verdict in ("pass", "warn", "block"), f"Invalid verdict: {s.duplicate_verdict}"
+        assert s.duplicate_verdict in ("pass", "warn", "block"), (
+            f"Invalid verdict: {s.duplicate_verdict}"
+        )
 
     # Validator was called once per suggestion
     assert mock_validator.validate_entity.call_count == 2
     # Dedup was called once per suggestion
     assert mock_duplicate_check_service.check.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_fail_soft_gates_emit_redacted_alert_events(
+    mock_llm_provider,
+    mock_duplicate_check_service,
+    caplog: pytest.LogCaptureFixture,
+):
+    """Validation/dedup degradation stays visible without logging tenant data."""
+    sensitive_label = "Confidential Matter\nforge=alert"
+    sensitive_error = "provider response contained sk-live-secret"
+    mock_assembler = AsyncMock()
+    mock_assembler.assemble = AsyncMock(return_value=_make_context())
+    mock_validator = AsyncMock()
+    mock_validator.validate_entity = AsyncMock(side_effect=RuntimeError(sensitive_error))
+    mock_duplicate_check_service.check = AsyncMock(side_effect=RuntimeError(sensitive_error))
+    mock_llm_provider.chat = AsyncMock(
+        return_value=(_make_llm_json([_suggestion(sensitive_label)]), 10, 5)
+    )
+
+    svc = _make_service(
+        mock_llm_provider,
+        mock_assembler,
+        mock_validator,
+        mock_duplicate_check_service,
+    )
+    with caplog.at_level("WARNING", logger="ontokit.services.suggestion_generation_service"):
+        response = await svc.generate(
+            project_id=PROJECT_ID,
+            branch="main",
+            class_iri=CLASS_IRI,
+            suggestion_type="children",
+            provider=mock_llm_provider,
+            project_namespace=NAMESPACE,
+        )
+
+    assert response.suggestions[0].duplicate_verdict == "pass"
+    assert "suggestion_validation_unavailable" in caplog.text
+    assert "suggestion_dedup_unavailable" in caplog.text
+    assert sensitive_label not in caplog.text
+    assert sensitive_error not in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -700,11 +789,11 @@ async def test_json_parse_handles_markdown_fences(
 
     # Wrap the JSON in markdown fences as an LLM would often do
     fenced_json = f"```json\n{_make_llm_json([_suggestion('Child Fenced')])}\n```"
-    mock_llm_provider.chat = AsyncMock(
-        return_value=(fenced_json, 100, 50)
-    )
+    mock_llm_provider.chat = AsyncMock(return_value=(fenced_json, 100, 50))
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",
@@ -741,11 +830,11 @@ async def test_confidence_normalization_scales(
         {"label": "100-scale Confidence", "confidence": 75},
         {"label": "Decimal Confidence", "confidence": 0.75},
     ]
-    mock_llm_provider.chat = AsyncMock(
-        return_value=(_make_llm_json(suggs), 100, 50)
-    )
+    mock_llm_provider.chat = AsyncMock(return_value=(_make_llm_json(suggs), 100, 50))
 
-    svc = _make_service(mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service)
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
     resp = await svc.generate(
         project_id=PROJECT_ID,
         branch="main",

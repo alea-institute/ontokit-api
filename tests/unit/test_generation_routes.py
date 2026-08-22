@@ -22,6 +22,7 @@ from ontokit.schemas.generation import (
     GenerateSuggestionsResponse,
     ValidationError,
 )
+from ontokit.services.llm.metering import LLMBudgetExceeded, MeteredLLMProvider
 
 PROJECT_ID = "11111111-1111-1111-1111-111111111111"
 GENERATE_URL = f"/api/v1/projects/{PROJECT_ID}/llm/generate-suggestions"
@@ -228,7 +229,6 @@ def test_generate_fails_open_when_redis_unavailable(
             "ontokit.api.routes.generation.get_model_pricing",
             new=AsyncMock(return_value=(0.0, 0.0)),
         ),
-        patch("ontokit.api.routes.generation.log_llm_call", new=AsyncMock()),
         caplog.at_level(logging.WARNING, logger="ontokit.api.routes.generation"),
     ):
         resp = client.post(GENERATE_URL, json=GENERATE_BODY)
@@ -308,7 +308,6 @@ def test_generate_success_shape(authed_client: tuple[TestClient, AsyncMock]):
             "ontokit.api.routes.generation.get_model_pricing",
             new=AsyncMock(return_value=(0.000001, 0.000002)),
         ),
-        patch("ontokit.api.routes.generation.log_llm_call", new=AsyncMock()) as audit_mock,
     ):
         resp = client.post(GENERATE_URL, json=GENERATE_BODY)
 
@@ -325,7 +324,39 @@ def test_generate_success_shape(authed_client: tuple[TestClient, AsyncMock]):
     assert sug["prompt_template"] == "children"
     # The configured model id is threaded into the pipeline for provenance
     assert svc_instance.generate.await_args.kwargs["model_id"] == "claude-sonnet-4-5"
-    audit_mock.assert_awaited_once()
+    assert isinstance(svc_instance.generate.await_args.kwargs["provider"], MeteredLLMProvider)
+
+
+def test_generate_402_when_atomic_reservation_refuses_call(
+    authed_client: tuple[TestClient, AsyncMock],
+):
+    """A concurrent request that consumes the remaining cap still blocks actuation."""
+    client, session = authed_client
+    _happy_path_execute(session)
+
+    svc_instance = MagicMock()
+    svc_instance.generate = AsyncMock(side_effect=LLMBudgetExceeded("daily_cap_reached"))
+
+    with (
+        patch("ontokit.api.routes.generation._get_redis", return_value=None),
+        patch(
+            "ontokit.api.routes.generation.check_budget",
+            new=AsyncMock(return_value=(True, None)),
+        ),
+        patch("ontokit.api.routes.generation.get_provider", return_value=MagicMock()),
+        patch(
+            "ontokit.api.routes.generation.SuggestionGenerationService",
+            return_value=svc_instance,
+        ),
+        patch(
+            "ontokit.api.routes.generation.get_model_pricing",
+            new=AsyncMock(return_value=(0.000001, 0.000002)),
+        ),
+    ):
+        resp = client.post(GENERATE_URL, json=GENERATE_BODY)
+
+    assert resp.status_code == 402
+    assert "daily" in resp.json()["detail"].lower()
 
 
 def test_generate_404_when_class_not_in_index(authed_client: tuple[TestClient, AsyncMock]):

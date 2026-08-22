@@ -32,9 +32,7 @@ class GoogleProvider(LLMProvider):
         model: str | None = None,
     ) -> None:
         super().__init__(api_key=api_key, base_url=base_url, model=model)
-        self._base = (
-            base_url or "https://generativelanguage.googleapis.com/v1beta"
-        ).rstrip("/")
+        self._base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
 
     def _headers(self) -> dict[str, str]:
         return {
@@ -66,10 +64,9 @@ class GoogleProvider(LLMProvider):
                 return data
         return {}
 
-    async def chat(
-        self, messages: list[dict[str, str]], **kwargs: Any
-    ) -> tuple[str, int, int]:
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> tuple[str, int, int]:
         model = kwargs.pop("model", self.model or "gemini-2.0-flash")
+        max_tokens = kwargs.pop("max_tokens", None)
 
         system_parts: list[str] = []
         contents: list[dict[str, Any]] = []
@@ -84,9 +81,9 @@ class GoogleProvider(LLMProvider):
 
         body: dict[str, Any] = {"contents": contents}
         if system_parts:
-            body["system_instruction"] = {
-                "parts": [{"text": "\n".join(system_parts)}]
-            }
+            body["system_instruction"] = {"parts": [{"text": "\n".join(system_parts)}]}
+        if max_tokens is not None:
+            body["generationConfig"] = {"maxOutputTokens": max_tokens}
 
         url = f"{self._base}/models/{model}:generateContent"
         data = await self._post_with_retry(url, body)
@@ -104,9 +101,7 @@ class GoogleProvider(LLMProvider):
         output_tokens = usage.get("candidatesTokenCount", 0)
         # Fallback estimation if API doesn't return counts
         if input_tokens == 0:
-            input_tokens = int(
-                sum(len(m.get("content", "").split()) for m in messages) * 1.3
-            )
+            input_tokens = int(sum(len(m.get("content", "").split()) for m in messages) * 1.3)
         if output_tokens == 0:
             output_tokens = int(len(response_text.split()) * 1.3)
 

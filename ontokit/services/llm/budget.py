@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
-from typing import TypedDict
+from hashlib import blake2b
+from typing import Protocol, TypedDict
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -31,6 +33,21 @@ class BudgetStatus(TypedDict):
     burn_rate_daily_usd: float
     budget_exhausted: bool
     daily_spent_usd: float
+    daily_cap_usd: float | None
+
+
+class BudgetConfig(Protocol):
+    """The cap fields shared by generation and embedding configurations."""
+
+    monthly_budget_usd: float | None
+    daily_cap_usd: float | None
+
+
+@dataclass
+class BudgetLimits:
+    """Session-independent snapshot of the two project spend caps."""
+
+    monthly_budget_usd: float | None
     daily_cap_usd: float | None
 
 
@@ -79,7 +96,9 @@ async def get_daily_spend(db: AsyncSession, project_id: uuid.UUID) -> float:
 async def check_budget(
     db: AsyncSession,
     project_id: uuid.UUID,
-    config: ProjectLLMConfig,
+    config: BudgetConfig,
+    *,
+    additional_cost_usd: float = 0.0,
 ) -> tuple[bool, str | None]:
     """Check whether the project is within its budget limits.
 
@@ -102,16 +121,53 @@ async def check_budget(
     # Check daily sub-cap first (Open Question 3)
     if config.daily_cap_usd is not None:
         daily_spend = await get_daily_spend(db, project_id)
-        if daily_spend >= config.daily_cap_usd:
+        if daily_spend >= config.daily_cap_usd or (
+            additional_cost_usd > 0 and daily_spend + additional_cost_usd > config.daily_cap_usd
+        ):
             return (False, "daily_cap_reached")
 
     # Check monthly budget
     if config.monthly_budget_usd is not None:
         monthly_spend = await get_monthly_spend(db, project_id)
-        if monthly_spend >= config.monthly_budget_usd:
+        if monthly_spend >= config.monthly_budget_usd or (
+            additional_cost_usd > 0
+            and monthly_spend + additional_cost_usd > config.monthly_budget_usd
+        ):
             return (False, "budget_exhausted")
 
     return (True, None)
+
+
+def project_budget_lock_key(project_id: uuid.UUID) -> int:
+    """Return the stable signed bigint used for a project's budget lock."""
+    digest = blake2b(
+        project_id.bytes,
+        digest_size=8,
+        person=b"ontokit-budget",
+    ).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
+
+
+async def lock_and_check_budget(
+    db: AsyncSession,
+    project_id: uuid.UUID,
+    config: BudgetConfig,
+    *,
+    additional_cost_usd: float,
+) -> tuple[bool, str | None]:
+    """Serialize a projected budget check inside the caller's transaction.
+
+    The caller must write and commit its reservation using the same session
+    before starting provider work. PostgreSQL releases this transaction-scoped
+    advisory lock on commit or rollback.
+    """
+    await db.execute(select(func.pg_advisory_xact_lock(project_budget_lock_key(project_id))))
+    return await check_budget(
+        db,
+        project_id,
+        config,
+        additional_cost_usd=additional_cost_usd,
+    )
 
 
 async def get_budget_status(
@@ -140,15 +196,11 @@ async def get_budget_status(
                 0.0,
             ).label("monthly"),
             func.coalesce(
-                func.sum(LLMAuditLog.cost_estimate_usd).filter(
-                    LLMAuditLog.created_at >= day_start
-                ),
+                func.sum(LLMAuditLog.cost_estimate_usd).filter(LLMAuditLog.created_at >= day_start),
                 0.0,
             ).label("daily"),
             func.coalesce(
-                func.sum(LLMAuditLog.cost_estimate_usd).filter(
-                    LLMAuditLog.created_at >= week_ago
-                ),
+                func.sum(LLMAuditLog.cost_estimate_usd).filter(LLMAuditLog.created_at >= week_ago),
                 0.0,
             ).label("week"),
         )

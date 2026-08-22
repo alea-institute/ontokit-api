@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from ontokit.services.llm.base import LLMProvider
+from ontokit.services.llm.base import LLMProvider, estimate_message_tokens, estimate_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,9 @@ _FALLBACK_MODELS = [
 class AnthropicProvider(LLMProvider):
     """Anthropic Claude provider using the official anthropic SDK."""
 
+    # This adapter currently uses messages.create, not Message Batches.
+    supports_true_batch_api = False
+
     def __init__(
         self,
         api_key: str | None = None,
@@ -41,12 +44,18 @@ class AnthropicProvider(LLMProvider):
         if self._client is None:
             import anthropic
 
-            self._client = anthropic.AsyncAnthropic(api_key=self.api_key)
+            from ontokit.services.llm.ssrf import secure_async_client
+
+            kwargs: dict[str, Any] = {
+                "api_key": self.api_key,
+                "http_client": secure_async_client(),
+            }
+            if self.base_url:
+                kwargs["base_url"] = self.base_url
+            self._client = anthropic.AsyncAnthropic(**kwargs)
         return self._client
 
-    async def chat(
-        self, messages: list[dict[str, str]], **kwargs: Any
-    ) -> tuple[str, int, int]:
+    async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> tuple[str, int, int]:
         client = self._get_client()
         max_tokens = kwargs.pop("max_tokens", 4096)
 
@@ -70,8 +79,10 @@ class AnthropicProvider(LLMProvider):
 
         response = await client.messages.create(**create_kwargs)
         text = response.content[0].text if response.content else ""
-        input_tokens = response.usage.input_tokens if response.usage else 0
-        output_tokens = response.usage.output_tokens if response.usage else 0
+        input_tokens = (
+            response.usage.input_tokens if response.usage else estimate_message_tokens(messages)
+        )
+        output_tokens = response.usage.output_tokens if response.usage else estimate_tokens(text)
         return text, input_tokens, output_tokens
 
     async def test_connection(self) -> bool:

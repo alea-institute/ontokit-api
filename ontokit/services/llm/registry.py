@@ -21,12 +21,19 @@ __all__ = [
     "DEFAULT_BASE_URLS",
     "DEFAULT_MODELS",
     "KNOWN_MODELS",
+    "LOCAL_PRIVATE_BASE_URLS",
     "LLMProviderType",
     "PROVIDER_DISPLAY_NAMES",
     "PROVIDER_ICON_NAMES",
     "PROVIDER_REQUIRES_KEY",
     "get_provider",
 ]
+
+LOCAL_PRIVATE_BASE_URLS: dict[LLMProviderType, str] = {
+    LLMProviderType.ollama: "http://localhost:11434/v1",
+    LLMProviderType.lmstudio: "http://localhost:1234/v1",
+    LLMProviderType.llamafile: "http://localhost:8080/v1",
+}
 
 DEFAULT_BASE_URLS: dict[LLMProviderType, str] = {
     LLMProviderType.openai: "https://api.openai.com/v1",
@@ -35,13 +42,11 @@ DEFAULT_BASE_URLS: dict[LLMProviderType, str] = {
     LLMProviderType.mistral: "https://api.mistral.ai/v1",
     LLMProviderType.cohere: "https://api.cohere.com/v2",
     LLMProviderType.meta_llama: "https://api.llama.com/v1",
-    LLMProviderType.ollama: "http://localhost:11434/v1",
-    LLMProviderType.lmstudio: "http://localhost:1234/v1",
     LLMProviderType.custom: "http://localhost:8080/v1",
     LLMProviderType.groq: "https://api.groq.com/openai/v1",
     LLMProviderType.xai: "https://api.x.ai/v1",
     LLMProviderType.github_models: "https://models.github.ai/inference",
-    LLMProviderType.llamafile: "http://localhost:8080/v1",
+    **LOCAL_PRIVATE_BASE_URLS,
 }
 
 DEFAULT_MODELS: dict[LLMProviderType, str] = {
@@ -176,17 +181,19 @@ KNOWN_MODELS: dict[LLMProviderType, list[dict[str, str]]] = {
 }
 
 # Providers handled by the single OpenAI-compatible client
-_OPENAI_COMPAT_PROVIDERS: frozenset[LLMProviderType] = frozenset({
-    LLMProviderType.openai,
-    LLMProviderType.mistral,
-    LLMProviderType.meta_llama,
-    LLMProviderType.ollama,
-    LLMProviderType.lmstudio,
-    LLMProviderType.custom,
-    LLMProviderType.groq,
-    LLMProviderType.xai,
-    LLMProviderType.llamafile,
-})
+_OPENAI_COMPAT_PROVIDERS: frozenset[LLMProviderType] = frozenset(
+    {
+        LLMProviderType.openai,
+        LLMProviderType.mistral,
+        LLMProviderType.meta_llama,
+        LLMProviderType.ollama,
+        LLMProviderType.lmstudio,
+        LLMProviderType.custom,
+        LLMProviderType.groq,
+        LLMProviderType.xai,
+        LLMProviderType.llamafile,
+    }
+)
 
 
 def get_provider(
@@ -221,9 +228,7 @@ def get_provider(
             provider_type = LLMProviderType(name)
         except ValueError:
             available = [p.value for p in LLMProviderType]
-            raise ValueError(
-                f"Unknown LLM provider: {name!r}. Available: {available}"
-            ) from None
+            raise ValueError(f"Unknown LLM provider: {name!r}. Available: {available}") from None
 
     # Resolve defaults
     resolved_base_url = base_url or DEFAULT_BASE_URLS.get(provider_type)
@@ -258,14 +263,14 @@ def get_provider(
 
     if provider_type in _OPENAI_COMPAT_PROVIDERS:
         from ontokit.services.llm.openai_compat import OpenAICompatProvider
-        from ontokit.services.llm.ssrf import _LOCAL_PROVIDER_VALUES
+        from ontokit.services.llm.ssrf import provider_allows_private_network
 
         return OpenAICompatProvider(
             api_key=api_key,
             base_url=resolved_base_url,
             model=resolved_model,
             # Local providers may point at private/loopback hosts by design.
-            allow_private=provider_type.value in _LOCAL_PROVIDER_VALUES,
+            allow_private=provider_allows_private_network(provider_type, resolved_base_url),
         )
 
     raise ValueError(f"No provider implementation for: {provider_type.value!r}")

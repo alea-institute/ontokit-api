@@ -44,14 +44,17 @@ from ontokit.schemas.llm import (
     MemberFlagsUpdate,
 )
 from ontokit.services.llm import (
+    PricingUnavailableError,
     check_llm_access,
     decrypt_secret,
     encrypt_secret,
     get_budget_status,
+    get_model_pricing,
     get_provider,
     get_usage_summary,
     validate_base_url,
 )
+from ontokit.services.llm.audit import finalize_llm_call, reserve_llm_call
 from ontokit.services.llm.rate_limiter import RATE_LIMITS
 from ontokit.services.llm.registry import (
     KNOWN_MODELS,
@@ -59,6 +62,7 @@ from ontokit.services.llm.registry import (
     PROVIDER_ICON_NAMES,
     PROVIDER_REQUIRES_KEY,
 )
+from ontokit.services.llm.ssrf import provider_allows_private_network
 
 logger = logging.getLogger(__name__)
 
@@ -79,9 +83,8 @@ _LOCAL_PROVIDERS = {
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
-async def _get_member_role(
-    db: AsyncSession, project_id: UUID, user_id: str
-) -> str | None:
+
+async def _get_member_role(db: AsyncSession, project_id: UUID, user_id: str) -> str | None:
     """Return the user's role in the project, or None if not a member."""
     result = await db.execute(
         select(ProjectMember).where(
@@ -121,9 +124,7 @@ async def _require_owner_or_admin(
     return role
 
 
-async def _get_llm_config(
-    db: AsyncSession, project_id: UUID
-) -> ProjectLLMConfig | None:
+async def _get_llm_config(db: AsyncSession, project_id: UUID) -> ProjectLLMConfig | None:
     """Fetch the project's LLM config row, or None if not configured."""
     result = await db.execute(
         select(ProjectLLMConfig).where(ProjectLLMConfig.project_id == project_id)
@@ -142,6 +143,16 @@ def _config_to_response(config: ProjectLLMConfig) -> LLMConfigResponse:
         monthly_budget_usd=config.monthly_budget_usd,
         daily_cap_usd=config.daily_cap_usd,
     )
+
+
+def _provider_connection_failure(provider: str, exc: Exception) -> dict[str, bool | str]:
+    """Return a stable failure without echoing untrusted upstream details."""
+    logger.warning(
+        "LLM provider connection test failed: provider=%s error_type=%s",
+        provider,
+        type(exc).__name__,
+    )
+    return {"success": False, "error": "Provider connection failed"}
 
 
 # ── Project-scoped LLM routes ─────────────────────────────────────────────────
@@ -191,11 +202,11 @@ async def update_llm_config(
     # private/local URLs are allowed; on a base_url-only update, fall back to the
     # stored provider so an existing local (e.g. Ollama) config isn't rejected.
     if data.base_url:
-        effective_provider = data.provider or (
-            LLMProviderType(config.provider) if config else None
-        )
+        effective_provider = data.provider or (LLMProviderType(config.provider) if config else None)
         allow_private = (
-            effective_provider in _LOCAL_PROVIDERS if effective_provider else False
+            provider_allows_private_network(effective_provider, data.base_url)
+            if effective_provider
+            else False
         )
         try:
             validate_base_url(data.base_url, allow_private=allow_private)
@@ -271,11 +282,11 @@ async def test_llm_connection(
     # Re-validate base_url immediately before the outbound call. SSRF validation
     # at config-write time is not sufficient on its own: DNS can be rebound
     # between write and use (TOCTOU), so we re-resolve and re-check here — the
-    # only outbound call this slice makes to a user-controlled endpoint. (Full
-    # connect-time IP pinning + redirect disabling across provider clients, and
-    # the PR-5 generation path, are tracked as follow-ups.)
+    # only outbound call this slice makes to a user-controlled endpoint. The
+    # provider transport also pins each connection to its validated numeric IP
+    # and disables redirects.
     if config.base_url:
-        allow_private = LLMProviderType(config.provider) in _LOCAL_PROVIDERS
+        allow_private = provider_allows_private_network(config.provider, config.base_url)
         try:
             validate_base_url(config.base_url, allow_private=allow_private)
         except ValueError as exc:
@@ -289,6 +300,50 @@ async def test_llm_connection(
     else:
         api_key = None
 
+    # A model-backed connection test spends a minimal request. Reserve that
+    # projected cost before the provider call so tests cannot bypass the same
+    # project cap enforced for ordinary paid work. BYO tests remain audited but
+    # are excluded from the project budget.
+    is_byo_key = bool(x_byo_api_key)
+    provider_is_local = config.provider in {provider.value for provider in _LOCAL_PROVIDERS}
+    input_tokens = 1 if config.model else 0
+    output_tokens = 1 if config.model else 0
+    cost_estimate = 0.0
+    if config.model and not provider_is_local:
+        try:
+            input_price, output_price = await get_model_pricing(config.model)
+            cost_estimate = input_tokens * input_price + output_tokens * output_price
+        except PricingUnavailableError:
+            if not is_byo_key:
+                return {
+                    "success": False,
+                    "error": "Pricing data is unavailable; connection test paused",
+                }
+
+    reservation_id, budget_reason = await reserve_llm_call(
+        db,
+        project_id=project_id,
+        config=config,
+        user_id=user.id,
+        model=config.model or "",
+        provider=config.provider,
+        endpoint="llm/connection-test",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_estimate_usd=cost_estimate,
+        is_byo_key=is_byo_key,
+    )
+    if reservation_id is None:
+        return {
+            "success": False,
+            "error": (
+                "Daily spending cap reached"
+                if budget_reason == "daily_cap_reached"
+                else "Monthly LLM budget exhausted"
+            ),
+        }
+
+    succeeded = False
     try:
         provider = get_provider(
             provider_type=config.provider,
@@ -298,16 +353,40 @@ async def test_llm_connection(
         )
         # 10-second timeout per spec
         await asyncio.wait_for(provider.test_connection(), timeout=10.0)
-        return {"success": True}
+        succeeded = True
+        response: dict[str, bool | str] = {"success": True}
     except TimeoutError:
-        return {"success": False, "error": "Connection timed out (10s limit)"}
+        response = {"success": False, "error": "Connection timed out (10s limit)"}
     except Exception as exc:
-        # Return the error message without leaking the key
-        error_msg = str(exc)
-        # Sanitize: remove any key-looking tokens from error output (Pitfall 4)
-        if api_key and api_key in error_msg:
-            error_msg = error_msg.replace(api_key, "[REDACTED]")
-        return {"success": False, "error": error_msg}
+        # Provider exceptions may echo response bodies, internal URLs, request
+        # headers, or credentials. Keep the user-facing contract generic and
+        # log only non-sensitive classification data.
+        response = _provider_connection_failure(config.provider, exc)
+
+    try:
+        await finalize_llm_call(
+            db,
+            reservation_id,
+            "llm/connection-test",
+            succeeded=succeeded,
+        )
+    except Exception as exc:
+        # The committed reservation still protects the cap and records an
+        # indeterminate outcome. Do not turn a bookkeeping outage into an
+        # automatic retry of provider work that has already happened.
+        logger.error(
+            "ALERT llm_audit_finalize_failed: project=%s provider=%s error_type=%s",
+            project_id,
+            config.provider,
+            type(exc).__name__,
+            extra={
+                "event": "llm_audit_finalize_failed",
+                "project_id": str(project_id),
+                "provider": config.provider,
+                "error_type": type(exc).__name__,
+            },
+        )
+    return response
 
 
 @router.get("/{project_id}/llm/usage", response_model=LLMUsageResponse)
@@ -365,7 +444,7 @@ async def get_llm_status(
             provider_type = provider_enum
             is_local = provider_enum in _LOCAL_PROVIDERS
             # Local providers (Ollama etc.) don't need an API key to be usable
-            configured = bool(config.api_key_encrypted) or is_local
+            configured = bool(config.model) and (bool(config.api_key_encrypted) or is_local)
 
     budget_exhausted = False
     monthly_spent_usd = 0.0

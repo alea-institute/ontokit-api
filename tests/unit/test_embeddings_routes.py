@@ -5,9 +5,20 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from uuid import uuid4
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 PROJECT_ID = "12345678-1234-5678-1234-567812345678"
+
+
+def test_semantic_search_rejects_anonymous_at_route(client: TestClient) -> None:
+    with patch("ontokit.api.routes.semantic_search.EmbeddingService") as service:
+        response = client.get(
+            f"/api/v1/projects/{PROJECT_ID}/search/semantic", params={"q": "contract"}
+        )
+    assert response.status_code == 401
+    service.return_value.semantic_search.assert_not_called()
 
 
 def _make_project_response(user_role: str = "owner") -> MagicMock:
@@ -114,6 +125,37 @@ class TestUpdateEmbeddingConfig:
         )
         assert response.status_code == 200
         assert response.json()["provider"] == "voyage"
+
+    @pytest.mark.asyncio
+    async def test_invalid_paid_provider_config_returns_typed_422(self) -> None:
+        from ontokit.api.routes.embeddings import update_embedding_config
+        from ontokit.schemas.embeddings import EmbeddingConfigUpdate
+
+        embed_service = MagicMock()
+        embed_service.update_config = AsyncMock(
+            side_effect=ValueError("OpenAI API key is required")
+        )
+
+        with (
+            patch(
+                "ontokit.api.routes.embeddings._verify_write_access",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(HTTPException) as raised,
+        ):
+            await update_embedding_config(
+                project_id=uuid4(),
+                data=EmbeddingConfigUpdate(
+                    provider="openai",
+                    model_name="text-embedding-3-small",
+                ),
+                db=AsyncMock(),
+                embed_service=embed_service,
+                user=MagicMock(),
+            )
+
+        assert raised.value.status_code == 422
+        assert raised.value.detail == "OpenAI API key is required"
 
 
 class TestGenerateEmbeddings:

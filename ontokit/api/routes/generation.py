@@ -26,6 +26,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.routes.llm import _LOCAL_PROVIDERS
 from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
 from ontokit.models.llm_config import ProjectLLMConfig
@@ -39,13 +40,16 @@ from ontokit.schemas.generation import (
 from ontokit.services.context_assembler import OntologyContextAssembler
 from ontokit.services.duplicate_check_service import DuplicateCheckService
 from ontokit.services.llm import (
+    BudgetLimits,
+    LLMBudgetExceeded,
+    MeteredLLMProvider,
+    PricingUnavailableError,
     check_budget,
     check_llm_access,
     check_rate_limit,
     decrypt_secret,
     get_model_pricing,
     get_provider,
-    log_llm_call,
 )
 from ontokit.services.llm.rate_limiter import FAIL_OPEN_EVENT
 from ontokit.services.suggestion_generation_service import SuggestionGenerationService
@@ -134,7 +138,8 @@ async def generate_suggestions(
     3. Budget — monthly + daily cap enforcement
     4. BYO-key routing — X-BYO-API-Key overrides stored project key
     5. Suggestion generation — context → LLM → parse → validate → dedup
-    6. Audit log — token usage recorded without prompt/response content
+    6. Audit log — spend reserved atomically before provider actuation and
+       reconciled to actual token usage without prompt/response content
 
     Returns typed suggestions with embedded validation status, duplicate verdicts,
     and per-suggestion model + prompt-template provenance (metadata only — the raw
@@ -166,6 +171,24 @@ async def generate_suggestions(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No model selected for this project's LLM configuration. Choose one in project settings.",
         )
+    budget_limits = BudgetLimits(
+        monthly_budget_usd=config.monthly_budget_usd,  # pyright: ignore[reportArgumentType]
+        daily_cap_usd=config.daily_cap_usd,  # pyright: ignore[reportArgumentType]
+    )
+
+    # Resolve trustworthy pricing before any provider call. Unknown models and
+    # pricing outages fail closed so the dollar budget cannot silently become
+    # an unlimited $0 ledger.
+    if config.provider in _LOCAL_PROVIDERS:
+        input_cost_per_tok, output_cost_per_tok = (0.0, 0.0)
+    else:
+        try:
+            input_cost_per_tok, output_cost_per_tok = await get_model_pricing(config.model)
+        except PricingUnavailableError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Pricing data is unavailable for the selected model; generation is paused.",
+            ) from exc
 
     # 4. Rate limit check (fails open if Redis unavailable — DB budget in step 5
     #    is the non-fail-open backstop). Both fail-open paths (pool absent here,
@@ -198,7 +221,7 @@ async def generate_suggestions(
         )
 
     # 5. Budget check
-    within_budget, budget_reason = await check_budget(db, project_id, config)
+    within_budget, budget_reason = await check_budget(db, project_id, budget_limits)
     if not within_budget:
         detail = (
             "Daily spending cap reached for this project."
@@ -228,6 +251,18 @@ async def generate_suggestions(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid LLM provider configuration: {exc}",
         ) from exc
+    provider = MeteredLLMProvider(
+        provider,
+        project_id=project_id,
+        config=budget_limits,
+        user_id=user.id,
+        model=config.model,
+        provider_name=str(config.provider),
+        endpoint="llm/generate-suggestions",
+        input_cost_per_token=input_cost_per_tok,
+        output_cost_per_token=output_cost_per_tok,
+        is_byo_key=bool(x_byo_api_key),
+    )
 
     # 8. Detect project namespace for IRI minting (VALID-06 / D-12)
     project_namespace = await detect_project_namespace(
@@ -257,6 +292,13 @@ async def generate_suggestions(
             project_namespace=project_namespace,
             model_id=config.model,
         )
+    except LLMBudgetExceeded as exc:
+        detail = (
+            "Daily spending cap reached for this project."
+            if exc.reason == "daily_cap_reached"
+            else "Monthly LLM budget exhausted for this project."
+        )
+        raise HTTPException(status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=detail) from exc
     except ValueError as exc:
         # Raised by OntologyContextAssembler when class_iri not found in index
         raise HTTPException(
@@ -279,7 +321,8 @@ async def generate_suggestions(
         ):
             logger.warning(
                 "generate_suggestions: provider auth error for project %s: %s",
-                project_id, error_msg,
+                project_id,
+                error_msg,
             )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
@@ -292,7 +335,8 @@ async def generate_suggestions(
         if isinstance(exc, TimeoutError | ConnectionError):
             logger.warning(
                 "generate_suggestions: transient provider error for project %s: %s",
-                project_id, error_msg,
+                project_id,
+                error_msg,
             )
             return GenerateSuggestionsResponse(
                 suggestions=[],
@@ -305,34 +349,11 @@ async def generate_suggestions(
         # Let it surface as a 500 so regressions are visible (review MEDIUM #5).
         logger.error(
             "generate_suggestions: unexpected error for project %s: %s",
-            project_id, error_msg, exc_info=True,
+            project_id,
+            error_msg,
+            exc_info=True,
         )
         raise
-
-    # 11. Audit log — metadata only, never prompt/response content (D-08)
-    try:
-        model_id = config.model or ""
-        input_cost_per_tok, output_cost_per_tok = await get_model_pricing(model_id)
-        cost_estimate = (
-            response.input_tokens * input_cost_per_tok
-            + response.output_tokens * output_cost_per_tok
-        )
-        await log_llm_call(
-            db=db,
-            project_id=str(project_id),
-            user_id=user.id,
-            model=model_id,
-            provider=str(config.provider),
-            endpoint="llm/generate-suggestions",
-            input_tokens=response.input_tokens,
-            output_tokens=response.output_tokens,
-            cost_estimate_usd=cost_estimate,
-            is_byo_key=bool(x_byo_api_key),
-        )
-        await db.commit()
-    except Exception as exc:
-        logger.warning("generate_suggestions: audit log failed: %s", exc)
-        # Don't fail the request if audit logging fails
 
     return response
 

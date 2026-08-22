@@ -10,18 +10,27 @@ import logging
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.models.llm_config import LLMAuditLog
 from ontokit.schemas.llm import LLMUsageResponse, LLMUserUsage
+from ontokit.services.llm.budget import BudgetConfig, lock_and_check_budget
 
 logger = logging.getLogger(__name__)
+
+_RESERVED_SUFFIX = ":reserved"
+_FAILED_SUFFIX = ":failed"
+_MAX_ENDPOINT_LENGTH = 200
+
+
+def _reservation_endpoint(endpoint: str, suffix: str) -> str:
+    return f"{endpoint[: _MAX_ENDPOINT_LENGTH - len(suffix)]}{suffix}"
 
 
 async def log_llm_call(
     db: AsyncSession,
-    project_id: str,
+    project_id: str | None,
     user_id: str,
     model: str,
     provider: str,
@@ -37,7 +46,10 @@ async def log_llm_call(
 
     Args:
         db: Async SQLAlchemy session.
-        project_id: UUID string for the project.
+        project_id: UUID string for the project, or None for instance-level
+            calls with no owning project (KTD20 — e.g. PR Party brief
+            generation). Null-project rows are excluded from every per-project
+            budget query, which filters on ``project_id``.
         user_id: The authenticated user ID.
         model: Model identifier used (e.g. "gpt-4o").
         provider: Provider name (e.g. "openai").
@@ -65,6 +77,82 @@ async def log_llm_call(
     db.add(entry)
     await db.flush()
     return entry
+
+
+async def reserve_llm_call(
+    db: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    config: BudgetConfig,
+    user_id: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost_estimate_usd: float,
+    is_byo_key: bool = False,
+) -> tuple[uuid.UUID | None, str | None]:
+    """Atomically reserve budget and persist an indeterminate call receipt.
+
+    Committing the receipt releases the per-project transaction lock before the
+    network call. A crash or cancellation therefore leaves a conservative
+    ``:reserved`` record instead of an invisible charge and retry window.
+    """
+    if not is_byo_key:
+        within_budget, reason = await lock_and_check_budget(
+            db,
+            project_id,
+            config,
+            additional_cost_usd=cost_estimate_usd,
+        )
+        if not within_budget:
+            await db.rollback()
+            return None, reason
+
+    entry = await log_llm_call(
+        db=db,
+        project_id=str(project_id),
+        user_id=user_id,
+        model=model,
+        provider=provider,
+        endpoint=_reservation_endpoint(endpoint, _RESERVED_SUFFIX),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_estimate_usd=cost_estimate_usd,
+        is_byo_key=is_byo_key,
+    )
+    await db.commit()
+    return entry.id, None
+
+
+async def finalize_llm_call(
+    db: AsyncSession,
+    reservation_id: uuid.UUID,
+    endpoint: str,
+    *,
+    succeeded: bool,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cost_estimate_usd: float | None = None,
+) -> None:
+    """Mark a committed reservation successful or failed without losing spend.
+
+    Successful calls may replace the conservative reservation with provider-
+    reported usage. Failed and indeterminate calls retain the projected amount
+    because the provider may still have charged for work before failing.
+    """
+    final_endpoint = endpoint if succeeded else _reservation_endpoint(endpoint, _FAILED_SUFFIX)
+    values: dict[str, str | int | float] = {"endpoint": final_endpoint}
+    if succeeded:
+        if input_tokens is not None:
+            values["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            values["output_tokens"] = output_tokens
+        if cost_estimate_usd is not None:
+            values["cost_estimate_usd"] = cost_estimate_usd
+    await db.execute(update(LLMAuditLog).where(LLMAuditLog.id == reservation_id).values(**values))
+    await db.commit()
 
 
 async def get_usage_summary(db: AsyncSession, project_id: str) -> LLMUsageResponse:

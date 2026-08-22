@@ -16,9 +16,15 @@ Provides:
 
 from ontokit.services.llm.audit import get_usage_summary, log_llm_call
 from ontokit.services.llm.base import LLMProvider
-from ontokit.services.llm.budget import check_budget, get_budget_status, get_monthly_spend
+from ontokit.services.llm.budget import (
+    BudgetLimits,
+    check_budget,
+    get_budget_status,
+    get_monthly_spend,
+)
 from ontokit.services.llm.crypto import decrypt_secret, encrypt_secret, rotate_secret
-from ontokit.services.llm.pricing import get_model_pricing
+from ontokit.services.llm.metering import LLMBudgetExceeded, MeteredLLMProvider
+from ontokit.services.llm.pricing import PricingUnavailableError, get_model_pricing
 from ontokit.services.llm.rate_limiter import check_rate_limit, get_remaining_calls
 from ontokit.services.llm.registry import get_provider
 from ontokit.services.llm.role_gates import check_llm_access
@@ -29,7 +35,11 @@ from ontokit.services.llm.ssrf import (
 )
 
 __all__ = [
+    "BudgetLimits",
     "LLMProvider",
+    "LLMBudgetExceeded",
+    "MeteredLLMProvider",
+    "PricingUnavailableError",
     "check_budget",
     "check_llm_access",
     "check_rate_limit",

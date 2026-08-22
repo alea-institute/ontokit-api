@@ -25,6 +25,7 @@ import logging
 import math
 import re
 from typing import Any, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,6 +44,20 @@ from ontokit.services.llm.prompts import PROMPT_BUILDERS
 from ontokit.services.validation_service import ValidationService, mint_iri
 
 logger = logging.getLogger(__name__)
+
+_FORBIDDEN_IRI_CHARS = frozenset('<>"{}|\\^`')
+_VALIDATION_UNAVAILABLE_EVENT = "suggestion_validation_unavailable"
+_DEDUP_UNAVAILABLE_EVENT = "suggestion_dedup_unavailable"
+
+
+def _is_safe_iri(value: str) -> bool:
+    """Return whether a generated absolute IRI/CURIE is safe to serialize."""
+    return bool(
+        value
+        and not any(char.isspace() or char in _FORBIDDEN_IRI_CHARS for char in value)
+        and urlsplit(value).scheme.lower()
+        in {"http", "https", "urn", "rdf", "rdfs", "owl", "skos", "dc", "dcterms"}
+    )
 
 
 class SuggestionGenerationService:
@@ -149,8 +164,20 @@ class SuggestionGenerationService:
                     )
                 except Exception as exc:
                     logger.warning(
-                        "Validation failed for %s suggestion %r: %s",
-                        suggestion_type, parsed["label"], exc,
+                        "ALERT %s: suggestion validation unavailable — "
+                        "project=%s branch=%s type=%s error_type=%s",
+                        _VALIDATION_UNAVAILABLE_EVENT,
+                        project_id,
+                        branch,
+                        suggestion_type,
+                        type(exc).__name__,
+                        extra={
+                            "event": _VALIDATION_UNAVAILABLE_EVENT,
+                            "project_id": str(project_id),
+                            "branch": branch,
+                            "suggestion_type": suggestion_type,
+                            "error_type": type(exc).__name__,
+                        },
                     )
 
             # Duplicate check (D-09) — SEQUENTIAL, one await at a time
@@ -172,8 +199,20 @@ class SuggestionGenerationService:
                     # Dedup infra failure fails soft to "pass" — logged distinctly
                     # so ops can alert on silently-disabled duplicate blocking.
                     logger.warning(
-                        "Dedup check unavailable for %s suggestion %r — allowing (verdict=pass): %s",
-                        suggestion_type, parsed["dedup_label"], exc,
+                        "ALERT %s: suggestion dedup unavailable — allowing "
+                        "(verdict=pass) project=%s branch=%s type=%s error_type=%s",
+                        _DEDUP_UNAVAILABLE_EVENT,
+                        project_id,
+                        branch,
+                        suggestion_type,
+                        type(exc).__name__,
+                        extra={
+                            "event": _DEDUP_UNAVAILABLE_EVENT,
+                            "project_id": str(project_id),
+                            "branch": branch,
+                            "suggestion_type": suggestion_type,
+                            "error_type": type(exc).__name__,
+                        },
                     )
 
             # Build final suggestion (GEN-09: provenance="llm-proposed")
@@ -278,6 +317,8 @@ class SuggestionGenerationService:
             # is realized on accept by the web layer, which reads `iri` as the
             # parent to link.
             existing = str(raw.get("iri") or "").strip()
+            if existing and not _is_safe_iri(existing):
+                return None
             parent_iri = existing or mint_iri(project_namespace)
             return {
                 **base,
@@ -315,6 +356,15 @@ class SuggestionGenerationService:
                         message="edge target must reference an existing entity (target_iri was null)",
                     )
                 )
+            elif not _is_safe_iri(target_iri):
+                errors.append(
+                    ValidationError(
+                        field="target_iri",
+                        code="GEN-05",
+                        message="edge target must be a safe absolute IRI",
+                    )
+                )
+                target_iri = None
             return {
                 **base,
                 # The edge's identity is its target entity; fall back to a minted
@@ -330,6 +380,8 @@ class SuggestionGenerationService:
             property_iri = str(raw.get("property_iri") or "").strip()
             value = str(raw.get("value") or "").strip()
             if not property_iri or not value:
+                return None
+            if not _is_safe_iri(property_iri):
                 return None
             lang_raw = raw.get("lang")
             lang = str(lang_raw).strip() or None if lang_raw is not None else None
@@ -374,18 +426,6 @@ class SuggestionGenerationService:
             return []
         except json.JSONDecodeError:
             pass
-
-        # Last resort: find the first {...} block via regex
-        m = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if m:
-            try:
-                data = json.loads(m.group())
-                if isinstance(data, dict):
-                    return cast(list[dict[str, Any]], data.get("suggestions", []))
-                if isinstance(data, list):
-                    return cast(list[dict[str, Any]], data)
-            except json.JSONDecodeError:
-                pass
 
         logger.warning("_parse_json_safe: could not parse LLM output as JSON")
         return []

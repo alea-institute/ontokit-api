@@ -19,6 +19,8 @@ from ontokit.services.llm.budget import (
     get_budget_status,
     get_daily_spend,
     get_monthly_spend,
+    lock_and_check_budget,
+    project_budget_lock_key,
 )
 
 
@@ -108,6 +110,38 @@ async def test_within_both_limits_allowed():
     db = _db([2.0, 50.0])  # daily spend, then monthly spend
     allowed, reason = await check_budget(db, "p", _config(monthly=100.0, daily=10.0))
     assert (allowed, reason) == (True, None)
+
+
+@pytest.mark.asyncio
+async def test_projected_cost_cannot_cross_monthly_budget():
+    db = _db([9.5])
+    allowed, reason = await check_budget(
+        db,
+        uuid.UUID("11111111-1111-1111-1111-111111111111"),
+        _config(monthly=10.0, daily=None),
+        additional_cost_usd=0.51,
+    )
+    assert (allowed, reason) == (False, "budget_exhausted")
+
+
+@pytest.mark.asyncio
+async def test_budget_reservation_locks_before_reading_spend():
+    project_id = uuid.UUID("11111111-1111-1111-1111-111111111111")
+    db = _db([0.0, 1.0])
+
+    allowed, reason = await lock_and_check_budget(
+        db,
+        project_id,
+        _config(monthly=10.0, daily=None),
+        additional_cost_usd=1.0,
+    )
+
+    assert (allowed, reason) == (True, None)
+    assert db.execute.await_count == 2
+    lock_query = db.execute.await_args_list[0].args[0]
+    compiled = lock_query.compile(compile_kwargs={"literal_binds": True})
+    assert "pg_advisory_xact_lock" in str(compiled)
+    assert str(project_budget_lock_key(project_id)) in str(compiled)
 
 
 @pytest.mark.asyncio

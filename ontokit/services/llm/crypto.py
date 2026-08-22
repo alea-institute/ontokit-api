@@ -1,7 +1,8 @@
 """Fernet symmetric encryption helpers for LLM API key storage.
 
-Uses the same key-derivation pattern as embedding_service.py — both derive from
-settings.secret_key via SHA-256 so keys are consistent across services.
+Both LLM and embedding provider keys use a domain-separated HKDF-SHA256 key
+derived from ``settings.secret_key``. Ciphertext written by the former raw
+SHA-256 derivation remains decryptable so operators can migrate it in place.
 
 Key rotation is supported via ``MultiFernet``: the *current* ``SECRET_KEY``
 always encrypts, while any retired keys listed in ``SECRET_KEY_PREVIOUS`` remain
@@ -18,6 +19,8 @@ import hashlib
 import logging
 
 from cryptography.fernet import Fernet, MultiFernet
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +30,22 @@ logger = logging.getLogger(__name__)
 _INSECURE_DEFAULT_SECRET = "change-me-in-production"  # noqa: S105 (not a real secret)
 
 
+_KEY_DOMAIN = b"ontokit:llm-provider-key:v2"
+
+
 def _derive_fernet(secret: str) -> Fernet:
-    """Derive a Fernet key from an application secret via SHA-256."""
+    """Derive a domain-separated Fernet key with HKDF-SHA256."""
+    key = HKDF(
+        algorithm=hashes.SHA256(),
+        length=32,
+        salt=None,
+        info=_KEY_DOMAIN,
+    ).derive(secret.encode())
+    return Fernet(base64.urlsafe_b64encode(key))
+
+
+def _derive_legacy_fernet(secret: str) -> Fernet:
+    """Read ciphertext written by the pre-HKDF raw-SHA256 derivation."""
     key = hashlib.sha256(secret.encode()).digest()
     return Fernet(base64.urlsafe_b64encode(key))
 
@@ -40,7 +57,9 @@ def _previous_secrets() -> list[str]:
     raw = settings.secret_key_previous or ""
     # Ignore the shipped default even if it leaks into the rotation list —
     # a publicly-known key must never be trusted to authenticate ciphertext.
-    return [s.strip() for s in raw.split(",") if s.strip() and s.strip() != _INSECURE_DEFAULT_SECRET]
+    return [
+        s.strip() for s in raw.split(",") if s.strip() and s.strip() != _INSECURE_DEFAULT_SECRET
+    ]
 
 
 def _get_fernet() -> MultiFernet:
@@ -72,8 +91,17 @@ def _get_fernet() -> MultiFernet:
             "development only — never in a shared or deployed environment."
         )
 
-    # Current key first (used for encryption), retired keys after (decrypt-only).
-    keys = [_derive_fernet(settings.secret_key), *(_derive_fernet(s) for s in _previous_secrets())]
+    previous = _previous_secrets()
+    # Current HKDF key first (used for encryption). Remaining entries are
+    # decryption-only: rotated HKDF keys followed by the pre-HKDF derivation for
+    # the current and retained secrets. ``rotate_secret`` migrates any fallback
+    # ciphertext onto the first/current key.
+    keys = [
+        _derive_fernet(settings.secret_key),
+        *(_derive_fernet(secret) for secret in previous),
+        _derive_legacy_fernet(settings.secret_key),
+        *(_derive_legacy_fernet(secret) for secret in previous),
+    ]
     return MultiFernet(keys)
 
 
@@ -98,8 +126,9 @@ def decrypt_secret(ciphertext: str) -> str:
 def rotate_secret(ciphertext: str) -> str:
     """Re-encrypt ciphertext under the current SECRET_KEY.
 
-    ``MultiFernet.rotate`` decrypts with whichever key still validates (current
-    or retired) and re-encrypts under the current key, refreshing the timestamp.
+    ``MultiFernet.rotate`` decrypts with whichever key still validates (current,
+    retired, or legacy-derived) and re-encrypts under the current key while
+    preserving the original token timestamp.
     Run stored provider-key ciphertext through this after a rotation to migrate
     it off a retired key, then drop that key from ``SECRET_KEY_PREVIOUS``.
     """

@@ -78,7 +78,13 @@ async def update_embedding_config(
 ) -> EmbeddingConfig:
     """Update embedding configuration."""
     await _verify_write_access(project_id, db, user)
-    return await embed_service.update_config(project_id, data)
+    try:
+        return await embed_service.update_config(project_id, data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from None
 
 
 @router.post(
@@ -98,12 +104,11 @@ async def generate_embeddings(
     git = get_git_service()
     resolved_branch = branch or git.get_default_branch(project_id)
 
-    # Check for an existing in-progress job for this project/branch
+    # Cap in-flight work per project, regardless of caller-selected branch.
     active_q = (
         select(EmbeddingJob)
         .where(
             EmbeddingJob.project_id == project_id,
-            EmbeddingJob.branch == resolved_branch,
             EmbeddingJob.status.in_(["pending", "running"]),
         )
         .limit(1)
