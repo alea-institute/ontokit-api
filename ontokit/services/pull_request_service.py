@@ -253,6 +253,21 @@ class PullRequestService:
                         detail=f"Target branch '{pr_create.target_branch}' does not exist",
                     )
 
+                existing_result = await self.db.execute(
+                    select(PullRequest.id)
+                    .where(
+                        PullRequest.project_id == project_id,
+                        PullRequest.source_branch == pr_create.source_branch,
+                        PullRequest.status == PRStatus.OPEN.value,
+                    )
+                    .limit(1)
+                )
+                if existing_result.scalar_one_or_none() is not None:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="An open pull request already exists for this source branch",
+                    )
+
                 max_number_result = await self.db.execute(
                     select(func.max(PullRequest.pr_number)).where(
                         PullRequest.project_id == project_id
