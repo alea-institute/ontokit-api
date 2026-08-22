@@ -38,11 +38,14 @@ class CohereProvider(LLMProvider):
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> tuple[str, int, int]:
         model = kwargs.pop("model", self.model or "command-a-03-2025")
+        max_tokens = kwargs.pop("max_tokens", None)
 
         body: dict[str, Any] = {
             "model": model,
             "messages": messages,
         }
+        if max_tokens is not None:
+            body["max_tokens"] = max_tokens
 
         url = f"{self._base}/chat"
         async with secure_async_client(timeout=120) as client:

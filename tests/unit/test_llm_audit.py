@@ -129,3 +129,29 @@ async def test_finalize_preserves_failed_outcome_without_error_detail() -> None:
     statement = db.execute.await_args.args[0]
     assert statement.compile().params["endpoint"] == "embeddings/test:failed"
     db.commit.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_finalize_success_reconciles_reservation_to_actual_usage() -> None:
+    db = AsyncMock()
+    reservation_id = uuid.uuid4()
+
+    await finalize_llm_call(
+        db,
+        reservation_id,
+        "llm/generate-suggestions",
+        succeeded=True,
+        input_tokens=12,
+        output_tokens=7,
+        cost_estimate_usd=0.125,
+    )
+
+    statement = db.execute.await_args.args[0]
+    assert statement.compile().params == {
+        "endpoint": "llm/generate-suggestions",
+        "input_tokens": 12,
+        "output_tokens": 7,
+        "cost_estimate_usd": 0.125,
+        "id_1": reservation_id,
+    }
+    db.commit.assert_awaited_once()

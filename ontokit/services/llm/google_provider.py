@@ -66,6 +66,7 @@ class GoogleProvider(LLMProvider):
 
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> tuple[str, int, int]:
         model = kwargs.pop("model", self.model or "gemini-2.0-flash")
+        max_tokens = kwargs.pop("max_tokens", None)
 
         system_parts: list[str] = []
         contents: list[dict[str, Any]] = []
@@ -81,6 +82,8 @@ class GoogleProvider(LLMProvider):
         body: dict[str, Any] = {"contents": contents}
         if system_parts:
             body["system_instruction"] = {"parts": [{"text": "\n".join(system_parts)}]}
+        if max_tokens is not None:
+            body["generationConfig"] = {"maxOutputTokens": max_tokens}
 
         url = f"{self._base}/models/{model}:generateContent"
         data = await self._post_with_retry(url, body)

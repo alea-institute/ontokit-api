@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import blake2b
 from typing import Protocol, TypedDict
@@ -37,6 +38,14 @@ class BudgetStatus(TypedDict):
 
 class BudgetConfig(Protocol):
     """The cap fields shared by generation and embedding configurations."""
+
+    monthly_budget_usd: float | None
+    daily_cap_usd: float | None
+
+
+@dataclass
+class BudgetLimits:
+    """Session-independent snapshot of the two project spend caps."""
 
     monthly_budget_usd: float | None
     daily_cap_usd: float | None
@@ -113,8 +122,7 @@ async def check_budget(
     if config.daily_cap_usd is not None:
         daily_spend = await get_daily_spend(db, project_id)
         if daily_spend >= config.daily_cap_usd or (
-            additional_cost_usd > 0
-            and daily_spend + additional_cost_usd > config.daily_cap_usd
+            additional_cost_usd > 0 and daily_spend + additional_cost_usd > config.daily_cap_usd
         ):
             return (False, "daily_cap_reached")
 

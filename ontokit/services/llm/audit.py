@@ -132,14 +132,26 @@ async def finalize_llm_call(
     endpoint: str,
     *,
     succeeded: bool,
+    input_tokens: int | None = None,
+    output_tokens: int | None = None,
+    cost_estimate_usd: float | None = None,
 ) -> None:
-    """Mark a committed reservation successful or failed without losing spend."""
+    """Mark a committed reservation successful or failed without losing spend.
+
+    Successful calls may replace the conservative reservation with provider-
+    reported usage. Failed and indeterminate calls retain the projected amount
+    because the provider may still have charged for work before failing.
+    """
     final_endpoint = endpoint if succeeded else _reservation_endpoint(endpoint, _FAILED_SUFFIX)
-    await db.execute(
-        update(LLMAuditLog)
-        .where(LLMAuditLog.id == reservation_id)
-        .values(endpoint=final_endpoint)
-    )
+    values: dict[str, str | int | float] = {"endpoint": final_endpoint}
+    if succeeded:
+        if input_tokens is not None:
+            values["input_tokens"] = input_tokens
+        if output_tokens is not None:
+            values["output_tokens"] = output_tokens
+        if cost_estimate_usd is not None:
+            values["cost_estimate_usd"] = cost_estimate_usd
+    await db.execute(update(LLMAuditLog).where(LLMAuditLog.id == reservation_id).values(**values))
     await db.commit()
 
 
