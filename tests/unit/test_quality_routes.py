@@ -187,6 +187,7 @@ class TestTriggerConsistencyCheck:
         assert "quality_job_status" in set_args[0][0]
         assert set_args[0][1] == "pending"
 
+    @patch("ontokit.api.routes.quality._enqueued_job_exists", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
@@ -197,6 +198,7 @@ class TestTriggerConsistencyCheck:
         mock_resolve: AsyncMock,
         mock_pool_fn: AsyncMock,
         mock_redis_fn: MagicMock,
+        mock_exists: AsyncMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
         """Returns 500 and cleans up pending key when enqueue returns None."""
@@ -207,6 +209,7 @@ class TestTriggerConsistencyCheck:
         mock_pool = AsyncMock()
         mock_pool.enqueue_job.return_value = None
         mock_pool_fn.return_value = mock_pool
+        mock_exists.return_value = False
 
         mock_redis = AsyncMock()
         mock_redis_fn.return_value = mock_redis
@@ -611,6 +614,7 @@ class TestDetectDuplicates:
         # The job_id returned to the client must match what was enqueued
         assert data["job_id"] == call_args[4]
 
+    @patch("ontokit.api.routes.quality._enqueued_job_exists", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
@@ -621,6 +625,7 @@ class TestDetectDuplicates:
         mock_resolve: AsyncMock,
         mock_pool_fn: AsyncMock,
         mock_redis_fn: MagicMock,
+        mock_exists: AsyncMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
         """Returns 500 and cleans up pending key when enqueue returns None."""
@@ -631,6 +636,7 @@ class TestDetectDuplicates:
         mock_pool = AsyncMock()
         mock_pool.enqueue_job.return_value = None
         mock_pool_fn.return_value = mock_pool
+        mock_exists.return_value = False
 
         mock_redis = AsyncMock()
         mock_redis_fn.return_value = mock_redis

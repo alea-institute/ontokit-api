@@ -92,11 +92,18 @@ class TestRunConsistencyCheckTask:
 
         # Verify Redis caching
         redis = ctx["redis"]
-        assert redis.set.await_count == 2  # cache_key + job_key
+        assert redis.set.await_count == 3  # pending refresh + cache_key + job_key
         assert redis.publish.await_count == 2  # started + complete
-        redis.eval.assert_awaited_once()
-        assert "quality_job_active:consistency" in redis.eval.await_args.args[2]
-        assert redis.eval.await_args.args[3] == JOB_ID
+        assert redis.eval.await_count == 2  # renew + release
+        assert redis.eval.await_args_list[0].args[2:] == (
+            f"quality_job_active:{PROJECT_ID}",
+            JOB_ID,
+            1800,
+        )
+        assert redis.eval.await_args_list[1].args[2:] == (
+            f"quality_job_active:{PROJECT_ID}",
+            JOB_ID,
+        )
 
     @pytest.mark.asyncio
     @patch("ontokit.worker.get_storage_service")
@@ -149,7 +156,7 @@ class TestRunConsistencyCheckTask:
         assert "not found" not in failure_status
         assert "not found" not in failure_event
         assert "Quality job failed" in failure_event
-        redis.eval.assert_awaited_once()
+        assert redis.eval.await_count == 2
 
     @pytest.mark.asyncio
     async def test_project_no_ontology(self) -> None:
@@ -221,7 +228,7 @@ class TestRunDuplicateDetectionTask:
         assert "secret" not in failure_status
         assert "secret" not in failure_event
         assert "Quality job failed" in failure_event
-        redis.eval.assert_awaited_once()
+        assert redis.eval.await_count == 2
 
     @pytest.mark.asyncio
     @patch(
@@ -246,11 +253,18 @@ class TestRunDuplicateDetectionTask:
         assert result["job_id"] == JOB_ID
 
         redis = ctx["redis"]
-        assert redis.set.await_count == 2
+        assert redis.set.await_count == 3
         assert redis.publish.await_count == 2
-        redis.eval.assert_awaited_once()
-        assert "quality_job_active:duplicates" in redis.eval.await_args.args[2]
-        assert redis.eval.await_args.args[3] == JOB_ID
+        assert redis.eval.await_count == 2
+        assert redis.eval.await_args_list[0].args[2:] == (
+            f"quality_job_active:{PROJECT_ID}",
+            JOB_ID,
+            1800,
+        )
+        assert redis.eval.await_args_list[1].args[2:] == (
+            f"quality_job_active:{PROJECT_ID}",
+            JOB_ID,
+        )
 
     @pytest.mark.asyncio
     @patch(

@@ -1,5 +1,6 @@
 """ARQ worker for background task processing."""
 
+import asyncio
 import json
 import logging
 from collections.abc import Set as AbstractSet
@@ -24,7 +25,7 @@ from ontokit.core.constants import (
     REMOTE_SYNC_UPDATES_CHANNEL,
 )
 from ontokit.core.encryption import decrypt_token
-from ontokit.core.redis_lock import release_owned_lock
+from ontokit.core.redis_lock import release_owned_lock, renew_or_claim_owned_lock
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
@@ -664,8 +665,23 @@ async def run_consistency_check_task(
     redis: ArqRedis = ctx["redis"]
 
     project_uuid = UUID(project_id)
+    terminal = False
 
     try:
+        if job_id and not await renew_or_claim_owned_lock(
+            redis,
+            f"quality_job_active:{project_id}",
+            job_id,
+            ttl_seconds=QUALITY_JOB_TTL_SECONDS,
+        ):
+            raise RuntimeError("A newer quality job owns this project's execution slot")
+        if job_id:
+            await redis.set(
+                f"quality_job_status:{project_id}:{job_id}",
+                "pending",
+                ex=QUALITY_JOB_TTL_SECONDS,
+            )
+
         # Notify start
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
@@ -692,7 +708,6 @@ async def run_consistency_check_task(
             raise ValueError(f"Project {project_id} has no ontology file")
 
         # Load ontology content and parse in a subprocess (CPU-bound, holds GIL)
-        import asyncio
         from concurrent.futures import ProcessPoolExecutor
 
         git_service = BareGitRepositoryService()
@@ -754,6 +769,7 @@ async def run_consistency_check_task(
             ),
         )
 
+        terminal = True
         return {
             "job_id": job_id,
             "issues_found": len(check_result.issues),
@@ -761,6 +777,7 @@ async def run_consistency_check_task(
         }
 
     except Exception as e:
+        terminal = True
         logger.exception(
             "Consistency check failed for project %s branch %s: %s",
             project_id,
@@ -788,11 +805,11 @@ async def run_consistency_check_task(
         )
         raise
     finally:
-        if job_id:
+        if job_id and terminal:
             try:
                 await release_owned_lock(
                     redis,
-                    f"quality_job_active:consistency:{project_id}:{branch}",
+                    f"quality_job_active:{project_id}",
                     job_id,
                 )
             except Exception:
@@ -816,8 +833,23 @@ async def run_duplicate_detection_task(
     redis: ArqRedis = ctx["redis"]
 
     project_uuid = UUID(project_id)
+    terminal = False
 
     try:
+        if job_id and not await renew_or_claim_owned_lock(
+            redis,
+            f"quality_job_active:{project_id}",
+            job_id,
+            ttl_seconds=QUALITY_JOB_TTL_SECONDS,
+        ):
+            raise RuntimeError("A newer quality job owns this project's execution slot")
+        if job_id:
+            await redis.set(
+                f"duplicates_job_status:{project_id}:{job_id}",
+                "pending",
+                ex=QUALITY_JOB_TTL_SECONDS,
+            )
+
         # Notify start
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
@@ -866,6 +898,7 @@ async def run_duplicate_detection_task(
             ),
         )
 
+        terminal = True
         return {
             "job_id": job_id,
             "clusters_found": len(detection_result.clusters),
@@ -873,6 +906,7 @@ async def run_duplicate_detection_task(
         }
 
     except Exception as e:
+        terminal = True
         logger.exception(
             "Duplicate detection failed for project %s branch %s: %s",
             project_id,
@@ -900,11 +934,11 @@ async def run_duplicate_detection_task(
         )
         raise
     finally:
-        if job_id:
+        if job_id and terminal:
             try:
                 await release_owned_lock(
                     redis,
-                    f"quality_job_active:duplicates:{project_id}:{branch}",
+                    f"quality_job_active:{project_id}",
                     job_id,
                 )
             except Exception:
