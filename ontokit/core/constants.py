@@ -20,4 +20,5 @@ LINT_UPDATES_CHANNEL = "lint:updates"
 NORMALIZATION_UPDATES_CHANNEL = "normalization:updates"
 ONTOLOGY_INDEX_UPDATES_CHANNEL = "ontology_index:updates"
 QUALITY_UPDATES_CHANNEL = "quality:updates"
+QUALITY_JOB_TTL_SECONDS = 1200  # Exceeds the workers' 15-minute job timeout.
 REMOTE_SYNC_UPDATES_CHANNEL = "remote_sync:updates"

@@ -6,11 +6,22 @@ import json
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from rdflib import Graph
 
 PROJECT_ID = "12345678-1234-5678-1234-567812345678"
 JOB_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+@pytest.fixture(autouse=True)
+def _default_quality_membership(authed_client: tuple[TestClient, AsyncMock]) -> None:
+    """Make route tests members unless a test explicitly overrides authorization."""
+    _, db = authed_client
+    member_result = MagicMock()
+    member_result.scalar_one_or_none.return_value = "membership-id"
+    db.execute.return_value = member_result
 
 
 class TestGetEntityReferences:
@@ -79,6 +90,62 @@ class TestGetEntityReferences:
 class TestTriggerConsistencyCheck:
     """Tests for POST /api/v1/projects/{id}/quality/check."""
 
+    @patch(
+        "ontokit.api.routes.quality._require_quality_job_access",
+        new_callable=AsyncMock,
+        create=True,
+    )
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_trigger_check_requires_project_membership(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_resolve: AsyncMock,
+        mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
+        mock_require: AsyncMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Authenticated strangers cannot spend project quality resources."""
+        client, _ = authed_client
+        mock_require.side_effect = HTTPException(status_code=403, detail="membership required")
+        mock_resolve.return_value = "main"
+        mock_pool = AsyncMock()
+        mock_pool.enqueue_job.return_value = MagicMock()
+        mock_pool_fn.return_value = mock_pool
+        mock_redis_fn.return_value = AsyncMock()
+
+        response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
+
+        assert response.status_code == 403
+        mock_pool_fn.assert_not_awaited()
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_trigger_check_rejects_second_active_job(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_resolve: AsyncMock,
+        mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Only one consistency check may run per project and branch."""
+        client, _ = authed_client
+        mock_resolve.return_value = "main"
+        mock_redis = AsyncMock()
+        mock_redis.set.return_value = False
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
+
+        assert response.status_code == 409
+        mock_pool_fn.assert_not_awaited()
+
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
@@ -115,7 +182,7 @@ class TestTriggerConsistencyCheck:
         # The job_id returned to the client must match what was enqueued
         assert data["job_id"] == call_args[3]
         # Pending status key must be set in Redis
-        mock_redis.set.assert_called_once()
+        assert mock_redis.set.await_count == 2
         set_args = mock_redis.set.call_args
         assert "quality_job_status" in set_args[0][0]
         assert set_args[0][1] == "pending"
@@ -147,7 +214,7 @@ class TestTriggerConsistencyCheck:
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
         assert response.status_code == 500
         # Pending key should be set then deleted
-        mock_redis.set.assert_called_once()
+        assert mock_redis.set.await_count == 2
         mock_redis.delete.assert_called_once()
 
     @patch("ontokit.api.routes.quality._get_redis")
@@ -250,7 +317,8 @@ class TestGetQualityJobResult:
 
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/jobs/{JOB_ID}")
         assert response.status_code == 500
-        assert "Out of memory" in response.json()["detail"]
+        assert response.json()["detail"] == "Quality job failed"
+        assert "Out of memory" not in response.json()["detail"]
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -269,7 +337,7 @@ class TestGetQualityJobResult:
 
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/jobs/{JOB_ID}")
         assert response.status_code == 500
-        assert "Unknown error" in response.json()["detail"]
+        assert response.json()["detail"] == "Quality job failed"
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -446,6 +514,30 @@ class TestDetectDuplicates:
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_detect_duplicates_rejects_second_active_job(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_resolve: AsyncMock,
+        mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """Only one duplicate scan may run per project and branch."""
+        client, _ = authed_client
+        mock_resolve.return_value = "main"
+        mock_redis = AsyncMock()
+        mock_redis.set.return_value = False
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")
+
+        assert response.status_code == 409
+        mock_pool_fn.assert_not_awaited()
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
     def test_detect_duplicates_success(
         self,
         mock_access: AsyncMock,  # noqa: ARG002
@@ -478,7 +570,7 @@ class TestDetectDuplicates:
         # The job_id returned to the client must match what was enqueued
         assert data["job_id"] == call_args[4]
         # Pending status key must be set in Redis
-        mock_redis.set.assert_called_once()
+        assert mock_redis.set.await_count == 2
         set_args = mock_redis.set.call_args
         assert "duplicates_job_status" in set_args[0][0]
         assert set_args[0][1] == "pending"
@@ -545,7 +637,7 @@ class TestDetectDuplicates:
 
         response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")
         assert response.status_code == 500
-        mock_redis.set.assert_called_once()
+        assert mock_redis.set.await_count == 2
         mock_redis.delete.assert_called_once()
 
     @patch("ontokit.api.routes.quality._get_redis")
@@ -645,7 +737,8 @@ class TestGetDuplicateJobResult:
 
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")
         assert response.status_code == 500
-        assert "Timeout exceeded" in response.json()["detail"]
+        assert response.json()["detail"] == "Quality job failed"
+        assert "Timeout exceeded" not in response.json()["detail"]
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
@@ -664,7 +757,7 @@ class TestGetDuplicateJobResult:
 
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates/jobs/{JOB_ID}")
         assert response.status_code == 500
-        assert "Unknown error" in response.json()["detail"]
+        assert response.json()["detail"] == "Quality job failed"
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)

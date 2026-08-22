@@ -19,10 +19,12 @@ from ontokit.core.constants import (
     LINT_UPDATES_CHANNEL,
     NORMALIZATION_UPDATES_CHANNEL,
     ONTOLOGY_INDEX_UPDATES_CHANNEL,
+    QUALITY_JOB_TTL_SECONDS,
     QUALITY_UPDATES_CHANNEL,
     REMOTE_SYNC_UPDATES_CHANNEL,
 )
 from ontokit.core.encryption import decrypt_token
+from ontokit.core.redis_lock import release_owned_lock
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
@@ -727,9 +729,9 @@ async def run_consistency_check_task(
         cache_key = f"quality:{project_id}:{branch}"
         if job_id:
             job_key = f"quality_job:{project_id}:{job_id}"
-            await redis.set(job_key, result_json, ex=600)
+            await redis.set(job_key, result_json, ex=QUALITY_JOB_TTL_SECONDS)
             await redis.delete(f"quality_job_status:{project_id}:{job_id}")
-        await redis.set(cache_key, result_json, ex=600)
+        await redis.set(cache_key, result_json, ex=QUALITY_JOB_TTL_SECONDS)
 
         logger.info(
             "Consistency check completed for project %s branch %s: %d issues",
@@ -769,8 +771,8 @@ async def run_consistency_check_task(
             # Write a short-lived failed status so polling clients can surface the error
             await redis.set(
                 f"quality_job_status:{project_id}:{job_id}",
-                json.dumps({"state": "failed", "error": str(e)}),
-                ex=600,
+                json.dumps({"state": "failed"}),
+                ex=QUALITY_JOB_TTL_SECONDS,
             )
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
@@ -780,11 +782,21 @@ async def run_consistency_check_task(
                     "project_id": project_id,
                     "branch": branch,
                     "job_id": job_id,
-                    "error": str(e),
+                    "error": "Quality job failed",
                 }
             ),
         )
         raise
+    finally:
+        if job_id:
+            try:
+                await release_owned_lock(
+                    redis,
+                    f"quality_job_active:consistency:{project_id}:{branch}",
+                    job_id,
+                )
+            except Exception:
+                logger.warning("Failed to release consistency job admission lock", exc_info=True)
 
 
 async def run_duplicate_detection_task(
@@ -829,9 +841,9 @@ async def run_duplicate_detection_task(
         cache_key = f"duplicates:{project_id}:{branch}"
         if job_id:
             job_key = f"duplicates_job:{project_id}:{job_id}"
-            await redis.set(job_key, result_json, ex=600)
+            await redis.set(job_key, result_json, ex=QUALITY_JOB_TTL_SECONDS)
             await redis.delete(f"duplicates_job_status:{project_id}:{job_id}")
-        await redis.set(cache_key, result_json, ex=600)
+        await redis.set(cache_key, result_json, ex=QUALITY_JOB_TTL_SECONDS)
 
         logger.info(
             "Duplicate detection completed for project %s branch %s: %d clusters",
@@ -871,8 +883,8 @@ async def run_duplicate_detection_task(
             # Write a short-lived failed status so polling clients can surface the error
             await redis.set(
                 f"duplicates_job_status:{project_id}:{job_id}",
-                json.dumps({"state": "failed", "error": str(e)}),
-                ex=600,
+                json.dumps({"state": "failed"}),
+                ex=QUALITY_JOB_TTL_SECONDS,
             )
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
@@ -882,11 +894,21 @@ async def run_duplicate_detection_task(
                     "project_id": project_id,
                     "branch": branch,
                     "job_id": job_id,
-                    "error": str(e),
+                    "error": "Quality job failed",
                 }
             ),
         )
         raise
+    finally:
+        if job_id:
+            try:
+                await release_owned_lock(
+                    redis,
+                    f"quality_job_active:duplicates:{project_id}:{branch}",
+                    job_id,
+                )
+            except Exception:
+                logger.warning("Failed to release duplicate job admission lock", exc_info=True)
 
 
 async def run_embedding_generation_task(

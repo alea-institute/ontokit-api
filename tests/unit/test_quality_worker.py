@@ -94,6 +94,9 @@ class TestRunConsistencyCheckTask:
         redis = ctx["redis"]
         assert redis.set.await_count == 2  # cache_key + job_key
         assert redis.publish.await_count == 2  # started + complete
+        redis.eval.assert_awaited_once()
+        assert "quality_job_active:consistency" in redis.eval.await_args.args[2]
+        assert redis.eval.await_args.args[3] == JOB_ID
 
     @pytest.mark.asyncio
     @patch("ontokit.worker.get_storage_service")
@@ -139,8 +142,14 @@ class TestRunConsistencyCheckTask:
         with pytest.raises(ValueError, match="not found"):
             await run_consistency_check_task(ctx, PROJECT_ID, "main", JOB_ID)
 
-        # Verify failure notification was published
-        ctx["redis"].publish.assert_awaited()
+        redis = ctx["redis"]
+        redis.publish.assert_awaited()
+        failure_status = redis.set.await_args.args[1]
+        failure_event = redis.publish.await_args.args[1]
+        assert "not found" not in failure_status
+        assert "not found" not in failure_event
+        assert "Quality job failed" in failure_event
+        redis.eval.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_project_no_ontology(self) -> None:
@@ -192,6 +201,30 @@ class TestRunDuplicateDetectionTask:
 
     @pytest.mark.asyncio
     @patch(
+        "ontokit.services.duplicate_detection_service.find_duplicates_sql",
+        new_callable=AsyncMock,
+    )
+    async def test_failure_is_redacted_and_releases_admission_lock(
+        self,
+        mock_find: AsyncMock,
+    ) -> None:
+        """Internal database errors are logged but not persisted or published."""
+        ctx = _make_ctx()
+        mock_find.side_effect = RuntimeError("postgresql://secret@db/internal")
+
+        with pytest.raises(RuntimeError, match="postgresql"):
+            await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
+
+        redis = ctx["redis"]
+        failure_status = redis.set.await_args.args[1]
+        failure_event = redis.publish.await_args.args[1]
+        assert "secret" not in failure_status
+        assert "secret" not in failure_event
+        assert "Quality job failed" in failure_event
+        redis.eval.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @patch(
         "ontokit.services.duplicate_detection_service.find_duplicates_sql", new_callable=AsyncMock
     )
     async def test_success(
@@ -215,6 +248,9 @@ class TestRunDuplicateDetectionTask:
         redis = ctx["redis"]
         assert redis.set.await_count == 2
         assert redis.publish.await_count == 2
+        redis.eval.assert_awaited_once()
+        assert "quality_job_active:duplicates" in redis.eval.await_args.args[2]
+        assert redis.eval.await_args.args[3] == JOB_ID
 
     @pytest.mark.asyncio
     @patch(

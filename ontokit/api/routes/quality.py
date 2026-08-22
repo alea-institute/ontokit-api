@@ -11,14 +11,17 @@ import pydantic
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 from fastapi.responses import JSONResponse
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
 
 from ontokit.api.dependencies import load_project_graph, resolve_branch, verify_project_access
 from ontokit.api.utils.redis import get_arq_pool
-from ontokit.core.auth import OptionalUser, RequiredUser
-from ontokit.core.constants import QUALITY_UPDATES_CHANNEL
+from ontokit.core.auth import OptionalUser, RequiredUser, require_authenticated_identity
+from ontokit.core.constants import QUALITY_JOB_TTL_SECONDS, QUALITY_UPDATES_CHANNEL
 from ontokit.core.database import get_db
+from ontokit.core.redis_lock import acquire_owned_lock, release_owned_lock
+from ontokit.models.project import ProjectMember
 from ontokit.schemas.quality import (
     ConsistencyCheckResult,
     ConsistencyCheckTriggerResponse,
@@ -32,6 +35,44 @@ from ontokit.services.cross_reference_service import get_cross_references
 logger = logging.getLogger(__name__)
 
 router = APIRouter()
+
+
+def _quality_job_lock_key(kind: str, project_id: UUID | str, branch: str) -> str:
+    return f"quality_job_active:{kind}:{project_id}:{branch}"
+
+
+async def _require_quality_job_access(
+    db: AsyncSession,
+    project_id: UUID,
+    user: RequiredUser,
+) -> None:
+    """Require a real project membership before admitting expensive work."""
+    require_authenticated_identity(user)
+    if user.is_superadmin:
+        return
+
+    result = await db.execute(
+        select(ProjectMember.id).where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user.id,
+        )
+    )
+    if result.scalar_one_or_none() is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Project membership required",
+        )
+
+
+async def _release_quality_job_lock(
+    redis: aioredis.Redis,
+    lock_key: str,
+    job_id: str,
+) -> None:
+    try:
+        await release_owned_lock(redis, lock_key, job_id)
+    except Exception:
+        logger.warning("Failed to release quality job admission lock", exc_info=True)
 
 
 def _get_redis() -> aioredis.Redis:
@@ -73,14 +114,27 @@ async def trigger_consistency_check(
 ) -> ConsistencyCheckTriggerResponse:
     """Enqueue a consistency check as a background job."""
     await verify_project_access(project_id, db, user)
+    await _require_quality_job_access(db, project_id, user)
     resolved_branch = await resolve_branch(project_id, branch)
 
     job_id = str(uuid.uuid4())
 
-    # Set pending status before enqueue to avoid race with fast-completing workers
     redis = _get_redis()
+    lock_key = _quality_job_lock_key("consistency", project_id, resolved_branch)
+    if not await acquire_owned_lock(
+        redis,
+        lock_key,
+        job_id,
+        ttl_seconds=QUALITY_JOB_TTL_SECONDS,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A consistency check is already in progress for this branch",
+        )
+
+    # Set pending status before enqueue to avoid race with fast-completing workers
     status_key = f"quality_job_status:{project_id}:{job_id}"
-    await redis.set(status_key, "pending", ex=600)
+    await redis.set(status_key, "pending", ex=QUALITY_JOB_TTL_SECONDS)
 
     try:
         pool = await get_arq_pool()
@@ -92,6 +146,7 @@ async def trigger_consistency_check(
         )
         if job is None:
             await redis.delete(status_key)
+            await _release_quality_job_lock(redis, lock_key, job_id)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to enqueue consistency check job",
@@ -100,6 +155,7 @@ async def trigger_consistency_check(
         raise
     except Exception as e:
         await redis.delete(status_key)
+        await _release_quality_job_lock(redis, lock_key, job_id)
         logger.exception("Failed to enqueue consistency check: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -144,14 +200,9 @@ async def get_quality_job_result(
     if job_status is not None:
         status_str = job_status.decode() if isinstance(job_status, bytes) else str(job_status)
         if status_str != "pending":
-            try:
-                failure = json.loads(status_str)
-                error_msg = failure.get("error", "Unknown error")
-            except json.JSONDecodeError:
-                error_msg = "Unknown error"
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Job failed: {error_msg}",
+                detail="Quality job failed",
             )
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
@@ -217,14 +268,27 @@ async def detect_duplicates(
 ) -> DuplicateDetectionTriggerResponse:
     """Enqueue duplicate detection as a background job."""
     await verify_project_access(project_id, db, user)
+    await _require_quality_job_access(db, project_id, user)
     resolved_branch = await resolve_branch(project_id, branch)
 
     job_id = str(uuid.uuid4())
 
-    # Set pending status before enqueue to avoid race with fast-completing workers
     redis = _get_redis()
+    lock_key = _quality_job_lock_key("duplicates", project_id, resolved_branch)
+    if not await acquire_owned_lock(
+        redis,
+        lock_key,
+        job_id,
+        ttl_seconds=QUALITY_JOB_TTL_SECONDS,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Duplicate detection is already in progress for this branch",
+        )
+
+    # Set pending status before enqueue to avoid race with fast-completing workers
     status_key = f"duplicates_job_status:{project_id}:{job_id}"
-    await redis.set(status_key, "pending", ex=600)
+    await redis.set(status_key, "pending", ex=QUALITY_JOB_TTL_SECONDS)
 
     try:
         pool = await get_arq_pool()
@@ -237,6 +301,7 @@ async def detect_duplicates(
         )
         if job is None:
             await redis.delete(status_key)
+            await _release_quality_job_lock(redis, lock_key, job_id)
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="Failed to enqueue duplicate detection job",
@@ -245,6 +310,7 @@ async def detect_duplicates(
         raise
     except Exception as e:
         await redis.delete(status_key)
+        await _release_quality_job_lock(redis, lock_key, job_id)
         logger.exception("Failed to enqueue duplicate detection: %s", e)
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -289,14 +355,9 @@ async def get_duplicate_job_result(
     if job_status is not None:
         status_str = job_status.decode() if isinstance(job_status, bytes) else str(job_status)
         if status_str != "pending":
-            try:
-                failure = json.loads(status_str)
-                error_msg = failure.get("error", "Unknown error")
-            except json.JSONDecodeError:
-                error_msg = "Unknown error"
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail=f"Job failed: {error_msg}",
+                detail="Quality job failed",
             )
         return JSONResponse(
             status_code=status.HTTP_202_ACCEPTED,
