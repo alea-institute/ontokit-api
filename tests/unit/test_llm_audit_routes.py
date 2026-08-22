@@ -63,6 +63,37 @@ def test_owner_gets_metadata_only_keyset_page(
     assert "api_key" not in serialized
 
 
+def test_audit_history_cursor_fetches_the_next_page(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    client, session = authed_client
+    now = datetime(2026, 8, 22, tzinfo=UTC)
+    first_page_rows = [_audit_row(now - timedelta(minutes=offset)) for offset in range(3)]
+    second_page_row = _audit_row(now - timedelta(minutes=3))
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_rows(first_page_rows),
+            _scalar_rows([second_page_row]),
+        ]
+    )
+
+    with patch(
+        "ontokit.api.routes.llm._require_owner_or_admin",
+        new=AsyncMock(return_value="owner"),
+    ):
+        first = client.get(URL, params={"limit": 2})
+        second = client.get(
+            URL,
+            params={"limit": 2, "cursor": first.json()["next_cursor"]},
+        )
+
+    assert second.status_code == 200
+    assert [entry["id"] for entry in second.json()["entries"]] == [str(second_page_row.id)]
+    assert second.json()["next_cursor"] is None
+    second_query = session.execute.await_args_list[1].args[0]
+    assert "(llm_audit_logs.created_at, llm_audit_logs.id) <" in str(second_query)
+
+
 def test_invalid_audit_cursor_is_typed_422(
     authed_client: tuple[TestClient, AsyncMock],
 ) -> None:

@@ -55,4 +55,4 @@ async def test_renew_owned_lock_preserves_newer_owner() -> None:
     assert renewed is False
     script, key_count, key, owner, ttl = redis.eval.await_args.args
     assert "not owner or owner == ARGV[1]" in script
-    assert (key_count, key, owner, ttl) == (1, "job:key", "old-job", 1800)
+    assert (key_count, key, owner, ttl) == (1, "job:key", "old-job", "1800")

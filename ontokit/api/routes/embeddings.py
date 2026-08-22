@@ -181,12 +181,7 @@ async def get_embedding_job(
 ) -> EmbeddingJobStatusResponse:
     """Return one accepted embedding job without exposing worker exception text."""
     require_authenticated_identity(user)
-    project = await get_project_service(db).get(project_id, user)
-    if project.user_role is None and not user.is_superadmin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Project membership required",
-        )
+    await get_project_service(db).require_member_role(project_id, user)
 
     result = await db.execute(
         select(EmbeddingJob).where(

@@ -212,6 +212,38 @@ class TestGet:
         assert response.user_role is None
 
     @pytest.mark.asyncio
+    async def test_require_member_role_uses_narrow_membership_result(
+        self, service: ProjectService, mock_db: AsyncMock
+    ) -> None:
+        row = MagicMock()
+        row.role = "viewer"
+        result = MagicMock()
+        result.one_or_none.return_value = row
+        mock_db.execute.return_value = result
+
+        role = await service.require_member_role(PROJECT_ID, _make_user(VIEWER_ID))
+
+        assert role == "viewer"
+        query = mock_db.execute.await_args.args[0]
+        assert "project_members" in str(query)
+        assert "github_integrations" not in str(query)
+
+    @pytest.mark.asyncio
+    async def test_require_member_role_rejects_nonmember(
+        self, service: ProjectService, mock_db: AsyncMock
+    ) -> None:
+        row = MagicMock()
+        row.role = None
+        result = MagicMock()
+        result.one_or_none.return_value = row
+        mock_db.execute.return_value = result
+
+        with pytest.raises(HTTPException) as raised:
+            await service.require_member_role(PROJECT_ID, _make_user("stranger"))
+
+        assert raised.value.status_code == 403
+
+    @pytest.mark.asyncio
     async def test_get_private_project_as_member(
         self, service: ProjectService, mock_db: AsyncMock
     ) -> None:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from uuid import uuid4
 
@@ -378,13 +379,9 @@ class TestGetEmbeddingJob:
         mock_get_ps: MagicMock,
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
-        from datetime import UTC, datetime
-
         client, session = authed_client
         job_id = uuid4()
-        mock_get_ps.return_value.get = AsyncMock(
-            return_value=_make_project_response(user_role="viewer")
-        )
+        mock_get_ps.return_value.require_member_role = AsyncMock(return_value="viewer")
         job = MagicMock(
             id=job_id,
             project_id=PROJECT_ID,
@@ -417,9 +414,7 @@ class TestGetEmbeddingJob:
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
         client, session = authed_client
-        mock_get_ps.return_value.get = AsyncMock(
-            return_value=_make_project_response(user_role="editor")
-        )
+        mock_get_ps.return_value.require_member_role = AsyncMock(return_value="editor")
         result = MagicMock()
         result.scalar_one_or_none.return_value = None
         session.execute = AsyncMock(return_value=result)
@@ -427,6 +422,40 @@ class TestGetEmbeddingJob:
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/embeddings/jobs/{uuid4()}")
 
         assert response.status_code == 404
+
+    @pytest.mark.parametrize(
+        ("job_status", "expected_progress"),
+        [("pending", 0.0), ("completed", 100.0)],
+    )
+    @patch("ontokit.api.routes.embeddings.get_project_service")
+    def test_zero_entity_job_progress_reflects_terminal_state(
+        self,
+        mock_get_ps: MagicMock,
+        job_status: str,
+        expected_progress: float,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        client, session = authed_client
+        job_id = uuid4()
+        mock_get_ps.return_value.require_member_role = AsyncMock(return_value="viewer")
+        job = MagicMock(
+            id=job_id,
+            branch="main",
+            status=job_status,
+            total_entities=0,
+            embedded_entities=0,
+            error_message=None,
+            started_at=datetime(2026, 8, 22, tzinfo=UTC),
+            completed_at=None,
+        )
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = job
+        session.execute = AsyncMock(return_value=result)
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/embeddings/jobs/{job_id}")
+
+        assert response.status_code == 200
+        assert response.json()["progress_percent"] == expected_progress
 
 
 class TestClearEmbeddings:

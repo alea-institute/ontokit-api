@@ -98,7 +98,7 @@ class TestRunConsistencyCheckTask:
         assert redis.eval.await_args_list[0].args[2:] == (
             f"quality_job_active:{PROJECT_ID}",
             JOB_ID,
-            1800,
+            "1800",
         )
         assert redis.eval.await_args_list[1].args[2:] == (
             f"quality_job_active:{PROJECT_ID}",
@@ -259,7 +259,7 @@ class TestRunDuplicateDetectionTask:
         assert redis.eval.await_args_list[0].args[2:] == (
             f"quality_job_active:{PROJECT_ID}",
             JOB_ID,
-            1800,
+            "1800",
         )
         assert redis.eval.await_args_list[1].args[2:] == (
             f"quality_job_active:{PROJECT_ID}",

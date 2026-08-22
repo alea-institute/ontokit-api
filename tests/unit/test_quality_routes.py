@@ -672,6 +672,46 @@ class TestDetectDuplicates:
         mock_redis.delete.assert_called_once()
 
 
+class TestQualityJobAdmissionScope:
+    """Project-wide admission is shared across both expensive job types."""
+
+    def test_consistency_job_blocks_duplicate_detection(
+        self,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        client, _ = authed_client
+        redis = AsyncMock()
+        redis.set.side_effect = [True, None, False]
+        pool = AsyncMock()
+        pool.enqueue_job.return_value = MagicMock()
+
+        with (
+            patch("ontokit.api.routes.quality._get_redis", return_value=redis),
+            patch(
+                "ontokit.api.routes.quality.get_arq_pool",
+                new=AsyncMock(return_value=pool),
+            ),
+            patch(
+                "ontokit.api.routes.quality.resolve_branch",
+                new=AsyncMock(return_value="main"),
+            ),
+            patch(
+                "ontokit.api.routes.quality.verify_project_access",
+                new=AsyncMock(),
+            ),
+            patch(
+                "ontokit.api.routes.quality._require_quality_job_access",
+                new=AsyncMock(),
+            ),
+        ):
+            first = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
+            second = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")
+
+        assert first.status_code == 200
+        assert second.status_code == 409
+        assert redis.set.await_args_list[0].args[0] == redis.set.await_args_list[2].args[0]
+
+
 class TestGetDuplicateJobResult:
     """Tests for GET /api/v1/projects/{id}/quality/duplicates/jobs/{job_id}."""
 
