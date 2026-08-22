@@ -7,6 +7,7 @@ import pytest
 
 from ontokit.services.llm.anthropic_provider import AnthropicProvider
 from ontokit.services.llm.openai_compat import OpenAICompatProvider
+from ontokit.services.llm.registry import get_provider
 
 
 @pytest.mark.asyncio
@@ -70,3 +71,55 @@ def test_anthropic_preserves_base_url_and_secure_client() -> None:
     assert kwargs["api_key"] == "secret"
     assert kwargs["base_url"] == "https://anthropic-proxy.example.test"
     assert kwargs["http_client"] is secure_client.return_value
+
+
+def test_custom_provider_does_not_bypass_private_network_guard() -> None:
+    """Project-selected custom gateways are not implicitly trusted as local."""
+    provider = get_provider(
+        "custom",
+        base_url="https://gateway.example.test/v1",
+        model="gateway-model",
+    )
+
+    assert isinstance(provider, OpenAICompatProvider)
+    assert provider._allow_private is False
+
+
+def test_local_provider_label_does_not_authorize_arbitrary_private_origin() -> None:
+    provider = get_provider(
+        "ollama",
+        base_url="http://internal-admin.example.test:8080/v1",
+        model="local-model",
+    )
+
+    assert isinstance(provider, OpenAICompatProvider)
+    assert provider._allow_private is False
+
+
+def test_operator_can_authorize_one_exact_custom_origin(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "ONTOKIT_PRIVATE_LLM_ORIGINS", "http://gateway.private.example:8081"
+    )
+
+    allowed = get_provider(
+        "custom",
+        base_url="http://gateway.private.example:8081/v1",
+        model="gateway-model",
+    )
+    different_port = get_provider(
+        "custom",
+        base_url="http://gateway.private.example:8082/v1",
+        model="gateway-model",
+    )
+
+    assert isinstance(allowed, OpenAICompatProvider)
+    assert allowed._allow_private is True
+    assert different_port._allow_private is False
+
+
+@pytest.mark.parametrize("provider_name", ["ollama", "lmstudio", "llamafile"])
+def test_explicit_local_providers_keep_private_network_support(provider_name: str) -> None:
+    provider = get_provider(provider_name, model="local-model")
+
+    assert isinstance(provider, OpenAICompatProvider)
+    assert provider._allow_private is True

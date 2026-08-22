@@ -59,6 +59,7 @@ from ontokit.services.llm.registry import (
     PROVIDER_ICON_NAMES,
     PROVIDER_REQUIRES_KEY,
 )
+from ontokit.services.llm.ssrf import provider_allows_private_network
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,18 @@ def _config_to_response(config: ProjectLLMConfig) -> LLMConfigResponse:
     )
 
 
+def _provider_connection_failure(
+    provider: str, exc: Exception
+) -> dict[str, bool | str]:
+    """Return a stable failure without echoing untrusted upstream details."""
+    logger.warning(
+        "LLM provider connection test failed: provider=%s error_type=%s",
+        provider,
+        type(exc).__name__,
+    )
+    return {"success": False, "error": "Provider connection failed"}
+
+
 # ── Project-scoped LLM routes ─────────────────────────────────────────────────
 
 
@@ -189,7 +202,11 @@ async def update_llm_config(
     # stored provider so an existing local (e.g. Ollama) config isn't rejected.
     if data.base_url:
         effective_provider = data.provider or (LLMProviderType(config.provider) if config else None)
-        allow_private = effective_provider in _LOCAL_PROVIDERS if effective_provider else False
+        allow_private = (
+            provider_allows_private_network(effective_provider, data.base_url)
+            if effective_provider
+            else False
+        )
         try:
             validate_base_url(data.base_url, allow_private=allow_private)
         except ValueError as e:
@@ -264,11 +281,11 @@ async def test_llm_connection(
     # Re-validate base_url immediately before the outbound call. SSRF validation
     # at config-write time is not sufficient on its own: DNS can be rebound
     # between write and use (TOCTOU), so we re-resolve and re-check here — the
-    # only outbound call this slice makes to a user-controlled endpoint. (Full
-    # connect-time IP pinning + redirect disabling across provider clients, and
-    # the PR-5 generation path, are tracked as follow-ups.)
+    # only outbound call this slice makes to a user-controlled endpoint. The
+    # provider transport also pins each connection to its validated numeric IP
+    # and disables redirects.
     if config.base_url:
-        allow_private = LLMProviderType(config.provider) in _LOCAL_PROVIDERS
+        allow_private = provider_allows_private_network(config.provider, config.base_url)
         try:
             validate_base_url(config.base_url, allow_private=allow_private)
         except ValueError as exc:
@@ -295,12 +312,10 @@ async def test_llm_connection(
     except TimeoutError:
         return {"success": False, "error": "Connection timed out (10s limit)"}
     except Exception as exc:
-        # Return the error message without leaking the key
-        error_msg = str(exc)
-        # Sanitize: remove any key-looking tokens from error output (Pitfall 4)
-        if api_key and api_key in error_msg:
-            error_msg = error_msg.replace(api_key, "[REDACTED]")
-        return {"success": False, "error": error_msg}
+        # Provider exceptions may echo response bodies, internal URLs, request
+        # headers, or credentials. Keep the user-facing contract generic and
+        # log only non-sensitive classification data.
+        return _provider_connection_failure(config.provider, exc)
 
 
 @router.get("/{project_id}/llm/usage", response_model=LLMUsageResponse)
