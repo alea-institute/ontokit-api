@@ -52,11 +52,13 @@ class TestCheckAndConsume:
         assert allowed is True
         assert remaining == 9
         redis.expire.assert_awaited_once()
+        assert redis.expire.await_args.kwargs == {"nx": True}
 
-    async def test_ttl_is_only_set_on_the_first_increment(self) -> None:
+    async def test_later_submission_repairs_a_missing_ttl_without_extending_one(self) -> None:
         redis = _redis(count=4)
         await check_and_consume(redis, PROJECT, USER, limit=10)
-        redis.expire.assert_not_awaited()
+        redis.expire.assert_awaited_once()
+        assert redis.expire.await_args.kwargs == {"nx": True}
 
     async def test_submission_at_the_limit_is_allowed(self) -> None:
         allowed, remaining = await check_and_consume(_redis(count=10), PROJECT, USER, limit=10)

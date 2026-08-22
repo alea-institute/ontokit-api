@@ -62,7 +62,7 @@ class ActionLimiterRedis(Protocol):
 
     async def incr(self, name: str) -> int: ...
 
-    async def expire(self, name: str, time: int) -> bool: ...
+    async def expire(self, name: str, time: int, *, nx: bool = ...) -> bool: ...
 
 
 class LimiterOutcome(StrEnum):
@@ -121,8 +121,9 @@ async def check_and_consume(
     key = action_key(user_id)
     try:
         used = await redis.incr(key)
-        if used == 1:
-            await redis.expire(key, _KEY_TTL_SECONDS)
+        # NX repairs a TTL-less key left by a crash between INCR and EXPIRE,
+        # while refusing to extend an existing daily window.
+        await redis.expire(key, _KEY_TTL_SECONDS, nx=True)
     except _REDIS_INFRA_ERRORS as e:
         _alert_unavailable(user_id, e)
         return (LimiterOutcome.UNAVAILABLE, 0)

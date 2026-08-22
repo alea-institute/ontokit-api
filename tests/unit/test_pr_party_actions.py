@@ -416,7 +416,7 @@ class _FakeRedis:
         self.counts[name] = self.counts.get(name, self.start) + 1
         return self.counts[name]
 
-    async def expire(self, name: str, time: int) -> bool:  # noqa: ARG002
+    async def expire(self, name: str, time: int, *, nx: bool = False) -> bool:  # noqa: ARG002
         self.expired.append(name)
         return True
 
@@ -1496,9 +1496,19 @@ class TestLimiterUnit:
 
     @pytest.mark.asyncio
     async def test_allowed_reports_the_remaining_budget(self) -> None:
-        outcome, remaining = await check_and_consume(_FakeRedis(), "user-1", limit=5)
+        redis = _FakeRedis()
+        outcome, remaining = await check_and_consume(redis, "user-1", limit=5)
         assert outcome is LimiterOutcome.ALLOWED
         assert remaining == 4
+        assert redis.expired == [action_key("user-1")]
+
+    @pytest.mark.asyncio
+    async def test_existing_counter_repairs_a_missing_ttl(self) -> None:
+        redis = _FakeRedis(start=2)
+        outcome, remaining = await check_and_consume(redis, "user-1", limit=5)
+        assert outcome is LimiterOutcome.ALLOWED
+        assert remaining == 2
+        assert redis.expired == [action_key("user-1")]
 
     @pytest.mark.asyncio
     async def test_over_limit_is_distinct_from_unavailable(self) -> None:

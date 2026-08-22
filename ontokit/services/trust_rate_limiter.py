@@ -40,7 +40,7 @@ class TrustLimiterRedis(Protocol):
 
     async def incr(self, name: str) -> int: ...
 
-    async def expire(self, name: str, time: int) -> bool: ...
+    async def expire(self, name: str, time: int, *, nx: bool = ...) -> bool: ...
 
     async def get(self, name: str) -> bytes | None: ...
 
@@ -96,8 +96,9 @@ async def check_and_consume(
     key = submission_key(project_id, user_id)
     try:
         used = await redis.incr(key)
-        if used == 1:
-            await redis.expire(key, _KEY_TTL_SECONDS)
+        # NX repairs a TTL-less key left by a crash between INCR and EXPIRE,
+        # while refusing to extend an existing daily window.
+        await redis.expire(key, _KEY_TTL_SECONDS, nx=True)
     except _REDIS_INFRA_ERRORS as e:
         _alert_unavailable(project_id, user_id, e)
         return (False, 0)
