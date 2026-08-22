@@ -1,5 +1,6 @@
 """ARQ worker for background task processing."""
 
+import asyncio
 import json
 import logging
 from collections.abc import Set as AbstractSet
@@ -31,6 +32,11 @@ from ontokit.services.github_sync import sync_github_project
 from ontokit.services.linter import LintResult, get_linter
 from ontokit.services.normalization_service import NormalizationService
 from ontokit.services.ontology import get_ontology_service
+from ontokit.services.quality_job_lock import (
+    QUALITY_JOB_STATUS_TTL_SECONDS,
+    release_quality_job,
+    renew_or_claim_quality_job,
+)
 from ontokit.services.storage import get_storage_service
 from ontokit.services.translation_jobs import (
     run_label_diff_job,
@@ -687,8 +693,18 @@ async def run_consistency_check_task(
     redis: ArqRedis = ctx["redis"]
 
     project_uuid = UUID(project_id)
+    terminal = False
 
     try:
+        if job_id and not await renew_or_claim_quality_job(redis, project_id, job_id):
+            raise RuntimeError("A newer quality job owns this project's execution slot")
+        if job_id:
+            await redis.set(
+                f"quality_job_status:{project_id}:{job_id}",
+                "pending",
+                ex=QUALITY_JOB_STATUS_TTL_SECONDS,
+            )
+
         # Notify start
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
@@ -715,7 +731,6 @@ async def run_consistency_check_task(
             raise ValueError(f"Project {project_id} has no ontology file")
 
         # Load ontology content and parse in a subprocess (CPU-bound, holds GIL)
-        import asyncio
         from concurrent.futures import ProcessPoolExecutor
 
         git_service = BareGitRepositoryService()
@@ -777,6 +792,7 @@ async def run_consistency_check_task(
             ),
         )
 
+        terminal = True
         return {
             "job_id": job_id,
             "issues_found": len(check_result.issues),
@@ -784,6 +800,7 @@ async def run_consistency_check_task(
         }
 
     except Exception as e:
+        terminal = True
         logger.exception(
             "Consistency check failed for project %s branch %s: %s",
             project_id,
@@ -795,7 +812,7 @@ async def run_consistency_check_task(
             await redis.set(
                 f"quality_job_status:{project_id}:{job_id}",
                 json.dumps({"state": "failed", "error": str(e)}),
-                ex=600,
+                ex=QUALITY_JOB_STATUS_TTL_SECONDS,
             )
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
@@ -810,6 +827,16 @@ async def run_consistency_check_task(
             ),
         )
         raise
+    finally:
+        if job_id and terminal:
+            try:
+                await release_quality_job(redis, project_id, job_id)
+            except Exception:
+                logger.exception(
+                    "Failed to release quality-job claim for project %s job %s",
+                    project_id,
+                    job_id,
+                )
 
 
 async def run_duplicate_detection_task(
@@ -829,8 +856,18 @@ async def run_duplicate_detection_task(
     redis: ArqRedis = ctx["redis"]
 
     project_uuid = UUID(project_id)
+    terminal = False
 
     try:
+        if job_id and not await renew_or_claim_quality_job(redis, project_id, job_id):
+            raise RuntimeError("A newer quality job owns this project's execution slot")
+        if job_id:
+            await redis.set(
+                f"duplicates_job_status:{project_id}:{job_id}",
+                "pending",
+                ex=QUALITY_JOB_STATUS_TTL_SECONDS,
+            )
+
         # Notify start
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
@@ -879,6 +916,7 @@ async def run_duplicate_detection_task(
             ),
         )
 
+        terminal = True
         return {
             "job_id": job_id,
             "clusters_found": len(detection_result.clusters),
@@ -886,6 +924,7 @@ async def run_duplicate_detection_task(
         }
 
     except Exception as e:
+        terminal = True
         logger.exception(
             "Duplicate detection failed for project %s branch %s: %s",
             project_id,
@@ -897,7 +936,7 @@ async def run_duplicate_detection_task(
             await redis.set(
                 f"duplicates_job_status:{project_id}:{job_id}",
                 json.dumps({"state": "failed", "error": str(e)}),
-                ex=600,
+                ex=QUALITY_JOB_STATUS_TTL_SECONDS,
             )
         await redis.publish(
             QUALITY_UPDATES_CHANNEL,
@@ -912,6 +951,16 @@ async def run_duplicate_detection_task(
             ),
         )
         raise
+    finally:
+        if job_id and terminal:
+            try:
+                await release_quality_job(redis, project_id, job_id)
+            except Exception:
+                logger.exception(
+                    "Failed to release quality-job claim for project %s job %s",
+                    project_id,
+                    job_id,
+                )
 
 
 async def run_embedding_generation_task(

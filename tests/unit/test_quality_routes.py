@@ -114,11 +114,39 @@ class TestTriggerConsistencyCheck:
         assert call_args[0] == "run_consistency_check_task"
         # The job_id returned to the client must match what was enqueued
         assert data["job_id"] == call_args[3]
+        assert mock_pool.enqueue_job.call_args.kwargs == {"_job_id": data["job_id"]}
         # Pending status key must be set in Redis
-        mock_redis.set.assert_called_once()
-        set_args = mock_redis.set.call_args
+        assert mock_redis.set.await_count == 2
+        set_args = mock_redis.set.await_args_list[1]
         assert "quality_job_status" in set_args[0][0]
         assert set_args[0][1] == "pending"
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_trigger_check_rejects_when_project_quality_job_is_active(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_resolve: AsyncMock,
+        mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        client, _ = authed_client
+        mock_resolve.return_value = "main"
+        mock_redis = AsyncMock()
+        mock_redis.set.return_value = False
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == {
+            "code": "quality_job_active",
+            "message": "A quality job is already active for this project",
+        }
+        mock_pool_fn.assert_not_awaited()
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
@@ -144,10 +172,14 @@ class TestTriggerConsistencyCheck:
         mock_redis = AsyncMock()
         mock_redis_fn.return_value = mock_redis
 
-        response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
+        with patch(
+            "ontokit.api.routes.quality._enqueued_job_exists",
+            new=AsyncMock(return_value=False),
+        ):
+            response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
         assert response.status_code == 500
         # Pending key should be set then deleted
-        mock_redis.set.assert_called_once()
+        assert mock_redis.set.await_count == 2
         mock_redis.delete.assert_called_once()
 
     @patch("ontokit.api.routes.quality._get_redis")
@@ -477,11 +509,39 @@ class TestDetectDuplicates:
         assert call_args[0] == "run_duplicate_detection_task"
         # The job_id returned to the client must match what was enqueued
         assert data["job_id"] == call_args[4]
+        assert mock_pool.enqueue_job.call_args.kwargs == {"_job_id": data["job_id"]}
         # Pending status key must be set in Redis
-        mock_redis.set.assert_called_once()
-        set_args = mock_redis.set.call_args
+        assert mock_redis.set.await_count == 2
+        set_args = mock_redis.set.await_args_list[1]
         assert "duplicates_job_status" in set_args[0][0]
         assert set_args[0][1] == "pending"
+
+    @patch("ontokit.api.routes.quality._get_redis")
+    @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.resolve_branch", new_callable=AsyncMock)
+    @patch("ontokit.api.routes.quality.verify_project_access", new_callable=AsyncMock)
+    def test_detect_duplicates_rejects_when_project_quality_job_is_active(
+        self,
+        mock_access: AsyncMock,  # noqa: ARG002
+        mock_resolve: AsyncMock,
+        mock_pool_fn: AsyncMock,
+        mock_redis_fn: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        client, _ = authed_client
+        mock_resolve.return_value = "main"
+        mock_redis = AsyncMock()
+        mock_redis.set.return_value = False
+        mock_redis_fn.return_value = mock_redis
+
+        response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == {
+            "code": "quality_job_active",
+            "message": "A quality job is already active for this project",
+        }
+        mock_pool_fn.assert_not_awaited()
 
     @patch("ontokit.api.routes.quality._get_redis")
     @patch("ontokit.api.routes.quality.get_arq_pool", new_callable=AsyncMock)
@@ -543,9 +603,13 @@ class TestDetectDuplicates:
         mock_redis = AsyncMock()
         mock_redis_fn.return_value = mock_redis
 
-        response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")
+        with patch(
+            "ontokit.api.routes.quality._enqueued_job_exists",
+            new=AsyncMock(return_value=False),
+        ):
+            response = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")
         assert response.status_code == 500
-        mock_redis.set.assert_called_once()
+        assert mock_redis.set.await_count == 2
         mock_redis.delete.assert_called_once()
 
     @patch("ontokit.api.routes.quality._get_redis")

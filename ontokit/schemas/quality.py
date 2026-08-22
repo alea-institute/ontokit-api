@@ -93,6 +93,15 @@ class ConsistencyCheckTriggerResponse(BaseModel):
     job_id: str
 
 
+class QualityJobConflictDetail(BaseModel):
+    code: Literal["quality_job_active"] = "quality_job_active"
+    message: str
+
+
+class QualityJobConflictResponse(BaseModel):
+    detail: QualityJobConflictDetail
+
+
 # --- Duplicate Detection ---
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
@@ -92,7 +93,7 @@ class TestRunConsistencyCheckTask:
 
         # Verify Redis caching
         redis = ctx["redis"]
-        assert redis.set.await_count == 2  # cache_key + job_key
+        assert redis.set.await_count == 3  # pending refresh + cache_key + job_key
         assert redis.publish.await_count == 2  # started + complete
 
     @pytest.mark.asyncio
@@ -213,7 +214,7 @@ class TestRunDuplicateDetectionTask:
         assert result["job_id"] == JOB_ID
 
         redis = ctx["redis"]
-        assert redis.set.await_count == 2
+        assert redis.set.await_count == 3
         assert redis.publish.await_count == 2
 
     @pytest.mark.asyncio
@@ -237,3 +238,40 @@ class TestRunDuplicateDetectionTask:
         mock_find.assert_called_once()
         call_args = mock_find.call_args
         assert call_args[0][3] == 0.95  # threshold is the 4th positional arg
+
+    @pytest.mark.asyncio
+    async def test_cancellation_retains_lease_for_arq_retry(self) -> None:
+        ctx = _make_ctx()
+        ctx["redis"].publish.side_effect = asyncio.CancelledError
+
+        with (
+            patch(
+                "ontokit.worker.renew_or_claim_quality_job",
+                new=AsyncMock(return_value=True),
+            ),
+            patch(
+                "ontokit.worker.release_quality_job", new=AsyncMock()
+            ) as release,
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
+
+        release.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stale_retry_cannot_run_under_a_newer_jobs_lease(self) -> None:
+        ctx = _make_ctx()
+
+        with (
+            patch(
+                "ontokit.worker.renew_or_claim_quality_job",
+                new=AsyncMock(return_value=False),
+            ),
+            patch(
+                "ontokit.worker.release_quality_job", new=AsyncMock()
+            ) as release,
+            pytest.raises(RuntimeError, match="newer quality job"),
+        ):
+            await run_duplicate_detection_task(ctx, PROJECT_ID, "main", 0.85, JOB_ID)
+
+        release.assert_awaited_once_with(ctx["redis"], PROJECT_ID, JOB_ID)
