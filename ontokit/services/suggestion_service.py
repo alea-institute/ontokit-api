@@ -53,6 +53,7 @@ from ontokit.schemas.suggestion import (
     SuggestionUser,
 )
 from ontokit.schemas.trust import TrustTier
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
@@ -714,6 +715,7 @@ class SuggestionService:
             select(PullRequest).where(
                 PullRequest.project_id == project_id,
                 PullRequest.source_branch == session.branch,
+                PullRequest.status == "open",
             )
         )
         existing_pr = existing_pr_result.scalar_one_or_none()
@@ -814,38 +816,63 @@ class SuggestionService:
 
         from ontokit.models.pull_request import PRStatus, PullRequest
 
-        max_retries = 3
-        for attempt in range(max_retries):
-            max_number_result = await self.db.execute(
-                select(sa_func.max(PullRequest.pr_number)).where(
-                    PullRequest.project_id == project_id
-                )
-            )
-            max_number = max_number_result.scalar() or 0
-            pr_number = max_number + 1
+        # A failed allocation rolls back the session and expires ORM-backed
+        # attributes. Keep every value needed by later attempts detached from
+        # the SuggestionSession before the first flush can trigger rollback.
+        author_id = session.user_id
+        author_name = session.user_name
+        author_email = session.user_email
 
-            db_pr = PullRequest(
-                project_id=project_id,
-                pr_number=pr_number,
-                title=pr_create.title,
-                description=pr_create.description,
-                source_branch=pr_create.source_branch,
-                target_branch=pr_create.target_branch,
-                author_id=session.user_id,
-                author_name=session.user_name,
-                author_email=session.user_email,
-                status=PRStatus.OPEN.value,
-            )
-            self.db.add(db_pr)
-            try:
-                await self.db.flush()
-            except IntegrityError:
-                await self.db.rollback()
-                if attempt == max_retries - 1:
-                    raise
-                continue
-            await self.db.refresh(db_pr)
-            return db_pr
+        max_retries = 3
+        rolled_back = False
+        for attempt in range(max_retries):
+            async with branch_write_lock(self.db, project_id, pr_create.source_branch):
+                existing_result = await self.db.execute(
+                    select(PullRequest).where(
+                        PullRequest.project_id == project_id,
+                        PullRequest.source_branch == pr_create.source_branch,
+                        PullRequest.status == PRStatus.OPEN.value,
+                    )
+                )
+                existing = existing_result.scalar_one_or_none()
+                if existing is not None:
+                    return existing
+
+                max_number_result = await self.db.execute(
+                    select(sa_func.max(PullRequest.pr_number)).where(
+                        PullRequest.project_id == project_id
+                    )
+                )
+                max_number = max_number_result.scalar() or 0
+                pr_number = max_number + 1
+
+                db_pr = PullRequest(
+                    project_id=project_id,
+                    pr_number=pr_number,
+                    title=pr_create.title,
+                    description=pr_create.description,
+                    source_branch=pr_create.source_branch,
+                    target_branch=pr_create.target_branch,
+                    author_id=author_id,
+                    author_name=author_name,
+                    author_email=author_email,
+                    status=PRStatus.OPEN.value,
+                )
+                self.db.add(db_pr)
+                try:
+                    await self.db.flush()
+                except IntegrityError:
+                    await self.db.rollback()
+                    rolled_back = True
+                    if attempt == max_retries - 1:
+                        raise
+                    continue
+                if rolled_back:
+                    # The caller continues using this ORM instance after the
+                    # helper returns (including stale auto-submit logging).
+                    await self.db.refresh(session)
+                await self.db.refresh(db_pr)
+                return db_pr
 
         # Unreachable, but satisfies type checker
         raise RuntimeError("Failed to allocate PR number")

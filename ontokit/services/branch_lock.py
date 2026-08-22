@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from uuid import UUID
 from weakref import WeakValueDictionary
 
@@ -36,4 +36,15 @@ async def branch_write_lock(db: AsyncSession, project_id: UUID, branch: str) -> 
         yield
 
 
-__all__ = ["branch_write_lock"]
+@asynccontextmanager
+async def branch_write_locks(
+    db: AsyncSession, project_id: UUID, branches: set[str]
+) -> AsyncIterator[None]:
+    """Acquire multiple canonical branch locks in deadlock-safe order."""
+    async with AsyncExitStack() as stack:
+        for branch in sorted(branches):
+            await stack.enter_async_context(branch_write_lock(db, project_id, branch))
+        yield
+
+
+__all__ = ["branch_write_lock", "branch_write_locks"]

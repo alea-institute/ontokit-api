@@ -275,10 +275,13 @@ class TestCreatePullRequest:
         mock_git_service.list_branches.return_value = [main_branch, feature_branch]
         mock_git_service.get_commits_between.return_value = []
 
-        # DB calls: _get_project, max(pr_number), flush, _get_github_token, commit,
+        # DB calls: _get_project, open-source check, max(pr_number), _get_github_token,
         # refresh, notify, _to_pr_response (_get_project again)
         project_result = MagicMock()
         project_result.scalar_one_or_none.return_value = project
+
+        no_open_pr_result = MagicMock()
+        no_open_pr_result.scalar_one_or_none.return_value = None
 
         max_result = MagicMock()
         max_result.scalar.return_value = 0
@@ -294,6 +297,7 @@ class TestCreatePullRequest:
         # Use project_result as fallback for any extra _get_project lookups
         mock_db.execute.side_effect = [
             project_result,  # _get_project
+            no_open_pr_result,  # open PR on source branch
             max_result,  # max(pr_number)
             gh_integration_result,  # _get_github_token -> _get_github_integration
             project_result_2,  # _to_pr_response -> _get_project
@@ -343,6 +347,42 @@ class TestCreatePullRequest:
         assert result.target_branch == "main"
         mock_db.add.assert_called()
         mock_db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_pr_returns_conflict_for_existing_open_source_branch(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+        mock_git_service: MagicMock,
+    ) -> None:
+        """A branch cannot have two simultaneously open pull requests."""
+        project = _make_project()
+        user = _make_user(EDITOR_ID)
+        existing_pr = _make_pr(source_branch="feature", status=PRStatus.OPEN.value)
+
+        main_branch = MagicMock(name="main")
+        main_branch.name = "main"
+        feature_branch = MagicMock(name="feature")
+        feature_branch.name = "feature"
+        mock_git_service.list_branches.return_value = [main_branch, feature_branch]
+
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        existing_result = MagicMock()
+        existing_result.scalar_one_or_none.return_value = existing_pr
+        mock_db.execute.side_effect = [
+            project_result,
+            MagicMock(),  # source-branch advisory lock
+            MagicMock(),  # target-branch advisory lock
+            existing_result,
+        ]
+
+        request = PRCreate(title="Duplicate", source_branch="feature", target_branch="main")
+        with pytest.raises(HTTPException) as error:
+            await service.create_pull_request(PROJECT_ID, request, user)
+
+        assert error.value.status_code == 409
+        mock_db.add.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_create_pr_source_branch_not_found(

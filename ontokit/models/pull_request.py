@@ -4,7 +4,18 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ontokit.core.database import Base
@@ -79,7 +90,17 @@ class PullRequest(Base):
         back_populates="pull_request", cascade="all, delete-orphan"
     )
 
-    __table_args__ = (UniqueConstraint("project_id", "pr_number", name="uq_project_pr_number"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "pr_number", name="uq_project_pr_number"),
+        Index(
+            "uq_pull_requests_open_source_branch",
+            "project_id",
+            "source_branch",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+            sqlite_where=text("status = 'open'"),
+        ),
+    )
 
     def __repr__(self) -> str:
         return f"<PullRequest(id={self.id}, project_id={self.project_id}, pr_number={self.pr_number}, title={self.title!r})>"

@@ -1060,6 +1060,8 @@ class TestSubmit:
         mock_project_result.scalar_one_or_none.return_value = project
         mock_no_pr_result = MagicMock()
         mock_no_pr_result.scalar_one_or_none.return_value = None
+        mock_no_direct_pr_result = MagicMock()
+        mock_no_direct_pr_result.scalar_one_or_none.return_value = None
         # For _create_pr_directly: max pr_number query
         mock_max_result = MagicMock()
         mock_max_result.scalar.return_value = 5
@@ -1068,6 +1070,8 @@ class TestSubmit:
             mock_session_result,  # _get_session
             mock_project_result,  # _verify_project_access
             mock_no_pr_result,  # existing PR check
+            MagicMock(),  # source-branch advisory lock
+            mock_no_direct_pr_result,  # locked direct-creation check
             mock_max_result,  # max pr_number
             mock_project_result,  # _get_project for notification
             project=project,
