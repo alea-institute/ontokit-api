@@ -10,13 +10,22 @@ import logging
 import uuid
 from datetime import timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.models.llm_config import LLMAuditLog
 from ontokit.schemas.llm import LLMUsageResponse, LLMUserUsage
+from ontokit.services.llm.budget import BudgetConfig, lock_and_check_budget
 
 logger = logging.getLogger(__name__)
+
+_RESERVED_SUFFIX = ":reserved"
+_FAILED_SUFFIX = ":failed"
+_MAX_ENDPOINT_LENGTH = 200
+
+
+def _reservation_endpoint(endpoint: str, suffix: str) -> str:
+    return f"{endpoint[: _MAX_ENDPOINT_LENGTH - len(suffix)]}{suffix}"
 
 
 async def log_llm_call(
@@ -68,6 +77,70 @@ async def log_llm_call(
     db.add(entry)
     await db.flush()
     return entry
+
+
+async def reserve_llm_call(
+    db: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    config: BudgetConfig,
+    user_id: str,
+    model: str,
+    provider: str,
+    endpoint: str,
+    input_tokens: int,
+    output_tokens: int,
+    cost_estimate_usd: float,
+    is_byo_key: bool = False,
+) -> tuple[uuid.UUID | None, str | None]:
+    """Atomically reserve budget and persist an indeterminate call receipt.
+
+    Committing the receipt releases the per-project transaction lock before the
+    network call. A crash or cancellation therefore leaves a conservative
+    ``:reserved`` record instead of an invisible charge and retry window.
+    """
+    if not is_byo_key:
+        within_budget, reason = await lock_and_check_budget(
+            db,
+            project_id,
+            config,
+            additional_cost_usd=cost_estimate_usd,
+        )
+        if not within_budget:
+            await db.rollback()
+            return None, reason
+
+    entry = await log_llm_call(
+        db=db,
+        project_id=str(project_id),
+        user_id=user_id,
+        model=model,
+        provider=provider,
+        endpoint=_reservation_endpoint(endpoint, _RESERVED_SUFFIX),
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_estimate_usd=cost_estimate_usd,
+        is_byo_key=is_byo_key,
+    )
+    await db.commit()
+    return entry.id, None
+
+
+async def finalize_llm_call(
+    db: AsyncSession,
+    reservation_id: uuid.UUID,
+    endpoint: str,
+    *,
+    succeeded: bool,
+) -> None:
+    """Mark a committed reservation successful or failed without losing spend."""
+    final_endpoint = endpoint if succeeded else _reservation_endpoint(endpoint, _FAILED_SUFFIX)
+    await db.execute(
+        update(LLMAuditLog)
+        .where(LLMAuditLog.id == reservation_id)
+        .values(endpoint=final_endpoint)
+    )
+    await db.commit()
 
 
 async def get_usage_summary(db: AsyncSession, project_id: str) -> LLMUsageResponse:

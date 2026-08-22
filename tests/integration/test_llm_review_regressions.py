@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -11,13 +12,13 @@ import pytest
 from fastapi import HTTPException
 from rdflib import Graph
 from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ontokit.api.routes import generation, semantic_search
 from ontokit.core.auth import CurrentUser
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.embedding import EntityEmbedding, ProjectEmbeddingConfig
-from ontokit.models.llm_config import ProjectLLMConfig
+from ontokit.models.llm_config import LLMAuditLog, ProjectLLMConfig
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
@@ -30,6 +31,7 @@ from ontokit.schemas.suggestion import (
 from ontokit.services.duplicate_check_service import DuplicateCheckService
 from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.llm import pricing
+from ontokit.services.llm.audit import reserve_llm_call
 from ontokit.services.suggestion_service import (
     MAX_NEW_ENTITIES_PER_SUBMISSION,
     SuggestionService,
@@ -43,6 +45,53 @@ async def _delete_project(db: AsyncSession, project_id: UUID) -> None:
     await db.rollback()
     await db.execute(delete(Project).where(Project.id == project_id))
     await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_paid_embedding_reservations_serialize_on_real_postgres(
+    real_db_session: AsyncSession,
+) -> None:
+    """Two projected charges cannot both cross one project's remaining cap."""
+    project_id = uuid4()
+    project = Project(id=project_id, name="Atomic embedding budget", owner_id="budget-owner")
+    config = ProjectLLMConfig(
+        project_id=project_id,
+        provider="openai",
+        model="text-embedding-3-small",
+        monthly_budget_usd=1.5,
+    )
+    real_db_session.add_all([project, config])
+    await real_db_session.commit()
+    session_factory = async_sessionmaker(real_db_session.bind, expire_on_commit=False)
+
+    async def reserve(user_id: str) -> tuple[UUID | None, str | None]:
+        async with session_factory() as db:
+            return await reserve_llm_call(
+                db,
+                project_id=project_id,
+                config=config,
+                user_id=user_id,
+                model="text-embedding-3-small",
+                provider="openai",
+                endpoint="embeddings/concurrency-proof",
+                input_tokens=100,
+                output_tokens=0,
+                cost_estimate_usd=1.0,
+            )
+
+    try:
+        results = await asyncio.gather(reserve("first"), reserve("second"))
+        assert sum(reservation_id is not None for reservation_id, _ in results) == 1
+        assert [reason for reservation_id, reason in results if reservation_id is None] == [
+            "budget_exhausted"
+        ]
+        await real_db_session.rollback()
+        count = await real_db_session.scalar(
+            select(func.count(LLMAuditLog.id)).where(LLMAuditLog.project_id == project_id)
+        )
+        assert count == 1
+    finally:
+        await _delete_project(real_db_session, project_id)
 
 
 @pytest.mark.asyncio

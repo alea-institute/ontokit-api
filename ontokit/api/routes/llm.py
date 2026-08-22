@@ -44,14 +44,17 @@ from ontokit.schemas.llm import (
     MemberFlagsUpdate,
 )
 from ontokit.services.llm import (
+    PricingUnavailableError,
     check_llm_access,
     decrypt_secret,
     encrypt_secret,
     get_budget_status,
+    get_model_pricing,
     get_provider,
     get_usage_summary,
     validate_base_url,
 )
+from ontokit.services.llm.audit import finalize_llm_call, reserve_llm_call
 from ontokit.services.llm.rate_limiter import RATE_LIMITS
 from ontokit.services.llm.registry import (
     KNOWN_MODELS,
@@ -299,6 +302,50 @@ async def test_llm_connection(
     else:
         api_key = None
 
+    # A model-backed connection test spends a minimal request. Reserve that
+    # projected cost before the provider call so tests cannot bypass the same
+    # project cap enforced for ordinary paid work. BYO tests remain audited but
+    # are excluded from the project budget.
+    is_byo_key = bool(x_byo_api_key)
+    provider_is_local = config.provider in {provider.value for provider in _LOCAL_PROVIDERS}
+    input_tokens = 1 if config.model else 0
+    output_tokens = 1 if config.model else 0
+    cost_estimate = 0.0
+    if config.model and not provider_is_local:
+        try:
+            input_price, output_price = await get_model_pricing(config.model)
+            cost_estimate = input_tokens * input_price + output_tokens * output_price
+        except PricingUnavailableError:
+            if not is_byo_key:
+                return {
+                    "success": False,
+                    "error": "Pricing data is unavailable; connection test paused",
+                }
+
+    reservation_id, budget_reason = await reserve_llm_call(
+        db,
+        project_id=project_id,
+        config=config,
+        user_id=user.id,
+        model=config.model or "",
+        provider=config.provider,
+        endpoint="llm/connection-test",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        cost_estimate_usd=cost_estimate,
+        is_byo_key=is_byo_key,
+    )
+    if reservation_id is None:
+        return {
+            "success": False,
+            "error": (
+                "Daily spending cap reached"
+                if budget_reason == "daily_cap_reached"
+                else "Monthly LLM budget exhausted"
+            ),
+        }
+
+    succeeded = False
     try:
         provider = get_provider(
             provider_type=config.provider,
@@ -308,14 +355,40 @@ async def test_llm_connection(
         )
         # 10-second timeout per spec
         await asyncio.wait_for(provider.test_connection(), timeout=10.0)
-        return {"success": True}
+        succeeded = True
+        response: dict[str, bool | str] = {"success": True}
     except TimeoutError:
-        return {"success": False, "error": "Connection timed out (10s limit)"}
+        response = {"success": False, "error": "Connection timed out (10s limit)"}
     except Exception as exc:
         # Provider exceptions may echo response bodies, internal URLs, request
         # headers, or credentials. Keep the user-facing contract generic and
         # log only non-sensitive classification data.
-        return _provider_connection_failure(config.provider, exc)
+        response = _provider_connection_failure(config.provider, exc)
+
+    try:
+        await finalize_llm_call(
+            db,
+            reservation_id,
+            "llm/connection-test",
+            succeeded=succeeded,
+        )
+    except Exception as exc:
+        # The committed reservation still protects the cap and records an
+        # indeterminate outcome. Do not turn a bookkeeping outage into an
+        # automatic retry of provider work that has already happened.
+        logger.error(
+            "ALERT llm_audit_finalize_failed: project=%s provider=%s error_type=%s",
+            project_id,
+            config.provider,
+            type(exc).__name__,
+            extra={
+                "event": "llm_audit_finalize_failed",
+                "project_id": str(project_id),
+                "provider": config.provider,
+                "error_type": type(exc).__name__,
+            },
+        )
+    return response
 
 
 @router.get("/{project_id}/llm/usage", response_model=LLMUsageResponse)

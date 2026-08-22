@@ -1808,8 +1808,12 @@ class TestPaidEmbeddingMetering:
 
         with (
             patch(
-                "ontokit.services.embedding_service.check_budget",
-                new=AsyncMock(return_value=(False, "daily budget exceeded")),
+                "ontokit.services.embedding_service.reserve_llm_call",
+                new=AsyncMock(return_value=(None, "daily budget exceeded")),
+            ),
+            patch(
+                "ontokit.services.embedding_service.get_model_pricing",
+                new=AsyncMock(return_value=(0.01, 0.0)),
             ),
             pytest.raises(RuntimeError, match="daily budget exceeded"),
         ):
@@ -1823,3 +1827,91 @@ class TestPaidEmbeddingMetering:
             )
 
         operation.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_paid_call_is_reserved_before_provider_and_finalized(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        from unittest.mock import patch
+
+        config_result = MagicMock()
+        config_result.scalar_one_or_none.return_value = MagicMock()
+        mock_db.execute.return_value = config_result
+        provider = MagicMock(provider_name="openai", model_id="text-embedding-3-small")
+        events: list[str] = []
+
+        async def operation() -> list[float]:
+            events.append("provider")
+            return [0.1]
+
+        async def reserve(*_args, **_kwargs):
+            events.append("reserve")
+            return uuid.uuid4(), None
+
+        async def finalize(*_args, **_kwargs):
+            events.append("finalize")
+
+        with (
+            patch(
+                "ontokit.services.embedding_service.get_model_pricing",
+                new=AsyncMock(return_value=(0.01, 0.0)),
+            ),
+            patch(
+                "ontokit.services.embedding_service.reserve_llm_call",
+                new=AsyncMock(side_effect=reserve),
+            ),
+            patch(
+                "ontokit.services.embedding_service.finalize_llm_call",
+                new=AsyncMock(side_effect=finalize),
+            ),
+        ):
+            result = await service._check_and_audit_embedding(
+                PROJECT_ID,
+                provider,
+                "sensitive query",
+                "embeddings/semantic-search",
+                "user-1",
+                operation,
+            )
+
+        assert result == [0.1]
+        assert events == ["reserve", "provider", "finalize"]
+
+    @pytest.mark.asyncio
+    async def test_paid_call_failure_keeps_failed_reservation(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        from unittest.mock import patch
+
+        config_result = MagicMock()
+        config_result.scalar_one_or_none.return_value = MagicMock()
+        mock_db.execute.return_value = config_result
+        provider = MagicMock(provider_name="openai", model_id="text-embedding-3-small")
+        reservation_id = uuid.uuid4()
+        finalize = AsyncMock()
+
+        with (
+            patch(
+                "ontokit.services.embedding_service.get_model_pricing",
+                new=AsyncMock(return_value=(0.01, 0.0)),
+            ),
+            patch(
+                "ontokit.services.embedding_service.reserve_llm_call",
+                new=AsyncMock(return_value=(reservation_id, None)),
+            ),
+            patch(
+                "ontokit.services.embedding_service.finalize_llm_call",
+                finalize,
+            ),
+            pytest.raises(RuntimeError, match="provider failed"),
+        ):
+            await service._check_and_audit_embedding(
+                PROJECT_ID,
+                provider,
+                "sensitive query",
+                "embeddings/semantic-search",
+                "user-1",
+                AsyncMock(side_effect=RuntimeError("provider failed")),
+            )
+
+        assert finalize.await_args.kwargs["succeeded"] is False

@@ -38,9 +38,8 @@ from ontokit.schemas.embeddings import EmbeddingProvider as EmbeddingProviderLit
 from ontokit.services.embedding_providers import get_embedding_provider
 from ontokit.services.embedding_providers.base import EmbeddingProvider as EmbeddingProviderBase
 from ontokit.services.embedding_text_builder import build_embedding_text
-from ontokit.services.llm.audit import log_llm_call
+from ontokit.services.llm.audit import finalize_llm_call, reserve_llm_call
 from ontokit.services.llm.base import estimate_tokens
-from ontokit.services.llm.budget import check_budget
 from ontokit.services.llm.pricing import PricingUnavailableError, get_model_pricing
 from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
 from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
@@ -117,7 +116,7 @@ class EmbeddingService:
         user_id: str,
         operation: Callable[[], Awaitable[_EmbeddingResult]],
     ) -> _EmbeddingResult:
-        """Run a paid embedding operation through budget and audit controls."""
+        """Reserve paid embedding budget before actuation and retain its receipt."""
         provider_name = provider.provider_name
         if provider_name == "local":
             return await operation()
@@ -141,31 +140,61 @@ class EmbeddingService:
                     "Paid embeddings require an embedding budget configuration"
                 )
             config = cast(ProjectLLMConfig, embedding_config)
-        within_budget, reason = await check_budget(self._db, project_id, config)
-        if not within_budget:
-            raise EmbeddingBudgetExceeded(str(reason))
-
         try:
             input_price, _ = await get_model_pricing(model_name)
         except PricingUnavailableError as exc:
             raise EmbeddingPricingUnavailable(model_name) from exc
-        result = await operation()
         tokens = estimate_tokens(input_text)
+        reserved_cost = tokens * input_price
         from ontokit.core.database import async_session_maker
 
-        async with async_session_maker() as audit_db:
-            await log_llm_call(
-                audit_db,
-                str(project_id),
-                user_id,
-                model_name,
-                provider_name,
-                endpoint,
-                tokens,
-                0,
-                tokens * input_price,
+        async with async_session_maker() as reservation_db:
+            reservation_id, reason = await reserve_llm_call(
+                reservation_db,
+                project_id=project_id,
+                config=config,
+                user_id=user_id,
+                model=model_name,
+                provider=provider_name,
+                endpoint=endpoint,
+                input_tokens=tokens,
+                output_tokens=0,
+                cost_estimate_usd=reserved_cost,
             )
-            await audit_db.commit()
+        if reservation_id is None:
+            raise EmbeddingBudgetExceeded(str(reason))
+
+        async def finalize(*, succeeded: bool) -> None:
+            try:
+                async with async_session_maker() as audit_db:
+                    await finalize_llm_call(
+                        audit_db,
+                        reservation_id,
+                        endpoint,
+                        succeeded=succeeded,
+                    )
+            except Exception as exc:
+                # The committed reservation remains budget-visible and explicitly
+                # indeterminate, so a bookkeeping outage cannot reopen the cap.
+                logger.error(
+                    "ALERT llm_audit_finalize_failed: project=%s provider=%s error_type=%s",
+                    project_id,
+                    provider_name,
+                    type(exc).__name__,
+                    extra={
+                        "event": "llm_audit_finalize_failed",
+                        "project_id": str(project_id),
+                        "provider": provider_name,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+        try:
+            result = await operation()
+        except BaseException:
+            await finalize(succeeded=False)
+            raise
+        await finalize(succeeded=True)
         return result
 
     async def get_config(self, project_id: UUID) -> EmbeddingConfig | None:
