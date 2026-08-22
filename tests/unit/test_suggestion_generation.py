@@ -682,6 +682,47 @@ async def test_auto_validate_in_pipeline(
     assert mock_duplicate_check_service.check.call_count == 2
 
 
+@pytest.mark.asyncio
+async def test_fail_soft_gates_emit_redacted_alert_events(
+    mock_llm_provider,
+    mock_duplicate_check_service,
+    caplog: pytest.LogCaptureFixture,
+):
+    """Validation/dedup degradation stays visible without logging tenant data."""
+    sensitive_label = "Confidential Matter\nforge=alert"
+    sensitive_error = "provider response contained sk-live-secret"
+    mock_assembler = AsyncMock()
+    mock_assembler.assemble = AsyncMock(return_value=_make_context())
+    mock_validator = AsyncMock()
+    mock_validator.validate_entity = AsyncMock(side_effect=RuntimeError(sensitive_error))
+    mock_duplicate_check_service.check = AsyncMock(side_effect=RuntimeError(sensitive_error))
+    mock_llm_provider.chat = AsyncMock(
+        return_value=(_make_llm_json([_suggestion(sensitive_label)]), 10, 5)
+    )
+
+    svc = _make_service(
+        mock_llm_provider,
+        mock_assembler,
+        mock_validator,
+        mock_duplicate_check_service,
+    )
+    with caplog.at_level("WARNING", logger="ontokit.services.suggestion_generation_service"):
+        response = await svc.generate(
+            project_id=PROJECT_ID,
+            branch="main",
+            class_iri=CLASS_IRI,
+            suggestion_type="children",
+            provider=mock_llm_provider,
+            project_namespace=NAMESPACE,
+        )
+
+    assert response.suggestions[0].duplicate_verdict == "pass"
+    assert "suggestion_validation_unavailable" in caplog.text
+    assert "suggestion_dedup_unavailable" in caplog.text
+    assert sensitive_label not in caplog.text
+    assert sensitive_error not in caplog.text
+
+
 # ---------------------------------------------------------------------------
 # Pitfall 3: JSON parse handles markdown fences
 # ---------------------------------------------------------------------------

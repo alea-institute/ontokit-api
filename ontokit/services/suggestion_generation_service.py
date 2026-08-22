@@ -46,6 +46,8 @@ from ontokit.services.validation_service import ValidationService, mint_iri
 logger = logging.getLogger(__name__)
 
 _FORBIDDEN_IRI_CHARS = frozenset('<>"{}|\\^`')
+_VALIDATION_UNAVAILABLE_EVENT = "suggestion_validation_unavailable"
+_DEDUP_UNAVAILABLE_EVENT = "suggestion_dedup_unavailable"
 
 
 def _is_safe_iri(value: str) -> bool:
@@ -162,10 +164,20 @@ class SuggestionGenerationService:
                     )
                 except Exception as exc:
                     logger.warning(
-                        "Validation failed for %s suggestion %r: %s",
+                        "ALERT %s: suggestion validation unavailable — "
+                        "project=%s branch=%s type=%s error_type=%s",
+                        _VALIDATION_UNAVAILABLE_EVENT,
+                        project_id,
+                        branch,
                         suggestion_type,
-                        parsed["label"],
-                        exc,
+                        type(exc).__name__,
+                        extra={
+                            "event": _VALIDATION_UNAVAILABLE_EVENT,
+                            "project_id": str(project_id),
+                            "branch": branch,
+                            "suggestion_type": suggestion_type,
+                            "error_type": type(exc).__name__,
+                        },
                     )
 
             # Duplicate check (D-09) — SEQUENTIAL, one await at a time
@@ -187,10 +199,20 @@ class SuggestionGenerationService:
                     # Dedup infra failure fails soft to "pass" — logged distinctly
                     # so ops can alert on silently-disabled duplicate blocking.
                     logger.warning(
-                        "Dedup check unavailable for %s suggestion %r — allowing (verdict=pass): %s",
+                        "ALERT %s: suggestion dedup unavailable — allowing "
+                        "(verdict=pass) project=%s branch=%s type=%s error_type=%s",
+                        _DEDUP_UNAVAILABLE_EVENT,
+                        project_id,
+                        branch,
                         suggestion_type,
-                        parsed["dedup_label"],
-                        exc,
+                        type(exc).__name__,
+                        extra={
+                            "event": _DEDUP_UNAVAILABLE_EVENT,
+                            "project_id": str(project_id),
+                            "branch": branch,
+                            "suggestion_type": suggestion_type,
+                            "error_type": type(exc).__name__,
+                        },
                     )
 
             # Build final suggestion (GEN-09: provenance="llm-proposed")
