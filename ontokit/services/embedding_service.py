@@ -1,7 +1,5 @@
 """Embedding service — manage embeddings, semantic search, similarity."""
 
-import base64
-import hashlib
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
@@ -9,7 +7,7 @@ from functools import partial
 from typing import Protocol, TypeVar, cast, runtime_checkable
 from uuid import UUID
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import MultiFernet
 from rdflib import Literal as RDFLiteral
 from rdflib import URIRef
 from rdflib.namespace import OWL, RDF, RDFS
@@ -58,12 +56,11 @@ class EmbeddingPricingUnavailable(RuntimeError):
 _EmbeddingResult = TypeVar("_EmbeddingResult")
 
 
-def _get_fernet() -> Fernet:
-    """Derive a Fernet key from the application secret."""
-    from ontokit.core.config import settings
+def _get_fernet() -> MultiFernet:
+    """Share the versioned provider-key KDF and legacy fallback."""
+    from ontokit.services.llm.crypto import _get_fernet as get_provider_key_fernet
 
-    key = hashlib.sha256(settings.secret_key.encode()).digest()
-    return Fernet(base64.urlsafe_b64encode(key))
+    return get_provider_key_fernet()
 
 
 def _encrypt_secret(plaintext: str) -> str:

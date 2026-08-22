@@ -4,7 +4,11 @@ Focus: user/BYO provider API keys must never be exposed in responses and must
 never be encrypted under the shipped default secret in production.
 """
 
+import base64
+import hashlib
+
 import pytest
+from cryptography.fernet import Fernet, InvalidToken
 
 from ontokit.schemas.llm import LLMConfigResponse, LLMConfigUpdate
 from ontokit.services.llm.crypto import (
@@ -33,6 +37,29 @@ def test_crypto_round_trip(strong_secret):  # noqa: ARG001 (pytest fixture appli
     assert ciphertext != api_key  # actually encrypted
     assert api_key not in ciphertext  # plaintext not embedded
     assert decrypt_secret(ciphertext) == api_key
+
+
+def test_new_ciphertext_uses_domain_separated_kdf(strong_secret):  # noqa: ARG001
+    """New writes must not be decryptable with the retired raw-SHA256 key."""
+    from ontokit.core.config import settings
+
+    ciphertext = encrypt_secret("sk-domain-separated")
+    legacy_key = hashlib.sha256(settings.secret_key.encode()).digest()
+    legacy = Fernet(base64.urlsafe_b64encode(legacy_key))
+
+    with pytest.raises(InvalidToken):
+        legacy.decrypt(ciphertext.encode())
+
+
+def test_legacy_sha256_ciphertext_still_decrypts(strong_secret):  # noqa: ARG001
+    """The KDF upgrade must not strand provider keys already stored at rest."""
+    from ontokit.core.config import settings
+
+    legacy_key = hashlib.sha256(settings.secret_key.encode()).digest()
+    legacy = Fernet(base64.urlsafe_b64encode(legacy_key))
+    ciphertext = legacy.encrypt(b"sk-existing-provider-key").decode()
+
+    assert decrypt_secret(ciphertext) == "sk-existing-provider-key"
 
 
 def test_config_response_never_exposes_key():

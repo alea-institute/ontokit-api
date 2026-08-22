@@ -250,7 +250,7 @@ class TestHelperUtilities:
     """Tests for module-level helper functions."""
 
     def test_get_fernet(self) -> None:
-        """_get_fernet returns a Fernet instance derived from settings.secret_key."""
+        """_get_fernet returns the shared versioned provider-key cipher."""
         from unittest.mock import patch
 
         from ontokit.services.embedding_service import _get_fernet
