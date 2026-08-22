@@ -43,7 +43,7 @@ from ontokit.services.embedding_providers.base import EmbeddingProvider as Embed
 from ontokit.services.embedding_text_builder import build_embedding_text
 from ontokit.services.llm.audit import finalize_llm_call, reserve_llm_call
 from ontokit.services.llm.base import estimate_tokens
-from ontokit.services.llm.budget import BudgetLimits
+from ontokit.services.llm.budget import combine_budget_limits
 from ontokit.services.llm.pricing import PricingUnavailableError, get_model_pricing
 from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
 from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
@@ -223,32 +223,21 @@ class EmbeddingService:
             return await operation()
 
         model_name = provider.model_id
-        config = (
+        llm_config = (
             await self._db.execute(
                 select(ProjectLLMConfig).where(ProjectLLMConfig.project_id == project_id)
             )
         ).scalar_one_or_none()
-        if config is None:
-            embedding_config = (
-                await self._db.execute(
-                    select(ProjectEmbeddingConfig).where(
-                        ProjectEmbeddingConfig.project_id == project_id
-                    )
+        embedding_config = (
+            await self._db.execute(
+                select(ProjectEmbeddingConfig).where(
+                    ProjectEmbeddingConfig.project_id == project_id
                 )
-            ).scalar_one_or_none()
-            if embedding_config is None:
-                raise EmbeddingBudgetExceeded(
-                    "Paid embeddings require an embedding budget configuration"
-                )
-            limits = BudgetLimits(
-                monthly_budget_usd=embedding_config.monthly_budget_usd,
-                daily_cap_usd=embedding_config.daily_cap_usd,
             )
-        else:
-            limits = BudgetLimits(
-                monthly_budget_usd=config.monthly_budget_usd,
-                daily_cap_usd=config.daily_cap_usd,
-            )
+        ).scalar_one_or_none()
+        if llm_config is None and embedding_config is None:
+            raise EmbeddingBudgetExceeded("Paid embeddings require a project budget configuration")
+        limits = combine_budget_limits(llm_config, embedding_config)
         try:
             input_price, _ = await get_model_pricing(model_name)
         except PricingUnavailableError as exc:

@@ -16,11 +16,14 @@ from ontokit.api.routes.llm import (
     _config_to_response,
     _provider_connection_failure,
     get_llm_config,
+    get_llm_status,
+    get_llm_usage,
     update_llm_config,
 )
 from ontokit.api.routes.llm import test_llm_connection as call_test_llm_connection
 from ontokit.core.auth import ANONYMOUS_USER, CurrentUser
-from ontokit.schemas.llm import LLMConfigUpdate, LLMProviderType
+from ontokit.schemas.llm import LLMConfigUpdate, LLMProviderType, LLMUsageResponse
+from ontokit.services.llm.registry import DEFAULT_MODELS
 
 
 def test_list_providers_public(client: TestClient):
@@ -160,6 +163,59 @@ async def test_config_scope_change_with_replacement_key_stores_only_new_secret()
 
     assert config.api_key_encrypted == "encrypted-new-key"
     encrypt.assert_called_once_with("new-key")
+
+
+@pytest.mark.asyncio
+async def test_config_explicit_null_clears_nullable_fields() -> None:
+    config = _stored_config()
+    db = AsyncMock()
+
+    with (
+        patch("ontokit.api.routes.llm._require_owner_or_admin", new=AsyncMock()),
+        patch("ontokit.api.routes.llm._get_llm_config", new=AsyncMock(return_value=config)),
+    ):
+        await update_llm_config(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            LLMConfigUpdate(
+                model=None,
+                base_url=None,
+                monthly_budget_usd=None,
+                daily_cap_usd=None,
+            ),
+            db,
+            SimpleNamespace(id="owner", is_superadmin=False, is_anonymous=False),
+        )
+
+    assert config.model is None
+    assert config.base_url is None
+    assert config.monthly_budget_usd is None
+    assert config.daily_cap_usd is None
+
+
+@pytest.mark.asyncio
+async def test_config_omitted_nullable_fields_preserve_values() -> None:
+    config = _stored_config()
+    original = {
+        field: getattr(config, field)
+        for field in ("model", "base_url", "monthly_budget_usd", "daily_cap_usd")
+    }
+    db = AsyncMock()
+
+    with (
+        patch("ontokit.api.routes.llm._require_owner_or_admin", new=AsyncMock()),
+        patch("ontokit.api.routes.llm._get_llm_config", new=AsyncMock(return_value=config)),
+    ):
+        await update_llm_config(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            LLMConfigUpdate(model_tier="quality"),
+            db,
+            SimpleNamespace(id="owner", is_superadmin=False, is_anonymous=False),
+        )
+
+    assert {
+        field: getattr(config, field)
+        for field in ("model", "base_url", "monthly_budget_usd", "daily_cap_usd")
+    } == original
 
 
 def test_config_response_strips_legacy_url_userinfo() -> None:
@@ -328,3 +384,215 @@ async def test_connection_budget_refusal_prevents_provider(
 
     assert response == {"success": False, "error": "Monthly LLM budget exhausted"}
     provider_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_connection_without_model_resolves_and_reserves_provider_default(
+    authenticated_user: CurrentUser,
+) -> None:
+    config = SimpleNamespace(
+        provider="openai",
+        base_url=None,
+        api_key_encrypted=None,
+        model=None,
+        monthly_budget_usd=1.0,
+        daily_cap_usd=None,
+    )
+    provider = MagicMock()
+    provider.test_connection = AsyncMock(return_value=True)
+    reservation_id = uuid4()
+
+    with (
+        patch(
+            "ontokit.api.routes.llm._require_owner_or_admin",
+            new=AsyncMock(return_value="admin"),
+        ),
+        patch(
+            "ontokit.api.routes.llm._get_llm_config",
+            new=AsyncMock(return_value=config),
+        ),
+        patch(
+            "ontokit.api.routes.llm.get_model_pricing",
+            new=AsyncMock(return_value=(0.01, 0.02)),
+        ) as pricing,
+        patch("ontokit.api.routes.llm.get_provider", return_value=provider) as provider_factory,
+        patch(
+            "ontokit.api.routes.llm.reserve_llm_call",
+            new=AsyncMock(return_value=(reservation_id, None)),
+        ) as reserve,
+        patch("ontokit.api.routes.llm.finalize_llm_call", new=AsyncMock()),
+    ):
+        response = await call_test_llm_connection(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            AsyncMock(),
+            authenticated_user,
+        )
+
+    default_model = DEFAULT_MODELS[LLMProviderType.openai]
+    assert response == {"success": True}
+    pricing.assert_awaited_once_with(default_model)
+    assert reserve.await_args.kwargs["model"] == default_model
+    assert reserve.await_args.kwargs["cost_estimate_usd"] > 0
+    assert provider_factory.call_args.kwargs["model"] == default_model
+
+
+@pytest.mark.asyncio
+async def test_connection_without_resolvable_model_refuses_before_provider(
+    authenticated_user: CurrentUser,
+) -> None:
+    config = SimpleNamespace(
+        provider="custom",
+        base_url=None,
+        api_key_encrypted=None,
+        model=None,
+        monthly_budget_usd=None,
+        daily_cap_usd=None,
+    )
+
+    with (
+        patch(
+            "ontokit.api.routes.llm._require_owner_or_admin",
+            new=AsyncMock(return_value="admin"),
+        ),
+        patch(
+            "ontokit.api.routes.llm._get_llm_config",
+            new=AsyncMock(return_value=config),
+        ),
+        patch("ontokit.api.routes.llm.reserve_llm_call", new=AsyncMock()) as reserve,
+        patch("ontokit.api.routes.llm.get_provider") as provider_factory,
+    ):
+        response = await call_test_llm_connection(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            AsyncMock(),
+            authenticated_user,
+        )
+
+    assert response == {
+        "success": False,
+        "error": "A model is required before testing this provider",
+    }
+    reserve.assert_not_awaited()
+    provider_factory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_status_cloud_byo_configuration_reports_readiness_and_stored_key_separately(
+    authenticated_user: CurrentUser,
+) -> None:
+    config = _stored_config(api_key_encrypted=None)
+    budget_status = {
+        "budget_exhausted": False,
+        "monthly_budget_usd": 10.0,
+        "monthly_spent_usd": 0.0,
+        "burn_rate_daily_usd": 0.0,
+    }
+
+    with (
+        patch(
+            "ontokit.api.routes.llm._require_project_member", new=AsyncMock(return_value="editor")
+        ),
+        patch("ontokit.api.routes.llm._get_llm_config", new=AsyncMock(return_value=config)),
+        patch(
+            "ontokit.api.routes.llm.get_budget_status", new=AsyncMock(return_value=budget_status)
+        ),
+    ):
+        response = await get_llm_status(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            AsyncMock(),
+            authenticated_user,
+        )
+
+    assert response.configured is True
+    assert response.api_key_set is False
+
+
+@pytest.mark.asyncio
+async def test_status_cloud_byo_configuration_uses_provider_default_model(
+    authenticated_user: CurrentUser,
+) -> None:
+    config = _stored_config(api_key_encrypted=None, model=None)
+    budget_status = {
+        "budget_exhausted": False,
+        "monthly_budget_usd": 10.0,
+        "monthly_spent_usd": 0.0,
+        "burn_rate_daily_usd": 0.0,
+    }
+
+    with (
+        patch(
+            "ontokit.api.routes.llm._require_project_member", new=AsyncMock(return_value="editor")
+        ),
+        patch("ontokit.api.routes.llm._get_llm_config", new=AsyncMock(return_value=config)),
+        patch(
+            "ontokit.api.routes.llm.get_budget_status", new=AsyncMock(return_value=budget_status)
+        ),
+    ):
+        response = await get_llm_status(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            AsyncMock(),
+            authenticated_user,
+        )
+
+    assert response.configured is True
+    assert response.api_key_set is False
+
+
+@pytest.mark.asyncio
+async def test_usage_budget_percentage_uses_project_spend_not_byo_total(
+    authenticated_user: CurrentUser,
+) -> None:
+    config = _stored_config(monthly_budget_usd=20.0)
+    usage = LLMUsageResponse(
+        total_calls=2,
+        total_cost_usd=100.0,
+        budget_consumed_pct=0.0,
+        burn_rate_daily_usd=1.0,
+        users=[],
+    )
+    budget_status = {"budget_consumed_pct": 25.0}
+
+    with (
+        patch("ontokit.api.routes.llm._require_owner_or_admin", new=AsyncMock()),
+        patch("ontokit.api.routes.llm._get_llm_config", new=AsyncMock(return_value=config)),
+        patch("ontokit.api.routes.llm.get_usage_summary", new=AsyncMock(return_value=usage)),
+        patch(
+            "ontokit.api.routes.llm.get_budget_status", new=AsyncMock(return_value=budget_status)
+        ),
+    ):
+        response = await get_llm_usage(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            AsyncMock(),
+            authenticated_user,
+        )
+
+    assert response.total_cost_usd == 100.0
+    assert response.budget_consumed_pct == 25.0
+
+
+@pytest.mark.asyncio
+async def test_usage_without_monthly_budget_skips_budget_snapshot(
+    authenticated_user: CurrentUser,
+) -> None:
+    config = _stored_config(monthly_budget_usd=None)
+    usage = LLMUsageResponse(
+        total_calls=1,
+        total_cost_usd=5.0,
+        budget_consumed_pct=0.0,
+        burn_rate_daily_usd=0.0,
+        users=[],
+    )
+
+    with (
+        patch("ontokit.api.routes.llm._require_owner_or_admin", new=AsyncMock()),
+        patch("ontokit.api.routes.llm._get_llm_config", new=AsyncMock(return_value=config)),
+        patch("ontokit.api.routes.llm.get_usage_summary", new=AsyncMock(return_value=usage)),
+        patch("ontokit.api.routes.llm.get_budget_status", new=AsyncMock()) as budget_status,
+    ):
+        response = await get_llm_usage(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            AsyncMock(),
+            authenticated_user,
+        )
+
+    assert response.budget_consumed_pct == 0.0
+    budget_status.assert_not_awaited()

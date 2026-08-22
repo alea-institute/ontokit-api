@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import timedelta
 from hashlib import blake2b
@@ -49,6 +50,23 @@ class BudgetLimits:
 
     monthly_budget_usd: float | None
     daily_cap_usd: float | None
+
+
+def _stricter_cap(values: Iterable[float | None]) -> float | None:
+    caps = [value for value in values if value is not None]
+    return min(caps) if caps else None
+
+
+def combine_budget_limits(*configs: BudgetConfig | None) -> BudgetLimits:
+    """Combine budget configs, selecting the stricter non-null cap per window."""
+    return BudgetLimits(
+        monthly_budget_usd=_stricter_cap(
+            config.monthly_budget_usd for config in configs if config is not None
+        ),
+        daily_cap_usd=_stricter_cap(
+            config.daily_cap_usd for config in configs if config is not None
+        ),
+    )
 
 
 async def get_monthly_spend(db: AsyncSession, project_id: uuid.UUID) -> float:

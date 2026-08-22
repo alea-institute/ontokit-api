@@ -16,6 +16,7 @@ from sqlalchemy.dialects import postgresql
 from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.services.llm.budget import (
     check_budget,
+    combine_budget_limits,
     get_budget_status,
     get_daily_spend,
     get_monthly_spend,
@@ -87,6 +88,28 @@ async def test_no_budget_configured_is_unlimited():
     allowed, reason = await check_budget(db, "p", _config(monthly=None, daily=None))
     assert (allowed, reason) == (True, None)
     db.execute.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("llm_caps", "embedding_caps", "expected"),
+    [
+        ((100.0, 10.0), (25.0, 20.0), (25.0, 10.0)),
+        ((None, 10.0), (25.0, None), (25.0, 10.0)),
+        ((None, None), (None, None), (None, None)),
+        ((50.0, None), None, (50.0, None)),
+    ],
+)
+def test_combine_budget_limits_uses_stricter_non_null_cap(
+    llm_caps: tuple[float | None, float | None],
+    embedding_caps: tuple[float | None, float | None] | None,
+    expected: tuple[float | None, float | None],
+) -> None:
+    llm_config = _config(*llm_caps)
+    embedding_config = _config(*embedding_caps) if embedding_caps else None
+
+    limits = combine_budget_limits(llm_config, embedding_config)
+
+    assert (limits.monthly_budget_usd, limits.daily_cap_usd) == expected
 
 
 @pytest.mark.asyncio

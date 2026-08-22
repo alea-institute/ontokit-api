@@ -56,6 +56,7 @@ class LLMStatusResponse(BaseModel):
     """LLM feature availability status for the current project."""
 
     configured: bool
+    api_key_set: bool
     provider: LLMProviderType | None = None
     budget_exhausted: bool
     daily_remaining: int | None = None  # None means uncapped

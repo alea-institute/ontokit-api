@@ -48,13 +48,14 @@ def _llm_config(
     api_key_encrypted: bytes | None = b"enc",
     monthly: float | None = 100.0,
     daily: float | None = None,
+    model: str | None = "claude-sonnet-4-6",
 ) -> Mock:
     config = Mock()
     config.provider = provider
     config.api_key_encrypted = api_key_encrypted
     config.monthly_budget_usd = monthly
     config.daily_cap_usd = daily
-    config.model = None
+    config.model = model
     config.model_tier = "quality"
     config.base_url = None
     return config
@@ -219,7 +220,9 @@ def test_status_response_never_leaks_key_material(
 
     resp = client.get(f"/api/v1/projects/{PROJECT_ID}/llm/status")
     assert resp.status_code == 200
-    assert not any("key" in field.lower() for field in resp.json())
+    body = resp.json()
+    assert body["api_key_set"] is True
+    assert "api_key" not in body
 
 
 # ── PATCH /members/{id}/flags ─────────────────────────────────────────────────

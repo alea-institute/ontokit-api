@@ -58,6 +58,7 @@ from ontokit.services.llm.audit import finalize_llm_call, reserve_llm_call
 from ontokit.services.llm.rate_limiter import RATE_LIMITS
 from ontokit.services.llm.registry import (
     DEFAULT_BASE_URLS,
+    DEFAULT_MODELS,
     KNOWN_MODELS,
     PROVIDER_DISPLAY_NAMES,
     PROVIDER_ICON_NAMES,
@@ -160,6 +161,11 @@ def _provider_connection_failure(provider: str, exc: Exception) -> dict[str, boo
     return {"success": False, "error": "Provider connection failed"}
 
 
+def _effective_model(provider: LLMProviderType, configured_model: str | None) -> str | None:
+    """Return the explicit model or the registry default available to the provider."""
+    return configured_model or DEFAULT_MODELS.get(provider) or None
+
+
 # ── Project-scoped LLM routes ─────────────────────────────────────────────────
 
 
@@ -250,19 +256,15 @@ async def update_llm_config(
             next_provider != previous_provider or next_origin != previous_origin
         )
 
-        # Update existing config — only apply fields that were explicitly set
+        # Update existing config. Nullable fields use model_fields_set so an
+        # explicit null clears the stored value while omission preserves it.
         if data.provider is not None:
             config.provider = data.provider.value
-        if data.model is not None:
-            config.model = data.model
         if data.model_tier is not None:
             config.model_tier = data.model_tier
-        if data.base_url is not None:
-            config.base_url = data.base_url
-        if data.monthly_budget_usd is not None:
-            config.monthly_budget_usd = data.monthly_budget_usd
-        if data.daily_cap_usd is not None:
-            config.daily_cap_usd = data.daily_cap_usd
+        for field in ("model", "base_url", "monthly_budget_usd", "daily_cap_usd"):
+            if field in data.model_fields_set:
+                setattr(config, field, getattr(data, field))
         if data.api_key:
             # Encrypt and overwrite; NEVER store plaintext
             config.api_key_encrypted = encrypt_secret(data.api_key)
@@ -328,29 +330,40 @@ async def test_llm_connection(
     # project cap enforced for ordinary paid work. BYO tests remain audited but
     # are excluded from the project budget.
     is_byo_key = bool(x_byo_api_key)
-    provider_is_local = config.provider in {
-        provider.value for provider in _ZERO_COST_LOCAL_PROVIDERS
-    }
-    input_tokens = 1 if config.model else 0
-    output_tokens = 1 if config.model else 0
+    try:
+        provider_type = LLMProviderType(config.provider)
+    except ValueError:
+        return {"success": False, "error": "Unknown provider configuration"}
+
+    effective_model = _effective_model(provider_type, config.model)
+    if not effective_model:
+        return {
+            "success": False,
+            "error": "A model is required before testing this provider",
+        }
+
+    provider_is_local = provider_type in _ZERO_COST_LOCAL_PROVIDERS
+    # Provider probes send a short prompt and request one output token. Reserve
+    # a conservative prompt allowance rather than treating the probe as free.
+    input_tokens = 8
+    output_tokens = 1
     cost_estimate = 0.0
-    if config.model and not provider_is_local:
+    if not provider_is_local:
         try:
-            input_price, output_price = await get_model_pricing(config.model)
+            input_price, output_price = await get_model_pricing(effective_model)
             cost_estimate = input_tokens * input_price + output_tokens * output_price
         except PricingUnavailableError:
-            if not is_byo_key:
-                return {
-                    "success": False,
-                    "error": "Pricing data is unavailable; connection test paused",
-                }
+            return {
+                "success": False,
+                "error": "Pricing data is unavailable; connection test paused",
+            }
 
     reservation_id, budget_reason = await reserve_llm_call(
         db,
         project_id=project_id,
         config=config,
         user_id=user.id,
-        model=config.model or "",
+        model=effective_model,
         provider=config.provider,
         endpoint="llm/connection-test",
         input_tokens=input_tokens,
@@ -374,7 +387,7 @@ async def test_llm_connection(
             provider_type=config.provider,
             api_key=api_key,
             base_url=config.base_url,
-            model=config.model,
+            model=effective_model,
         )
         # 10-second timeout per spec
         await asyncio.wait_for(provider.test_connection(), timeout=10.0)
@@ -431,11 +444,11 @@ async def get_llm_usage(
     config = await _get_llm_config(db, project_id)
     usage = await get_usage_summary(db, str(project_id))
 
-    # Patch in budget_consumed_pct using the config context
+    # total_cost_usd intentionally displays all calls, including BYO. Budget
+    # percentage reuses the non-BYO budget snapshot used by enforcement/status.
     if config and config.monthly_budget_usd and config.monthly_budget_usd > 0:
-        usage.budget_consumed_pct = round(
-            (usage.total_cost_usd / config.monthly_budget_usd) * 100, 2
-        )
+        budget_status = await get_budget_status(db, project_id, config)
+        usage.budget_consumed_pct = budget_status["budget_consumed_pct"]
 
     return usage
 
@@ -469,9 +482,9 @@ async def get_llm_status(
             provider_enum = None
         if provider_enum is not None:
             provider_type = provider_enum
-            is_local = provider_enum in _ZERO_COST_LOCAL_PROVIDERS
-            # Local providers (Ollama etc.) don't need an API key to be usable
-            configured = bool(config.model) and (bool(config.api_key_encrypted) or is_local)
+            # A valid provider+model is ready for either a stored project key or
+            # a request-scoped BYO key. Key availability is reported separately.
+            configured = _effective_model(provider_enum, config.model) is not None
 
     budget_exhausted = False
     monthly_spent_usd = 0.0
@@ -501,6 +514,7 @@ async def get_llm_status(
 
     return LLMStatusResponse(
         configured=configured,
+        api_key_set=bool(config and config.api_key_encrypted),
         provider=provider_type,
         budget_exhausted=budget_exhausted,
         daily_remaining=daily_remaining,

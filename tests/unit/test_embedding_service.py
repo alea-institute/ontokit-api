@@ -1851,6 +1851,46 @@ class TestGetConfigWithTimestamp:
 
 class TestPaidEmbeddingMetering:
     @pytest.mark.asyncio
+    async def test_paid_call_uses_stricter_llm_and_embedding_caps(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        llm_config = MagicMock(monthly_budget_usd=100.0, daily_cap_usd=5.0)
+        embedding_config = MagicMock(monthly_budget_usd=25.0, daily_cap_usd=None)
+        llm_result = MagicMock()
+        llm_result.scalar_one_or_none.return_value = llm_config
+        embedding_result = MagicMock()
+        embedding_result.scalar_one_or_none.return_value = embedding_config
+        mock_db.execute.side_effect = [llm_result, embedding_result]
+        provider = MagicMock(provider_name="openai", model_id="text-embedding-3-small")
+
+        with (
+            patch(
+                "ontokit.services.embedding_service.get_model_pricing",
+                new=AsyncMock(return_value=(0.01, 0.0)),
+            ),
+            patch(
+                "ontokit.services.embedding_service.reserve_llm_call",
+                new=AsyncMock(return_value=(uuid.uuid4(), None)),
+            ) as reserve,
+            patch(
+                "ontokit.services.embedding_service.finalize_llm_call",
+                new=AsyncMock(),
+            ),
+        ):
+            await service._check_and_audit_embedding(
+                PROJECT_ID,
+                provider,
+                "sensitive query",
+                "embeddings/semantic-search",
+                "user-1",
+                AsyncMock(return_value=[0.1]),
+            )
+
+        limits = reserve.await_args.kwargs["config"]
+        assert limits.monthly_budget_usd == 25.0
+        assert limits.daily_cap_usd == 5.0
+
+    @pytest.mark.asyncio
     async def test_missing_budget_config_prevents_provider_call(
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:
@@ -1879,7 +1919,9 @@ class TestPaidEmbeddingMetering:
         from unittest.mock import patch
 
         config_result = MagicMock()
-        config_result.scalar_one_or_none.return_value = MagicMock()
+        config_result.scalar_one_or_none.return_value = MagicMock(
+            monthly_budget_usd=10.0, daily_cap_usd=5.0
+        )
         mock_db.execute.return_value = config_result
         provider = MagicMock(provider_name="openai", model_id="text-embedding-3-small")
         operation = AsyncMock(return_value=[0.1])
@@ -1913,7 +1955,9 @@ class TestPaidEmbeddingMetering:
         from unittest.mock import patch
 
         config_result = MagicMock()
-        config_result.scalar_one_or_none.return_value = MagicMock()
+        config_result.scalar_one_or_none.return_value = MagicMock(
+            monthly_budget_usd=10.0, daily_cap_usd=5.0
+        )
         mock_db.execute.return_value = config_result
         provider = MagicMock(provider_name="openai", model_id="text-embedding-3-small")
         events: list[str] = []
@@ -1962,7 +2006,9 @@ class TestPaidEmbeddingMetering:
         from unittest.mock import patch
 
         config_result = MagicMock()
-        config_result.scalar_one_or_none.return_value = MagicMock()
+        config_result.scalar_one_or_none.return_value = MagicMock(
+            monthly_budget_usd=10.0, daily_cap_usd=5.0
+        )
         mock_db.execute.return_value = config_result
         provider = MagicMock(provider_name="openai", model_id="text-embedding-3-small")
         reservation_id = uuid.uuid4()
