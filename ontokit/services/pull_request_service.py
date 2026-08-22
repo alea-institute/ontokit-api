@@ -58,6 +58,7 @@ from ontokit.schemas.pull_request import (
     ReviewListResponse,
     ReviewResponse,
 )
+from ontokit.services.branch_lock import branch_write_locks
 from ontokit.services.github_service import GitHubService, get_github_service
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.user_service import UserService, get_user_service
@@ -224,50 +225,70 @@ class PullRequestService:
                 detail="Only editors and above can create pull requests",
             )
 
-        # Verify source branch exists
-        branches = self.git_service.list_branches(project_id)
-        branch_names = [b.name for b in branches]
-
-        if pr_create.source_branch not in branch_names:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Source branch '{pr_create.source_branch}' does not exist",
-            )
-
-        if pr_create.target_branch not in branch_names:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Target branch '{pr_create.target_branch}' does not exist",
-            )
-
         if pr_create.source_branch == pr_create.target_branch:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Source and target branches must be different",
             )
 
-        # Get next PR number for this project
-        max_number_result = await self.db.execute(
-            select(func.max(PullRequest.pr_number)).where(PullRequest.project_id == project_id)
-        )
-        max_number = max_number_result.scalar() or 0
-        pr_number = max_number + 1
+        try:
+            async with branch_write_locks(
+                self.db,
+                project_id,
+                {pr_create.source_branch, pr_create.target_branch},
+            ):
+                branches = self.git_service.list_branches(project_id)
+                branch_names = {branch.name for branch in branches}
+                if pr_create.source_branch not in branch_names:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Source branch '{pr_create.source_branch}' does not exist",
+                    )
+                if pr_create.target_branch not in branch_names:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Target branch '{pr_create.target_branch}' does not exist",
+                    )
 
-        # Create PR in database
-        db_pr = PullRequest(
-            project_id=project_id,
-            pr_number=pr_number,
-            title=pr_create.title,
-            description=pr_create.description,
-            source_branch=pr_create.source_branch,
-            target_branch=pr_create.target_branch,
-            author_id=user.id,
-            author_name=user.name,
-            author_email=user.email,
-            status=PRStatus.OPEN.value,
-        )
-        self.db.add(db_pr)
-        await self.db.flush()
+                existing_result = await self.db.execute(
+                    select(PullRequest.id)
+                    .where(
+                        PullRequest.project_id == project_id,
+                        PullRequest.source_branch == pr_create.source_branch,
+                        PullRequest.status == PRStatus.OPEN.value,
+                    )
+                    .limit(1)
+                )
+                if existing_result.scalar_one_or_none() is not None:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="An open pull request already exists for this source branch",
+                    )
+
+                max_number_result = await self.db.execute(
+                    select(func.max(PullRequest.pr_number)).where(
+                        PullRequest.project_id == project_id
+                    )
+                )
+                pr_number = (max_number_result.scalar() or 0) + 1
+                db_pr = PullRequest(
+                    project_id=project_id,
+                    pr_number=pr_number,
+                    title=pr_create.title,
+                    description=pr_create.description,
+                    source_branch=pr_create.source_branch,
+                    target_branch=pr_create.target_branch,
+                    author_id=user.id,
+                    author_name=user.name,
+                    author_email=user.email,
+                    status=PRStatus.OPEN.value,
+                )
+                self.db.add(db_pr)
+                await self.db.flush()
+                await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
 
         # Sync with GitHub if integration exists and we can resolve a token
         gh_result = await self._get_github_token(project_id)
