@@ -101,8 +101,12 @@ def _make_branch(
 
 
 @pytest.fixture
-def mock_project_service() -> Generator[AsyncMock, None, None]:
+def mock_project_service(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> Generator[AsyncMock, None, None]:
+    _client, mock_db = authed_client
     mock_svc = AsyncMock(spec=ProjectService)
+    mock_svc.db = mock_db
     app.dependency_overrides[get_service] = lambda: mock_svc
     try:
         yield mock_svc

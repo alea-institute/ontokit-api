@@ -45,15 +45,19 @@ def _secure_test_secret(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_all_endpoints_403_when_auth_mode_required(client: TestClient) -> None:
-    with patch(
-        "ontokit.api.routes.anonymous_suggestions.settings"
-    ) as settings_mock:
+    with patch("ontokit.api.routes.anonymous_suggestions.settings") as settings_mock:
         settings_mock.auth_mode = "required"
         token = "irrelevant"
         responses = [
             client.post(f"{BASE}/sessions"),
-            client.put(f"{BASE}/sessions/s_x/save", json=SAVE_BODY, headers={"X-Anonymous-Token": token}),
-            client.post(f"{BASE}/sessions/s_x/submit", json=SUBMIT_BODY, headers={"X-Anonymous-Token": token}),
+            client.put(
+                f"{BASE}/sessions/s_x/save", json=SAVE_BODY, headers={"X-Anonymous-Token": token}
+            ),
+            client.post(
+                f"{BASE}/sessions/s_x/submit",
+                json=SUBMIT_BODY,
+                headers={"X-Anonymous-Token": token},
+            ),
             client.post(f"{BASE}/sessions/s_x/discard", headers={"X-Anonymous-Token": token}),
             client.post(f"{BASE}/beacon?token={token}", json={"session_id": "s_x", "content": "x"}),
         ]
@@ -228,9 +232,10 @@ async def test_reap_deletes_branch_and_discards() -> None:
     select_result.scalars.return_value.all.return_value = [stale]
     claim_result = MagicMock()
     claim_result.rowcount = 1
+    lock_result = MagicMock()
 
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=[select_result, claim_result])
+    db.execute = AsyncMock(side_effect=[select_result, claim_result, lock_result])
     db.commit = AsyncMock()
     service.db = db
     service.git_service = MagicMock()
