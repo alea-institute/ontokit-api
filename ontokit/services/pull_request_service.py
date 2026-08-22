@@ -58,6 +58,7 @@ from ontokit.schemas.pull_request import (
     ReviewListResponse,
     ReviewResponse,
 )
+from ontokit.services.branch_lock import branch_write_lock, branch_write_locks
 from ontokit.services.github_service import GitHubService, get_github_service
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.user_service import UserService, get_user_service
@@ -554,14 +555,26 @@ class PullRequestService:
         merge_message = (
             merge_request.merge_message or f"Merge pull request #{pr_number}: {pr.title}"
         )
-        merge_result = self.git_service.merge_branch(
-            project_id=project_id,
-            source=pr.source_branch,
-            target=pr.target_branch,
-            message=merge_message,
-            author_name=user.name,
-            author_email=user.email,
-        )
+        try:
+            async with branch_write_locks(
+                self.db,
+                project_id,
+                {pr.source_branch, pr.target_branch},
+            ):
+                merge_result = self.git_service.merge_branch(
+                    project_id=project_id,
+                    source=pr.source_branch,
+                    target=pr.target_branch,
+                    message=merge_message,
+                    author_name=user.name,
+                    author_email=user.email,
+                )
+                # End the advisory-lock transaction before releasing the matching
+                # process-local locks. Git is already the durable source of truth.
+                await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
 
         if not merge_result.success:
             raise HTTPException(
@@ -580,15 +593,18 @@ class PullRequestService:
         # Delete source branch if requested
         if merge_request.delete_source_branch:
             try:
-                self.git_service.delete_branch(project_id, pr.source_branch)
-                # Clean up branch metadata
-                await self.db.execute(
-                    sa_delete(BranchMetadata).where(
-                        BranchMetadata.project_id == project_id,
-                        BranchMetadata.branch_name == pr.source_branch,
+                async with branch_write_lock(self.db, project_id, pr.source_branch):
+                    self.git_service.delete_branch(project_id, pr.source_branch)
+                    # Clean up branch metadata
+                    await self.db.execute(
+                        sa_delete(BranchMetadata).where(
+                            BranchMetadata.project_id == project_id,
+                            BranchMetadata.branch_name == pr.source_branch,
+                        )
                     )
-                )
+                    await self.db.commit()
             except Exception as e:
+                await self.db.rollback()
                 logger.warning(f"Failed to delete source branch: {e}")
 
         # Sync with GitHub if integration exists
@@ -945,10 +961,13 @@ class PullRequestService:
         from_branch = branch_create.from_branch or self.git_service.get_current_branch(project_id)
 
         try:
-            branch_info = self.git_service.create_branch(
-                project_id, branch_create.name, from_branch
-            )
+            async with branch_write_lock(self.db, project_id, branch_create.name):
+                branch_info = self.git_service.create_branch(
+                    project_id, branch_create.name, from_branch
+                )
+                await self.db.commit()
         except Exception as e:
+            await self.db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=str(e),

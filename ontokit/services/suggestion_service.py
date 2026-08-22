@@ -1,11 +1,9 @@
 """Suggestion session service for managing suggester workflows."""
 
-import asyncio
 import json
 import logging
 import os
 import secrets
-from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID
@@ -46,13 +44,11 @@ from ontokit.schemas.suggestion import (
     SuggestionSubmitResponse,
     SuggestionUser,
 )
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
 
 logger = logging.getLogger(__name__)
-
-# Per-branch locks to serialize concurrent git writes (save + beacon_save)
-_branch_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 
 class SuggestionService:
@@ -103,6 +99,24 @@ class SuggestionService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You no longer have permission to suggest changes",
             )
+
+    @staticmethod
+    def _require_active_session(session: SuggestionSession, action: str) -> None:
+        if session.status != SuggestionSessionStatus.ACTIVE.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Session is {session.status}, cannot {action}",
+            )
+
+    async def _delete_git_branch(self, project_id: UUID, branch: str) -> None:
+        """Delete one suggestion branch under the canonical ref-write lock."""
+        try:
+            async with branch_write_lock(self.db, project_id, branch):
+                self.git_service.delete_branch(project_id, branch, force=True)
+                await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
 
     def _get_git_ontology_path(self, project: Project) -> str:
         """Get the ontology file path within the git repo."""
@@ -194,17 +208,6 @@ class SuggestionService:
         branch = f"suggest/{user_prefix}/{session_id}"
         beacon_token = create_beacon_token(session_id)
 
-        # Create the git branch
-        try:
-            self.git_service.create_branch(project_id, branch)
-        except Exception as e:
-            logger.error(f"Failed to create suggestion branch: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to create suggestion branch",
-            ) from e
-
-        # Create the database record
         db_session = SuggestionSession(
             project_id=project_id,
             user_id=user.id,
@@ -214,14 +217,25 @@ class SuggestionService:
             branch=branch,
             beacon_token=beacon_token,
         )
+        branch_created = False
         try:
-            self.db.add(db_session)
-            await self.db.commit()
+            async with branch_write_lock(self.db, project_id, branch):
+                try:
+                    self.git_service.create_branch(project_id, branch)
+                    branch_created = True
+                except Exception as e:
+                    logger.error(f"Failed to create suggestion branch: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to create suggestion branch",
+                    ) from e
+                self.db.add(db_session)
+                await self.db.commit()
         except IntegrityError:
             # Race: another request created an active session concurrently
             await self.db.rollback()
             try:
-                self.git_service.delete_branch(project_id, branch, force=True)
+                await self._delete_git_branch(project_id, branch)
             except Exception:
                 logger.warning(f"Failed to clean up orphaned branch {branch}")
             # Return the existing session
@@ -246,10 +260,11 @@ class SuggestionService:
             ) from None
         except Exception:
             await self.db.rollback()
-            try:
-                self.git_service.delete_branch(project_id, branch, force=True)
-            except Exception:
-                logger.warning(f"Failed to clean up orphaned branch {branch}")
+            if branch_created:
+                try:
+                    await self._delete_git_branch(project_id, branch)
+                except Exception:
+                    logger.warning(f"Failed to clean up orphaned branch {branch}")
             raise
 
         # Refresh outside the branch-cleanup try/except so a refresh failure
@@ -286,17 +301,15 @@ class SuggestionService:
         self._verify_ownership(session, user)
         await self._verify_project_access(project_id, user)
 
-        if session.status != SuggestionSessionStatus.ACTIVE.value:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Session is {session.status}, cannot save",
-            )
+        self._require_active_session(session, "save")
 
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
 
         # Serialize git writes per branch to prevent lost commits
-        async with _branch_locks[session.branch]:
+        async with branch_write_lock(self.db, project_id, session.branch):
+            await self.db.refresh(session, attribute_names=["status"])
+            self._require_active_session(session, "save")
             # Commit to the suggestion branch
             commit_message = f"Update {data.entity_label}"
             try:
@@ -310,6 +323,7 @@ class SuggestionService:
                     author_email=session.user_email or "suggester@ontokit.dev",
                 )
             except Exception as e:
+                await self.db.rollback()
                 logger.error(f"Failed to save suggestion: {e}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -766,21 +780,19 @@ class SuggestionService:
         self._verify_ownership(session, user)
         await self._verify_project_access(project_id, user)
 
-        if session.status != SuggestionSessionStatus.ACTIVE.value:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Session is {session.status}, cannot discard",
-            )
+        self._require_active_session(session, "discard")
 
-        # Delete the git branch
-        try:
-            self.git_service.delete_branch(project_id, session.branch, force=True)
-        except Exception as e:
-            logger.warning(f"Failed to delete suggestion branch {session.branch}: {e}")
+        async with branch_write_lock(self.db, project_id, session.branch):
+            await self.db.refresh(session, attribute_names=["status"])
+            self._require_active_session(session, "discard")
+            try:
+                self.git_service.delete_branch(project_id, session.branch, force=True)
+            except Exception as e:
+                logger.warning(f"Failed to delete suggestion branch {session.branch}: {e}")
 
-        session.status = SuggestionSessionStatus.DISCARDED.value
-        session.last_activity = datetime.now(UTC)
-        await self.db.commit()
+            session.status = SuggestionSessionStatus.DISCARDED.value
+            session.last_activity = datetime.now(UTC)
+            await self.db.commit()
 
     async def beacon_save(
         self, project_id: UUID, data: SuggestionBeaconRequest, token: str
@@ -854,7 +866,10 @@ class SuggestionService:
         filename = self._get_git_ontology_path(project)
 
         # Serialize git writes per branch to prevent lost commits
-        async with _branch_locks[session.branch]:
+        async with branch_write_lock(self.db, project_id, session.branch):
+            await self.db.refresh(session, attribute_names=["status"])
+            if session.status != SuggestionSessionStatus.ACTIVE.value:
+                return
             # Commit without full validation (speed over correctness for beacon)
             try:
                 self.git_service.commit_to_branch(  # type: ignore[attr-defined]
@@ -867,6 +882,7 @@ class SuggestionService:
                     author_email=session.user_email or "suggester@ontokit.dev",
                 )
             except Exception as e:
+                await self.db.rollback()
                 logger.warning(f"Beacon save failed for session {data.session_id}: {e}")
                 return  # Beacon is fire-and-forget
 
@@ -920,17 +936,6 @@ class SuggestionService:
         beacon_token = create_beacon_token(session_id)
         anon_user_id = f"anonymous-{secrets.token_hex(6)}"
 
-        # Create the git branch
-        try:
-            self.git_service.create_branch(project_id, branch)
-        except Exception as e:
-            logger.error(f"Failed to create anonymous suggestion branch: {e}")
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Failed to create suggestion branch",
-            ) from e
-
-        # Create the database record
         db_session = SuggestionSession(
             project_id=project_id,
             user_id=anon_user_id,
@@ -942,15 +947,27 @@ class SuggestionService:
             is_anonymous=True,
             client_ip=client_ip,
         )
+        branch_created = False
         try:
-            self.db.add(db_session)
-            await self.db.commit()
+            async with branch_write_lock(self.db, project_id, branch):
+                try:
+                    self.git_service.create_branch(project_id, branch)
+                    branch_created = True
+                except Exception as e:
+                    logger.error(f"Failed to create anonymous suggestion branch: {e}")
+                    raise HTTPException(
+                        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                        detail="Failed to create suggestion branch",
+                    ) from e
+                self.db.add(db_session)
+                await self.db.commit()
         except Exception:
             await self.db.rollback()
-            try:
-                self.git_service.delete_branch(project_id, branch, force=True)
-            except Exception:
-                logger.warning(f"Failed to clean up orphaned anonymous branch {branch}")
+            if branch_created:
+                try:
+                    await self._delete_git_branch(project_id, branch)
+                except Exception:
+                    logger.warning(f"Failed to clean up orphaned anonymous branch {branch}")
             raise
 
         try:
@@ -993,16 +1010,14 @@ class SuggestionService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Session is not an anonymous session",
             )
-        if session.status != SuggestionSessionStatus.ACTIVE.value:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Session is {session.status}, cannot save",
-            )
+        self._require_active_session(session, "save")
 
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
 
-        async with _branch_locks[session.branch]:
+        async with branch_write_lock(self.db, project_id, session.branch):
+            await self.db.refresh(session, attribute_names=["status"])
+            self._require_active_session(session, "save")
             commit_message = f"Update {data.entity_label}"
             try:
                 commit_info = self.git_service.commit_to_branch(  # type: ignore[attr-defined]
@@ -1015,6 +1030,7 @@ class SuggestionService:
                     author_email=session.user_email or "anonymous@ontokit.dev",
                 )
             except Exception as e:
+                await self.db.rollback()
                 logger.error(f"Failed to save anonymous suggestion: {e}")
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1117,20 +1133,21 @@ class SuggestionService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Session is not an anonymous session",
             )
-        if session.status != SuggestionSessionStatus.ACTIVE.value:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Session is {session.status}, cannot discard",
-            )
+        self._require_active_session(session, "discard")
 
-        try:
-            self.git_service.delete_branch(project_id, session.branch, force=True)
-        except Exception as e:
-            logger.warning(f"Failed to delete anonymous suggestion branch {session.branch}: {e}")
+        async with branch_write_lock(self.db, project_id, session.branch):
+            await self.db.refresh(session, attribute_names=["status"])
+            self._require_active_session(session, "discard")
+            try:
+                self.git_service.delete_branch(project_id, session.branch, force=True)
+            except Exception as e:
+                logger.warning(
+                    f"Failed to delete anonymous suggestion branch {session.branch}: {e}"
+                )
 
-        session.status = SuggestionSessionStatus.DISCARDED.value
-        session.last_activity = datetime.now(UTC)
-        await self.db.commit()
+            session.status = SuggestionSessionStatus.DISCARDED.value
+            session.last_activity = datetime.now(UTC)
+            await self.db.commit()
 
     async def auto_submit_stale_sessions(self) -> int:
         """Auto-create PRs for stale suggestion sessions.
@@ -1260,15 +1277,17 @@ class SuggestionService:
                 continue
             await self.db.commit()
 
-            try:
-                self.git_service.delete_branch(session.project_id, session.branch, force=True)
-            except Exception as e:
-                # Branch may already be gone; log and keep the discard.
-                logger.warning(
-                    "Reaped anonymous session %s but branch delete failed: %s",
-                    session.session_id,
-                    e,
-                )
+            async with branch_write_lock(self.db, session.project_id, session.branch):
+                try:
+                    self.git_service.delete_branch(session.project_id, session.branch, force=True)
+                except Exception as e:
+                    # Branch may already be gone; log and keep the discard.
+                    logger.warning(
+                        "Reaped anonymous session %s but branch delete failed: %s",
+                        session.session_id,
+                        e,
+                    )
+                await self.db.commit()
             count += 1
             logger.info(
                 "Reaped stale anonymous session %s (changes_count=%s)",

@@ -61,6 +61,7 @@ from ontokit.schemas.pull_request import (
     GitHubRepoFilesResponse,
     ProjectCreateFromGitHub,
 )
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.change_event_service import ChangeEventService
 from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.github_service import get_github_service
@@ -1076,23 +1077,25 @@ async def create_branch(
         )
 
     try:
-        from_ref = branch.from_branch or "HEAD"
-        result = git.create_branch(project_id, branch.name, from_ref)
+        async with branch_write_lock(db, project_id, branch.name):
+            from_ref = branch.from_branch or "HEAD"
+            result = git.create_branch(project_id, branch.name, from_ref)
+
+            # Record branch metadata (who created this branch)
+            metadata = BranchMetadata(
+                project_id=project_id,
+                branch_name=result.name,
+                created_by_id=user.id,
+                created_by_name=user.name,
+            )
+            db.add(metadata)
+            await db.commit()
     except Exception as e:
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Could not create branch: {e}",
         ) from e
-
-    # Record branch metadata (who created this branch)
-    metadata = BranchMetadata(
-        project_id=project_id,
-        branch_name=result.name,
-        created_by_id=user.id,
-        created_by_name=user.name,
-    )
-    db.add(metadata)
-    await db.commit()
 
     return BranchInfo(
         name=result.name,
@@ -1233,33 +1236,41 @@ async def delete_branch(
             )
 
     try:
-        git.delete_branch(project_id, branch_name, force=force)
+        async with branch_write_lock(db, project_id, branch_name):
+            git.delete_branch(project_id, branch_name, force=force)
+
+            # Clean up branch metadata
+            await db.execute(
+                sa_delete(BranchMetadata).where(
+                    BranchMetadata.project_id == project_id,
+                    BranchMetadata.branch_name == branch_name,
+                )
+            )
+
+            # Clean up ontology index for deleted branch
+            try:
+                await index_service.delete_branch_index(project_id, branch_name, auto_commit=False)
+            except Exception:
+                logger.warning(
+                    "Failed to clean up ontology index for deleted branch", exc_info=True
+                )
+
+            await db.commit()
     except ValueError as e:
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(e),
         ) from e
     except KeyError as e:
+        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Branch not found: {branch_name}",
         ) from e
-
-    # Clean up branch metadata
-    await db.execute(
-        sa_delete(BranchMetadata).where(
-            BranchMetadata.project_id == project_id,
-            BranchMetadata.branch_name == branch_name,
-        )
-    )
-
-    # Clean up ontology index for deleted branch
-    try:
-        await index_service.delete_branch_index(project_id, branch_name, auto_commit=False)
     except Exception:
-        logger.warning("Failed to clean up ontology index for deleted branch", exc_info=True)
-
-    await db.commit()
+        await db.rollback()
+        raise
 
 
 # Source content endpoints
@@ -1350,16 +1361,19 @@ async def save_source_content(
 
     # Commit to git on the specified branch
     try:
-        commit_info = git.commit_changes(
-            project_id=project_id,
-            ontology_content=content_bytes,
-            filename=filename,
-            message=data.commit_message,
-            author_name=user.name,
-            author_email=user.email,
-            branch_name=current_branch,
-        )
+        async with branch_write_lock(service.db, project_id, current_branch):
+            commit_info = git.commit_changes(
+                project_id=project_id,
+                ontology_content=content_bytes,
+                filename=filename,
+                message=data.commit_message,
+                author_name=user.name,
+                author_email=user.email,
+                branch_name=current_branch,
+            )
+            await service.db.commit()
     except Exception as e:
+        await service.db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to commit changes: {e}",

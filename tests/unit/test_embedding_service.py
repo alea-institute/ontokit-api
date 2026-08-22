@@ -22,7 +22,7 @@ def _make_config_row(
     provider: str = "local",
     model_name: str = "all-MiniLM-L6-v2",
     api_key_encrypted: str | None = None,
-    dimensions: int = 384,
+    dimensions: int = 3,
     auto_embed_on_save: bool = False,
     last_full_embed_at: datetime | None = None,
 ) -> MagicMock:
@@ -65,6 +65,7 @@ def _isolate_branch_lock(monkeypatch: pytest.MonkeyPatch) -> None:
         yield
 
     monkeypatch.setattr("ontokit.services.embedding_service.branch_write_lock", unlocked)
+    monkeypatch.setattr("ontokit.services.embedding_service.embedding_config_lock", unlocked)
 
 
 class TestGetConfig:
@@ -161,10 +162,22 @@ class TestUpdateConfig:
         update.api_key = None
         update.auto_embed_on_save = True
 
-        await service.update_config(PROJECT_ID, update)
+        lock_calls: list[tuple[object, uuid.UUID]] = []
+
+        @asynccontextmanager
+        async def recording_lock(db: object, project_id: uuid.UUID):
+            lock_calls.append((db, project_id))
+            yield
+
+        with patch(
+            "ontokit.services.embedding_service.embedding_config_lock",
+            recording_lock,
+        ):
+            await service.update_config(PROJECT_ID, update)
         mock_db.add.assert_not_called()
         mock_db.commit.assert_awaited_once()
         assert existing.auto_embed_on_save is True
+        assert lock_calls == [(mock_db, PROJECT_ID)]
 
 
 class TestGetStatus:
@@ -417,6 +430,80 @@ class TestEmbedProject:
     """Tests for embed_project()."""
 
     @pytest.mark.asyncio
+    async def test_config_change_before_activation_preserves_live_snapshot(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """A snapshot staged with stale provider settings is never published."""
+        from rdflib import Graph
+
+        job_id = uuid.uuid4()
+        job_result = MagicMock()
+        job_result.scalar_one_or_none.return_value = None
+
+        project = MagicMock()
+        project.source_file_path = "ontology.ttl"
+        project.github_integration = None
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+
+        initial_config_result = MagicMock()
+        initial_config_result.scalar_one_or_none.return_value = _make_config_row()
+        changed_config_result = MagicMock()
+        changed_config_result.scalar_one_or_none.return_value = _make_config_row(
+            provider="openai",
+            model_name="text-embedding-3-small",
+            dimensions=1536,
+        )
+
+        provider = AsyncMock()
+        provider.dimensions = 3
+        provider.provider_name = "local"
+        provider.model_id = "all-MiniLM-L6-v2"
+
+        ontology = MagicMock()
+        ontology.load_from_git = AsyncMock(return_value=Graph())
+
+        mock_db.execute.side_effect = [
+            job_result,
+            project_result,
+            initial_config_result,
+            MagicMock(),  # clear retry-left staging rows
+            changed_config_result,  # activation-time config reload
+            MagicMock(),  # failure cleanup: staging delete
+            MagicMock(),  # failure cleanup: job update
+            initial_config_result,  # old implementation's late config read
+        ]
+
+        with (
+            patch(
+                "ontokit.services.embedding_service.get_embedding_provider",
+                return_value=provider,
+            ),
+            patch(
+                "ontokit.services.ontology.get_ontology_service",
+                return_value=ontology,
+            ),
+            patch(
+                "ontokit.git.bare_repository.BareGitRepositoryService",
+                return_value=MagicMock(),
+            ),
+            patch(
+                "ontokit.services.storage.get_storage_service",
+                return_value=MagicMock(),
+            ),
+            pytest.raises(RuntimeError, match="configuration changed"),
+        ):
+            await service.embed_project(PROJECT_ID, BRANCH, job_id)
+
+        executed_sql = [
+            str(call.args[0].compile(compile_kwargs={"literal_binds": True}))
+            for call in mock_db.execute.await_args_list
+            if hasattr(call.args[0], "compile")
+        ]
+        assert not any(sql.startswith("DELETE FROM entity_embeddings ") for sql in executed_sql)
+        assert not any("INSERT INTO entity_embeddings " in sql for sql in executed_sql)
+
+    @pytest.mark.asyncio
     async def test_embed_project_creates_job_and_embeds_entities(
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:
@@ -470,10 +557,10 @@ class TestEmbedProject:
             cfg_result,  # _get_provider -> select config
             MagicMock(),  # clear retry-left staging rows
             MagicMock(),  # stage batch
+            cfg_result,  # activation-time config reload
             MagicMock(),  # delete prior live snapshot
             MagicMock(),  # activate staged snapshot
             MagicMock(),  # clear activated staging rows
-            cfg_result,  # select config for last_full_embed_at
         ]
 
         with (
@@ -550,10 +637,10 @@ class TestEmbedProject:
             proj_result,  # select Project
             cfg_result,  # _get_provider
             MagicMock(),  # clear retry-left staging rows
+            cfg_result,  # activation-time config reload
             MagicMock(),  # delete prior live snapshot
             MagicMock(),  # activate empty staged snapshot
             MagicMock(),  # clear activated staging rows
-            cfg_result,  # config for last_full_embed_at
         ]
 
         mock_provider = AsyncMock()
@@ -727,10 +814,10 @@ class TestEmbedProject:
             cfg_result,  # _get_provider
             MagicMock(),  # clear retry-left staging rows
             MagicMock(),  # stage batch
+            cfg_result,  # activation-time config reload
             MagicMock(),  # delete prior live snapshot
             MagicMock(),  # activate staged snapshot
             MagicMock(),  # clear activated staging rows
-            cfg_result,  # config for last_full_embed_at
         ]
 
         with (
@@ -804,7 +891,6 @@ class TestEmbedProject:
         mock_provider = AsyncMock()
         mock_provider.dimensions = 3
         mock_provider.provider_name = "local"
-        mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
 
         mock_db.execute.side_effect = [
@@ -812,10 +898,10 @@ class TestEmbedProject:
             proj_result,  # select Project
             cfg_result,  # _get_provider
             MagicMock(),  # clear retry-left staging rows
+            cfg_result,  # activation-time config reload
             MagicMock(),  # delete prior live snapshot
             MagicMock(),  # activate empty staged snapshot
             MagicMock(),  # clear activated staging rows
-            cfg_result,  # config for last_full_embed_at
         ]
 
         with (
@@ -957,7 +1043,7 @@ class TestEmbedProject:
         with (
             patch(
                 "ontokit.services.embedding_service.get_embedding_provider",
-                return_value=AsyncMock(provider_name="local", model_id="m"),
+                return_value=MagicMock(),
             ),
             patch(
                 "ontokit.services.ontology.get_ontology_service",
@@ -1010,21 +1096,26 @@ class TestEmbedProject:
         mock_git = MagicMock()
         mock_git.get_default_branch.return_value = "main"
 
+        mock_provider = AsyncMock()
+        mock_provider.provider_name = "local"
+        mock_provider.model_id = "all-MiniLM-L6-v2"
+        mock_provider.dimensions = 3
+
         mock_db.execute.side_effect = [
             job_result,  # select EmbeddingJob
             proj_result,  # select Project
             cfg_result,  # _get_provider
             MagicMock(),  # clear retry-left staging rows
+            cfg_result,  # activation-time config reload
             MagicMock(),  # delete prior live snapshot
             MagicMock(),  # activate empty staged snapshot
             MagicMock(),  # clear activated staging rows
-            cfg_result,  # config for last_full_embed_at
         ]
 
         with (
             patch(
                 "ontokit.services.embedding_service.get_embedding_provider",
-                return_value=AsyncMock(provider_name="local", model_id="m"),
+                return_value=mock_provider,
             ),
             patch(
                 "ontokit.services.ontology.get_ontology_service",

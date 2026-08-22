@@ -3,6 +3,7 @@
 import logging
 import math
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
 from typing import Protocol, TypeVar, cast, runtime_checkable
@@ -37,7 +38,7 @@ from ontokit.schemas.embeddings import (
     SimilarEntity,
 )
 from ontokit.schemas.embeddings import EmbeddingProvider as EmbeddingProviderLiteral
-from ontokit.services.branch_lock import branch_write_lock
+from ontokit.services.branch_lock import branch_write_lock, embedding_config_lock
 from ontokit.services.embedding_providers import get_embedding_provider
 from ontokit.services.embedding_providers.base import EmbeddingProvider as EmbeddingProviderBase
 from ontokit.services.embedding_text_builder import build_embedding_text
@@ -49,6 +50,41 @@ from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
 from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
 
 logger = logging.getLogger(__name__)
+
+_DEFAULT_EMBEDDING_PROVIDER = "local"
+_DEFAULT_EMBEDDING_MODEL = "all-MiniLM-L6-v2"
+_DEFAULT_EMBEDDING_DIMENSIONS = 384
+
+
+@dataclass(frozen=True)
+class _EmbeddingConfigFingerprint:
+    provider: str
+    model_name: str
+    dimensions: int
+
+
+def _provider_fingerprint(provider: EmbeddingProviderBase) -> _EmbeddingConfigFingerprint:
+    return _EmbeddingConfigFingerprint(
+        provider=provider.provider_name,
+        model_name=provider.model_id,
+        dimensions=provider.dimensions,
+    )
+
+
+def _effective_config_fingerprint(
+    config: ProjectEmbeddingConfig | None,
+) -> _EmbeddingConfigFingerprint:
+    if config is None:
+        return _EmbeddingConfigFingerprint(
+            provider=_DEFAULT_EMBEDDING_PROVIDER,
+            model_name=_DEFAULT_EMBEDDING_MODEL,
+            dimensions=_DEFAULT_EMBEDDING_DIMENSIONS,
+        )
+    return _EmbeddingConfigFingerprint(
+        provider=config.provider,
+        model_name=config.model_name,
+        dimensions=config.dimensions,
+    )
 
 
 class EmbeddingBudgetExceeded(RuntimeError):
@@ -318,6 +354,13 @@ class EmbeddingService:
     async def update_config(
         self, project_id: UUID, update: EmbeddingConfigUpdate
     ) -> EmbeddingConfig:
+        async with embedding_config_lock(self._db, project_id):
+            return await self._update_config_locked(project_id, update)
+
+    async def _update_config_locked(
+        self, project_id: UUID, update: EmbeddingConfigUpdate
+    ) -> EmbeddingConfig:
+        """Update configuration while excluding snapshot activation."""
         result = await self._db.execute(
             select(ProjectEmbeddingConfig).where(ProjectEmbeddingConfig.project_id == project_id)
         )
@@ -437,8 +480,8 @@ class EmbeddingService:
             total_entities=total_entities,
             embedded_entities=embedded_count,
             coverage_percent=coverage,
-            provider=cfg.provider if cfg else "local",
-            model_name=cfg.model_name if cfg else "all-MiniLM-L6-v2",
+            provider=cfg.provider if cfg else _DEFAULT_EMBEDDING_PROVIDER,
+            model_name=cfg.model_name if cfg else _DEFAULT_EMBEDDING_MODEL,
             job_in_progress=job_in_progress,
             job_progress_percent=job_progress,
             last_full_embed_at=cfg.last_full_embed_at.isoformat()
@@ -467,8 +510,8 @@ class EmbeddingService:
         )
         cfg = result.scalar_one_or_none()
 
-        provider_name = cfg.provider if cfg else "local"
-        model_name = cfg.model_name if cfg else "all-MiniLM-L6-v2"
+        provider_name = cfg.provider if cfg else _DEFAULT_EMBEDDING_PROVIDER
+        model_name = cfg.model_name if cfg else _DEFAULT_EMBEDDING_MODEL
         api_key = None
         if cfg and cfg.api_key_encrypted:
             api_key = _decrypt_secret(cfg.api_key_encrypted)
@@ -556,6 +599,7 @@ class EmbeddingService:
             # Get provider
             provider = await self._get_provider(project_id)
             expected_dimensions = provider.dimensions
+            staged_fingerprint = _provider_fingerprint(provider)
 
             # A worker retry owns the same job id. Remove any crash-left staging
             # rows before rebuilding its private snapshot.
@@ -620,7 +664,10 @@ class EmbeddingService:
             # Activation is one transaction under the same cross-process branch
             # lock used by ontology writers. A changed source revision aborts
             # instead of publishing a stale snapshot or pruning new entities.
-            async with branch_write_lock(self._db, project_id, branch):
+            async with (
+                embedding_config_lock(self._db, project_id),
+                branch_write_lock(self._db, project_id, branch),
+            ):
                 if source_revision is not None:
                     if repository is None:
                         raise RuntimeError("Embedding source repository was not retained")
@@ -629,6 +676,19 @@ class EmbeddingService:
                         raise RuntimeError(
                             "Ontology branch changed during embedding refresh; retry the job"
                         )
+
+                # Reload while both locks are held. Configuration updates use
+                # the same project lock, closing the check/publish race.
+                cfg_result = await self._db.execute(
+                    select(ProjectEmbeddingConfig).where(
+                        ProjectEmbeddingConfig.project_id == project_id
+                    )
+                )
+                cfg = cfg_result.scalar_one_or_none()
+                if _effective_config_fingerprint(cfg) != staged_fingerprint:
+                    raise RuntimeError(
+                        "Embedding configuration changed during refresh; retry the job"
+                    )
 
                 await self._db.execute(
                     delete(EntityEmbedding).where(
@@ -644,12 +704,6 @@ class EmbeddingService:
                 completed_at = datetime.now(UTC)
                 job.status = "completed"
                 job.completed_at = completed_at
-                cfg_result = await self._db.execute(
-                    select(ProjectEmbeddingConfig).where(
-                        ProjectEmbeddingConfig.project_id == project_id
-                    )
-                )
-                cfg = cfg_result.scalar_one_or_none()
                 if cfg:
                     cfg.last_full_embed_at = completed_at
                 await self._db.commit()

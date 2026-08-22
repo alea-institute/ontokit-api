@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -15,6 +16,17 @@ from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessi
 from ontokit.services.suggestion_service import SuggestionService
 
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_branch_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep service unit tests independent from the lock's SQL round trip."""
+
+    @asynccontextmanager
+    async def unlocked(*_args: object, **_kwargs: object):
+        yield
+
+    monkeypatch.setattr("ontokit.services.suggestion_service.branch_write_lock", unlocked)
 
 
 # ---------------------------------------------------------------------------
@@ -671,6 +683,46 @@ class TestVerifyReviewerAccess:
 
 class TestSave:
     @pytest.mark.asyncio
+    async def test_save_rechecks_active_status_after_waiting_for_branch_lock(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+    ) -> None:
+        """A discard that wins the lock prevents a stale save."""
+        session = _make_session(status=SuggestionSessionStatus.ACTIVE.value)
+        project = _make_project()
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [session_result, project_result, project_result]
+
+        @asynccontextmanager
+        async def discard_wins(*_args: object, **_kwargs: object):
+            session.status = SuggestionSessionStatus.DISCARDED.value
+            yield
+
+        from ontokit.schemas.suggestion import SuggestionSaveRequest
+
+        data = SuggestionSaveRequest(
+            content="content",
+            entity_iri="http://example.org/X",
+            entity_label="X",
+        )
+        with (
+            patch(
+                "ontokit.services.suggestion_service.branch_write_lock",
+                discard_wins,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await service.save(PROJECT_ID, session.session_id, data, _make_user())
+
+        assert exc_info.value.status_code == 400
+        mock_git.commit_to_branch.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_save_success(
         self,
         service: SuggestionService,
@@ -708,13 +760,25 @@ class TestSave:
             entity_label="Person",
         )
 
+        lock_calls: list[tuple[object, uuid.UUID, str]] = []
+
+        @asynccontextmanager
+        async def recording_lock(db: object, project_id: uuid.UUID, branch: str):
+            lock_calls.append((db, project_id, branch))
+            yield
+
         user = _make_user()
-        result = await service.save(PROJECT_ID, session.session_id, data, user)
+        with patch(
+            "ontokit.services.suggestion_service.branch_write_lock",
+            recording_lock,
+        ):
+            result = await service.save(PROJECT_ID, session.session_id, data, user)
 
         assert result.commit_hash == "abc123"
         assert result.branch == session.branch
         assert result.changes_count == 1
         mock_git.commit_to_branch.assert_called_once()
+        assert lock_calls == [(mock_db, PROJECT_ID, session.branch)]
 
     @pytest.mark.asyncio
     async def test_save_non_active_session_raises_400(
@@ -1498,14 +1562,28 @@ class TestBeaconSave:
             content="@prefix : <http://example.org/> .",
         )
 
-        with patch(
-            "ontokit.services.suggestion_service.verify_beacon_token",
-            return_value=session.session_id,
+        lock_calls: list[tuple[object, uuid.UUID, str]] = []
+
+        @asynccontextmanager
+        async def recording_lock(db: object, project_id: uuid.UUID, branch: str):
+            lock_calls.append((db, project_id, branch))
+            yield
+
+        with (
+            patch(
+                "ontokit.services.suggestion_service.verify_beacon_token",
+                return_value=session.session_id,
+            ),
+            patch(
+                "ontokit.services.suggestion_service.branch_write_lock",
+                recording_lock,
+            ),
         ):
             await service.beacon_save(PROJECT_ID, data, "valid-token")
 
         assert session.changes_count == 2
         mock_git.commit_to_branch.assert_called_once()
+        assert lock_calls == [(mock_db, PROJECT_ID, session.branch)]
 
     @pytest.mark.asyncio
     async def test_beacon_save_invalid_token_raises_401(

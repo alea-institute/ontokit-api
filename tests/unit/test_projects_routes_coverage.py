@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Generator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -33,6 +34,17 @@ VALID_TURTLE = """\
 <http://example.org/ontology> rdf:type owl:Ontology .
 :Person rdf:type owl:Class .
 """
+
+
+@pytest.fixture(autouse=True)
+def _isolate_branch_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep route tests independent from the lock's SQL round trip."""
+
+    @asynccontextmanager
+    async def unlocked(*_args: object, **_kwargs: object):
+        yield
+
+    monkeypatch.setattr("ontokit.api.routes.projects.branch_write_lock", unlocked)
 
 
 # ---------------------------------------------------------------------------

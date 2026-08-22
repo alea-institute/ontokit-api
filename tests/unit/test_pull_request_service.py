@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -28,6 +29,16 @@ OWNER_ID = "owner-user-id"
 EDITOR_ID = "editor-user-id"
 VIEWER_ID = "viewer-user-id"
 OTHER_ID = "other-user-id"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_branch_locks(monkeypatch: pytest.MonkeyPatch) -> None:
+    @asynccontextmanager
+    async def unlocked(*_args: object, **_kwargs: object):
+        yield
+
+    monkeypatch.setattr("ontokit.services.pull_request_service.branch_write_lock", unlocked)
+    monkeypatch.setattr("ontokit.services.pull_request_service.branch_write_locks", unlocked)
 
 
 # ---------------------------------------------------------------------------

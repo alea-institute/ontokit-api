@@ -34,6 +34,7 @@ from ontokit.schemas.project import (
     ProjectUpdate,
     TransferOwnership,
 )
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.ontology_extractor import (
     NormalizationReport,
     OntologyMetadataExtractor,
@@ -376,18 +377,21 @@ class ProjectService:
             if self.git_service.repository_exists(db_project.id):
                 try:
                     git_file_path = turtle_file_path or ontology_file_path
-                    normalize_commit = self.git_service.commit_changes(
-                        project_id=db_project.id,
-                        ontology_content=normalized_content,
-                        filename=git_file_path,
-                        message="Normalize ontology to canonical Turtle format",
-                        author_name=owner.name,
-                        author_email=owner.email,
-                        branch_name=default_branch,
-                    )
+                    async with branch_write_lock(self.db, db_project.id, default_branch):
+                        normalize_commit = self.git_service.commit_changes(
+                            project_id=db_project.id,
+                            ontology_content=normalized_content,
+                            filename=git_file_path,
+                            message="Normalize ontology to canonical Turtle format",
+                            author_name=owner.name,
+                            author_email=owner.email,
+                            branch_name=default_branch,
+                        )
+                        await self.db.commit()
                     commit_hash = normalize_commit.hash
                     logger.info(f"Committed normalized content to git for project {db_project.id}")
                 except Exception as e:
+                    await self.db.rollback()
                     logger.warning(
                         f"Failed to commit normalized content for project {db_project.id}: {e}"
                     )
@@ -691,14 +695,18 @@ class ProjectService:
                 change_lines = "\n".join(f"- {change}" for change in changes)
                 commit_message = f"Update ontology metadata\n\n{change_lines}\n\nAutomated sync from project settings."
 
-                commit_info = self.git_service.commit_changes(
-                    project_id=project.id,
-                    ontology_content=updated_content,
-                    filename=git_filename,
-                    message=commit_message,
-                    author_name=user.name,
-                    author_email=user.email,
-                )
+                branch_name = self.git_service.get_default_branch(project.id)
+                async with branch_write_lock(self.db, project.id, branch_name):
+                    commit_info = self.git_service.commit_changes(
+                        project_id=project.id,
+                        ontology_content=updated_content,
+                        filename=git_filename,
+                        message=commit_message,
+                        author_name=user.name,
+                        author_email=user.email,
+                        branch_name=branch_name,
+                    )
+                    await self.db.commit()
                 logger.info(
                     f"Synced metadata to RDF for project {project.id}, "
                     f"commit {commit_info.short_hash}"
@@ -715,6 +723,7 @@ class ProjectService:
             )
             return None
         except Exception as e:
+            await self.db.rollback()
             logger.warning(
                 f"Failed to sync metadata to RDF for project {project.id}: {e}. "
                 "Database update succeeded, but RDF sync failed."

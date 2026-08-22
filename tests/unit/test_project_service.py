@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -20,6 +21,17 @@ OWNER_ID = "owner-user-id"
 ADMIN_ID = "admin-user-id"
 EDITOR_ID = "editor-user-id"
 VIEWER_ID = "viewer-user-id"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_branch_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep service unit tests independent from the lock's SQL round trip."""
+
+    @asynccontextmanager
+    async def unlocked(*_args: object, **_kwargs: object):
+        yield
+
+    monkeypatch.setattr("ontokit.services.project_service.branch_write_lock", unlocked)
 
 
 def _make_member(user_id: str, role: str, project_id: uuid.UUID = PROJECT_ID) -> MagicMock:

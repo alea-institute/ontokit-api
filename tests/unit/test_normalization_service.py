@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -20,6 +21,15 @@ SAMPLE_TURTLE = b"""\
 
 <http://example.org/onto> rdf:type owl:Ontology .
 """
+
+
+@pytest.fixture(autouse=True)
+def _isolate_branch_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    @asynccontextmanager
+    async def unlocked(*_args: object, **_kwargs: object):
+        yield
+
+    monkeypatch.setattr("ontokit.services.normalization_service.branch_write_lock", unlocked)
 
 
 def _make_project(

@@ -81,7 +81,8 @@ class EntityEmbedding(Base):
     __table_args__ = (
         UniqueConstraint("project_id", "branch", "entity_iri", name="uq_entity_embedding"),
         CheckConstraint(
-            "dimensions > 0 AND dimensions <= 16000 AND vector_dims(embedding) = dimensions",
+            "dimensions IS NOT NULL AND dimensions > 0 AND dimensions <= 16000 "
+            "AND vector_dims(embedding) = dimensions",
             name="ck_entity_embeddings_dimensions",
         ),
         Index("ix_entity_embeddings_project_branch", "project_id", "branch"),

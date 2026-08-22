@@ -13,6 +13,7 @@ from ontokit.core.auth import CurrentUser
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.normalization import NormalizationRun
 from ontokit.models.project import Project
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.ontology_extractor import OntologyMetadataExtractor
 from ontokit.services.storage import StorageError, StorageService
 
@@ -224,14 +225,21 @@ class NormalizationService:
                 if report.prefixes_removed:
                     commit_message += f"Prefixes removed: {', '.join(report.prefixes_removed)}\n"
 
-                commit_info = self.git_service.commit_changes(
-                    project_id=project.id,
-                    ontology_content=normalized_content,
-                    filename=filename,
-                    message=commit_message,
-                    author_name=user.name if user else "OntoKit System",
-                    author_email=user.email if user else "system@ontokit.dev",
-                )
+                branch = self.git_service.get_current_branch(project.id)
+                try:
+                    async with branch_write_lock(self.db, project.id, branch):
+                        commit_info = self.git_service.commit_changes(
+                            project_id=project.id,
+                            ontology_content=normalized_content,
+                            filename=filename,
+                            message=commit_message,
+                            author_name=user.name if user else "OntoKit System",
+                            author_email=user.email if user else "system@ontokit.dev",
+                        )
+                        await self.db.commit()
+                except Exception:
+                    await self.db.rollback()
+                    raise
                 commit_hash = commit_info.hash
 
         # Create the run record

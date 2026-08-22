@@ -20,12 +20,20 @@ depends_on: str | Sequence[str] | None = None
 def upgrade() -> None:
     op.add_column("entity_embeddings", sa.Column("dimensions", sa.Integer(), nullable=True))
     op.execute("UPDATE entity_embeddings SET dimensions = vector_dims(embedding)")
+    op.execute("""
+        ALTER TABLE entity_embeddings
+        ADD CONSTRAINT ck_entity_embeddings_dimensions
+        CHECK (
+            dimensions IS NOT NULL
+            AND dimensions > 0
+            AND dimensions <= 16000
+            AND vector_dims(embedding) = dimensions
+        ) NOT VALID
+    """)
+    op.execute("ALTER TABLE entity_embeddings VALIDATE CONSTRAINT ck_entity_embeddings_dimensions")
+    # PostgreSQL can use the validated IS NOT NULL check to avoid a second
+    # full-table validation scan when enforcing the column property.
     op.alter_column("entity_embeddings", "dimensions", nullable=False)
-    op.create_check_constraint(
-        "ck_entity_embeddings_dimensions",
-        "entity_embeddings",
-        "dimensions > 0 AND dimensions <= 16000 AND vector_dims(embedding) = dimensions",
-    )
 
     op.create_table(
         "entity_embedding_staging",
@@ -61,31 +69,56 @@ def upgrade() -> None:
         "entity_embedding_staging",
         "vector_dims(embedding) = dimensions",
     )
-    # The legacy migration swallowed an invalid index on a dimensionless vector
-    # column. Replace it with real expression indexes whose partial predicates
-    # match the dimensions filter used by search. Fail the migration if the
-    # installed pgvector cannot provide the promised ANN capability.
-    op.execute("DROP INDEX IF EXISTS ix_entity_embeddings_hnsw")
-    for dimensions in (384, 1024, 1536):
-        op.execute(f"""
-            CREATE INDEX ix_entity_embeddings_hnsw_{dimensions}
-            ON entity_embeddings
-            USING hnsw ((embedding::vector({dimensions})) vector_cosine_ops)
-            WITH (m = 16, ef_construction = 64)
-            WHERE dimensions = {dimensions}
+    # Index DDL runs outside the migration transaction so writes remain
+    # available. Capability checks fail explicitly instead of silently leaving
+    # production without the ANN contract promised by this revision.
+    with op.get_context().autocommit_block():
+        op.execute("""
+            DO $$
+            BEGIN
+                IF NOT EXISTS (SELECT 1 FROM pg_am WHERE amname = 'hnsw') THEN
+                    RAISE EXCEPTION 'pgvector HNSW access method is required';
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_opclass c
+                    JOIN pg_am a ON a.oid = c.opcmethod
+                    WHERE a.amname = 'hnsw' AND c.opcname = 'vector_cosine_ops'
+                ) THEN
+                    RAISE EXCEPTION 'pgvector vector_cosine_ops HNSW opclass is required';
+                END IF;
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_opclass c
+                    JOIN pg_am a ON a.oid = c.opcmethod
+                    WHERE a.amname = 'hnsw' AND c.opcname = 'halfvec_cosine_ops'
+                ) THEN
+                    RAISE EXCEPTION 'pgvector halfvec_cosine_ops HNSW opclass is required';
+                END IF;
+            END $$
         """)
-    op.execute("""
-        CREATE INDEX ix_entity_embeddings_hnsw_3072
-        ON entity_embeddings
-        USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops)
-        WITH (m = 16, ef_construction = 64)
-        WHERE dimensions = 3072
-    """)
+        op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_entity_embeddings_hnsw")
+        for dimensions in (384, 1024, 1536):
+            op.execute(f"""
+                CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_entity_embeddings_hnsw_{dimensions}
+                ON entity_embeddings
+                USING hnsw ((embedding::vector({dimensions})) vector_cosine_ops)
+                WITH (m = 16, ef_construction = 64)
+                WHERE dimensions = {dimensions}
+            """)
+        op.execute("""
+            CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_entity_embeddings_hnsw_3072
+            ON entity_embeddings
+            USING hnsw ((embedding::halfvec(3072)) halfvec_cosine_ops)
+            WITH (m = 16, ef_construction = 64)
+            WHERE dimensions = 3072
+        """)
 
 
 def downgrade() -> None:
-    for dimensions in (384, 1024, 1536, 3072):
-        op.execute(f"DROP INDEX IF EXISTS ix_entity_embeddings_hnsw_{dimensions}")
+    with op.get_context().autocommit_block():
+        for dimensions in (384, 1024, 1536, 3072):
+            op.execute(f"DROP INDEX CONCURRENTLY IF EXISTS ix_entity_embeddings_hnsw_{dimensions}")
     op.drop_table("entity_embedding_staging")
     op.drop_constraint(
         "ck_entity_embeddings_dimensions",
@@ -93,3 +126,17 @@ def downgrade() -> None:
         type_="check",
     )
     op.drop_column("entity_embeddings", "dimensions")
+    # Restore the predecessor revision's best-effort index contract. The
+    # predecessor allowed pgvector installations that cannot index an
+    # unbounded vector column, so downgrade must preserve that guarded behavior.
+    op.execute("""
+        DO $$
+        BEGIN
+            CREATE INDEX IF NOT EXISTS ix_entity_embeddings_hnsw
+            ON entity_embeddings
+            USING hnsw (embedding vector_cosine_ops)
+            WITH (m = 16, ef_construction = 64);
+        EXCEPTION WHEN others THEN
+            RAISE WARNING 'HNSW index restoration failed; preserving predecessor fallback. Error: %', SQLERRM;
+        END $$
+    """)
