@@ -78,7 +78,13 @@ async def update_embedding_config(
 ) -> EmbeddingConfig:
     """Update embedding configuration."""
     await _verify_write_access(project_id, db, user)
-    return await embed_service.update_config(project_id, data)
+    try:
+        return await embed_service.update_config(project_id, data)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from None
 
 
 @router.post(

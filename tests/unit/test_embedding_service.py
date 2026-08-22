@@ -4,7 +4,7 @@
 
 import uuid
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from sqlalchemy.dialects import postgresql
@@ -120,7 +120,12 @@ class TestUpdateConfig:
         update.api_key = None
         update.auto_embed_on_save = True
 
-        await service.update_config(PROJECT_ID, update)
+        provider = MagicMock(dimensions=384)
+        with patch(
+            "ontokit.services.embedding_service.get_embedding_provider",
+            return_value=provider,
+        ):
+            await service.update_config(PROJECT_ID, update)
         mock_db.add.assert_called_once()
         added = mock_db.add.call_args[0][0]
         assert added.auto_embed_on_save is True
@@ -182,6 +187,10 @@ class TestGetStatus:
         assert status.embedded_entities == 0
         assert status.job_in_progress is False
         assert status.coverage_percent == 0.0
+
+        last_job_query = mock_db.execute.await_args_list[-1].args[0]
+        compiled = str(last_job_query.compile(compile_kwargs={"literal_binds": True}))
+        assert "embedding_jobs.status = 'completed'" in compiled
 
     @pytest.mark.asyncio
     async def test_returns_status_with_active_job(
@@ -1705,7 +1714,7 @@ class TestUpdateConfigEdgeCases:
             patch(
                 "ontokit.services.embedding_service.get_embedding_provider",
                 return_value=mock_provider_obj,
-            ),
+            ) as provider_factory,
             patch(
                 "ontokit.services.embedding_service._encrypt_secret",
                 return_value="encrypted",
@@ -1718,6 +1727,38 @@ class TestUpdateConfigEdgeCases:
         assert existing.dimensions == 1536
         assert existing.last_full_embed_at is None
         assert existing.api_key_encrypted == "encrypted"
+        provider_factory.assert_called_once_with(
+            "openai", "text-embedding-3-small", "new-key"
+        )
+
+    @pytest.mark.asyncio
+    async def test_paid_provider_switch_requires_a_new_key(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """A key stored for another provider must not be silently reused."""
+        from ontokit.schemas.embeddings import EmbeddingConfigUpdate
+
+        existing = _make_config_row(
+            provider="local",
+            model_name="all-MiniLM-L6-v2",
+            api_key_encrypted="key-for-a-different-provider",
+        )
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = existing
+        mock_db.execute.return_value = result
+
+        with pytest.raises(ValueError, match="OpenAI API key is required"):
+            await service.update_config(
+                PROJECT_ID,
+                EmbeddingConfigUpdate(
+                    provider="openai",
+                    model_name="text-embedding-3-small",
+                ),
+            )
+
+        assert existing.provider == "local"
+        assert existing.model_name == "all-MiniLM-L6-v2"
+        mock_db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_api_key_only_update(self, service: EmbeddingService, mock_db: AsyncMock) -> None:

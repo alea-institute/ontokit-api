@@ -226,16 +226,24 @@ class EmbeddingService:
             config = ProjectEmbeddingConfig(project_id=project_id)
             self._db.add(config)
 
-        model_changed = False
-        if update.provider is not None and update.provider != config.provider:
-            config.provider = update.provider
-            model_changed = True
-        if update.model_name is not None and update.model_name != config.model_name:
-            config.model_name = update.model_name
-            model_changed = True
+        previous_provider = config.provider
+        target_provider = update.provider or config.provider
+        target_model = update.model_name or config.model_name
+        model_changed = target_provider != config.provider or target_model != config.model_name
         if model_changed:
-            # Update dimensions based on new provider/model
-            provider = get_embedding_provider(config.provider, config.model_name, None)
+            # Paid providers validate key presence in their constructors. Use a
+            # key supplied in this request, or retain the encrypted key only
+            # when changing models within the same provider.
+            provider_api_key = update.api_key
+            if (
+                provider_api_key is None
+                and config.api_key_encrypted
+                and target_provider == previous_provider
+            ):
+                provider_api_key = _decrypt_secret(config.api_key_encrypted)
+            provider = get_embedding_provider(target_provider, target_model, provider_api_key)
+            config.provider = target_provider
+            config.model_name = target_model
             config.dimensions = provider.dimensions
             # Invalidate stale embeddings and reset full-embed marker
             config.last_full_embed_at = None
@@ -312,7 +320,7 @@ class EmbeddingService:
                 .where(
                     EmbeddingJob.project_id == project_id,
                     EmbeddingJob.branch == branch,
-                    EmbeddingJob.status == "complete",
+                    EmbeddingJob.status == "completed",
                     EmbeddingJob.total_entities > 0,
                 )
                 .order_by(EmbeddingJob.completed_at.desc())
