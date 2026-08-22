@@ -19,20 +19,26 @@ Authorization pattern mirrors embeddings.py:
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 import logging
 import uuid
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
-from ontokit.models.llm_config import ProjectLLMConfig
+from ontokit.models.llm_config import LLMAuditLog, ProjectLLMConfig
 from ontokit.models.project import ProjectMember
 from ontokit.schemas.llm import (
+    LLMAuditEntry,
+    LLMAuditHistoryResponse,
     LLMConfigResponse,
     LLMConfigUpdate,
     LLMKnownModel,
@@ -80,8 +86,48 @@ _LOCAL_PROVIDERS = {
     LLMProviderType.custom,
 }
 
+_AUDIT_CURSOR_KEYS = frozenset({"v", "project_id", "created_at", "id"})
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
+
+
+def _encode_audit_cursor(row: LLMAuditLog) -> str:
+    payload = {
+        "v": 1,
+        "project_id": str(row.project_id),
+        "created_at": row.created_at.isoformat(),
+        "id": str(row.id),
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode())
+    return encoded.rstrip(b"=").decode()
+
+
+def _decode_audit_cursor(cursor: str, project_id: UUID) -> tuple[datetime, UUID]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        payload = json.loads(base64.b64decode(padded, altchars=b"-_", validate=True))
+        if not isinstance(payload, dict) or set(payload) != _AUDIT_CURSOR_KEYS:
+            raise ValueError("unexpected cursor fields")
+        if payload["v"] != 1 or UUID(payload["project_id"]) != project_id:
+            raise ValueError("cursor scope mismatch")
+        created_at = datetime.fromisoformat(payload["created_at"])
+        if created_at.tzinfo is None:
+            raise ValueError("cursor timestamp must be timezone-aware")
+        row_id = UUID(payload["id"])
+    except (
+        binascii.Error,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="Invalid audit cursor",
+        ) from exc
+    return created_at, row_id
 
 
 async def _get_member_role(db: AsyncSession, project_id: UUID, user_id: str) -> str | None:
@@ -414,6 +460,47 @@ async def get_llm_usage(
         )
 
     return usage
+
+
+@router.get("/{project_id}/llm/audit", response_model=LLMAuditHistoryResponse)
+async def get_llm_audit_history(
+    project_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+    cursor: str | None = Query(default=None, max_length=1024),
+    limit: int = Query(default=50, ge=1, le=100),
+) -> LLMAuditHistoryResponse:
+    """Return metadata-only per-call receipts for project owners and admins."""
+    require_authenticated_identity(user)
+    await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
+
+    query = select(LLMAuditLog).where(LLMAuditLog.project_id == project_id)
+    if cursor is not None:
+        created_at, row_id = _decode_audit_cursor(cursor, project_id)
+        query = query.where(tuple_(LLMAuditLog.created_at, LLMAuditLog.id) < (created_at, row_id))
+    query = query.order_by(LLMAuditLog.created_at.desc(), LLMAuditLog.id.desc()).limit(limit + 1)
+
+    rows = list((await db.execute(query)).scalars().all())
+    page = rows[:limit]
+    next_cursor = _encode_audit_cursor(page[-1]) if len(rows) > limit and page else None
+    return LLMAuditHistoryResponse(
+        entries=[
+            LLMAuditEntry(
+                id=row.id,
+                timestamp=row.created_at,
+                user_id=row.user_id,
+                model=row.model,
+                provider=row.provider,
+                endpoint=row.endpoint,
+                input_tokens=row.input_tokens,
+                output_tokens=row.output_tokens,
+                cost_estimate_usd=row.cost_estimate_usd,
+                is_byo_key=row.is_byo_key,
+            )
+            for row in page
+        ],
+        next_cursor=next_cursor,
+    )
 
 
 @router.get("/{project_id}/llm/status", response_model=LLMStatusResponse)

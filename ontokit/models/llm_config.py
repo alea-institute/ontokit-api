@@ -77,7 +77,7 @@ class LLMAuditLog(Base):
     project: Mapped["Project | None"] = relationship()  # type: ignore[name-defined]  # noqa: F821
 
     __table_args__ = (
-        Index("ix_llm_audit_project_date", "project_id", "created_at"),
+        Index("ix_llm_audit_project_date", "project_id", "created_at", "id"),
         Index("ix_llm_audit_project_user", "project_id", "user_id"),
     )
 

@@ -42,6 +42,19 @@ def test_audit_model_columns_are_metadata_only():
         )
 
 
+def test_audit_history_index_supports_stable_keyset_order():
+    from ontokit.models.llm_config import LLMAuditLog
+
+    index = next(
+        item for item in LLMAuditLog.__table__.indexes if item.name == "ix_llm_audit_project_date"
+    )
+    assert [column.name for column in index.columns] == [
+        "project_id",
+        "created_at",
+        "id",
+    ]
+
+
 def test_user_usage_reports_byo_flag_not_key():
     """Per-user usage reports whether a BYO key was used, never the key itself."""
     fields = set(LLMUserUsage.model_fields)

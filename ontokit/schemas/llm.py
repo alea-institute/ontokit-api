@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from enum import StrEnum
+from uuid import UUID
 
 from pydantic import BaseModel
 
@@ -101,6 +102,7 @@ class LLMUsageResponse(BaseModel):
 class LLMAuditEntry(BaseModel):
     """Single audit log entry for the usage history table."""
 
+    id: UUID
     timestamp: datetime
     user_id: str
     model: str
@@ -110,6 +112,13 @@ class LLMAuditEntry(BaseModel):
     output_tokens: int
     cost_estimate_usd: float
     is_byo_key: bool
+
+
+class LLMAuditHistoryResponse(BaseModel):
+    """Newest-first page of metadata-only LLM call receipts."""
+
+    entries: list[LLMAuditEntry]
+    next_cursor: str | None = None
 
 
 class LLMProviderInfo(BaseModel):
