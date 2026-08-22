@@ -808,6 +808,27 @@ class SuggestionService:
             # fall back to creating the PR directly
             if e.status_code == status.HTTP_403_FORBIDDEN:
                 pr_response = await self._create_pr_directly(project_id, pr_create, session)  # type: ignore[assignment]
+            elif e.status_code == status.HTTP_409_CONFLICT:
+                raced_pr_result = await self.db.execute(
+                    select(PullRequest).where(
+                        PullRequest.project_id == project_id,
+                        PullRequest.source_branch == session.branch,
+                        PullRequest.status == "open",
+                    )
+                )
+                raced_pr = raced_pr_result.scalar_one_or_none()
+                if raced_pr is None:
+                    raise
+                session.status = new_status
+                session.pr_number = raced_pr.pr_number
+                session.pr_id = raced_pr.id
+                session.last_activity = datetime.now(UTC)
+                await self.db.commit()
+                return SuggestionSubmitResponse(
+                    pr_number=raced_pr.pr_number,
+                    pr_url=raced_pr.github_pr_url,
+                    status=new_status,
+                )
             else:
                 raise
 

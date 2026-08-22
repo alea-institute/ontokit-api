@@ -95,6 +95,16 @@ class TestRunConsistencyCheckTask:
         redis = ctx["redis"]
         assert redis.set.await_count == 3  # pending refresh + cache_key + job_key
         assert redis.publish.await_count == 2  # started + complete
+        assert redis.eval.await_count == 2  # renew + release
+        assert redis.eval.await_args_list[0].args[2:] == (
+            f"quality_job_active:{PROJECT_ID}",
+            JOB_ID,
+            "1800",
+        )
+        assert redis.eval.await_args_list[1].args[2:] == (
+            f"quality_job_active:{PROJECT_ID}",
+            JOB_ID,
+        )
 
     @pytest.mark.asyncio
     @patch("ontokit.worker.get_storage_service")
@@ -216,6 +226,16 @@ class TestRunDuplicateDetectionTask:
         redis = ctx["redis"]
         assert redis.set.await_count == 3
         assert redis.publish.await_count == 2
+        assert redis.eval.await_count == 2
+        assert redis.eval.await_args_list[0].args[2:] == (
+            f"quality_job_active:{PROJECT_ID}",
+            JOB_ID,
+            "1800",
+        )
+        assert redis.eval.await_args_list[1].args[2:] == (
+            f"quality_job_active:{PROJECT_ID}",
+            JOB_ID,
+        )
 
     @pytest.mark.asyncio
     @patch(

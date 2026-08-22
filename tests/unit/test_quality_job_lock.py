@@ -59,7 +59,7 @@ async def test_worker_renews_or_reclaims_its_lease_atomically() -> None:
         1,
         quality_job_lock_key("project-1"),
         "job-1",
-        QUALITY_JOB_LOCK_TTL_SECONDS,
+        str(QUALITY_JOB_LOCK_TTL_SECONDS),
     )
 
 

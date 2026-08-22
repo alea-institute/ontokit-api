@@ -5,10 +5,11 @@ import json
 import logging
 import os
 from pathlib import Path
+from typing import cast
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, literal, or_, select
+from sqlalchemy import and_, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -548,6 +549,36 @@ class ProjectService:
             )
 
         return self._to_response(project, user)
+
+    async def require_member_role(
+        self,
+        project_id: UUID,
+        user: CurrentUser,
+    ) -> ProjectRole | None:
+        """Require project membership using a narrow lookup suitable for polling."""
+        result = await self.db.execute(
+            select(Project.id, ProjectMember.role)
+            .outerjoin(
+                ProjectMember,
+                and_(
+                    ProjectMember.project_id == Project.id,
+                    ProjectMember.user_id == user.id,
+                ),
+            )
+            .where(Project.id == project_id)
+        )
+        row = result.one_or_none()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found",
+            )
+        if row.role is None and not user.is_superadmin:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Project membership required",
+            )
+        return cast(ProjectRole | None, row.role)
 
     async def update(
         self,
