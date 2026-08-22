@@ -3,6 +3,7 @@
 # ruff: noqa: ARG002
 
 import uuid
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -53,6 +54,17 @@ def mock_db() -> AsyncMock:
 def service(mock_db: AsyncMock) -> EmbeddingService:
     """Create an EmbeddingService with mocked DB."""
     return EmbeddingService(mock_db)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_branch_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep service unit tests independent from the lock's SQL round trip."""
+
+    @asynccontextmanager
+    async def unlocked(*_args: object, **_kwargs: object):
+        yield
+
+    monkeypatch.setattr("ontokit.services.embedding_service.branch_write_lock", unlocked)
 
 
 class TestGetConfig:
@@ -433,10 +445,6 @@ class TestEmbedProject:
         cfg_result = MagicMock()
         cfg_result.scalar_one_or_none.return_value = cfg
 
-        # Existing embedding check returns None (new entity)
-        existing_result = MagicMock()
-        existing_result.scalar_one_or_none.return_value = None
-
         # Build a small test graph
         g = Graph()
         test_uri = URIRef("http://example.org/MyClass")
@@ -444,6 +452,7 @@ class TestEmbedProject:
         g.add((test_uri, RDFS.label, RDFLiteral("My Class")))
 
         mock_provider = AsyncMock()
+        mock_provider.dimensions = 3
         mock_provider.provider_name = "local"
         mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
@@ -459,8 +468,11 @@ class TestEmbedProject:
             job_result,  # select EmbeddingJob
             proj_result,  # select Project
             cfg_result,  # _get_provider -> select config
-            existing_result,  # existing embedding check (upsert)
-            MagicMock(),  # delete prune
+            MagicMock(),  # clear retry-left staging rows
+            MagicMock(),  # stage batch
+            MagicMock(),  # delete prior live snapshot
+            MagicMock(),  # activate staged snapshot
+            MagicMock(),  # clear activated staging rows
             cfg_result,  # select config for last_full_embed_at
         ]
 
@@ -537,11 +549,15 @@ class TestEmbedProject:
             job_result,  # select EmbeddingJob (found)
             proj_result,  # select Project
             cfg_result,  # _get_provider
-            MagicMock(),  # delete (prune all - no entities)
+            MagicMock(),  # clear retry-left staging rows
+            MagicMock(),  # delete prior live snapshot
+            MagicMock(),  # activate empty staged snapshot
+            MagicMock(),  # clear activated staging rows
             cfg_result,  # config for last_full_embed_at
         ]
 
         mock_provider = AsyncMock()
+        mock_provider.dimensions = 3
         mock_provider.provider_name = "local"
         mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
@@ -591,6 +607,7 @@ class TestEmbedProject:
         mock_db.execute.side_effect = [
             job_result,  # select EmbeddingJob
             proj_result,  # select Project -> None
+            MagicMock(),  # discard staging rows
             MagicMock(),  # rollback update
         ]
 
@@ -632,6 +649,7 @@ class TestEmbedProject:
         mock_db.execute.side_effect = [
             job_result,  # select EmbeddingJob
             proj_result,  # select Project -> None
+            MagicMock(),  # discard staging rows
             MagicMock(),  # raw UPDATE for failure status
         ]
         mock_db.rollback = AsyncMock()
@@ -654,9 +672,9 @@ class TestEmbedProject:
             await service.embed_project(PROJECT_ID, BRANCH, job_id)
 
         mock_db.rollback.assert_awaited_once()
-        # Third execute call is the raw UPDATE setting status='failed'
-        assert mock_db.execute.call_count == 3
-        update_stmt = mock_db.execute.call_args_list[2][0][0]
+        # Fourth execute call is the raw UPDATE setting status='failed'.
+        assert mock_db.execute.call_count == 4
+        update_stmt = mock_db.execute.call_args_list[3][0][0]
         compiled = update_stmt.compile(compile_kwargs={"literal_binds": True})
         compiled_str = str(compiled)
         assert "failed" in compiled_str
@@ -688,17 +706,13 @@ class TestEmbedProject:
         cfg_result = MagicMock()
         cfg_result.scalar_one_or_none.return_value = cfg
 
-        # Existing embedding (update path)
-        existing_emb = MagicMock()
-        existing_emb_result = MagicMock()
-        existing_emb_result.scalar_one_or_none.return_value = existing_emb
-
         g = Graph()
         test_uri = URIRef("http://example.org/ExistingClass")
         g.add((test_uri, RDF.type, OWL.Class))
         g.add((test_uri, RDFS.label, RDFLiteral("Existing Class")))
 
         mock_provider = AsyncMock()
+        mock_provider.dimensions = 3
         mock_provider.provider_name = "local"
         mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
@@ -711,8 +725,11 @@ class TestEmbedProject:
             job_result,  # select EmbeddingJob
             proj_result,  # select Project
             cfg_result,  # _get_provider
-            existing_emb_result,  # existing embedding check -> found
-            MagicMock(),  # delete prune
+            MagicMock(),  # clear retry-left staging rows
+            MagicMock(),  # stage batch
+            MagicMock(),  # delete prior live snapshot
+            MagicMock(),  # activate staged snapshot
+            MagicMock(),  # clear activated staging rows
             cfg_result,  # config for last_full_embed_at
         ]
 
@@ -748,9 +765,9 @@ class TestEmbedProject:
         ):
             await service.embed_project(PROJECT_ID, BRANCH, job_id)
 
-        # The existing embedding object should have been updated
-        assert existing_emb.embedding == [0.4, 0.5, 0.6]
-        assert existing_emb.provider == "local"
+        staged_stmt = mock_db.execute.await_args_list[4].args[0]
+        compiled = staged_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+        assert "ON CONFLICT (job_id, entity_iri) DO UPDATE" in str(compiled)
 
     @pytest.mark.asyncio
     async def test_embed_project_falls_back_to_storage_on_default_branch(
@@ -785,6 +802,7 @@ class TestEmbedProject:
         mock_git.get_default_branch.return_value = "main"
 
         mock_provider = AsyncMock()
+        mock_provider.dimensions = 3
         mock_provider.provider_name = "local"
         mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
@@ -793,7 +811,10 @@ class TestEmbedProject:
             job_result,  # select EmbeddingJob
             proj_result,  # select Project
             cfg_result,  # _get_provider
-            MagicMock(),  # delete prune (no entities)
+            MagicMock(),  # clear retry-left staging rows
+            MagicMock(),  # delete prior live snapshot
+            MagicMock(),  # activate empty staged snapshot
+            MagicMock(),  # clear activated staging rows
             cfg_result,  # config for last_full_embed_at
         ]
 
@@ -848,6 +869,7 @@ class TestEmbedProject:
         mock_db.execute.side_effect = [
             job_result,  # select EmbeddingJob
             proj_result,  # select Project
+            MagicMock(),  # discard staging rows
             MagicMock(),  # rollback update
         ]
         mock_db.rollback = AsyncMock()
@@ -891,6 +913,7 @@ class TestEmbedProject:
             side_effect=[
                 job_result,  # select EmbeddingJob
                 proj_result,  # select Project
+                MagicMock(),  # except handler: discard staging rows
                 MagicMock(),  # except handler: update EmbeddingJob status
             ]
         )
@@ -924,7 +947,8 @@ class TestEmbedProject:
         mock_db.execute.side_effect = [
             job_result,  # select EmbeddingJob
             proj_result,  # select Project
-            cfg_result,  # _get_provider
+            MagicMock(),  # discard staging rows
+            MagicMock(),  # update failed job
         ]
 
         mock_ontology = MagicMock()
@@ -990,7 +1014,10 @@ class TestEmbedProject:
             job_result,  # select EmbeddingJob
             proj_result,  # select Project
             cfg_result,  # _get_provider
-            MagicMock(),  # delete prune
+            MagicMock(),  # clear retry-left staging rows
+            MagicMock(),  # delete prior live snapshot
+            MagicMock(),  # activate empty staged snapshot
+            MagicMock(),  # clear activated staging rows
             cfg_result,  # config for last_full_embed_at
         ]
 
@@ -1035,6 +1062,7 @@ class TestEmbedProject:
             side_effect=[
                 job_result,  # select EmbeddingJob
                 proj_result,  # select Project
+                MagicMock(),  # except handler: discard staging rows
                 MagicMock(),  # except handler: update EmbeddingJob status
             ]
         )
@@ -1117,6 +1145,7 @@ class TestEmbedSingleEntity:
         mock_ontology._get_graph = AsyncMock(return_value=g)
 
         mock_provider = AsyncMock()
+        mock_provider.dimensions = 3
         mock_provider.provider_name = "local"
         mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
@@ -1126,11 +1155,7 @@ class TestEmbedSingleEntity:
         cfg_result = MagicMock()
         cfg_result.scalar_one_or_none.return_value = _make_config_row()
 
-        # Existing embedding query -> None
-        existing_result = MagicMock()
-        existing_result.scalar_one_or_none.return_value = None
-
-        mock_db.execute.side_effect = [cfg_result, existing_result]
+        mock_db.execute.side_effect = [cfg_result, MagicMock()]
 
         with (
             patch(
@@ -1156,7 +1181,9 @@ class TestEmbedSingleEntity:
         ):
             await service.embed_single_entity(PROJECT_ID, BRANCH, "http://example.org/Foo")
 
-        mock_db.add.assert_called_once()
+        upsert_stmt = mock_db.execute.await_args_list[1].args[0]
+        compiled = upsert_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+        assert "ON CONFLICT ON CONSTRAINT uq_entity_embedding DO UPDATE" in str(compiled)
         mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1175,6 +1202,7 @@ class TestEmbedSingleEntity:
         mock_ontology._get_graph = AsyncMock(return_value=g)
 
         mock_provider = AsyncMock()
+        mock_provider.dimensions = 3
         mock_provider.provider_name = "local"
         mock_provider.provider_name = "local"
         mock_provider.model_id = "all-MiniLM-L6-v2"
@@ -1183,11 +1211,7 @@ class TestEmbedSingleEntity:
         cfg_result = MagicMock()
         cfg_result.scalar_one_or_none.return_value = _make_config_row()
 
-        existing_emb = MagicMock()
-        existing_result = MagicMock()
-        existing_result.scalar_one_or_none.return_value = existing_emb
-
-        mock_db.execute.side_effect = [cfg_result, existing_result]
+        mock_db.execute.side_effect = [cfg_result, MagicMock()]
 
         with (
             patch(
@@ -1213,10 +1237,11 @@ class TestEmbedSingleEntity:
         ):
             await service.embed_single_entity(PROJECT_ID, BRANCH, "http://example.org/Bar")
 
-        # Should NOT call db.add (update path)
+        # The one conflict-safe statement covers both insert and concurrent update paths.
         mock_db.add.assert_not_called()
-        assert existing_emb.embedding == [0.7, 0.8, 0.9]
-        assert existing_emb.deprecated is True
+        upsert_stmt = mock_db.execute.await_args_list[1].args[0]
+        compiled = upsert_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+        assert "ON CONFLICT ON CONSTRAINT uq_entity_embedding DO UPDATE" in str(compiled)
         mock_db.commit.assert_awaited_once()
 
 
@@ -1274,6 +1299,7 @@ class TestSemanticSearch:
         cfg_result.scalar_one_or_none.return_value = _make_config_row()
 
         mock_provider = AsyncMock()
+        mock_provider.dimensions = 3
         mock_provider.provider_name = "local"
         mock_provider.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
@@ -1328,6 +1354,7 @@ class TestSemanticSearch:
         cfg_result.scalar_one_or_none.return_value = _make_config_row()
 
         mock_provider = AsyncMock()
+        mock_provider.dimensions = 3
         mock_provider.provider_name = "local"
         mock_provider.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
 
@@ -1357,7 +1384,13 @@ class TestSemanticSearch:
             f"Unresolved :query_vec bindparam in compiled SQL — {compiled_sql!r}"
         )
         # No self_iri here — semantic_search doesn't exclude any subject.
-        assert set(compiled.params.keys()) == {"query_vec", "pid", "br", "lim"}
+        assert set(compiled.params.keys()) == {
+            "query_vec",
+            "dimensions",
+            "pid",
+            "br",
+            "lim",
+        }
 
 
 # ---------------------------------------------------------------------------
@@ -1407,6 +1440,7 @@ class TestFindSimilar:
         # Source entity embedding
         source_emb = MagicMock()
         source_emb.embedding = [0.1, 0.2, 0.3]
+        source_emb.dimensions = 3
         emb_result = MagicMock()
         emb_result.scalar_one_or_none.return_value = source_emb
 
@@ -1450,6 +1484,7 @@ class TestFindSimilar:
 
         source_emb = MagicMock()
         source_emb.embedding = [0.1, 0.2, 0.3]
+        source_emb.dimensions = 3
         emb_result = MagicMock()
         emb_result.scalar_one_or_none.return_value = source_emb
 
@@ -1477,6 +1512,7 @@ class TestFindSimilar:
             "query_vec",
             "pid",
             "br",
+            "dimensions",
             "self_iri",
             "lim",
         }
@@ -1558,6 +1594,7 @@ class TestRankSuggestions:
         # Context embedding
         ctx_emb = MagicMock()
         ctx_emb.embedding = [1.0, 0.0, 0.0]  # unit vector along x-axis
+        ctx_emb.dimensions = 3
         ctx_result = MagicMock()
         ctx_result.scalar_one_or_none.return_value = ctx_emb
 
@@ -1602,6 +1639,7 @@ class TestRankSuggestions:
 
         ctx_emb = MagicMock()
         ctx_emb.embedding = [0.0, 0.0, 0.0]  # zero vector
+        ctx_emb.dimensions = 3
         ctx_result = MagicMock()
         ctx_result.scalar_one_or_none.return_value = ctx_emb
 
@@ -1629,6 +1667,7 @@ class TestRankSuggestions:
 
         ctx_emb = MagicMock()
         ctx_emb.embedding = [1.0, 0.0, 0.0]
+        ctx_emb.dimensions = 3
         ctx_result = MagicMock()
         ctx_result.scalar_one_or_none.return_value = ctx_emb
 
@@ -1727,9 +1766,7 @@ class TestUpdateConfigEdgeCases:
         assert existing.dimensions == 1536
         assert existing.last_full_embed_at is None
         assert existing.api_key_encrypted == "encrypted"
-        provider_factory.assert_called_once_with(
-            "openai", "text-embedding-3-small", "new-key"
-        )
+        provider_factory.assert_called_once_with("openai", "text-embedding-3-small", "new-key")
 
     @pytest.mark.asyncio
     async def test_paid_provider_switch_requires_a_new_key(

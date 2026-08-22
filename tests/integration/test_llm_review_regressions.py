@@ -682,6 +682,7 @@ async def test_p0_6_identical_real_embedding_blocks_without_structure(
         label="Legal Entity",
         embedding_text="Legal Entity",
         embedding=[1.0, 0.0, 0.0],
+        dimensions=3,
         provider="local",
         model_name="integration-vector",
     )
@@ -692,6 +693,7 @@ async def test_p0_6_identical_real_embedding_blocks_without_structure(
     provider = AsyncMock()
     provider.provider_name = "local"
     provider.model_id = "integration-vector"
+    provider.dimensions = 3
     provider.embed_text.return_value = [1.0, 0.0, 0.0]
     service._embedding_svc._get_provider = AsyncMock(return_value=provider)  # type: ignore[method-assign]
 
