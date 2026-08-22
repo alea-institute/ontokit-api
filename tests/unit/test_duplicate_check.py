@@ -139,6 +139,29 @@ async def test_structural_score_compares_candidate_direct_parent_to_proposed_par
 
 
 @pytest.mark.asyncio
+async def test_check_many_batches_semantic_queries_once():
+    """Generation batches provider embeddings while preserving per-label scoring."""
+    svc, _ = _make_service()
+    semantic_batches = [
+        [_make_sem_result(label="Alpha", branch="main")],
+        [_make_sem_result(label="Beta", branch="feature/beta")],
+    ]
+    with patch.object(
+        svc._embedding_svc,
+        "semantic_search_many_all_branches",
+        new=AsyncMock(return_value=semantic_batches),
+    ) as batch_search:
+        responses = await svc.check_many(
+            PROJECT_ID,
+            [("Alpha", "http://example.org/Parent"), ("Beta", None)],
+        )
+
+    batch_search.assert_awaited_once_with(PROJECT_ID, ["Alpha", "Beta"], limit=10)
+    assert len(responses) == 2
+    assert all(response.candidates for response in responses)
+
+
+@pytest.mark.asyncio
 async def test_exact_label_match_returns_block_verdict():
     """Composite score > 0.95 produces verdict='block' — submission is rejected (DEDUP-05)."""
     svc, _ = _make_service()

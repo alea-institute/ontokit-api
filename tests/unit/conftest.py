@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.core.auth import CurrentUser, get_current_user, get_current_user_optional
 from ontokit.core.database import get_db
 from ontokit.main import app
+from ontokit.schemas.duplicate_check import DuplicateCheckResponse, ScoreBreakdown
 
 
 @pytest.fixture
@@ -82,12 +83,16 @@ def mock_ontology_index() -> AsyncMock:
 
 @pytest.fixture
 def mock_duplicate_check_service() -> AsyncMock:
-    """AsyncMock for DuplicateCheckService.check() returning a pass verdict."""
+    """AsyncMock for DuplicateCheckService batch checks returning pass verdicts."""
     svc = AsyncMock()
-    svc.check = AsyncMock(
-        return_value=AsyncMock(
-            verdict="pass",
-            composite_score=0.0,
-        )
+    response = DuplicateCheckResponse(
+        verdict="pass",
+        composite_score=0.0,
+        score_breakdown=ScoreBreakdown(exact=0.0, semantic=0.0, structural=0.0),
+        candidates=[],
+    )
+    svc.check = AsyncMock(return_value=response)
+    svc.check_many = AsyncMock(
+        side_effect=lambda _project_id, checks: [response.model_copy(deep=True) for _ in checks]
     )
     return svc

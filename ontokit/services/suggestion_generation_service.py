@@ -124,7 +124,7 @@ class SuggestionGenerationService:
         text, input_tokens, output_tokens = await provider.chat(messages)
 
         # ── Step 4: Parse JSON output (handle Pitfall 3 — markdown fences) ────
-        raw_suggestions = self._parse_json_safe(text)
+        raw_suggestions = self._parse_json_safe(text)[:batch_size]
 
         # ── Step 5 + 6 + 7: parse per-type, validate, dedup — SEQUENTIAL (Pitfall 5) ─
         # Each of the five suggestion types has a distinct LLM output schema and a
@@ -139,6 +139,7 @@ class SuggestionGenerationService:
             p["iri"] for p in context.get("parents", []) if isinstance(p, dict) and p.get("iri")
         ]
 
+        parsed_suggestions: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for raw in raw_suggestions:
             if not isinstance(raw, dict):
                 continue
@@ -149,7 +150,42 @@ class SuggestionGenerationService:
                 # Malformed / empty suggestion for this type — skip rather than
                 # emit a blank, validation-failing stub.
                 continue
+            parsed_suggestions.append((raw, parsed))
 
+        dedup_checks = [
+            (parsed["dedup_label"], parsed["dedup_parent"])
+            for _raw, parsed in parsed_suggestions
+            if parsed["dedup_label"]
+        ]
+        dedup_results_by_index: dict[int, Any] = {}
+        if dedup_checks:
+            try:
+                dedup_results = await self._dedup.check_many(project_id, dedup_checks)
+                if len(dedup_results) != len(dedup_checks):
+                    raise RuntimeError("Duplicate check returned an unexpected batch size")
+                result_iterator = iter(dedup_results)
+                for index, (_raw, parsed) in enumerate(parsed_suggestions):
+                    if parsed["dedup_label"]:
+                        dedup_results_by_index[index] = next(result_iterator)
+            except Exception as exc:
+                logger.warning(
+                    "ALERT %s: suggestion dedup unavailable — allowing "
+                    "(verdict=pass) project=%s branch=%s type=%s error_type=%s",
+                    _DEDUP_UNAVAILABLE_EVENT,
+                    project_id,
+                    branch,
+                    suggestion_type,
+                    type(exc).__name__,
+                    extra={
+                        "event": _DEDUP_UNAVAILABLE_EVENT,
+                        "project_id": str(project_id),
+                        "branch": branch,
+                        "suggestion_type": suggestion_type,
+                        "error_type": type(exc).__name__,
+                    },
+                )
+
+        for index, (raw, parsed) in enumerate(parsed_suggestions):
             confidence = self._normalize_confidence(raw.get("confidence"))
 
             # Validate — only for class-like suggestions (children/siblings/parents).
@@ -180,40 +216,16 @@ class SuggestionGenerationService:
                         },
                     )
 
-            # Duplicate check (D-09) — SEQUENTIAL, one await at a time
+            # Apply the duplicate result produced by the bounded batch lookup.
             duplicate_verdict = "pass"
             duplicate_candidates: list[dict[str, Any]] = []
-            if parsed["dedup_label"]:
-                try:
-                    dedup_result = await self._dedup.check(
-                        project_id,
-                        label=parsed["dedup_label"],
-                        parent_iri=parsed["dedup_parent"],
-                    )
-                    duplicate_verdict = dedup_result.verdict
-                    duplicate_candidates = [
-                        {"iri": c.iri, "label": c.label, "score": c.score}
-                        for c in (dedup_result.candidates or [])
-                    ]
-                except Exception as exc:
-                    # Dedup infra failure fails soft to "pass" — logged distinctly
-                    # so ops can alert on silently-disabled duplicate blocking.
-                    logger.warning(
-                        "ALERT %s: suggestion dedup unavailable — allowing "
-                        "(verdict=pass) project=%s branch=%s type=%s error_type=%s",
-                        _DEDUP_UNAVAILABLE_EVENT,
-                        project_id,
-                        branch,
-                        suggestion_type,
-                        type(exc).__name__,
-                        extra={
-                            "event": _DEDUP_UNAVAILABLE_EVENT,
-                            "project_id": str(project_id),
-                            "branch": branch,
-                            "suggestion_type": suggestion_type,
-                            "error_type": type(exc).__name__,
-                        },
-                    )
+            dedup_result = dedup_results_by_index.get(index)
+            if dedup_result is not None:
+                duplicate_verdict = dedup_result.verdict
+                duplicate_candidates = [
+                    {"iri": c.iri, "label": c.label, "score": c.score}
+                    for c in (dedup_result.candidates or [])
+                ]
 
             # Build final suggestion (GEN-09: provenance="llm-proposed")
             results.append(

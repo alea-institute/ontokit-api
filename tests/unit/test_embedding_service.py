@@ -1485,6 +1485,73 @@ class TestSemanticSearch:
 
 
 # ---------------------------------------------------------------------------
+# cross-branch semantic search batching
+# ---------------------------------------------------------------------------
+
+
+class TestSemanticSearchManyAllBranches:
+    @pytest.mark.asyncio
+    async def test_embeds_all_queries_in_one_provider_call(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        count_result = MagicMock()
+        count_result.scalar.return_value = 2
+        cfg_result = MagicMock()
+        cfg_result.scalar_one_or_none.return_value = _make_config_row()
+
+        provider = AsyncMock()
+        provider.dimensions = 3
+        provider.provider_name = "local"
+        provider.embed_batch = AsyncMock(return_value=[[0.1, 0.2, 0.3], [0.3, 0.2, 0.1]])
+
+        first_row = MagicMock(
+            query_index=0,
+            entity_iri="http://example.org/Alpha",
+            label="Alpha",
+            entity_type="class",
+            score=0.91,
+            deprecated=False,
+            branch="main",
+        )
+        second_row = MagicMock(
+            query_index=1,
+            entity_iri="http://example.org/Beta",
+            label="Beta",
+            entity_type="class",
+            score=0.88,
+            deprecated=False,
+            branch="feature/beta",
+        )
+        search_result = MagicMock()
+        search_result.__iter__ = Mock(return_value=iter([first_row, second_row]))
+        mock_db.execute.side_effect = [
+            count_result,
+            cfg_result,
+            search_result,
+        ]
+
+        with (
+            patch("ontokit.services.embedding_service.Vector", new="not-None"),
+            patch(
+                "ontokit.services.embedding_service.get_embedding_provider",
+                return_value=provider,
+            ),
+        ):
+            results = await service.semantic_search_many_all_branches(
+                PROJECT_ID, ["Alpha", "Beta"], limit=10
+            )
+
+        provider.embed_batch.assert_awaited_once_with(["Alpha", "Beta"])
+        assert mock_db.execute.await_count == 3
+        assert [[row.label for row in batch] for batch in results] == [["Alpha"], ["Beta"]]
+
+        statement = mock_db.execute.await_args_list[2].args[0]
+        compiled = statement.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
+        assert ":query_vec" not in str(compiled)
+        assert {"query_vec_0", "query_vec_1"}.issubset(compiled.params)
+
+
+# ---------------------------------------------------------------------------
 # find_similar
 # ---------------------------------------------------------------------------
 

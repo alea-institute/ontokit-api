@@ -22,10 +22,11 @@ import socket
 from collections.abc import AsyncIterable, AsyncIterator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
-from functools import lru_cache
+from functools import lru_cache, partial
 from typing import Any
 from urllib.parse import urlparse, urlunparse
 
+import anyio
 import httpcore
 import httpx
 
@@ -266,6 +267,13 @@ def resolve_and_validate(url: str, *, allow_private: bool = False) -> list[str]:
     return ips
 
 
+async def resolve_and_validate_async(url: str, *, allow_private: bool = False) -> list[str]:
+    """Resolve and validate without blocking the application's event loop."""
+    return await anyio.to_thread.run_sync(
+        partial(resolve_and_validate, url, allow_private=allow_private)
+    )
+
+
 class PinnedDNSBackend(httpcore.AsyncNetworkBackend):
     """Resolve, validate, and dial the same numeric IP address."""
 
@@ -295,7 +303,7 @@ class PinnedDNSBackend(httpcore.AsyncNetworkBackend):
         if ips is None:
             try:
                 ips = tuple(
-                    resolve_and_validate(
+                    await resolve_and_validate_async(
                         f"{scheme}://{url_host}:{port}",
                         allow_private=self._allow_private,
                     )
@@ -432,7 +440,9 @@ class SSRFProtectedTransport(httpx.AsyncBaseTransport):
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
         try:
-            ips = resolve_and_validate(str(request.url), allow_private=self._allow_private)
+            ips = await resolve_and_validate_async(
+                str(request.url), allow_private=self._allow_private
+            )
         except ValueError as exc:
             logger.warning("SSRF guard blocked request: host=%s", request.url.host)
             raise httpx.ConnectError(str(exc), request=request) from exc

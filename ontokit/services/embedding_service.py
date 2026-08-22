@@ -13,7 +13,7 @@ from cryptography.fernet import MultiFernet
 from rdflib import Literal as RDFLiteral
 from rdflib import URIRef
 from rdflib.namespace import OWL, RDF, RDFS
-from sqlalchemy import delete, func, select, text, update
+from sqlalchemy import delete, exists, func, select, text, update
 from sqlalchemy.dialects.postgresql import Insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -893,13 +893,10 @@ class EmbeddingService:
             )
 
         # Check if any embeddings exist for this project
-        count_q = (
-            select(func.count())
-            .select_from(EntityEmbedding)
-            .where(EntityEmbedding.project_id == project_id)
-        )
-        count = (await self._db.execute(count_q)).scalar() or 0
-        if count == 0:
+        has_embeddings = (
+            await self._db.execute(select(exists().where(EntityEmbedding.project_id == project_id)))
+        ).scalar()
+        if not has_embeddings:
             return []
 
         # Embed query
@@ -916,6 +913,137 @@ class EmbeddingService:
             ),
         )
         dimensions = provider.dimensions
+        return await self._query_semantic_all_branches(
+            project_id,
+            query_vec,
+            dimensions=dimensions,
+            limit=limit,
+            threshold=threshold,
+            exclude_branch=exclude_branch,
+            exclude_iris=exclude_iris,
+        )
+
+    async def semantic_search_many_all_branches(
+        self,
+        project_id: UUID,
+        queries: list[str],
+        limit: int = 20,
+        threshold: float = 0.3,
+        billing_user_id: str = "system:duplicate-check",
+    ) -> list[list[SemanticSearchResultWithBranch]]:
+        """Embed and rank many duplicate-check labels in bounded batch calls."""
+        if not queries:
+            return []
+        if Vector is None:
+            raise RuntimeError(
+                "pgvector is not installed. Semantic search requires the pgvector extension."
+            )
+
+        has_embeddings = (
+            await self._db.execute(select(exists().where(EntityEmbedding.project_id == project_id)))
+        ).scalar()
+        if not has_embeddings:
+            return [[] for _ in queries]
+
+        provider = await self._get_provider(project_id)
+        query_vectors = cast(
+            list[list[float]],
+            await self._check_and_audit_embedding(
+                project_id,
+                provider,
+                "\n".join(queries),
+                "embeddings/duplicate-check",
+                billing_user_id,
+                partial(provider.embed_batch, queries),
+            ),
+        )
+        if len(query_vectors) != len(queries):
+            raise RuntimeError("Embedding provider returned an unexpected batch size")
+
+        return await self._query_semantic_many_all_branches(
+            project_id,
+            query_vectors,
+            dimensions=provider.dimensions,
+            limit=limit,
+            threshold=threshold,
+        )
+
+    async def _query_semantic_many_all_branches(
+        self,
+        project_id: UUID,
+        query_vectors: list[list[float]],
+        *,
+        dimensions: int,
+        limit: int,
+        threshold: float,
+    ) -> list[list[SemanticSearchResultWithBranch]]:
+        """Rank several query vectors in one database round trip."""
+        column_operand, query_operand = _distance_operands(dimensions)
+        values: list[str] = []
+        params: dict[str, object] = {
+            "pid": str(project_id),
+            "dimensions": dimensions,
+            "threshold": threshold,
+            "lim": limit,
+        }
+        for index, query_vec in enumerate(query_vectors):
+            _validate_embedding_dimensions(query_vec, expected=dimensions)
+            parameter = f"query_vec_{index}"
+            values.append(f"({index}, {query_operand.replace(':query_vec', f':{parameter}')})")
+            params[parameter] = _vec_to_str(query_vec)
+
+        query_str = text(f"""
+            WITH query_vectors(query_index, query_vec) AS (
+                VALUES {", ".join(values)}
+            )
+            SELECT q.query_index,
+                   candidate.entity_iri,
+                   candidate.label,
+                   candidate.entity_type,
+                   candidate.branch,
+                   candidate.deprecated,
+                   candidate.score
+            FROM query_vectors AS q
+            CROSS JOIN LATERAL (
+                SELECT entity_iri, label, entity_type, branch, deprecated,
+                       1 - ({column_operand} <=> q.query_vec) AS score
+                FROM entity_embeddings
+                WHERE project_id = :pid
+                  AND dimensions = :dimensions
+                  AND (1 - ({column_operand} <=> q.query_vec)) >= :threshold
+                ORDER BY {column_operand} <=> q.query_vec
+                LIMIT :lim
+            ) AS candidate
+            ORDER BY q.query_index, candidate.score DESC
+        """)  # nosec B608 -- operands and bind names come from fixed dimensions/list indices
+        result = await self._db.execute(query_str, params)
+
+        grouped: list[list[SemanticSearchResultWithBranch]] = [[] for _ in query_vectors]
+        for row in result:
+            grouped[int(row.query_index)].append(
+                SemanticSearchResultWithBranch(
+                    iri=row.entity_iri,
+                    label=row.label or "",
+                    entity_type=row.entity_type,
+                    score=round(float(row.score), 4),
+                    deprecated=row.deprecated,
+                    branch=row.branch,
+                )
+            )
+        return grouped
+
+    async def _query_semantic_all_branches(
+        self,
+        project_id: UUID,
+        query_vec: list[float],
+        *,
+        dimensions: int,
+        limit: int,
+        threshold: float,
+        exclude_branch: str | None = None,
+        exclude_iris: set[str] | None = None,
+    ) -> list[SemanticSearchResultWithBranch]:
+        """Query all branches with a validated, already-computed embedding."""
         _validate_embedding_dimensions(query_vec, expected=dimensions)
         column_operand, query_operand = _distance_operands(dimensions)
 

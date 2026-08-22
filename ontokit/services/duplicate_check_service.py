@@ -76,6 +76,27 @@ class DuplicateCheckService:
             )
             semantic_candidates = []
 
+        return await self._score_candidates(
+            project_id,
+            normalized_label=normalized_label,
+            exact_candidates=exact_candidates,
+            semantic_candidates=semantic_candidates,
+            parent_iri=parent_iri,
+            limit=limit,
+        )
+
+    async def _score_candidates(
+        self,
+        project_id: UUID,
+        *,
+        normalized_label: str,
+        exact_candidates: list[SemanticSearchResultWithBranch],
+        semantic_candidates: list[SemanticSearchResultWithBranch],
+        parent_iri: str | None,
+        limit: int,
+    ) -> DuplicateCheckResponse:
+        """Score already-loaded exact and semantic candidates for one label."""
+
         # Merge the two bounded sources by ontology identity. Exact-index data
         # wins for the label/branch projection; ANN still contributes its score.
         semantic_keys = {(candidate.iri, candidate.branch) for candidate in semantic_candidates}
@@ -203,6 +224,47 @@ class DuplicateCheckService:
             score_breakdown=best_breakdown,
             candidates=candidates,
         )
+
+    async def check_many(
+        self,
+        project_id: UUID,
+        checks: list[tuple[str, str | None]],
+        limit: int = 10,
+    ) -> list[DuplicateCheckResponse]:
+        """Check several labels with one embedding-provider batch call."""
+        if not checks:
+            return []
+        labels = [label for label, _parent_iri in checks]
+        try:
+            semantic_batches = await self._embedding_svc.semantic_search_many_all_branches(
+                project_id, labels, limit=limit
+            )
+            if len(semantic_batches) != len(checks):
+                raise RuntimeError("Semantic search returned an unexpected batch size")
+        except Exception as exc:
+            logger.warning(
+                "Semantic duplicate batch search unavailable; continuing with exact labels: %s",
+                exc,
+            )
+            semantic_batches = [[] for _ in checks]
+
+        responses: list[DuplicateCheckResponse] = []
+        for (label, parent_iri), semantic_candidates in zip(checks, semantic_batches, strict=True):
+            normalized_label = label.lower().strip()
+            exact_candidates = await self._find_exact_label_matches(
+                project_id, normalized_label, limit
+            )
+            responses.append(
+                await self._score_candidates(
+                    project_id,
+                    normalized_label=normalized_label,
+                    exact_candidates=exact_candidates,
+                    semantic_candidates=semantic_candidates,
+                    parent_iri=parent_iri,
+                    limit=limit,
+                )
+            )
+        return responses
 
     async def _find_exact_label_matches(
         self,

@@ -1,6 +1,8 @@
 """Tests for LLM base-url SSRF metadata/private-IP detection."""
 
+import asyncio
 import socket
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpcore
@@ -15,6 +17,7 @@ from ontokit.services.llm.ssrf import (
     _is_metadata_ip,
     _is_private_ip,
     resolve_and_validate,
+    resolve_and_validate_async,
     secure_async_client,
 )
 
@@ -114,6 +117,31 @@ class TestResolveAndValidate:
             pytest.raises(ValueError, match="Cannot resolve"),
         ):
             resolve_and_validate("https://nope.invalid/v1")
+
+    @pytest.mark.asyncio
+    async def test_async_resolution_does_not_block_event_loop(self):
+        events: list[str] = []
+
+        def slow_getaddrinfo(*_args, **_kwargs):
+            time.sleep(0.05)
+            events.append("dns-finished")
+            return _gai("8.8.8.8")
+
+        async def event_loop_marker() -> None:
+            await asyncio.sleep(0.005)
+            events.append("event-loop-ran")
+
+        with patch(
+            "ontokit.services.llm.ssrf.socket.getaddrinfo",
+            side_effect=slow_getaddrinfo,
+        ):
+            addresses, _ = await asyncio.gather(
+                resolve_and_validate_async("https://api.example.com/v1"),
+                event_loop_marker(),
+            )
+
+        assert addresses == ["8.8.8.8"]
+        assert events == ["event-loop-ran", "dns-finished"]
 
 
 class TestSSRFProtectedTransport:

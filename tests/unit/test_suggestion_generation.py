@@ -711,6 +711,44 @@ async def test_batch_size_configurable(
     assert "3" in full_text, "batch_size=3 should appear in the prompt content"
 
 
+@pytest.mark.asyncio
+async def test_provider_output_is_capped_to_requested_batch_size(
+    mock_llm_provider,
+    mock_duplicate_check_service,
+):
+    """A provider cannot amplify validation/dedup work beyond the request bound."""
+    mock_assembler = AsyncMock()
+    mock_assembler.assemble = AsyncMock(return_value=_make_context())
+    mock_validator = AsyncMock()
+    mock_validator.validate_entity = AsyncMock(return_value=[])
+    mock_llm_provider.chat = AsyncMock(
+        return_value=(
+            _make_llm_json(
+                [_suggestion("Child A"), _suggestion("Child B"), _suggestion("Child C")]
+            ),
+            100,
+            50,
+        )
+    )
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
+
+    response = await svc.generate(
+        project_id=PROJECT_ID,
+        branch="main",
+        class_iri=CLASS_IRI,
+        suggestion_type="children",
+        batch_size=1,
+        provider=mock_llm_provider,
+        project_namespace=NAMESPACE,
+    )
+
+    assert [suggestion.label for suggestion in response.suggestions] == ["Child A"]
+    mock_validator.validate_entity.assert_awaited_once()
+    assert mock_duplicate_check_service.check_many.await_args.args[1] == [("Child A", CLASS_IRI)]
+
+
 # ---------------------------------------------------------------------------
 # D-09: auto-validate in pipeline
 # ---------------------------------------------------------------------------
@@ -759,8 +797,11 @@ async def test_auto_validate_in_pipeline(
 
     # Validator was called once per suggestion
     assert mock_validator.validate_entity.call_count == 2
-    # Dedup was called once per suggestion
-    assert mock_duplicate_check_service.check.call_count == 2
+    # Duplicate scoring batches provider embeddings, then maps one result per suggestion.
+    mock_duplicate_check_service.check_many.assert_awaited_once_with(
+        PROJECT_ID,
+        [("Child A", CLASS_IRI), ("Child B", CLASS_IRI)],
+    )
 
 
 @pytest.mark.asyncio
@@ -776,7 +817,7 @@ async def test_fail_soft_gates_emit_redacted_alert_events(
     mock_assembler.assemble = AsyncMock(return_value=_make_context())
     mock_validator = AsyncMock()
     mock_validator.validate_entity = AsyncMock(side_effect=RuntimeError(sensitive_error))
-    mock_duplicate_check_service.check = AsyncMock(side_effect=RuntimeError(sensitive_error))
+    mock_duplicate_check_service.check_many = AsyncMock(side_effect=RuntimeError(sensitive_error))
     mock_llm_provider.chat = AsyncMock(
         return_value=(_make_llm_json([_suggestion(sensitive_label)]), 10, 5)
     )

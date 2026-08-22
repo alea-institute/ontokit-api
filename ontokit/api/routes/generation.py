@@ -22,6 +22,7 @@ import logging
 from typing import Annotated, Any
 from uuid import UUID
 
+import httpx
 from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -334,7 +335,7 @@ async def generate_suggestions(
 
         # Transient provider/network hiccups → empty suggestions (not a 500), so a
         # flaky upstream doesn't hard-fail the editor.
-        if isinstance(exc, TimeoutError | ConnectionError):
+        if isinstance(exc, TimeoutError | ConnectionError | httpx.TransportError):
             logger.warning(
                 "generate_suggestions: transient provider error for project %s: %s",
                 project_id,

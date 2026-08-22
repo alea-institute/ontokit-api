@@ -16,6 +16,7 @@ import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from uuid import UUID
 
+import httpx
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
@@ -465,6 +466,51 @@ def test_generate_502_on_provider_auth_error(authed_client: tuple[TestClient, As
         resp = client.post(GENERATE_URL, json=GENERATE_BODY)
 
     assert resp.status_code == 502
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "provider_error",
+    [
+        httpx.ConnectError("connection refused"),
+        httpx.ReadTimeout("provider timed out"),
+    ],
+)
+async def test_generate_httpx_transport_failure_returns_empty_suggestions(
+    provider_error: httpx.HTTPError,
+) -> None:
+    """HTTPX network failures follow the documented transient degradation path."""
+    session = AsyncMock()
+    _happy_path_execute(session)
+    svc_instance = MagicMock()
+    svc_instance.generate = AsyncMock(side_effect=provider_error)
+
+    with (
+        patch("ontokit.api.routes.generation._get_redis", return_value=None),
+        patch(
+            "ontokit.api.routes.generation.check_budget",
+            new=AsyncMock(return_value=(True, None)),
+        ),
+        patch("ontokit.api.routes.generation.get_provider", return_value=MagicMock()),
+        patch(
+            "ontokit.api.routes.generation.SuggestionGenerationService",
+            return_value=svc_instance,
+        ),
+        patch(
+            "ontokit.api.routes.generation.get_model_pricing",
+            new=AsyncMock(return_value=(0.000001, 0.000002)),
+        ),
+    ):
+        response = await generate_suggestions(
+            UUID(PROJECT_ID),
+            GenerateSuggestionsRequest(**GENERATE_BODY),
+            session,
+            MagicMock(id="user", is_superadmin=False, is_anonymous=False),
+        )
+
+    assert response.suggestions == []
+    assert response.input_tokens == 0
+    assert response.output_tokens == 0
 
 
 # ── validate-entity ───────────────────────────────────────────────────────────
