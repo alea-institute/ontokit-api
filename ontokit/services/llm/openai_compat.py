@@ -34,10 +34,12 @@ class OpenAICompatProvider(LLMProvider):
         model: str | None = None,
         allow_private: bool = False,
     ) -> None:
-        super().__init__(api_key=api_key, base_url=base_url, model=model)
-        # Local/self-hosted providers (ollama, lmstudio, custom, llamafile)
-        # legitimately point at private/loopback hosts; cloud providers must not.
-        self._allow_private = allow_private
+        super().__init__(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            allow_private=allow_private,
+        )
         self._client: Any = None
 
     def _get_client(self) -> Any:

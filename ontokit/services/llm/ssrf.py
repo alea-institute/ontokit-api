@@ -24,7 +24,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 
 import httpcore
 import httpx
@@ -44,16 +44,44 @@ _METADATA_IPS = frozenset(
 )
 
 
-def _canonical_origin(url: str) -> str | None:
+def canonical_origin(url: str) -> str | None:
     """Return a normalized scheme/host/effective-port origin."""
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         return None
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    except ValueError:
+        return None
     host = parsed.hostname.lower()
     if ":" in host:
         host = f"[{host}]"
     return f"{parsed.scheme}://{host}:{port}"
+
+
+def sanitize_base_url(url: str | None) -> str | None:
+    """Strip legacy URL userinfo before a stored base URL is returned.
+
+    New writes reject userinfo. This compatibility path prevents credentials
+    embedded by older versions from reaching member-visible responses while an
+    operator migrates the stored value.
+    """
+    if not url:
+        return url
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    if parsed.username is None and parsed.password is None:
+        return url
+    try:
+        explicit_port = parsed.port
+    except ValueError:
+        return None
+    host = parsed.hostname.lower()
+    if ":" in host:
+        host = f"[{host}]"
+    netloc = f"{host}:{explicit_port}" if explicit_port is not None else host
+    return urlunparse(parsed._replace(netloc=netloc))
 
 
 @lru_cache(maxsize=32)
@@ -61,7 +89,7 @@ def _parse_operator_private_origins(origins: str) -> frozenset[str]:
     return frozenset(
         origin
         for value in origins.split(",")
-        if (origin := _canonical_origin(value.strip())) is not None
+        if (origin := canonical_origin(value.strip())) is not None
     )
 
 
@@ -74,7 +102,7 @@ def provider_allows_private_network(provider: object, base_url: str | None) -> b
     if not base_url:
         return False
     value = getattr(provider, "value", provider)
-    origin = _canonical_origin(base_url)
+    origin = canonical_origin(base_url)
     if origin is None:
         return False
     from ontokit.services.llm.registry import LOCAL_PRIVATE_BASE_URLS
@@ -83,7 +111,7 @@ def provider_allows_private_network(provider: object, base_url: str | None) -> b
         (url for key, url in LOCAL_PRIVATE_BASE_URLS.items() if key.value == value),
         None,
     )
-    return (built_in is not None and origin == _canonical_origin(built_in)) or (
+    return (built_in is not None and origin == canonical_origin(built_in)) or (
         origin in _operator_private_origins()
     )
 
@@ -134,6 +162,9 @@ def validate_base_url(url: str, allow_private: bool = False) -> str:
 
     if not parsed.hostname:
         raise ValueError(f"URL must include a hostname: {url!r}")
+
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URL must not include embedded credentials (userinfo)")
 
     # Always block the cloud metadata endpoint regardless of provider type
     try:
@@ -207,6 +238,8 @@ def resolve_and_validate(url: str, *, allow_private: bool = False) -> list[str]:
         raise ValueError(f"Only http:// and https:// are allowed. Got: {parsed.scheme!r}")
     if not parsed.hostname:
         raise ValueError(f"URL must include a hostname: {url!r}")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URL must not include embedded credentials (userinfo)")
 
     allow = allow_private
 

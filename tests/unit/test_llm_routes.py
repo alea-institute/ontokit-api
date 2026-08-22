@@ -12,9 +12,15 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from ontokit.api.routes.llm import _provider_connection_failure
+from ontokit.api.routes.llm import (
+    _config_to_response,
+    _provider_connection_failure,
+    get_llm_config,
+    update_llm_config,
+)
 from ontokit.api.routes.llm import test_llm_connection as call_test_llm_connection
-from ontokit.schemas.llm import LLMProviderType
+from ontokit.core.auth import ANONYMOUS_USER, CurrentUser
+from ontokit.schemas.llm import LLMConfigUpdate, LLMProviderType
 
 
 def test_list_providers_public(client: TestClient):
@@ -54,6 +60,118 @@ def test_project_llm_config_requires_auth(client: TestClient):
     assert resp.status_code in (401, 403)
 
 
+@pytest.mark.asyncio
+async def test_project_llm_route_rejects_disabled_auth_anonymous_identity() -> None:
+    from fastapi import HTTPException
+
+    session = AsyncMock()
+    with pytest.raises(HTTPException) as raised:
+        await get_llm_config(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            session,
+            ANONYMOUS_USER,
+        )
+
+    assert raised.value.status_code == 403
+    assert "authenticated" in raised.value.detail.lower()
+    session.execute.assert_not_awaited()
+
+
+def _stored_config(**overrides: object) -> SimpleNamespace:
+    values: dict[str, object] = {
+        "provider": "openai",
+        "model": "gpt-4o-mini",
+        "model_tier": "cheap",
+        "api_key_encrypted": "encrypted-old-key",
+        "base_url": "https://gateway.example.test/v1",
+        "monthly_budget_usd": 10.0,
+        "daily_cap_usd": 1.0,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "update",
+    [
+        LLMConfigUpdate(provider="anthropic"),
+        LLMConfigUpdate(base_url="https://other.example.test/v1"),
+    ],
+)
+async def test_config_scope_change_without_replacement_key_clears_secret(
+    update: LLMConfigUpdate,
+) -> None:
+    config = _stored_config()
+    db = AsyncMock()
+
+    with (
+        patch("ontokit.api.routes.llm._require_owner_or_admin", new=AsyncMock()),
+        patch("ontokit.api.routes.llm._get_llm_config", new=AsyncMock(return_value=config)),
+        patch("ontokit.api.routes.llm.validate_base_url"),
+    ):
+        await update_llm_config(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            update,
+            db,
+            SimpleNamespace(id="owner", is_superadmin=False, is_anonymous=False),
+        )
+
+    assert config.api_key_encrypted is None
+
+
+@pytest.mark.asyncio
+async def test_config_path_change_on_same_canonical_origin_preserves_secret() -> None:
+    config = _stored_config()
+    db = AsyncMock()
+
+    with (
+        patch("ontokit.api.routes.llm._require_owner_or_admin", new=AsyncMock()),
+        patch("ontokit.api.routes.llm._get_llm_config", new=AsyncMock(return_value=config)),
+        patch("ontokit.api.routes.llm.validate_base_url"),
+    ):
+        await update_llm_config(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            LLMConfigUpdate(base_url="https://gateway.example.test/v2"),
+            db,
+            SimpleNamespace(id="owner", is_superadmin=False, is_anonymous=False),
+        )
+
+    assert config.api_key_encrypted == "encrypted-old-key"
+
+
+@pytest.mark.asyncio
+async def test_config_scope_change_with_replacement_key_stores_only_new_secret() -> None:
+    config = _stored_config()
+    db = AsyncMock()
+
+    with (
+        patch("ontokit.api.routes.llm._require_owner_or_admin", new=AsyncMock()),
+        patch("ontokit.api.routes.llm._get_llm_config", new=AsyncMock(return_value=config)),
+        patch("ontokit.api.routes.llm.validate_base_url"),
+        patch("ontokit.api.routes.llm.encrypt_secret", return_value="encrypted-new-key") as encrypt,
+    ):
+        await update_llm_config(
+            UUID("12345678-1234-5678-1234-567812345678"),
+            LLMConfigUpdate(provider="anthropic", api_key="new-key"),
+            db,
+            SimpleNamespace(id="owner", is_superadmin=False, is_anonymous=False),
+        )
+
+    assert config.api_key_encrypted == "encrypted-new-key"
+    encrypt.assert_called_once_with("new-key")
+
+
+def test_config_response_strips_legacy_url_userinfo() -> None:
+    response = _config_to_response(
+        _stored_config(base_url="https://legacy-user:legacy-pass@gateway.example.test/v1")
+    )
+
+    assert response.base_url == "https://gateway.example.test/v1"
+    assert "legacy-user" not in response.model_dump_json()
+    assert "legacy-pass" not in response.model_dump_json()
+
+
 def test_provider_connection_failure_never_echoes_outbound_error(caplog):
     marker = "internal-host.example:8443 returned sk-sensitive"
 
@@ -64,7 +182,9 @@ def test_provider_connection_failure_never_echoes_outbound_error(caplog):
 
 
 @pytest.mark.asyncio
-async def test_connection_route_redacts_provider_exception(caplog) -> None:
+async def test_connection_route_redacts_provider_exception(
+    caplog, authenticated_user: CurrentUser
+) -> None:
     marker = "https://internal-host.example:8443 sk-sensitive upstream body"
     config = SimpleNamespace(
         provider="custom",
@@ -84,6 +204,10 @@ async def test_connection_route_redacts_provider_exception(caplog) -> None:
             "ontokit.api.routes.llm._get_llm_config",
             new=AsyncMock(return_value=config),
         ),
+        patch(
+            "ontokit.api.routes.llm.get_model_pricing",
+            new=AsyncMock(return_value=(0.01, 0.02)),
+        ),
         patch("ontokit.api.routes.llm.get_provider", return_value=provider),
         patch(
             "ontokit.api.routes.llm.reserve_llm_call",
@@ -97,7 +221,7 @@ async def test_connection_route_redacts_provider_exception(caplog) -> None:
         response = await call_test_llm_connection(
             UUID("12345678-1234-5678-1234-567812345678"),
             AsyncMock(),
-            SimpleNamespace(id="user-1", is_superadmin=False),
+            authenticated_user,
         )
 
     assert response == {"success": False, "error": "Provider connection failed"}
@@ -106,7 +230,9 @@ async def test_connection_route_redacts_provider_exception(caplog) -> None:
 
 
 @pytest.mark.asyncio
-async def test_connection_reserves_paid_call_before_provider() -> None:
+async def test_connection_reserves_paid_call_before_provider(
+    authenticated_user: CurrentUser,
+) -> None:
     events: list[str] = []
     config = SimpleNamespace(
         provider="openai",
@@ -156,7 +282,7 @@ async def test_connection_reserves_paid_call_before_provider() -> None:
         response = await call_test_llm_connection(
             UUID("12345678-1234-5678-1234-567812345678"),
             AsyncMock(),
-            SimpleNamespace(id="user-1", is_superadmin=False),
+            authenticated_user,
         )
 
     assert response == {"success": True}
@@ -164,7 +290,9 @@ async def test_connection_reserves_paid_call_before_provider() -> None:
 
 
 @pytest.mark.asyncio
-async def test_connection_budget_refusal_prevents_provider() -> None:
+async def test_connection_budget_refusal_prevents_provider(
+    authenticated_user: CurrentUser,
+) -> None:
     config = SimpleNamespace(
         provider="openai",
         base_url=None,
@@ -195,7 +323,7 @@ async def test_connection_budget_refusal_prevents_provider() -> None:
         response = await call_test_llm_connection(
             UUID("12345678-1234-5678-1234-567812345678"),
             AsyncMock(),
-            SimpleNamespace(id="user-1", is_superadmin=False),
+            authenticated_user,
         )
 
     assert response == {"success": False, "error": "Monthly LLM budget exhausted"}

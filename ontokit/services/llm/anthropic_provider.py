@@ -36,8 +36,14 @@ class AnthropicProvider(LLMProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        allow_private: bool = False,
     ) -> None:
-        super().__init__(api_key=api_key, base_url=base_url, model=model)
+        super().__init__(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            allow_private=allow_private,
+        )
         self._client: Any = None
 
     def _get_client(self) -> Any:
@@ -48,7 +54,7 @@ class AnthropicProvider(LLMProvider):
 
             kwargs: dict[str, Any] = {
                 "api_key": self.api_key,
-                "http_client": secure_async_client(),
+                "http_client": secure_async_client(allow_private=self._allow_private),
             }
             if self.base_url:
                 kwargs["base_url"] = self.base_url

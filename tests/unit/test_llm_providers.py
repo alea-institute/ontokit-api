@@ -67,10 +67,13 @@ async def test_cohere_forwards_output_token_cap() -> None:
     context.__aenter__.return_value = client
     context.__aexit__.return_value = None
 
-    with patch("ontokit.services.llm.cohere_provider.secure_async_client", return_value=context):
+    with patch(
+        "ontokit.services.llm.cohere_provider.secure_async_client", return_value=context
+    ) as secure_client:
         await provider.chat([{"role": "user", "content": "test"}], max_tokens=4096)
 
     assert client.post.await_args.kwargs["json"]["max_tokens"] == 4096
+    secure_client.assert_called_once_with(allow_private=False, timeout=120)
 
 
 @pytest.mark.asyncio
@@ -105,7 +108,7 @@ def test_anthropic_preserves_base_url_and_secure_client() -> None:
     ):
         assert provider._get_client() is sdk_client
 
-    secure_client.assert_called_once_with()
+    secure_client.assert_called_once_with(allow_private=False)
     kwargs = constructor.call_args.kwargs
     assert kwargs["api_key"] == "secret"
     assert kwargs["base_url"] == "https://anthropic-proxy.example.test"
@@ -152,6 +155,30 @@ def test_operator_can_authorize_one_exact_custom_origin(monkeypatch) -> None:
     assert isinstance(allowed, OpenAICompatProvider)
     assert allowed._allow_private is True
     assert different_port._allow_private is False
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "provider_type"),
+    [
+        ("anthropic", AnthropicProvider),
+        ("google", GoogleProvider),
+        ("cohere", CohereProvider),
+    ],
+)
+def test_operator_private_origin_reaches_non_openai_transports(
+    monkeypatch, provider_name: str, provider_type: type
+) -> None:
+    monkeypatch.setenv("ONTOKIT_PRIVATE_LLM_ORIGINS", "http://gateway.private.example:8081")
+
+    provider = get_provider(
+        provider_name,
+        api_key="secret",
+        base_url="http://gateway.private.example:8081/v1",
+        model="test-model",
+    )
+
+    assert isinstance(provider, provider_type)
+    assert provider._allow_private is True
 
 
 @pytest.mark.parametrize("provider_name", ["ollama", "lmstudio", "llamafile"])

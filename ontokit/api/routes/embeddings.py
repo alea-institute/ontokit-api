@@ -36,7 +36,7 @@ def get_embeddings(
     return EmbeddingService(db)
 
 
-async def _verify_write_access(project_id: UUID, db: AsyncSession, user: CurrentUser) -> None:
+async def _verify_write_access(project_id: UUID, db: AsyncSession, user: CurrentUser) -> str:
     service = get_project_service(db)
     project_response = await service.get(project_id, user)
     if project_response.user_role not in ("owner", "admin", "editor"):
@@ -44,6 +44,7 @@ async def _verify_write_access(project_id: UUID, db: AsyncSession, user: Current
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Write access required",
         )
+    return project_response.user_role
 
 
 @router.get("/{project_id}/embeddings/config", response_model=EmbeddingConfig)
@@ -77,7 +78,13 @@ async def update_embedding_config(
     user: RequiredUser,
 ) -> EmbeddingConfig:
     """Update embedding configuration."""
-    await _verify_write_access(project_id, db, user)
+    role = await _verify_write_access(project_id, db, user)
+    budget_fields = {"monthly_budget_usd", "daily_cap_usd"}
+    if budget_fields & data.model_fields_set and role not in ("owner", "admin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only owner or admin can change embedding budget caps",
+        )
     try:
         return await embed_service.update_config(project_id, data)
     except ValueError as exc:

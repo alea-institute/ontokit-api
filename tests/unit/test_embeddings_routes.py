@@ -13,10 +13,9 @@ PROJECT_ID = "12345678-1234-5678-1234-567812345678"
 
 
 def test_semantic_search_rejects_anonymous_at_route(client: TestClient) -> None:
+    path = client.app.url_path_for("semantic_search", project_id=PROJECT_ID)
     with patch("ontokit.api.routes.semantic_search.EmbeddingService") as service:
-        response = client.get(
-            f"/api/v1/projects/{PROJECT_ID}/search/semantic", params={"q": "contract"}
-        )
+        response = client.get(str(path), params={"q": "contract"})
     assert response.status_code == 401
     service.return_value.semantic_search.assert_not_called()
 
@@ -125,6 +124,92 @@ class TestUpdateEmbeddingConfig:
         )
         assert response.status_code == 200
         assert response.json()["provider"] == "voyage"
+
+    @pytest.mark.asyncio
+    async def test_editor_can_change_non_budget_embedding_settings(self) -> None:
+        from ontokit.api.routes.embeddings import update_embedding_config
+        from ontokit.schemas.embeddings import EmbeddingConfig, EmbeddingConfigUpdate
+
+        embed_service = MagicMock()
+        embed_service.update_config = AsyncMock(
+            return_value=EmbeddingConfig(
+                provider="local",
+                model_name="all-MiniLM-L6-v2",
+                api_key_set=False,
+                dimensions=384,
+                auto_embed_on_save=True,
+            )
+        )
+        with patch(
+            "ontokit.api.routes.embeddings._verify_write_access",
+            new=AsyncMock(return_value="editor"),
+        ):
+            response = await update_embedding_config(
+                project_id=uuid4(),
+                data=EmbeddingConfigUpdate(auto_embed_on_save=True),
+                db=AsyncMock(),
+                embed_service=embed_service,
+                user=MagicMock(),
+            )
+
+        assert response.auto_embed_on_save is True
+        embed_service.update_config.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("field", ["monthly_budget_usd", "daily_cap_usd"])
+    async def test_editor_cannot_mutate_embedding_budget_caps(self, field: str) -> None:
+        from ontokit.api.routes.embeddings import update_embedding_config
+        from ontokit.schemas.embeddings import EmbeddingConfigUpdate
+
+        embed_service = MagicMock()
+        with (
+            patch(
+                "ontokit.api.routes.embeddings._verify_write_access",
+                new=AsyncMock(return_value="editor"),
+            ),
+            pytest.raises(HTTPException) as raised,
+        ):
+            await update_embedding_config(
+                project_id=uuid4(),
+                data=EmbeddingConfigUpdate(**{field: 5.0}),
+                db=AsyncMock(),
+                embed_service=embed_service,
+                user=MagicMock(),
+            )
+
+        assert raised.value.status_code == 403
+        embed_service.update_config.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_owner_can_mutate_embedding_budget_caps(self) -> None:
+        from ontokit.api.routes.embeddings import update_embedding_config
+        from ontokit.schemas.embeddings import EmbeddingConfig, EmbeddingConfigUpdate
+
+        embed_service = MagicMock()
+        embed_service.update_config = AsyncMock(
+            return_value=EmbeddingConfig(
+                provider="local",
+                model_name="all-MiniLM-L6-v2",
+                api_key_set=False,
+                dimensions=384,
+                auto_embed_on_save=False,
+                monthly_budget_usd=5.0,
+            )
+        )
+        with patch(
+            "ontokit.api.routes.embeddings._verify_write_access",
+            new=AsyncMock(return_value="owner"),
+        ):
+            response = await update_embedding_config(
+                project_id=uuid4(),
+                data=EmbeddingConfigUpdate(monthly_budget_usd=5.0),
+                db=AsyncMock(),
+                embed_service=embed_service,
+                user=MagicMock(),
+            )
+
+        assert response.monthly_budget_usd == 5.0
+        embed_service.update_config.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_invalid_paid_provider_config_returns_typed_422(self) -> None:

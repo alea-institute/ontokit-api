@@ -38,10 +38,12 @@ class LLMProvider(abc.ABC):
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        allow_private: bool = False,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url
         self.model = model
+        self._allow_private = allow_private
 
     @abc.abstractmethod
     async def chat(self, messages: list[dict[str, str]], **kwargs: Any) -> tuple[str, int, int]:

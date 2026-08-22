@@ -14,12 +14,19 @@ from __future__ import annotations
 
 import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from uuid import UUID
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from ontokit.api.routes.generation import generate_suggestions, validate_entity
+from ontokit.core.auth import ANONYMOUS_USER
 from ontokit.schemas.generation import (
     GeneratedSuggestion,
+    GenerateSuggestionsRequest,
     GenerateSuggestionsResponse,
+    ValidateEntityRequest,
     ValidationError,
 )
 from ontokit.services.llm.metering import LLMBudgetExceeded, MeteredLLMProvider
@@ -107,6 +114,23 @@ def _generation_response() -> GenerateSuggestionsResponse:
 def test_generate_requires_auth(client: TestClient):
     resp = client.post(GENERATE_URL, json=GENERATE_BODY)
     assert resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_generate_rejects_disabled_auth_anonymous_identity() -> None:
+    session = AsyncMock()
+
+    with pytest.raises(HTTPException) as raised:
+        await generate_suggestions(
+            UUID(PROJECT_ID),
+            GenerateSuggestionsRequest(**GENERATE_BODY),
+            session,
+            ANONYMOUS_USER,
+        )
+
+    assert raised.value.status_code == 403
+    assert "authenticated" in raised.value.detail.lower()
+    session.execute.assert_not_awaited()
 
 
 def test_generate_404_unknown_project(authed_client: tuple[TestClient, AsyncMock]):
@@ -282,6 +306,40 @@ def test_generate_402_when_daily_cap_reached(authed_client: tuple[TestClient, As
     assert "daily" in resp.json()["detail"].lower()
 
 
+@pytest.mark.asyncio
+async def test_custom_provider_with_unknown_pricing_fails_closed() -> None:
+    """Custom gateways are not assumed to be zero-cost local runtimes."""
+    from ontokit.services.llm import PricingUnavailableError
+
+    session = AsyncMock()
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_one_or_none(_project()),
+            _scalar_one_or_none(_member("editor")),
+            _scalar_one_or_none(_llm_config(provider="custom", model="unknown-model")),
+        ]
+    )
+
+    with (
+        patch(
+            "ontokit.api.routes.generation.get_model_pricing",
+            new=AsyncMock(side_effect=PricingUnavailableError("unknown")),
+        ) as pricing,
+        patch("ontokit.api.routes.generation.get_provider") as provider,
+        pytest.raises(HTTPException) as raised,
+    ):
+        await generate_suggestions(
+            UUID(PROJECT_ID),
+            GenerateSuggestionsRequest(**GENERATE_BODY),
+            session,
+            MagicMock(id="user", is_superadmin=False, is_anonymous=False),
+        )
+
+    assert raised.value.status_code == 503
+    pricing.assert_awaited_once_with("unknown-model")
+    provider.assert_not_called()
+
+
 # ── generate-suggestions: pipeline outcomes ───────────────────────────────────
 
 
@@ -418,6 +476,23 @@ def test_validate_entity_requires_auth(client: TestClient):
         json={"label": "X", "parent_iris": [], "labels": []},
     )
     assert resp.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_validate_entity_rejects_disabled_auth_anonymous_identity() -> None:
+    session = AsyncMock()
+
+    with pytest.raises(HTTPException) as raised:
+        await validate_entity(
+            UUID(PROJECT_ID),
+            ValidateEntityRequest(label="X", parent_iris=[], labels=[]),
+            session,
+            ANONYMOUS_USER,
+        )
+
+    assert raised.value.status_code == 403
+    assert "authenticated" in raised.value.detail.lower()
+    session.execute.assert_not_awaited()
 
 
 def test_validate_entity_403_for_non_member(authed_client: tuple[TestClient, AsyncMock]):

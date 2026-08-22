@@ -40,6 +40,11 @@ class TestAnonymousUser:
         """ANONYMOUS_USER is an instance of CurrentUser."""
         assert isinstance(ANONYMOUS_USER, CurrentUser)
 
+    def test_anonymous_user_has_explicit_identity_marker(self) -> None:
+        """Authorization boundaries must not infer anonymity from optional attributes."""
+        assert ANONYMOUS_USER.is_anonymous is True
+        assert CurrentUser(id="authenticated-user").is_anonymous is False
+
 
 # ---------------------------------------------------------------------------
 # AUTH_MODE=disabled
@@ -59,7 +64,9 @@ class TestAuthModeDisabled:
 
     @pytest.mark.asyncio
     @patch("ontokit.core.auth.settings")
-    async def test_disabled_get_current_user_optional_returns_anonymous(self, mock_settings) -> None:  # noqa: ANN001
+    async def test_disabled_get_current_user_optional_returns_anonymous(
+        self, mock_settings
+    ) -> None:  # noqa: ANN001
         """In disabled mode, get_current_user_optional returns ANONYMOUS_USER (not None)."""
         mock_settings.auth_mode = "disabled"
         result = await get_current_user_optional(credentials=None)
@@ -67,7 +74,9 @@ class TestAuthModeDisabled:
 
     @pytest.mark.asyncio
     @patch("ontokit.core.auth.settings")
-    async def test_disabled_get_current_user_with_token_returns_anonymous(self, mock_settings) -> None:  # noqa: ANN001
+    async def test_disabled_get_current_user_with_token_returns_anonymous(
+        self, mock_settings
+    ) -> None:  # noqa: ANN001
         """In disabled mode, get_current_user_with_token returns (ANONYMOUS_USER, 'anonymous')."""
         mock_settings.auth_mode = "disabled"
         user, token = await get_current_user_with_token(credentials=None)
@@ -99,7 +108,9 @@ class TestAuthModeRequired:
 
     @pytest.mark.asyncio
     @patch("ontokit.core.auth.settings")
-    async def test_required_get_current_user_raises_401_without_credentials(self, mock_settings) -> None:  # noqa: ANN001
+    async def test_required_get_current_user_raises_401_without_credentials(
+        self, mock_settings
+    ) -> None:  # noqa: ANN001
         """In required mode, get_current_user raises 401 when no credentials provided."""
         mock_settings.auth_mode = "required"
         with pytest.raises(HTTPException) as exc_info:
@@ -108,7 +119,9 @@ class TestAuthModeRequired:
 
     @pytest.mark.asyncio
     @patch("ontokit.core.auth.settings")
-    async def test_required_get_current_user_optional_returns_none_without_credentials(self, mock_settings) -> None:  # noqa: ANN001
+    async def test_required_get_current_user_optional_returns_none_without_credentials(
+        self, mock_settings
+    ) -> None:  # noqa: ANN001
         """In required mode, get_current_user_optional returns None when no credentials provided."""
         mock_settings.auth_mode = "required"
         result = await get_current_user_optional(credentials=None)
@@ -125,7 +138,9 @@ class TestAuthModeOptional:
 
     @pytest.mark.asyncio
     @patch("ontokit.core.auth.settings")
-    async def test_optional_get_current_user_raises_401_without_credentials(self, mock_settings) -> None:  # noqa: ANN001
+    async def test_optional_get_current_user_raises_401_without_credentials(
+        self, mock_settings
+    ) -> None:  # noqa: ANN001
         """In optional mode, get_current_user (RequiredUser) raises 401 without credentials (write protection)."""
         mock_settings.auth_mode = "optional"
         with pytest.raises(HTTPException) as exc_info:
@@ -134,7 +149,9 @@ class TestAuthModeOptional:
 
     @pytest.mark.asyncio
     @patch("ontokit.core.auth.settings")
-    async def test_optional_get_current_user_optional_returns_none_without_credentials(self, mock_settings) -> None:  # noqa: ANN001
+    async def test_optional_get_current_user_optional_returns_none_without_credentials(
+        self, mock_settings
+    ) -> None:  # noqa: ANN001
         """In optional mode, get_current_user_optional returns None without credentials (browse works)."""
         mock_settings.auth_mode = "optional"
         result = await get_current_user_optional(credentials=None)

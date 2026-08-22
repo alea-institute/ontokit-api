@@ -30,8 +30,14 @@ class GoogleProvider(LLMProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        allow_private: bool = False,
     ) -> None:
-        super().__init__(api_key=api_key, base_url=base_url, model=model)
+        super().__init__(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            allow_private=allow_private,
+        )
         self._base = (base_url or "https://generativelanguage.googleapis.com/v1beta").rstrip("/")
 
     def _headers(self) -> dict[str, str]:
@@ -46,7 +52,9 @@ class GoogleProvider(LLMProvider):
         """POST with exponential back-off on 429 / 503."""
         timeout = httpx.Timeout(60.0, connect=10.0)
         for attempt in range(max_retries + 1):
-            async with secure_async_client(timeout=timeout) as client:
+            async with secure_async_client(
+                allow_private=self._allow_private, timeout=timeout
+            ) as client:
                 resp = await client.post(url, headers=self._headers(), json=body)
                 if resp.status_code in (429, 503) and attempt < max_retries:
                     delay = 2**attempt
@@ -114,7 +122,7 @@ class GoogleProvider(LLMProvider):
             "contents": [{"role": "user", "parts": [{"text": "Hi"}]}],
             "generationConfig": {"maxOutputTokens": 1},
         }
-        async with secure_async_client(timeout=30) as client:
+        async with secure_async_client(allow_private=self._allow_private, timeout=30) as client:
             resp = await client.post(url, headers=self._headers(), json=body)
             resp.raise_for_status()
         return True
@@ -122,7 +130,7 @@ class GoogleProvider(LLMProvider):
     async def list_models(self) -> list[str]:
         try:
             url = f"{self._base}/models"
-            async with secure_async_client(timeout=30) as client:
+            async with secure_async_client(allow_private=self._allow_private, timeout=30) as client:
                 resp = await client.get(url, headers=self._headers())
                 resp.raise_for_status()
                 data = resp.json()

@@ -101,6 +101,10 @@ class TestResolveAndValidate:
         with pytest.raises(ValueError, match="require HTTPS"):
             resolve_and_validate("http://api.example.com/v1")
 
+    def test_url_userinfo_is_rejected(self):
+        with pytest.raises(ValueError, match="credentials"):
+            resolve_and_validate("https://user:password@api.example.com/v1")
+
     def test_unresolvable_host_rejected(self):
         with (
             patch(

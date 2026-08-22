@@ -26,8 +26,14 @@ class CohereProvider(LLMProvider):
         api_key: str | None = None,
         base_url: str | None = None,
         model: str | None = None,
+        allow_private: bool = False,
     ) -> None:
-        super().__init__(api_key=api_key, base_url=base_url, model=model)
+        super().__init__(
+            api_key=api_key,
+            base_url=base_url,
+            model=model,
+            allow_private=allow_private,
+        )
         self._base = (base_url or "https://api.cohere.com/v2").rstrip("/")
 
     def _headers(self) -> dict[str, str]:
@@ -48,7 +54,7 @@ class CohereProvider(LLMProvider):
             body["max_tokens"] = max_tokens
 
         url = f"{self._base}/chat"
-        async with secure_async_client(timeout=120) as client:
+        async with secure_async_client(allow_private=self._allow_private, timeout=120) as client:
             resp = await client.post(url, headers=self._headers(), json=body)
             resp.raise_for_status()
             data = resp.json()
@@ -78,7 +84,7 @@ class CohereProvider(LLMProvider):
             "max_tokens": 1,
         }
         url = f"{self._base}/chat"
-        async with secure_async_client(timeout=30) as client:
+        async with secure_async_client(allow_private=self._allow_private, timeout=30) as client:
             resp = await client.post(url, headers=self._headers(), json=body)
             resp.raise_for_status()
         return True
@@ -86,7 +92,7 @@ class CohereProvider(LLMProvider):
     async def list_models(self) -> list[str]:
         try:
             url = f"{self._base}/models"
-            async with secure_async_client(timeout=30) as client:
+            async with secure_async_client(allow_private=self._allow_private, timeout=30) as client:
                 resp = await client.get(url, headers=self._headers())
                 resp.raise_for_status()
                 data = resp.json()

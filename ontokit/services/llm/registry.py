@@ -233,6 +233,9 @@ def get_provider(
     # Resolve defaults
     resolved_base_url = base_url or DEFAULT_BASE_URLS.get(provider_type)
     resolved_model = model or DEFAULT_MODELS.get(provider_type) or None
+    from ontokit.services.llm.ssrf import provider_allows_private_network
+
+    allow_private = provider_allows_private_network(provider_type, resolved_base_url)
 
     # Local providers don't require a real key — supply a placeholder so the SDK
     # doesn't reject the client construction
@@ -242,17 +245,32 @@ def get_provider(
     if provider_type == LLMProviderType.anthropic:
         from ontokit.services.llm.anthropic_provider import AnthropicProvider
 
-        return AnthropicProvider(api_key=api_key, base_url=resolved_base_url, model=resolved_model)
+        return AnthropicProvider(
+            api_key=api_key,
+            base_url=resolved_base_url,
+            model=resolved_model,
+            allow_private=allow_private,
+        )
 
     if provider_type == LLMProviderType.google:
         from ontokit.services.llm.google_provider import GoogleProvider
 
-        return GoogleProvider(api_key=api_key, base_url=resolved_base_url, model=resolved_model)
+        return GoogleProvider(
+            api_key=api_key,
+            base_url=resolved_base_url,
+            model=resolved_model,
+            allow_private=allow_private,
+        )
 
     if provider_type == LLMProviderType.cohere:
         from ontokit.services.llm.cohere_provider import CohereProvider
 
-        return CohereProvider(api_key=api_key, base_url=resolved_base_url, model=resolved_model)
+        return CohereProvider(
+            api_key=api_key,
+            base_url=resolved_base_url,
+            model=resolved_model,
+            allow_private=allow_private,
+        )
 
     if provider_type == LLMProviderType.github_models:
         from ontokit.services.llm.github_models_provider import GitHubModelsProvider
@@ -263,14 +281,13 @@ def get_provider(
 
     if provider_type in _OPENAI_COMPAT_PROVIDERS:
         from ontokit.services.llm.openai_compat import OpenAICompatProvider
-        from ontokit.services.llm.ssrf import provider_allows_private_network
 
         return OpenAICompatProvider(
             api_key=api_key,
             base_url=resolved_base_url,
             model=resolved_model,
             # Local providers may point at private/loopback hosts by design.
-            allow_private=provider_allows_private_network(provider_type, resolved_base_url),
+            allow_private=allow_private,
         )
 
     raise ValueError(f"No provider implementation for: {provider_type.value!r}")

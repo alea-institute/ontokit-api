@@ -8,7 +8,12 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
+from ontokit.core.auth import (
+    CurrentUser,
+    OptionalUser,
+    RequiredUser,
+    require_authenticated_identity,
+)
 from ontokit.core.database import get_db
 from ontokit.schemas.embeddings import (
     RankedCandidate,
@@ -47,15 +52,16 @@ async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser |
 )
 async def semantic_search(
     project_id: UUID,
+    user: RequiredUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     service: Annotated[EmbeddingService, Depends(get_embeddings)],
-    user: OptionalUser,
     q: str = Query(..., min_length=1, description="Search query"),
     branch: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
     threshold: float = Query(default=0.3, ge=0.0, le=1.0),
 ) -> SemanticSearchResponse:
     """Search entities using semantic similarity."""
+    require_authenticated_identity(user)
     await _verify_access(project_id, db, user)
     resolved_branch = branch
     if not resolved_branch:

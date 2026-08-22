@@ -26,8 +26,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.api.routes.llm import _LOCAL_PROVIDERS
-from ontokit.core.auth import RequiredUser
+from ontokit.api.routes.llm import _ZERO_COST_LOCAL_PROVIDERS
+from ontokit.core.auth import RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.project import Project, ProjectMember
@@ -145,12 +145,14 @@ async def generate_suggestions(
     and per-suggestion model + prompt-template provenance (metadata only — the raw
     prompt text is never persisted, per D-08).
     """
+    require_authenticated_identity(user)
+
     # 1. Load project + role
     project = await _load_project(db, project_id)
     role = await _require_project_member(db, project_id, user.id, user.is_superadmin)
 
     # 2. LLM access gate (ROLE-05: anonymous / viewer blocked)
-    if not check_llm_access(role, is_anonymous=getattr(user, "is_anonymous", False)):
+    if not check_llm_access(role, is_anonymous=user.is_anonymous):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"LLM features are not available for your role ({role})",
@@ -179,7 +181,7 @@ async def generate_suggestions(
     # Resolve trustworthy pricing before any provider call. Unknown models and
     # pricing outages fail closed so the dollar budget cannot silently become
     # an unlimited $0 ledger.
-    if config.provider in _LOCAL_PROVIDERS:
+    if config.provider in _ZERO_COST_LOCAL_PROVIDERS:
         input_cost_per_tok, output_cost_per_tok = (0.0, 0.0)
     else:
         try:
@@ -374,6 +376,8 @@ async def validate_entity(
 
     Does NOT require LLM configuration — validation is pure server-side logic.
     """
+    require_authenticated_identity(user)
+
     # Check project membership (any member can validate)
     project = await _load_project(db, project_id)
     await _require_project_member(db, project_id, user.id, user.is_superadmin)

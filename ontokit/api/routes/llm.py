@@ -28,7 +28,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import RequiredUser
+from ontokit.core.auth import RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.project import ProjectMember
@@ -57,12 +57,17 @@ from ontokit.services.llm import (
 from ontokit.services.llm.audit import finalize_llm_call, reserve_llm_call
 from ontokit.services.llm.rate_limiter import RATE_LIMITS
 from ontokit.services.llm.registry import (
+    DEFAULT_BASE_URLS,
     KNOWN_MODELS,
     PROVIDER_DISPLAY_NAMES,
     PROVIDER_ICON_NAMES,
     PROVIDER_REQUIRES_KEY,
 )
-from ontokit.services.llm.ssrf import provider_allows_private_network
+from ontokit.services.llm.ssrf import (
+    canonical_origin,
+    provider_allows_private_network,
+    sanitize_base_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -72,12 +77,12 @@ router = APIRouter()
 # Public catalogue routes (registered at root — no auth required)
 public_router = APIRouter()
 
-# Providers that are considered local (allow private IPs, allow HTTP)
-_LOCAL_PROVIDERS = {
+# Built-in local runtimes are the only providers known to be zero-cost. Custom
+# gateways may be private when operator-approved, but are not assumed free.
+_ZERO_COST_LOCAL_PROVIDERS = {
     LLMProviderType.ollama,
     LLMProviderType.lmstudio,
     LLMProviderType.llamafile,
-    LLMProviderType.custom,
 }
 
 
@@ -139,7 +144,7 @@ def _config_to_response(config: ProjectLLMConfig) -> LLMConfigResponse:
         model=config.model,
         model_tier=config.model_tier,
         api_key_set=bool(config.api_key_encrypted),  # NEVER return the key itself
-        base_url=config.base_url,
+        base_url=sanitize_base_url(config.base_url),
         monthly_budget_usd=config.monthly_budget_usd,
         daily_cap_usd=config.daily_cap_usd,
     )
@@ -169,6 +174,7 @@ async def get_llm_config(
     Accessible to any project member. The API key is NEVER returned — only
     api_key_set=True/False indicates whether a key is stored.
     """
+    require_authenticated_identity(user)
     await _require_project_member(db, project_id, user.id, user.is_superadmin)
 
     config = await _get_llm_config(db, project_id)
@@ -191,9 +197,10 @@ async def update_llm_config(
     """Create or update the LLM configuration for a project.
 
     Owner/admin only. If an API key is provided it is encrypted before storage
-    and never returned in any response. The existing key is preserved if no new
-    key is provided.
+    and never returned in any response. An existing key is preserved only while
+    its provider and canonical base-URL origin remain unchanged.
     """
+    require_authenticated_identity(user)
     await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
 
     config = await _get_llm_config(db, project_id)
@@ -232,6 +239,17 @@ async def update_llm_config(
             config.api_key_encrypted = encrypt_secret(data.api_key)
         db.add(config)
     else:
+        previous_provider = LLMProviderType(config.provider)
+        next_provider = data.provider or previous_provider
+        previous_origin = canonical_origin(
+            config.base_url or DEFAULT_BASE_URLS.get(previous_provider, "")
+        )
+        next_base_url = data.base_url if "base_url" in data.model_fields_set else config.base_url
+        next_origin = canonical_origin(next_base_url or DEFAULT_BASE_URLS.get(next_provider, ""))
+        credential_scope_changed = (
+            next_provider != previous_provider or next_origin != previous_origin
+        )
+
         # Update existing config — only apply fields that were explicitly set
         if data.provider is not None:
             config.provider = data.provider.value
@@ -248,6 +266,10 @@ async def update_llm_config(
         if data.api_key:
             # Encrypt and overwrite; NEVER store plaintext
             config.api_key_encrypted = encrypt_secret(data.api_key)
+        elif credential_scope_changed:
+            # A key is authority for one provider/origin only. Never carry it
+            # across a provider or canonical-origin transition implicitly.
+            config.api_key_encrypted = None
 
     await db.commit()
     await db.refresh(config)
@@ -270,6 +292,7 @@ async def test_llm_connection(
         {"success": true} on success.
         {"success": false, "error": "<message>"} on failure.
     """
+    require_authenticated_identity(user)
     await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
 
     config = await _get_llm_config(db, project_id)
@@ -305,7 +328,9 @@ async def test_llm_connection(
     # project cap enforced for ordinary paid work. BYO tests remain audited but
     # are excluded from the project budget.
     is_byo_key = bool(x_byo_api_key)
-    provider_is_local = config.provider in {provider.value for provider in _LOCAL_PROVIDERS}
+    provider_is_local = config.provider in {
+        provider.value for provider in _ZERO_COST_LOCAL_PROVIDERS
+    }
     input_tokens = 1 if config.model else 0
     output_tokens = 1 if config.model else 0
     cost_estimate = 0.0
@@ -400,6 +425,7 @@ async def get_llm_usage(
     Shows per-user call counts, costs, and overall budget consumption for
     the current calendar month.
     """
+    require_authenticated_identity(user)
     await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
 
     config = await _get_llm_config(db, project_id)
@@ -427,6 +453,7 @@ async def get_llm_status(
     frontend can gate LLM affordances. Advisory only — the dispatch path
     (PR-5) re-checks budget and rate limits server-side on every call.
     """
+    require_authenticated_identity(user)
     role = await _require_project_member(db, project_id, user.id, user.is_superadmin)
     config = await _get_llm_config(db, project_id)
     has_llm_access = check_llm_access(role)
@@ -442,7 +469,7 @@ async def get_llm_status(
             provider_enum = None
         if provider_enum is not None:
             provider_type = provider_enum
-            is_local = provider_enum in _LOCAL_PROVIDERS
+            is_local = provider_enum in _ZERO_COST_LOCAL_PROVIDERS
             # Local providers (Ollama etc.) don't need an API key to be usable
             configured = bool(config.model) and (bool(config.api_key_encrypted) or is_local)
 
@@ -499,6 +526,7 @@ async def update_member_flags(
     Currently supports `can_self_merge_structural` (ROLE-03): a per-editor
     override allowing structural PR self-merge.
     """
+    require_authenticated_identity(user)
     await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
 
     result = await db.execute(
