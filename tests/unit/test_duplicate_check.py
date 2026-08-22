@@ -83,6 +83,22 @@ async def test_exact_label_match_is_blocked_without_embeddings():
 
 
 @pytest.mark.asyncio
+async def test_semantic_check_attributes_paid_call_to_requesting_user():
+    svc, _ = _make_service()
+    svc._billing_user_id = "requesting-user"
+    semantic_search = AsyncMock(return_value=[])
+
+    with patch.object(
+        svc._embedding_svc,
+        "semantic_search_all_branches",
+        new=semantic_search,
+    ):
+        await svc.check(PROJECT_ID, "Candidate")
+
+    assert semantic_search.await_args.kwargs["billing_user_id"] == "requesting-user"
+
+
+@pytest.mark.asyncio
 async def test_rejected_high_score_candidate_does_not_raise_verdict():
     """Rejected matches stay visible but cannot warn or block a new proposal."""
     svc, _ = _make_service()
@@ -156,7 +172,12 @@ async def test_check_many_batches_semantic_queries_once():
             [("Alpha", "http://example.org/Parent"), ("Beta", None)],
         )
 
-    batch_search.assert_awaited_once_with(PROJECT_ID, ["Alpha", "Beta"], limit=10)
+    batch_search.assert_awaited_once_with(
+        PROJECT_ID,
+        ["Alpha", "Beta"],
+        limit=10,
+        billing_user_id="system:duplicate-check",
+    )
     assert len(responses) == 2
     assert all(response.candidates for response in responses)
 

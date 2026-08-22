@@ -79,11 +79,17 @@ async def update_embedding_config(
 ) -> EmbeddingConfig:
     """Update embedding configuration."""
     role = await _verify_write_access(project_id, db, user)
-    budget_fields = {"monthly_budget_usd", "daily_cap_usd"}
-    if budget_fields & data.model_fields_set and role not in ("owner", "admin"):
+    admin_fields = {
+        "provider",
+        "model_name",
+        "api_key",
+        "monthly_budget_usd",
+        "daily_cap_usd",
+    }
+    if admin_fields & data.model_fields_set and role not in ("owner", "admin"):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Only owner or admin can change embedding budget caps",
+            detail="Only owner or admin can change embedding provider, credentials, or budget caps",
         )
     try:
         return await embed_service.update_config(project_id, data)

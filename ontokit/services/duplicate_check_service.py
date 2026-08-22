@@ -34,9 +34,10 @@ WARN_THRESHOLD = 0.80
 class DuplicateCheckService:
     """Composite duplicate detection per D-01/D-02/D-03."""
 
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, billing_user_id: str = "system:duplicate-check"):
         self._db = db
         self._embedding_svc = EmbeddingService(db)
+        self._billing_user_id = billing_user_id
 
     async def check(
         self,
@@ -67,7 +68,10 @@ class DuplicateCheckService:
         exact_candidates = await self._find_exact_label_matches(project_id, normalized_label, limit)
         try:
             semantic_candidates = await self._embedding_svc.semantic_search_all_branches(
-                project_id, label, limit=limit
+                project_id,
+                label,
+                limit=limit,
+                billing_user_id=self._billing_user_id,
             )
         except Exception as exc:
             logger.warning(
@@ -237,7 +241,10 @@ class DuplicateCheckService:
         labels = [label for label, _parent_iri in checks]
         try:
             semantic_batches = await self._embedding_svc.semantic_search_many_all_branches(
-                project_id, labels, limit=limit
+                project_id,
+                labels,
+                limit=limit,
+                billing_user_id=self._billing_user_id,
             )
             if len(semantic_batches) != len(checks):
                 raise RuntimeError("Semantic search returned an unexpected batch size")

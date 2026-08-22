@@ -27,6 +27,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.llm_access import get_rate_limit_redis as _get_redis
 from ontokit.api.routes.llm import _ZERO_COST_LOCAL_PROVIDERS, _effective_model
 from ontokit.core.auth import RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
@@ -63,24 +64,6 @@ router = APIRouter(prefix="/projects/{project_id}/llm", tags=["Generation"])
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-
-
-def _get_redis() -> Any:
-    """Get the shared Redis connection pool, or None if unavailable.
-
-    Returns None when the pool cannot be imported (app not fully initialised).
-    The caller treats None as fail-open for rate limiting, but must log the
-    bypass at WARNING so ops can alert on unmetered LLM traffic (the DB budget
-    layer is the non-fail-open backstop). Narrowed to Import/attribute errors:
-    a mis-wired pool object raising elsewhere should surface, not be swallowed.
-    """
-    try:
-        from ontokit.main import redis_pool
-
-        return redis_pool
-    except (ImportError, AttributeError) as exc:
-        logger.warning("Rate-limit Redis pool unavailable (%s) — rate limiting will fail open", exc)
-        return None
 
 
 async def _require_project_member(
@@ -283,7 +266,7 @@ async def generate_suggestions(
     # 9. Construct services
     assembler = OntologyContextAssembler(db)
     validator = ValidationService(db)
-    dedup = DuplicateCheckService(db)
+    dedup = DuplicateCheckService(db, billing_user_id=user.id)
     svc = SuggestionGenerationService(
         db=db,
         assembler=assembler,

@@ -7,7 +7,7 @@ server-side). The member-flags PATCH is the privilege-granting endpoint
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -117,7 +117,9 @@ def test_status_viewer_unconfigured_reports_zero_not_null(
     assert resp.json()["daily_remaining"] == 0
 
 
-def test_status_editor_gets_static_daily_cap(authed_client: tuple[TestClient, AsyncMock]):
+def test_status_editor_gets_static_daily_cap_when_redis_unavailable(
+    authed_client: tuple[TestClient, AsyncMock],
+):
     client, session = authed_client
     session.execute = AsyncMock(
         side_effect=[
@@ -136,6 +138,37 @@ def test_status_editor_gets_static_daily_cap(authed_client: tuple[TestClient, As
     assert body["daily_remaining"] == 500  # COST-03 static cap (Redis count in PR-5)
     assert body["monthly_spent_usd"] == 20.0
     assert body["monthly_budget_usd"] == 100.0
+
+
+def test_status_editor_gets_live_daily_remaining(
+    authed_client: tuple[TestClient, AsyncMock],
+):
+    client, session = authed_client
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_one_or_none(_member("editor")),
+            _scalar_one_or_none(_llm_config(monthly=100.0)),
+            _budget_row(monthly=20.0, daily=1.0, week_total=7.0),
+        ]
+    )
+    redis = MagicMock()
+    remaining = AsyncMock(return_value=377)
+
+    with (
+        patch(
+            "ontokit.api.routes.llm.get_rate_limit_redis",
+            return_value=redis,
+        ),
+        patch(
+            "ontokit.api.routes.llm.get_remaining_calls",
+            new=remaining,
+        ),
+    ):
+        resp = client.get(f"/api/v1/projects/{PROJECT_ID}/llm/status")
+
+    assert resp.status_code == 200
+    assert resp.json()["daily_remaining"] == 377
+    remaining.assert_awaited_once_with(redis, PROJECT_ID, "test-user-id", "editor")
 
 
 def test_status_viewer_reports_zero_not_unlimited(

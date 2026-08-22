@@ -104,6 +104,7 @@ class TestUpdateEmbeddingConfig:
     ) -> None:
         """Successfully updates embedding config."""
         client, _ = authed_client
+        mock_verify.return_value = "owner"
 
         from ontokit.schemas.embeddings import EmbeddingConfig
 
@@ -156,8 +157,21 @@ class TestUpdateEmbeddingConfig:
         embed_service.update_config.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("field", ["monthly_budget_usd", "daily_cap_usd"])
-    async def test_editor_cannot_mutate_embedding_budget_caps(self, field: str) -> None:
+    @pytest.mark.parametrize(
+        ("field", "value"),
+        [
+            ("provider", "openai"),
+            ("model_name", "text-embedding-3-small"),
+            ("api_key", "replacement-key"),
+            ("monthly_budget_usd", 5.0),
+            ("daily_cap_usd", 5.0),
+        ],
+    )
+    async def test_editor_cannot_mutate_embedding_admin_fields(
+        self,
+        field: str,
+        value: str | float,
+    ) -> None:
         from ontokit.api.routes.embeddings import update_embedding_config
         from ontokit.schemas.embeddings import EmbeddingConfigUpdate
 
@@ -171,7 +185,7 @@ class TestUpdateEmbeddingConfig:
         ):
             await update_embedding_config(
                 project_id=uuid4(),
-                data=EmbeddingConfigUpdate(**{field: 5.0}),
+                data=EmbeddingConfigUpdate(**{field: value}),
                 db=AsyncMock(),
                 embed_service=embed_service,
                 user=MagicMock(),
@@ -224,7 +238,7 @@ class TestUpdateEmbeddingConfig:
         with (
             patch(
                 "ontokit.api.routes.embeddings._verify_write_access",
-                new_callable=AsyncMock,
+                new=AsyncMock(return_value="owner"),
             ),
             pytest.raises(HTTPException) as raised,
         ):

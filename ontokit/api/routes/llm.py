@@ -28,6 +28,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.llm_access import get_rate_limit_redis
 from ontokit.core.auth import RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.models.llm_config import ProjectLLMConfig
@@ -55,7 +56,7 @@ from ontokit.services.llm import (
     validate_base_url,
 )
 from ontokit.services.llm.audit import finalize_llm_call, reserve_llm_call
-from ontokit.services.llm.rate_limiter import RATE_LIMITS
+from ontokit.services.llm.rate_limiter import RATE_LIMITS, get_remaining_calls
 from ontokit.services.llm.registry import (
     DEFAULT_BASE_URLS,
     DEFAULT_MODELS,
@@ -502,15 +503,12 @@ async def get_llm_status(
             monthly_spent_usd = budget_status["monthly_spent_usd"]
             burn_rate_daily = budget_status["burn_rate_daily_usd"]
 
-    # Per-role allowance. RATE_LIMITS encodes access directly: 0 = no LLM
-    # access (viewer/unknown roles), None = unlimited (owner/admin) — a
-    # no-access role must report 0, since null reads as "uncapped". For capped
-    # roles this is the static cap, not a live count: Redis-backed remaining
-    # counts arrive with the dispatch layer (PR-5), which injects Redis here.
-    # This is a pure static per-role lookup — independent of `configured`, so
-    # a no-access role reports 0 even on an unconfigured project (the null-here
-    # = uncapped invariant must not depend on config state).
-    daily_remaining: int | None = RATE_LIMITS.get(role, 0)
+    redis = get_rate_limit_redis()
+    daily_remaining: int | None = (
+        await get_remaining_calls(redis, str(project_id), user.id, role)
+        if redis is not None
+        else RATE_LIMITS.get(role, 0)
+    )
 
     return LLMStatusResponse(
         configured=configured,

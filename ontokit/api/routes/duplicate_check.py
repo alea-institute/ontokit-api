@@ -7,7 +7,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import OptionalUser
+from ontokit.api.llm_access import require_embedding_query_access
+from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
 from ontokit.schemas.duplicate_check import DuplicateCheckRequest, DuplicateCheckResponse
 from ontokit.services.duplicate_check_service import DuplicateCheckService
@@ -23,7 +24,7 @@ async def check_duplicate(
     project_id: UUID,
     request: DuplicateCheckRequest,
     db: Annotated[AsyncSession, Depends(get_db)],
-    user: OptionalUser,
+    user: RequiredUser,
 ) -> DuplicateCheckResponse:
     """Check if a proposed entity is a duplicate of anything in the ontology.
 
@@ -33,14 +34,12 @@ async def check_duplicate(
     Used by suggestion generation (Phase 13) and inline UX (Phase 14)
     before allowing a suggestion to be submitted.
 
-    Access mirrors the other ontology-index reads (semantic search): public
-    projects are readable by anyone; private projects require membership —
-    enforced by ``project_service.get`` (403/404).
+    Because semantic scoring may call a paid embedding provider, callers must
+    be authenticated project members whose role grants LLM access.
     """
-    # Same access rule as /search/semantic — this endpoint reads the ontology
-    # index + embeddings, so it must not leak private-project entity data.
-    await get_project_service(db).get(project_id, user)
-    service = DuplicateCheckService(db)
+    project = await get_project_service(db).get(project_id, user)
+    await require_embedding_query_access(project_id, user, project.user_role)
+    service = DuplicateCheckService(db, billing_user_id=user.id)
     return await service.check(
         project_id=project_id,
         label=request.label,

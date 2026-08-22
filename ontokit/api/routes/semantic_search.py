@@ -8,6 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.llm_access import require_embedding_query_access
 from ontokit.core.auth import (
     CurrentUser,
     OptionalUser,
@@ -36,12 +37,17 @@ def get_embeddings(
     return EmbeddingService(db)
 
 
-async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser | None) -> None:
+async def _verify_access(
+    project_id: UUID,
+    db: AsyncSession,
+    user: CurrentUser | None,
+) -> str | None:
     from fastapi import HTTPException
 
     service = get_project_service(db)
     try:
-        await service.get(project_id, user)
+        project = await service.get(project_id, user)
+        return project.user_role
     except HTTPException:
         raise
 
@@ -62,13 +68,21 @@ async def semantic_search(
 ) -> SemanticSearchResponse:
     """Search entities using semantic similarity."""
     require_authenticated_identity(user)
-    await _verify_access(project_id, db, user)
+    role = await _verify_access(project_id, db, user)
+    await require_embedding_query_access(project_id, user, role)
     resolved_branch = branch
     if not resolved_branch:
         from ontokit.git import get_git_service
 
         resolved_branch = get_git_service().get_default_branch(project_id)
-    return await service.semantic_search(project_id, resolved_branch, q, limit, threshold)
+    return await service.semantic_search(
+        project_id,
+        resolved_branch,
+        q,
+        limit,
+        threshold,
+        billing_user_id=user.id,
+    )
 
 
 @router.get(
