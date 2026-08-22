@@ -42,9 +42,7 @@ def _patch_access(allowed: bool = True, status_code: int = 403) -> MagicMock:
     if allowed:
         service.get = AsyncMock(return_value=MagicMock())
     else:
-        service.get = AsyncMock(
-            side_effect=HTTPException(status_code=status_code, detail="denied")
-        )
+        service.get = AsyncMock(side_effect=HTTPException(status_code=status_code, detail="denied"))
     return service
 
 
@@ -58,9 +56,7 @@ def test_private_project_denied_before_check_runs(client: TestClient) -> None:
             "ontokit.api.routes.duplicate_check.get_project_service",
             return_value=_patch_access(allowed=False, status_code=403),
         ),
-        patch(
-            "ontokit.api.routes.duplicate_check.DuplicateCheckService"
-        ) as service_cls,
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
     ):
         resp = client.post(URL, json=BODY)
 
@@ -86,9 +82,7 @@ def test_public_project_allows_anonymous(client: TestClient) -> None:
             "ontokit.api.routes.duplicate_check.get_project_service",
             return_value=_patch_access(allowed=True),
         ),
-        patch(
-            "ontokit.api.routes.duplicate_check.DuplicateCheckService"
-        ) as service_cls,
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
     ):
         service_cls.return_value.check = check
         resp = client.post(URL, json=BODY)
@@ -108,9 +102,7 @@ def test_request_fields_forwarded_to_service(client: TestClient) -> None:
             "ontokit.api.routes.duplicate_check.get_project_service",
             return_value=_patch_access(allowed=True),
         ),
-        patch(
-            "ontokit.api.routes.duplicate_check.DuplicateCheckService"
-        ) as service_cls,
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
     ):
         service_cls.return_value.check = check
         resp = client.post(URL, json=BODY)
@@ -140,9 +132,7 @@ def test_branch_field_removed_and_never_forwarded(client: TestClient) -> None:
             "ontokit.api.routes.duplicate_check.get_project_service",
             return_value=_patch_access(allowed=True),
         ),
-        patch(
-            "ontokit.api.routes.duplicate_check.DuplicateCheckService"
-        ) as service_cls,
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
     ):
         service_cls.return_value.check = check
         # A stray branch key is ignored by the schema, request still succeeds.
@@ -160,3 +150,13 @@ def test_422_on_missing_label(client: TestClient) -> None:
         resp = client.post(URL, json={"entity_type": "class"})
 
     assert resp.status_code == 422
+
+
+def test_openapi_registers_documented_duplicate_check_path() -> None:
+    """The schema documentation and registered route stay on one public contract."""
+    from ontokit.main import app
+    from ontokit.schemas.duplicate_check import DuplicateCheckRequest
+
+    assert "POST /projects/{id}/duplicate-check" in (DuplicateCheckRequest.__doc__ or "")
+    assert "/api/v1/projects/{project_id}/duplicate-check" in app.openapi()["paths"]
+    assert "/api/v1/projects/{project_id}/duplicates/check" not in app.openapi()["paths"]

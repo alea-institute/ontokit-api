@@ -572,3 +572,46 @@ def test_validate_entity_valid_when_no_errors(authed_client: tuple[TestClient, A
 
     assert resp.status_code == 200
     assert resp.json() == {"valid": True, "errors": []}
+
+
+@pytest.mark.asyncio
+async def test_validate_entity_forwards_non_main_branch():
+    """Standalone validation uses the branch the client intends to mutate."""
+    session = AsyncMock()
+    project = _project()
+    project.ontology_iri = None
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_one_or_none(project),
+            _scalar_one_or_none(_member("editor")),
+        ]
+    )
+    validator = MagicMock()
+    validator.validate_entity = AsyncMock(return_value=[])
+
+    with (
+        patch(
+            "ontokit.api.routes.generation.detect_project_namespace",
+            new=AsyncMock(return_value="http://example.org/feature#"),
+        ) as detect_namespace,
+        patch("ontokit.api.routes.generation.ValidationService", return_value=validator),
+    ):
+        response = await validate_entity(
+            UUID(PROJECT_ID),
+            ValidateEntityRequest(
+                branch="feature/legal-concepts",
+                label="New Concept",
+                parent_iris=["http://example.org/feature#Parent"],
+                labels=[{"lang": "en", "value": "New Concept"}],
+            ),
+            session,
+            MagicMock(id="user", is_superadmin=False, is_anonymous=False),
+        )
+
+    assert response.valid is True
+    assert detect_namespace.await_args.args[3] == "feature/legal-concepts"
+    assert validator.validate_entity.await_args.kwargs["branch"] == "feature/legal-concepts"
+
+
+def test_validate_entity_branch_defaults_to_main() -> None:
+    assert ValidateEntityRequest.model_fields["branch"].default == "main"

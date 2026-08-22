@@ -213,6 +213,7 @@ class ValidateEntityRequest(BaseModel):
     """
 
     entity_iri: str | None = None  # Optional — if not set, IRI will be minted
+    branch: str = "main"
     label: str
     parent_iris: list[str]
     labels: list[dict[str, str]]  # Each entry: {"lang": "en", "value": "..."}

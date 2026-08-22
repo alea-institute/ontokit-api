@@ -383,9 +383,8 @@ async def validate_entity(
     await _require_project_member(db, project_id, user.id, user.is_superadmin)
 
     # Detect or derive project namespace
-    branch = "main"  # validate-entity doesn't require a branch param; default to main
     project_namespace = request.namespace or await detect_project_namespace(
-        project.ontology_iri, db, project_id, branch
+        project.ontology_iri, db, project_id, request.branch
     )
 
     # Build entity dict matching ValidationService.validate_entity() expectations
@@ -400,7 +399,7 @@ async def validate_entity(
     validator = ValidationService(db)
     errors = await validator.validate_entity(
         project_id=project_id,
-        branch=branch,
+        branch=request.branch,
         entity=entity,
         project_namespace=project_namespace,
     )

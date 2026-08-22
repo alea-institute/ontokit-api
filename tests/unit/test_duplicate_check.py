@@ -43,8 +43,99 @@ def _make_sem_result(
 def _make_service() -> tuple[DuplicateCheckService, MagicMock]:
     """Return a DuplicateCheckService with a mocked AsyncSession."""
     db = MagicMock()
+    empty_result = MagicMock()
+    empty_result.all.return_value = []
+    db.execute = AsyncMock(return_value=empty_result)
     svc = DuplicateCheckService(db)
+    svc._classify_sources = AsyncMock(  # type: ignore[method-assign]
+        side_effect=lambda _project_id, branches: dict.fromkeys(branches, "main")
+    )
+    svc._get_rejection_infos = AsyncMock(return_value={})  # type: ignore[method-assign]
     return svc, db
+
+
+@pytest.mark.asyncio
+async def test_exact_label_match_is_blocked_without_embeddings():
+    """An exact indexed label remains a hard duplicate when ANN has no rows."""
+    svc, db = _make_service()
+    exact_row = MagicMock(
+        iri="http://example.org/LegalEntity",
+        label="Legal Entity",
+        entity_type="class",
+        branch="feature/exact-match",
+        deprecated=False,
+    )
+    exact_result = MagicMock()
+    exact_result.all.return_value = [exact_row]
+    db.execute = AsyncMock(return_value=exact_result)
+
+    with patch.object(
+        svc._embedding_svc,
+        "semantic_search_all_branches",
+        new=AsyncMock(return_value=[]),
+    ):
+        response = await svc.check(PROJECT_ID, "  LEGAL ENTITY  ")
+
+    assert response.verdict == "block"
+    assert [(candidate.iri, candidate.branch) for candidate in response.candidates] == [
+        ("http://example.org/LegalEntity", "feature/exact-match")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_rejected_high_score_candidate_does_not_raise_verdict():
+    """Rejected matches stay visible but cannot warn or block a new proposal."""
+    svc, _ = _make_service()
+    sem_result = _make_sem_result(label="Legal Entity", score=1.0, branch="suggest-old")
+
+    with (
+        patch.object(
+            svc._embedding_svc,
+            "semantic_search_all_branches",
+            new=AsyncMock(return_value=[sem_result]),
+        ),
+        patch.object(
+            svc,
+            "_classify_sources",
+            new=AsyncMock(return_value={"suggest-old": "rejected"}),
+        ),
+    ):
+        response = await svc.check(PROJECT_ID, "Legal Entity")
+
+    assert response.verdict == "pass"
+    assert response.composite_score == 0.0
+    assert response.candidates[0].score > 0.0
+
+
+@pytest.mark.asyncio
+async def test_structural_score_compares_candidate_direct_parent_to_proposed_parent():
+    """Structural similarity compares equivalent direct-parent contexts."""
+    svc, db = _make_service()
+    sem_result = _make_sem_result(label="Different", score=0.5, branch="main")
+    hierarchy_row = MagicMock(
+        child_iri=sem_result.iri,
+        branch="main",
+        parent_count=1,
+        shares_parent=True,
+    )
+    exact_result = MagicMock()
+    exact_result.all.return_value = []
+    hierarchy_result = MagicMock()
+    hierarchy_result.all.return_value = [hierarchy_row]
+    db.execute = AsyncMock(side_effect=[exact_result, hierarchy_result])
+
+    with patch.object(
+        svc._embedding_svc,
+        "semantic_search_all_branches",
+        new=AsyncMock(return_value=[sem_result]),
+    ):
+        response = await svc.check(
+            PROJECT_ID,
+            "New Label",
+            parent_iri="http://example.org/Entity",
+        )
+
+    assert response.score_breakdown.structural == 1.0
 
 
 @pytest.mark.asyncio
@@ -62,14 +153,9 @@ async def test_exact_label_match_returns_block_verdict():
             new=AsyncMock(return_value=[sem_result]),
         ),
         patch.object(
-            svc._structural_svc,
-            "compute_similarity",
-            return_value=1.0,
-        ),
-        patch.object(
             svc,
-            "_classify_source",
-            new=AsyncMock(return_value="main"),
+            "_load_direct_parent_scores",
+            new=AsyncMock(return_value={(sem_result.iri, sem_result.branch): 1.0}),
         ),
     ):
         response = await svc.check(
@@ -97,14 +183,9 @@ async def test_semantic_similarity_warn_range():
             new=AsyncMock(return_value=[sem_result]),
         ),
         patch.object(
-            svc._structural_svc,
-            "compute_similarity",
-            return_value=0.5,
-        ),
-        patch.object(
             svc,
-            "_classify_source",
-            new=AsyncMock(return_value="main"),
+            "_load_direct_parent_scores",
+            new=AsyncMock(return_value={(sem_result.iri, sem_result.branch): 0.5}),
         ),
     ):
         response = await svc.check(
@@ -132,14 +213,9 @@ async def test_below_threshold_passes_silently():
             new=AsyncMock(return_value=[sem_result]),
         ),
         patch.object(
-            svc._structural_svc,
-            "compute_similarity",
-            return_value=0.3,
-        ),
-        patch.object(
             svc,
-            "_classify_source",
-            new=AsyncMock(return_value="main"),
+            "_load_direct_parent_scores",
+            new=AsyncMock(return_value={(sem_result.iri, sem_result.branch): 0.3}),
         ),
     ):
         response = await svc.check(
@@ -168,14 +244,9 @@ async def test_composite_score_weights():
             new=AsyncMock(return_value=[sem_result]),
         ),
         patch.object(
-            svc._structural_svc,
-            "compute_similarity",
-            return_value=0.75,
-        ),
-        patch.object(
             svc,
-            "_classify_source",
-            new=AsyncMock(return_value="main"),
+            "_load_direct_parent_scores",
+            new=AsyncMock(return_value={(sem_result.iri, sem_result.branch): 0.75}),
         ),
     ):
         response = await svc.check(
@@ -204,9 +275,7 @@ async def test_all_branch_scope():
         _make_sem_result(
             iri="http://ex.org/B", label="Concept B", score=0.85, branch="suggest-123"
         ),
-        _make_sem_result(
-            iri="http://ex.org/C", label="Concept C", score=0.8, branch="suggest-456"
-        ),
+        _make_sem_result(iri="http://ex.org/C", label="Concept C", score=0.8, branch="suggest-456"),
     ]
 
     with (
@@ -214,16 +283,6 @@ async def test_all_branch_scope():
             svc._embedding_svc,
             "semantic_search_all_branches",
             new=AsyncMock(return_value=candidates),
-        ),
-        patch.object(
-            svc._structural_svc,
-            "compute_similarity",
-            return_value=0.0,
-        ),
-        patch.object(
-            svc,
-            "_classify_source",
-            new=AsyncMock(return_value="main"),
         ),
     ):
         response = await svc.check(
@@ -236,6 +295,35 @@ async def test_all_branch_scope():
     assert "suggest-123" in response_branches
     assert "suggest-456" in response_branches
     assert len(response.candidates) == 3
+
+
+@pytest.mark.asyncio
+async def test_same_iri_on_different_branches_preserves_both_candidates():
+    """Cross-branch identity includes branch, so projections are never mixed."""
+    svc, _ = _make_service()
+    iri = "http://example.org/Shared"
+    semantic = _make_sem_result(iri=iri, label="Semantic Label", score=0.7, branch="main")
+    exact = _make_sem_result(iri=iri, label="Exact Label", score=0.0, branch="feature/exact")
+
+    with (
+        patch.object(
+            svc._embedding_svc,
+            "semantic_search_all_branches",
+            new=AsyncMock(return_value=[semantic]),
+        ),
+        patch.object(
+            svc,
+            "_find_exact_label_matches",
+            new=AsyncMock(return_value=[exact]),
+        ),
+    ):
+        response = await svc.check(PROJECT_ID, "Exact Label")
+
+    assert {(candidate.iri, candidate.branch) for candidate in response.candidates} == {
+        (iri, "main"),
+        (iri, "feature/exact"),
+    }
+    assert response.verdict == "block"
 
 
 @pytest.mark.asyncio
@@ -258,12 +346,6 @@ async def test_rejection_history_surfaced():
         rejected_by="user-id-123",
     )
 
-    async def mock_classify_source(_project_id, _branch):
-        return "rejected"
-
-    async def mock_get_rejection_info(_project_id, _rejected_iri):
-        return rej_record
-
     with (
         patch.object(
             svc._embedding_svc,
@@ -271,13 +353,14 @@ async def test_rejection_history_surfaced():
             new=AsyncMock(return_value=[sem_result]),
         ),
         patch.object(
-            svc._structural_svc,
-            "compute_similarity",
-            return_value=0.0,
+            svc,
+            "_classify_sources",
+            new=AsyncMock(return_value={"suggest-old": "rejected"}),
         ),
-        patch.object(svc, "_classify_source", new=AsyncMock(side_effect=mock_classify_source)),
         patch.object(
-            svc, "_get_rejection_info", new=AsyncMock(side_effect=mock_get_rejection_info)
+            svc,
+            "_get_rejection_infos",
+            new=AsyncMock(return_value={sem_result.iri: rej_record}),
         ),
     ):
         response = await svc.check(
@@ -306,14 +389,9 @@ async def test_response_includes_score_breakdown():
             new=AsyncMock(return_value=[sem_result]),
         ),
         patch.object(
-            svc._structural_svc,
-            "compute_similarity",
-            return_value=0.5,
-        ),
-        patch.object(
             svc,
-            "_classify_source",
-            new=AsyncMock(return_value="main"),
+            "_load_direct_parent_scores",
+            new=AsyncMock(return_value={(sem_result.iri, sem_result.branch): 0.5}),
         ),
     ):
         response = await svc.check(

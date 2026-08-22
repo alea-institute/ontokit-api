@@ -286,14 +286,16 @@ class SuggestionGenerationService:
             label = str(raw.get("label") or "").strip()
             if not label:
                 return None
+            if suggestion_type == "siblings" and not shared_parent_iris:
+                # The ontology index models top-level classes by absence of a
+                # parent, not by an explicit root node. Emitting a free-floating
+                # generated class would violate VALID-01, while falling back to
+                # class_iri would silently turn the sibling into a child.
+                return None
             new_iri = mint_iri(project_namespace)
             # A sibling shares the focus class's parents; a child is parented by
             # the focus class itself.
-            parent_iris = (
-                [class_iri]
-                if suggestion_type == "children"
-                else (shared_parent_iris or [class_iri])
-            )
+            parent_iris = [class_iri] if suggestion_type == "children" else shared_parent_iris
             return {
                 **base,
                 "iri": new_iri,
@@ -305,7 +307,7 @@ class SuggestionGenerationService:
                     "labels": [{"lang": "en", "value": label}],
                 },
                 "dedup_label": label,
-                "dedup_parent": parent_iris[0] if parent_iris else class_iri,
+                "dedup_parent": parent_iris[0],
             }
 
         if suggestion_type == "parents":

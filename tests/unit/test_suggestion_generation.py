@@ -173,6 +173,39 @@ async def test_gen02_generate_siblings(
     assert all(s.suggestion_type == "siblings" for s in resp.suggestions)
 
 
+@pytest.mark.asyncio
+async def test_gen02_root_sibling_is_skipped_without_explicit_root(
+    mock_llm_provider,
+    mock_duplicate_check_service,
+):
+    """A root focus with no shared parent must not turn a sibling into its child."""
+    context = _make_context()
+    context["parents"] = []
+    mock_assembler = AsyncMock()
+    mock_assembler.assemble = AsyncMock(return_value=context)
+    mock_validator = AsyncMock()
+    mock_validator.validate_entity = AsyncMock(return_value=[])
+    mock_llm_provider.chat = AsyncMock(
+        return_value=(_make_llm_json([_suggestion("Top-level Peer")]), 100, 50)
+    )
+
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
+    response = await svc.generate(
+        project_id=PROJECT_ID,
+        branch="main",
+        class_iri=CLASS_IRI,
+        suggestion_type="siblings",
+        provider=mock_llm_provider,
+        project_namespace=NAMESPACE,
+    )
+
+    assert response.suggestions == []
+    mock_validator.validate_entity.assert_not_awaited()
+    mock_duplicate_check_service.check.assert_not_awaited()
+
+
 # ---------------------------------------------------------------------------
 # GEN-03: annotations
 # ---------------------------------------------------------------------------

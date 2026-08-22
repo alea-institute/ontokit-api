@@ -129,6 +129,19 @@ async def test_valid02_english_label_accepts_empty_lang():
     assert "VALID-02" not in codes, f"Unexpected VALID-02 in {codes}"
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("value", ["", "   "])
+async def test_valid02_rejects_blank_english_or_untagged_label(value: str):
+    """Language eligibility does not make an empty label discoverable."""
+    svc, _ = _make_service()
+    entity = _entity(labels=[{"lang": "en", "value": value}, {"lang": "", "value": value}])
+
+    with patch.object(svc._index, "get_ancestor_path", new=AsyncMock(return_value=[])):
+        errors = await svc.validate_entity(PROJECT_ID, BRANCH, entity, PROJECT_NS)
+
+    assert "VALID-02" in {error.code for error in errors}
+
+
 # ---------------------------------------------------------------------------
 # VALID-03: cycle detection
 # ---------------------------------------------------------------------------
@@ -181,6 +194,21 @@ async def test_valid03_cycle_detection_passes_no_cycle():
 
     codes = [e.code for e in errors]
     assert "VALID-03" not in codes, f"Unexpected VALID-03 in {codes}"
+
+
+@pytest.mark.asyncio
+async def test_valid03_rejects_direct_self_parent_before_ancestor_lookup():
+    """Direct self-parenting is a cycle even when the entity is not indexed yet."""
+    svc, _ = _make_service()
+    entity_iri = "http://example.org/ontology#SelfParent"
+    entity = _entity(iri=entity_iri, parent_iris=[entity_iri])
+    ancestor_lookup = AsyncMock(return_value=[])
+
+    with patch.object(svc._index, "get_ancestor_path", new=ancestor_lookup):
+        errors = await svc.validate_entity(PROJECT_ID, BRANCH, entity, PROJECT_NS)
+
+    assert "VALID-03" in {error.code for error in errors}
+    ancestor_lookup.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -259,7 +287,7 @@ def test_valid06_iri_minting_uses_uuid():
     ns = "http://example.org/ontology#"
     iri = mint_iri(ns)
     assert iri.startswith(ns), f"IRI {iri!r} does not start with {ns!r}"
-    local = iri[len(ns):]
+    local = iri[len(ns) :]
     assert re.match(
         r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
         local,

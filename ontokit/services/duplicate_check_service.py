@@ -3,10 +3,11 @@
 import logging
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import case, func, select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.models.duplicate_rejection import DuplicateRejection
+from ontokit.models.ontology_index import IndexedEntity, IndexedHierarchy, IndexedLabel
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.duplicate_check import (
     CandidateSource,
@@ -15,8 +16,8 @@ from ontokit.schemas.duplicate_check import (
     DuplicateVerdict,
     ScoreBreakdown,
 )
+from ontokit.schemas.embeddings import SemanticSearchResultWithBranch
 from ontokit.services.embedding_service import EmbeddingService
-from ontokit.services.structural_similarity_service import StructuralSimilarityService
 
 logger = logging.getLogger(__name__)
 
@@ -36,7 +37,6 @@ class DuplicateCheckService:
     def __init__(self, db: AsyncSession):
         self._db = db
         self._embedding_svc = EmbeddingService(db)
-        self._structural_svc = StructuralSimilarityService()
 
     async def check(
         self,
@@ -62,12 +62,42 @@ class DuplicateCheckService:
         del entity_type  # accepted for schema parity; scoring is type-agnostic today
         normalized_label = label.lower().strip()
 
-        # 1. Semantic search across ALL branches (DEDUP-08)
-        semantic_candidates = await self._embedding_svc.semantic_search_all_branches(
-            project_id, label, limit=limit
-        )
+        # Exact labels are an independent indexed signal: an unavailable, empty,
+        # or stale embedding projection must never hide a definitive duplicate.
+        exact_candidates = await self._find_exact_label_matches(project_id, normalized_label, limit)
+        try:
+            semantic_candidates = await self._embedding_svc.semantic_search_all_branches(
+                project_id, label, limit=limit
+            )
+        except Exception as exc:
+            logger.warning(
+                "Semantic duplicate search unavailable; continuing with exact labels: %s",
+                exc,
+            )
+            semantic_candidates = []
 
-        if not semantic_candidates:
+        # Merge the two bounded sources by ontology identity. Exact-index data
+        # wins for the label/branch projection; ANN still contributes its score.
+        semantic_keys = {(candidate.iri, candidate.branch) for candidate in semantic_candidates}
+        candidates_by_key = {
+            (candidate.iri, candidate.branch): candidate for candidate in semantic_candidates
+        }
+        for exact_candidate in exact_candidates:
+            candidate_key = (exact_candidate.iri, exact_candidate.branch)
+            semantic_candidate = candidates_by_key.get(candidate_key)
+            if semantic_candidate is None:
+                candidates_by_key[candidate_key] = exact_candidate
+            else:
+                candidates_by_key[candidate_key] = semantic_candidate.model_copy(
+                    update={
+                        "label": exact_candidate.label,
+                        "entity_type": exact_candidate.entity_type,
+                        "deprecated": exact_candidate.deprecated,
+                    }
+                )
+        merged_candidates = list(candidates_by_key.values())
+
+        if not merged_candidates:
             return DuplicateCheckResponse(
                 verdict="pass",
                 composite_score=0.0,
@@ -75,12 +105,28 @@ class DuplicateCheckService:
                 candidates=[],
             )
 
+        parent_scores = (
+            await self._load_direct_parent_scores(project_id, merged_candidates, parent_iri)
+            if parent_iri
+            else {}
+        )
+        source_by_branch = await self._classify_sources(
+            project_id, {candidate.branch for candidate in merged_candidates}
+        )
+        rejected_iris = {
+            candidate.iri
+            for candidate in merged_candidates
+            if source_by_branch[candidate.branch] == "rejected"
+        }
+        rejection_by_iri = await self._get_rejection_infos(project_id, rejected_iris)
+
         # 2. Build candidate list with all three scores
         candidates: list[DuplicateCandidate] = []
         best_composite = 0.0
         best_breakdown = ScoreBreakdown(exact=0.0, semantic=0.0, structural=0.0)
+        actionable_exact_fallback = False
 
-        for sem_result in semantic_candidates:
+        for sem_result in merged_candidates:
             # Exact score: case-insensitive label match
             candidate_label_norm = (sem_result.label or "").lower().strip()
             exact_score = 1.0 if candidate_label_norm == normalized_label else 0.0
@@ -88,16 +134,9 @@ class DuplicateCheckService:
             # Semantic score: from ANN search
             semantic_score = sem_result.score
 
-            # Structural score: folio-python Jaccard (returns 0.0 if folio unavailable)
-            structural_score = (
-                self._structural_svc.compute_similarity(
-                    sem_result.iri,
-                    parent_iri,
-                    max_depth=3,
-                )
-                if parent_iri
-                else 0.0
-            )
+            # Structural score compares like with like: the candidate's direct
+            # parents against the proposed entity's direct-parent context.
+            structural_score = parent_scores.get((sem_result.iri, sem_result.branch), 0.0)
 
             # Composite (D-01 weights)
             composite = (
@@ -107,13 +146,13 @@ class DuplicateCheckService:
             )
 
             # Determine source (D-09)
-            source = await self._classify_source(project_id, sem_result.branch)
+            source = source_by_branch[sem_result.branch]
 
             # Look up rejection history (D-09, D-11)
             rejection_reason = None
             canonical_iri = None
             if source == "rejected":
-                rej = await self._get_rejection_info(project_id, sem_result.iri)
+                rej = rejection_by_iri.get(sem_result.iri)
                 if rej:
                     rejection_reason = rej.rejection_reason
                     canonical_iri = rej.canonical_iri
@@ -130,7 +169,15 @@ class DuplicateCheckService:
                 )
             )
 
-            if composite > best_composite:
+            # A dismissed/rejected candidate remains useful historical context,
+            # but it cannot affect the current warn/block decision.
+            if (
+                source != "rejected"
+                and exact_score == 1.0
+                and (sem_result.iri, sem_result.branch) not in semantic_keys
+            ):
+                actionable_exact_fallback = True
+            if source != "rejected" and composite > best_composite:
                 best_composite = composite
                 best_breakdown = ScoreBreakdown(
                     exact=round(exact_score, 4),
@@ -140,9 +187,10 @@ class DuplicateCheckService:
 
         # Sort candidates by score descending
         candidates.sort(key=lambda c: c.score, reverse=True)
+        candidates = candidates[:limit]
 
         # Determine verdict (D-02)
-        if best_composite > BLOCK_THRESHOLD:
+        if actionable_exact_fallback or best_composite > BLOCK_THRESHOLD:
             verdict: DuplicateVerdict = "block"
         elif best_composite > WARN_THRESHOLD:
             verdict = "warn"
@@ -156,48 +204,155 @@ class DuplicateCheckService:
             candidates=candidates,
         )
 
-    async def _classify_source(self, project_id: UUID, branch: str) -> CandidateSource:
-        """Classify a branch as main/pending/rejected per D-09."""
-        # Check if branch matches a suggestion session
-        session = (
-            await self._db.execute(
-                select(SuggestionSession)
-                .where(
-                    SuggestionSession.project_id == project_id,
-                    SuggestionSession.branch == branch,
-                )
-                .order_by(SuggestionSession.created_at.desc())
-                .limit(1)
-            )
-        ).scalars().first()
+    async def _find_exact_label_matches(
+        self,
+        project_id: UUID,
+        normalized_label: str,
+        limit: int,
+    ) -> list[SemanticSearchResultWithBranch]:
+        """Return a bounded, cross-branch exact-label projection from the index."""
+        if not normalized_label:
+            return []
 
-        if not session:
-            return "main"
-
-        status = session.status
-        if status == SuggestionSessionStatus.REJECTED.value:
-            return "rejected"
-        elif status in (
-            SuggestionSessionStatus.ACTIVE.value,
-            SuggestionSessionStatus.SUBMITTED.value,
-            SuggestionSessionStatus.AUTO_SUBMITTED.value,
-            SuggestionSessionStatus.CHANGES_REQUESTED.value,
-        ):
-            return "pending"
-        else:
-            return "main"  # merged/discarded sessions are now part of main
-
-    async def _get_rejection_info(
-        self, project_id: UUID, rejected_iri: str
-    ) -> DuplicateRejection | None:
-        """Look up rejection history for an IRI."""
         result = await self._db.execute(
-            select(DuplicateRejection)
+            select(
+                IndexedEntity.iri,
+                func.min(IndexedLabel.value).label("label"),
+                IndexedEntity.entity_type,
+                IndexedEntity.branch,
+                IndexedEntity.deprecated,
+            )
+            .join(IndexedLabel, IndexedLabel.entity_id == IndexedEntity.id)
+            .where(
+                IndexedEntity.project_id == project_id,
+                func.lower(func.trim(IndexedLabel.value)) == normalized_label,
+            )
+            .group_by(
+                IndexedEntity.iri,
+                IndexedEntity.entity_type,
+                IndexedEntity.branch,
+                IndexedEntity.deprecated,
+            )
+            .order_by(
+                case((IndexedEntity.branch == "main", 0), else_=1),
+                IndexedEntity.iri,
+                IndexedEntity.branch,
+            )
+            .limit(limit)
+        )
+        return [
+            SemanticSearchResultWithBranch(
+                iri=row.iri,
+                label=row.label,
+                entity_type=row.entity_type,
+                score=0.0,
+                branch=row.branch,
+                deprecated=row.deprecated,
+            )
+            for row in result.all()
+        ]
+
+    async def _load_direct_parent_scores(
+        self,
+        project_id: UUID,
+        candidates: list[SemanticSearchResultWithBranch],
+        proposed_parent_iri: str,
+    ) -> dict[tuple[str, str], float]:
+        """Compute bounded direct-parent Jaccard scores in one aggregate query."""
+        candidate_keys = {(candidate.iri, candidate.branch) for candidate in candidates}
+        if not candidate_keys:
+            return {}
+
+        result = await self._db.execute(
+            select(
+                IndexedHierarchy.child_iri,
+                IndexedHierarchy.branch,
+                func.count(IndexedHierarchy.parent_iri).label("parent_count"),
+                func.bool_or(IndexedHierarchy.parent_iri == proposed_parent_iri).label(
+                    "shares_parent"
+                ),
+            )
+            .where(
+                IndexedHierarchy.project_id == project_id,
+                tuple_(IndexedHierarchy.child_iri, IndexedHierarchy.branch).in_(
+                    sorted(candidate_keys)
+                ),
+            )
+            .group_by(IndexedHierarchy.child_iri, IndexedHierarchy.branch)
+        )
+        return {
+            (row.child_iri, row.branch): 1.0 / int(row.parent_count)
+            for row in result.all()
+            if row.shares_parent and row.parent_count
+        }
+
+    async def _classify_sources(
+        self, project_id: UUID, branches: set[str]
+    ) -> dict[str, CandidateSource]:
+        """Classify bounded branches from their latest suggestion session."""
+        ranked_sessions = (
+            select(
+                SuggestionSession.branch,
+                SuggestionSession.status,
+                func.row_number()
+                .over(
+                    partition_by=SuggestionSession.branch,
+                    order_by=(SuggestionSession.created_at.desc(), SuggestionSession.id.desc()),
+                )
+                .label("rank"),
+            )
+            .where(
+                SuggestionSession.project_id == project_id,
+                SuggestionSession.branch.in_(sorted(branches)),
+            )
+            .subquery()
+        )
+        result = await self._db.execute(
+            select(ranked_sessions.c.branch, ranked_sessions.c.status).where(
+                ranked_sessions.c.rank == 1
+            )
+        )
+        sources: dict[str, CandidateSource] = dict.fromkeys(branches, "main")
+        for row in result.all():
+            if row.status == SuggestionSessionStatus.REJECTED.value:
+                sources[row.branch] = "rejected"
+            elif row.status in (
+                SuggestionSessionStatus.ACTIVE.value,
+                SuggestionSessionStatus.SUBMITTED.value,
+                SuggestionSessionStatus.AUTO_SUBMITTED.value,
+                SuggestionSessionStatus.CHANGES_REQUESTED.value,
+            ):
+                sources[row.branch] = "pending"
+        return sources
+
+    async def _get_rejection_infos(
+        self, project_id: UUID, rejected_iris: set[str]
+    ) -> dict[str, DuplicateRejection]:
+        """Bulk-load the latest rejection history for bounded candidate IRIs."""
+        if not rejected_iris:
+            return {}
+        ranked_rejections = (
+            select(
+                DuplicateRejection.id,
+                func.row_number()
+                .over(
+                    partition_by=DuplicateRejection.rejected_iri,
+                    order_by=(
+                        DuplicateRejection.rejected_at.desc(),
+                        DuplicateRejection.id.desc(),
+                    ),
+                )
+                .label("rank"),
+            )
             .where(
                 DuplicateRejection.project_id == project_id,
-                DuplicateRejection.rejected_iri == rejected_iri,
+                DuplicateRejection.rejected_iri.in_(sorted(rejected_iris)),
             )
-            .order_by(DuplicateRejection.rejected_at.desc())
-            .limit(1)
+            .subquery()
         )
-        return result.scalars().first()
+        result = await self._db.execute(
+            select(DuplicateRejection)
+            .join(ranked_rejections, ranked_rejections.c.id == DuplicateRejection.id)
+            .where(ranked_rejections.c.rank == 1)
+        )
+        return {row.rejected_iri: row for row in result.scalars().all()}
