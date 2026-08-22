@@ -593,6 +593,57 @@ class TestSaveSourceContentSuccess:
         assert data["branch"] == "main"
 
     @patch("ontokit.api.routes.projects.get_arq_pool", new_callable=AsyncMock)
+    def test_storage_and_git_writes_share_branch_lock(
+        self,
+        mock_get_arq_pool: AsyncMock,
+        authed_client: tuple[TestClient, AsyncMock],
+        mock_project_service: AsyncMock,
+        mock_storage_service: MagicMock,
+        mock_ontology_service: MagicMock,  # noqa: ARG002
+        mock_git_service: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The storage mirror cannot race ahead of the serialized Git write."""
+        client, _db = authed_client
+        mock_project_service.get = AsyncMock(
+            return_value=_project_response(
+                user_role="editor",
+                source_file_path="ontology.ttl",
+            )
+        )
+        mock_git_service.repository_exists.return_value = True
+        mock_git_service.get_default_branch.return_value = "main"
+        mock_git_service.commit_changes.return_value = MagicMock(
+            hash="deadbeef",
+            message="Update ontology",
+        )
+        mock_get_arq_pool.return_value = None
+        inside_lock = False
+
+        @asynccontextmanager
+        async def tracked_lock(*_args: object, **_kwargs: object):
+            nonlocal inside_lock
+            inside_lock = True
+            try:
+                yield
+            finally:
+                inside_lock = False
+
+        async def upload(*_args: object, **_kwargs: object) -> str:
+            assert inside_lock
+            return "ontokit/test-object"
+
+        monkeypatch.setattr("ontokit.api.routes.projects.branch_write_lock", tracked_lock)
+        mock_storage_service.upload_file.side_effect = upload
+
+        response = client.put(
+            f"/api/v1/projects/{PROJECT_ID}/source",
+            json={"content": VALID_TURTLE, "commit_message": "Update ontology"},
+        )
+
+        assert response.status_code == 200
+
+    @patch("ontokit.api.routes.projects.get_arq_pool", new_callable=AsyncMock)
     def test_save_source_with_branch_param(
         self,
         mock_get_arq_pool: AsyncMock,

@@ -656,65 +656,74 @@ class ProjectService:
             # projects, e.g. "source/ontology-semantic-canon.ttl" vs "ontology.ttl")
             git_filename = self._get_git_ontology_path(project)
 
-            # For GitHub-cloned projects, git is the source of truth — the editor
-            # loads from git, so MinIO content may be stale.  Read from git when
-            # a repository exists to ensure we update the correct content.
-            content: bytes | None = None
-            if self.git_service.repository_exists(project.id):
-                try:
-                    branch = self.git_service.get_default_branch(project.id)
-                    content = self.git_service.get_file_at_version(
-                        project.id, git_filename, branch
-                    ).encode("utf-8")
-                except Exception:
-                    # Fall back to MinIO below
-                    content = None
-
-            if content is None:
-                content = await storage.download_file(object_name)
-
-            # Update metadata in the RDF
-            updater = OntologyMetadataUpdater()
-            updated_content, changes = updater.update_metadata(
-                content=content,
-                filename=git_filename,
-                new_title=new_name,
-                new_description=new_description,
+            repository_exists = self.git_service.repository_exists(project.id)
+            branch_name = (
+                self.git_service.get_default_branch(project.id) if repository_exists else None
             )
 
-            if not changes:
-                logger.debug(f"No RDF changes needed for project {project.id}")
-                return None
+            async def persist_metadata_update() -> str | None:
+                # Git is the source of truth when present. This function runs
+                # under its branch lock so the read, transform, storage mirror,
+                # and Git commit all describe one branch version.
+                content: bytes | None = None
+                if repository_exists and branch_name is not None:
+                    try:
+                        content = self.git_service.get_file_at_version(
+                            project.id, git_filename, branch_name
+                        ).encode("utf-8")
+                    except Exception:
+                        content = None
 
-            # Upload updated content to MinIO (keeps MinIO in sync)
-            await storage.upload_file(object_name, updated_content, "text/turtle")
+                if content is None:
+                    content = await storage.download_file(object_name)
 
-            # Commit to git using the correct file path
-            if self.git_service.repository_exists(project.id):
-                # Build commit message
+                updater = OntologyMetadataUpdater()
+                updated_content, changes = updater.update_metadata(
+                    content=content,
+                    filename=git_filename,
+                    new_title=new_name,
+                    new_description=new_description,
+                )
+
+                if not changes:
+                    logger.debug(f"No RDF changes needed for project {project.id}")
+                    return None
+
+                await storage.upload_file(object_name, updated_content, "text/turtle")
+
+                if not repository_exists or branch_name is None:
+                    logger.debug(f"No git repository for project {project.id}, skipping commit")
+                    return None
+
                 change_lines = "\n".join(f"- {change}" for change in changes)
-                commit_message = f"Update ontology metadata\n\n{change_lines}\n\nAutomated sync from project settings."
-
-                branch_name = self.git_service.get_default_branch(project.id)
-                async with branch_write_lock(self.db, project.id, branch_name):
-                    commit_info = self.git_service.commit_changes(
-                        project_id=project.id,
-                        ontology_content=updated_content,
-                        filename=git_filename,
-                        message=commit_message,
-                        author_name=user.name,
-                        author_email=user.email,
-                        branch_name=branch_name,
-                    )
-                    await self.db.commit()
+                commit_message = (
+                    f"Update ontology metadata\n\n{change_lines}\n\n"
+                    "Automated sync from project settings."
+                )
+                commit_info = self.git_service.commit_changes(
+                    project_id=project.id,
+                    ontology_content=updated_content,
+                    filename=git_filename,
+                    message=commit_message,
+                    author_name=user.name,
+                    author_email=user.email,
+                    branch_name=branch_name,
+                )
                 logger.info(
                     f"Synced metadata to RDF for project {project.id}, "
                     f"commit {commit_info.short_hash}"
                 )
                 return commit_info.hash
-            else:
-                logger.debug(f"No git repository for project {project.id}, skipping commit")
-                return None
+
+            if repository_exists and branch_name is not None:
+                async with branch_write_lock(self.db, project.id, branch_name):
+                    commit_hash = await persist_metadata_update()
+                    # Release the transaction-scoped advisory lock even when no
+                    # RDF change was necessary.
+                    await self.db.commit()
+                    return commit_hash
+
+            return await persist_metadata_update()
 
         except StorageError as e:
             logger.warning(

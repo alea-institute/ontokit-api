@@ -17,6 +17,26 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _drop_invalid_index(index_name: str) -> None:
+    """Remove a partial concurrent-build artifact before retrying its DDL."""
+    result = op.get_bind().execute(
+        sa.text("""
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_index i
+                JOIN pg_class c ON c.oid = i.indexrelid
+                WHERE i.indrelid = 'entity_embeddings'::regclass
+                  AND c.relname = :index_name
+                  AND (NOT i.indisvalid OR NOT i.indisready)
+            )
+        """),
+        {"index_name": index_name},
+    )
+    if result.scalar_one():
+        # Names are fixed migration constants, never external input.
+        op.execute(sa.text(f'DROP INDEX CONCURRENTLY IF EXISTS "{index_name}"'))
+
+
 def upgrade() -> None:
     op.add_column("entity_embeddings", sa.Column("dimensions", sa.Integer(), nullable=True))
     op.execute("UPDATE entity_embeddings SET dimensions = vector_dims(embedding)")
@@ -99,6 +119,7 @@ def upgrade() -> None:
         """)
         op.execute("DROP INDEX CONCURRENTLY IF EXISTS ix_entity_embeddings_hnsw")
         for dimensions in (384, 1024, 1536):
+            _drop_invalid_index(f"ix_entity_embeddings_hnsw_{dimensions}")
             op.execute(f"""
                 CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_entity_embeddings_hnsw_{dimensions}
                 ON entity_embeddings
@@ -106,6 +127,7 @@ def upgrade() -> None:
                 WITH (m = 16, ef_construction = 64)
                 WHERE dimensions = {dimensions}
             """)
+        _drop_invalid_index("ix_entity_embeddings_hnsw_3072")
         op.execute("""
             CREATE INDEX CONCURRENTLY IF NOT EXISTS ix_entity_embeddings_hnsw_3072
             ON entity_embeddings

@@ -225,50 +225,58 @@ class PullRequestService:
                 detail="Only editors and above can create pull requests",
             )
 
-        # Verify source branch exists
-        branches = self.git_service.list_branches(project_id)
-        branch_names = [b.name for b in branches]
-
-        if pr_create.source_branch not in branch_names:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Source branch '{pr_create.source_branch}' does not exist",
-            )
-
-        if pr_create.target_branch not in branch_names:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Target branch '{pr_create.target_branch}' does not exist",
-            )
-
         if pr_create.source_branch == pr_create.target_branch:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Source and target branches must be different",
             )
 
-        # Get next PR number for this project
-        max_number_result = await self.db.execute(
-            select(func.max(PullRequest.pr_number)).where(PullRequest.project_id == project_id)
-        )
-        max_number = max_number_result.scalar() or 0
-        pr_number = max_number + 1
+        try:
+            async with branch_write_locks(
+                self.db,
+                project_id,
+                {pr_create.source_branch, pr_create.target_branch},
+            ):
+                # Branch deletion uses the same source-branch lock. Verify and
+                # commit the OPEN row inside the critical section so a PR can
+                # never be created for a branch that wins a concurrent delete.
+                branches = self.git_service.list_branches(project_id)
+                branch_names = {branch.name for branch in branches}
+                if pr_create.source_branch not in branch_names:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Source branch '{pr_create.source_branch}' does not exist",
+                    )
+                if pr_create.target_branch not in branch_names:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Target branch '{pr_create.target_branch}' does not exist",
+                    )
 
-        # Create PR in database
-        db_pr = PullRequest(
-            project_id=project_id,
-            pr_number=pr_number,
-            title=pr_create.title,
-            description=pr_create.description,
-            source_branch=pr_create.source_branch,
-            target_branch=pr_create.target_branch,
-            author_id=user.id,
-            author_name=user.name,
-            author_email=user.email,
-            status=PRStatus.OPEN.value,
-        )
-        self.db.add(db_pr)
-        await self.db.flush()
+                max_number_result = await self.db.execute(
+                    select(func.max(PullRequest.pr_number)).where(
+                        PullRequest.project_id == project_id
+                    )
+                )
+                pr_number = (max_number_result.scalar() or 0) + 1
+                db_pr = PullRequest(
+                    project_id=project_id,
+                    pr_number=pr_number,
+                    title=pr_create.title,
+                    description=pr_create.description,
+                    source_branch=pr_create.source_branch,
+                    target_branch=pr_create.target_branch,
+                    author_id=user.id,
+                    author_name=user.name,
+                    author_email=user.email,
+                    status=PRStatus.OPEN.value,
+                )
+                self.db.add(db_pr)
+                await self.db.flush()
+                await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
 
         # Sync with GitHub if integration exists and we can resolve a token
         gh_result = await self._get_github_token(project_id)
@@ -436,7 +444,9 @@ class PullRequestService:
                 detail="Only the author or admins can close this pull request",
             )
 
+        await self._lock_pr_row(pr)
         if pr.status != PRStatus.OPEN.value:
+            await self.db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Pull request is already closed or merged",
@@ -444,7 +454,9 @@ class PullRequestService:
 
         pr.status = PRStatus.CLOSED.value
 
-        # Sync with GitHub if integration exists
+        await self.db.commit()
+
+        # Sync with GitHub only after the local state transition is durable.
         if pr.github_pr_number:
             gh_result = await self._get_github_token(project_id)
             if gh_result:
@@ -459,7 +471,6 @@ class PullRequestService:
                 except Exception as e:
                     logger.warning(f"Failed to close GitHub PR: {e}")
 
-        await self.db.commit()
         await self.db.refresh(pr)
 
         return await self._to_pr_response(pr, project_id)
@@ -532,26 +543,6 @@ class PullRequestService:
                 detail="Pull request is not open",
             )
 
-        # Check approval requirements
-        approval_count = sum(1 for r in pr.reviews if r.status == ReviewStatus.APPROVED.value)
-        if approval_count < project.pr_approval_required:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Pull request requires {project.pr_approval_required} approvals, but has {approval_count}",
-            )
-
-        # Capture commit hashes before merge
-        branches = self.git_service.list_branches(project_id)
-        branch_map = {b.name: b for b in branches}
-
-        base_commit_hash = None
-        head_commit_hash = None
-        if pr.target_branch in branch_map:
-            base_commit_hash = branch_map[pr.target_branch].commit_hash
-        if pr.source_branch in branch_map:
-            head_commit_hash = branch_map[pr.source_branch].commit_hash
-
-        # Perform merge in local git
         merge_message = (
             merge_request.merge_message or f"Merge pull request #{pr_number}: {pr.title}"
         )
@@ -561,6 +552,37 @@ class PullRequestService:
                 project_id,
                 {pr.source_branch, pr.target_branch},
             ):
+                await self._lock_pr_row(pr)
+                if pr.status != PRStatus.OPEN.value:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Pull request is not open",
+                    )
+
+                approval_count = sum(
+                    1 for review in pr.reviews if review.status == ReviewStatus.APPROVED.value
+                )
+                if approval_count < project.pr_approval_required:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=(
+                            f"Pull request requires {project.pr_approval_required} approvals, "
+                            f"but has {approval_count}"
+                        ),
+                    )
+
+                branches = self.git_service.list_branches(project_id)
+                branch_map = {branch.name: branch for branch in branches}
+                base_commit_hash = (
+                    branch_map[pr.target_branch].commit_hash
+                    if pr.target_branch in branch_map
+                    else None
+                )
+                head_commit_hash = (
+                    branch_map[pr.source_branch].commit_hash
+                    if pr.source_branch in branch_map
+                    else None
+                )
                 merge_result = self.git_service.merge_branch(
                     project_id=project_id,
                     source=pr.source_branch,
@@ -569,26 +591,22 @@ class PullRequestService:
                     author_name=user.name,
                     author_email=user.email,
                 )
-                # End the advisory-lock transaction before releasing the matching
-                # process-local locks. Git is already the durable source of truth.
+                if not merge_result.success:
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail=f"Merge failed: {merge_result.message}",
+                    )
+
+                pr.status = PRStatus.MERGED.value
+                pr.merged_by = user.id
+                pr.merged_at = datetime.now(UTC)
+                pr.merge_commit_hash = merge_result.merge_commit_hash
+                pr.base_commit_hash = base_commit_hash
+                pr.head_commit_hash = head_commit_hash
                 await self.db.commit()
         except Exception:
             await self.db.rollback()
             raise
-
-        if not merge_result.success:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Merge failed: {merge_result.message}",
-            )
-
-        # Update PR status and store commit hashes
-        pr.status = PRStatus.MERGED.value
-        pr.merged_by = user.id
-        pr.merged_at = datetime.now(UTC)
-        pr.merge_commit_hash = merge_result.merge_commit_hash
-        pr.base_commit_hash = base_commit_hash
-        pr.head_commit_hash = head_commit_hash
 
         # Delete source branch if requested
         if merge_request.delete_source_branch:
@@ -622,8 +640,6 @@ class PullRequestService:
                     )
                 except Exception as e:
                     logger.warning(f"Failed to merge GitHub PR: {e}")
-
-        await self.db.commit()
 
         # Notify PR author that their PR was merged
         if pr.author_id != user.id:
@@ -1710,6 +1726,14 @@ class PullRequestService:
             )
 
         return pr
+
+    async def _lock_pr_row(self, pr: PullRequest) -> None:
+        """Refresh and lock a PR row before a lifecycle transition."""
+        await self.db.refresh(
+            pr,
+            attribute_names=["reviews", "comments"],
+            with_for_update=True,
+        )
 
     async def _get_github_integration(self, project_id: UUID) -> GitHubIntegration | None:
         """Get GitHub integration for a project."""

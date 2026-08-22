@@ -1246,7 +1246,7 @@ class TestEmbedSingleEntity:
         cfg_result = MagicMock()
         cfg_result.scalar_one_or_none.return_value = _make_config_row()
 
-        mock_db.execute.side_effect = [cfg_result, MagicMock()]
+        mock_db.execute.side_effect = [cfg_result, cfg_result, MagicMock()]
 
         with (
             patch(
@@ -1272,7 +1272,7 @@ class TestEmbedSingleEntity:
         ):
             await service.embed_single_entity(PROJECT_ID, BRANCH, "http://example.org/Foo")
 
-        upsert_stmt = mock_db.execute.await_args_list[1].args[0]
+        upsert_stmt = mock_db.execute.await_args_list[2].args[0]
         compiled = upsert_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
         assert "ON CONFLICT ON CONSTRAINT uq_entity_embedding DO UPDATE" in str(compiled)
         mock_db.commit.assert_awaited_once()
@@ -1302,7 +1302,7 @@ class TestEmbedSingleEntity:
         cfg_result = MagicMock()
         cfg_result.scalar_one_or_none.return_value = _make_config_row()
 
-        mock_db.execute.side_effect = [cfg_result, MagicMock()]
+        mock_db.execute.side_effect = [cfg_result, cfg_result, MagicMock()]
 
         with (
             patch(
@@ -1330,10 +1330,59 @@ class TestEmbedSingleEntity:
 
         # The one conflict-safe statement covers both insert and concurrent update paths.
         mock_db.add.assert_not_called()
-        upsert_stmt = mock_db.execute.await_args_list[1].args[0]
+        upsert_stmt = mock_db.execute.await_args_list[2].args[0]
         compiled = upsert_stmt.compile(dialect=postgresql.dialect())  # type: ignore[no-untyped-call]
         assert "ON CONFLICT ON CONSTRAINT uq_entity_embedding DO UPDATE" in str(compiled)
         mock_db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_rejects_stale_provider_after_config_change(
+        self, service: EmbeddingService, mock_db: AsyncMock
+    ) -> None:
+        """A completed old-model call cannot repopulate an invalidated index."""
+        from rdflib import Graph, URIRef
+
+        graph = Graph()
+        uri = URIRef("http://example.org/Foo")
+        ontology = MagicMock()
+        ontology.is_loaded.return_value = True
+        ontology._get_graph = AsyncMock(return_value=graph)
+
+        provider = AsyncMock()
+        provider.dimensions = 3
+        provider.provider_name = "local"
+        provider.model_id = "old-model"
+        provider.embed_text = AsyncMock(return_value=[0.1, 0.2, 0.3])
+
+        old_config = MagicMock()
+        old_config.scalar_one_or_none.return_value = _make_config_row(model_name="old-model")
+        new_config = MagicMock()
+        new_config.scalar_one_or_none.return_value = _make_config_row(model_name="new-model")
+        mock_db.execute.side_effect = [old_config, new_config]
+
+        with (
+            patch(
+                "ontokit.services.ontology.get_ontology_service",
+                return_value=ontology,
+            ),
+            patch(
+                "ontokit.services.embedding_service._get_entity_type",
+                return_value="class",
+            ),
+            patch(
+                "ontokit.services.embedding_service.build_embedding_text",
+                return_value="Foo entity text",
+            ),
+            patch(
+                "ontokit.services.embedding_service.get_embedding_provider",
+                return_value=provider,
+            ),
+            pytest.raises(RuntimeError, match="configuration changed"),
+        ):
+            await service.embed_single_entity(PROJECT_ID, BRANCH, str(uri))
+
+        mock_db.rollback.assert_awaited_once()
+        mock_db.commit.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

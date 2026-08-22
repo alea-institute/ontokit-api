@@ -798,6 +798,32 @@ class TestMergePullRequest:
         assert exc_info.value.status_code == 400
 
     @pytest.mark.asyncio
+    async def test_merge_rechecks_status_after_branch_lock_wait(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+        mock_git_service: MagicMock,
+    ) -> None:
+        """A close committed during the lock wait prevents the stale merge."""
+        project = _make_project()
+        pr = _make_pr(status=PRStatus.OPEN.value)
+        user = _make_user(OWNER_ID)
+        _setup_project_and_pr_lookup(mock_db, project, pr)
+
+        async def refresh_locked(obj: MagicMock, **kwargs: object) -> None:
+            if kwargs.get("with_for_update"):
+                obj.status = PRStatus.CLOSED.value
+
+        mock_db.refresh.side_effect = refresh_locked
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.merge_pull_request(PROJECT_ID, 1, PRMergeRequest(), user)
+
+        assert exc_info.value.status_code == 400
+        mock_git_service.merge_branch.assert_not_called()
+        mock_db.rollback.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_merge_conflict_raises_409(
         self,
         service: PullRequestService,

@@ -30,7 +30,9 @@ from ontokit.schemas.generation import (
     ValidateEntityRequest,
     ValidationError,
 )
+from ontokit.schemas.llm import LLMProviderType
 from ontokit.services.llm.metering import LLMBudgetExceeded, MeteredLLMProvider
+from ontokit.services.llm.registry import DEFAULT_MODELS
 
 PROJECT_ID = "11111111-1111-1111-1111-111111111111"
 GENERATE_URL = f"/api/v1/projects/{PROJECT_ID}/llm/generate-suggestions"
@@ -384,6 +386,50 @@ def test_generate_success_shape(authed_client: tuple[TestClient, AsyncMock]):
     # The configured model id is threaded into the pipeline for provenance
     assert svc_instance.generate.await_args.kwargs["model_id"] == "claude-sonnet-4-5"
     assert isinstance(svc_instance.generate.await_args.kwargs["provider"], MeteredLLMProvider)
+
+
+def test_generate_uses_registry_default_model_when_config_model_is_null(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    """Status-ready default-model configs generate with matching provenance."""
+    client, session = authed_client
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_one_or_none(_project()),
+            _scalar_one_or_none(_member("editor")),
+            _scalar_one_or_none(_llm_config(provider="anthropic", model=None)),
+        ]
+    )
+    svc_instance = MagicMock()
+    svc_instance.generate = AsyncMock(return_value=_generation_response())
+    provider = MagicMock()
+
+    with (
+        patch("ontokit.api.routes.generation._get_redis", return_value=None),
+        patch(
+            "ontokit.api.routes.generation.check_budget",
+            new=AsyncMock(return_value=(True, None)),
+        ),
+        patch(
+            "ontokit.api.routes.generation.get_provider",
+            return_value=provider,
+        ) as provider_factory,
+        patch(
+            "ontokit.api.routes.generation.SuggestionGenerationService",
+            return_value=svc_instance,
+        ),
+        patch(
+            "ontokit.api.routes.generation.get_model_pricing",
+            new=AsyncMock(return_value=(0.000001, 0.000002)),
+        ) as pricing,
+    ):
+        response = client.post(GENERATE_URL, json=GENERATE_BODY)
+
+    assert response.status_code == 200
+    expected_model = DEFAULT_MODELS[LLMProviderType.anthropic]
+    pricing.assert_awaited_once_with(expected_model)
+    assert provider_factory.call_args.kwargs["model"] == expected_model
+    assert svc_instance.generate.await_args.kwargs["model_id"] == expected_model
 
 
 def test_generate_402_when_atomic_reservation_refuses_call(

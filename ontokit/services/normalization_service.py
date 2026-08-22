@@ -14,7 +14,7 @@ from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.normalization import NormalizationRun
 from ontokit.models.project import Project
 from ontokit.services.branch_lock import branch_write_lock
-from ontokit.services.ontology_extractor import OntologyMetadataExtractor
+from ontokit.services.ontology_extractor import NormalizationReport, OntologyMetadataExtractor
 from ontokit.services.storage import StorageError, StorageService
 
 logger = logging.getLogger(__name__)
@@ -200,47 +200,61 @@ class NormalizationService:
         if not project.source_file_path:
             raise ValueError("Project has no ontology file")
 
-        # Download current content
         object_name = self._get_object_name(project.source_file_path)
-        content = await self.storage.download_file(object_name)
         filename = Path(object_name).name
+        repository_exists = self.git_service.repository_exists(project.id)
+        branch = self.git_service.get_current_branch(project.id) if repository_exists else None
 
-        # Normalize
-        normalized_content, report = self.extractor.normalize_to_turtle(content, filename)
+        async def normalize_current_content() -> tuple[
+            bytes, bytes, NormalizationReport, str | None
+        ]:
+            content = await self.storage.download_file(object_name)
+            normalized_content, report = self.extractor.normalize_to_turtle(content, filename)
+            commit_hash = None
 
-        commit_hash = None
-        content_changed = normalized_content != content
+            if not dry_run and normalized_content != content:
+                await self.storage.upload_file(object_name, normalized_content, "text/turtle")
 
-        if not dry_run and content_changed:
-            # Upload normalized content
-            await self.storage.upload_file(object_name, normalized_content, "text/turtle")
-
-            # Commit to git
-            if self.git_service.repository_exists(project.id):
-                commit_message = (
-                    "Normalize ontology to canonical Turtle format\n\n"
-                    f"Trigger: {trigger_type}\n"
-                    f"Triple count: {report.triple_count}\n"
-                )
-                if report.prefixes_removed:
-                    commit_message += f"Prefixes removed: {', '.join(report.prefixes_removed)}\n"
-
-                branch = self.git_service.get_current_branch(project.id)
-                try:
-                    async with branch_write_lock(self.db, project.id, branch):
-                        commit_info = self.git_service.commit_changes(
-                            project_id=project.id,
-                            ontology_content=normalized_content,
-                            filename=filename,
-                            message=commit_message,
-                            author_name=user.name if user else "OntoKit System",
-                            author_email=user.email if user else "system@ontokit.dev",
+                if repository_exists:
+                    commit_message = (
+                        "Normalize ontology to canonical Turtle format\n\n"
+                        f"Trigger: {trigger_type}\n"
+                        f"Triple count: {report.triple_count}\n"
+                    )
+                    if report.prefixes_removed:
+                        commit_message += (
+                            f"Prefixes removed: {', '.join(report.prefixes_removed)}\n"
                         )
-                        await self.db.commit()
-                except Exception:
-                    await self.db.rollback()
-                    raise
-                commit_hash = commit_info.hash
+
+                    commit_info = self.git_service.commit_changes(
+                        project_id=project.id,
+                        ontology_content=normalized_content,
+                        filename=filename,
+                        message=commit_message,
+                        author_name=user.name if user else "OntoKit System",
+                        author_email=user.email if user else "system@ontokit.dev",
+                    )
+                    commit_hash = commit_info.hash
+
+            return content, normalized_content, report, commit_hash
+
+        if not dry_run and branch is not None:
+            try:
+                async with branch_write_lock(self.db, project.id, branch):
+                    (
+                        content,
+                        normalized_content,
+                        report,
+                        commit_hash,
+                    ) = await normalize_current_content()
+                    await self.db.commit()
+            except Exception:
+                await self.db.rollback()
+                raise
+        else:
+            content, normalized_content, report, commit_hash = await normalize_current_content()
+
+        content_changed = normalized_content != content
 
         # Create the run record
         run = NormalizationRun(

@@ -1262,22 +1262,22 @@ class SuggestionService:
 
         count = 0
         for session in stale:
-            # Atomic claim (same pattern as auto_submit_stale_sessions)
-            claim_result = await self.db.execute(
-                update(SuggestionSession)
-                .where(
-                    SuggestionSession.id == session.id,
-                    SuggestionSession.status == SuggestionSessionStatus.ACTIVE.value,
-                    SuggestionSession.is_anonymous.is_(True),
-                    SuggestionSession.last_activity < cutoff,
-                )
-                .values(status=SuggestionSessionStatus.DISCARDED.value)
-            )
-            if claim_result.rowcount != 1:  # type: ignore[attr-defined]
-                continue
-            await self.db.commit()
-
             async with branch_write_lock(self.db, session.project_id, session.branch):
+                # Save paths refresh the session under this same lock. Claiming
+                # after the lock wait makes the latest activity authoritative.
+                claim_result = await self.db.execute(
+                    update(SuggestionSession)
+                    .where(
+                        SuggestionSession.id == session.id,
+                        SuggestionSession.status == SuggestionSessionStatus.ACTIVE.value,
+                        SuggestionSession.is_anonymous.is_(True),
+                        SuggestionSession.last_activity < cutoff,
+                    )
+                    .values(status=SuggestionSessionStatus.DISCARDED.value)
+                )
+                if claim_result.rowcount != 1:  # type: ignore[attr-defined]
+                    await self.db.rollback()
+                    continue
                 try:
                     self.git_service.delete_branch(session.project_id, session.branch, force=True)
                 except Exception as e:

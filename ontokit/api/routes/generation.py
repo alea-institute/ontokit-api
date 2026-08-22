@@ -27,7 +27,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.api.routes.llm import _ZERO_COST_LOCAL_PROVIDERS
+from ontokit.api.routes.llm import _ZERO_COST_LOCAL_PROVIDERS, _effective_model
 from ontokit.core.auth import RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.models.llm_config import ProjectLLMConfig
@@ -38,6 +38,7 @@ from ontokit.schemas.generation import (
     ValidateEntityRequest,
     ValidateEntityResponse,
 )
+from ontokit.schemas.llm import LLMProviderType
 from ontokit.services.context_assembler import OntologyContextAssembler
 from ontokit.services.duplicate_check_service import DuplicateCheckService
 from ontokit.services.llm import (
@@ -166,10 +167,17 @@ async def generate_suggestions(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No LLM configuration found for this project. Configure one in project settings.",
         )
-    # Provenance completeness (D-08): every suggestion must carry a resolvable
-    # model id. `config.model` is nullable, so refuse to generate without one
-    # rather than stamp `model=None` on the output.
-    if not config.model:
+    # Resolve the same provider default used by status and connection tests so
+    # readiness, pricing, metering, and suggestion provenance share one model.
+    try:
+        provider_type = LLMProviderType(config.provider)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid LLM provider configuration.",
+        ) from exc
+    effective_model = _effective_model(provider_type, config.model)
+    if effective_model is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="No model selected for this project's LLM configuration. Choose one in project settings.",
@@ -182,11 +190,11 @@ async def generate_suggestions(
     # Resolve trustworthy pricing before any provider call. Unknown models and
     # pricing outages fail closed so the dollar budget cannot silently become
     # an unlimited $0 ledger.
-    if config.provider in _ZERO_COST_LOCAL_PROVIDERS:
+    if provider_type in _ZERO_COST_LOCAL_PROVIDERS:
         input_cost_per_tok, output_cost_per_tok = (0.0, 0.0)
     else:
         try:
-            input_cost_per_tok, output_cost_per_tok = await get_model_pricing(config.model)
+            input_cost_per_tok, output_cost_per_tok = await get_model_pricing(effective_model)
         except PricingUnavailableError as exc:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -247,7 +255,7 @@ async def generate_suggestions(
             provider_type=config.provider,
             api_key=api_key,
             base_url=config.base_url,
-            model=config.model,
+            model=effective_model,
         )
     except ValueError as exc:
         raise HTTPException(
@@ -259,7 +267,7 @@ async def generate_suggestions(
         project_id=project_id,
         config=budget_limits,
         user_id=user.id,
-        model=config.model,
+        model=effective_model,
         provider_name=str(config.provider),
         endpoint="llm/generate-suggestions",
         input_cost_per_token=input_cost_per_tok,
@@ -293,7 +301,7 @@ async def generate_suggestions(
             batch_size=request.batch_size,
             provider=provider,
             project_namespace=project_namespace,
-            model_id=config.model,
+            model_id=effective_model,
         )
     except LLMBudgetExceeded as exc:
         detail = (

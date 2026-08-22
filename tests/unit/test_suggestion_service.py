@@ -2225,6 +2225,55 @@ class TestDiscardEdgeCases:
         assert session.status == SuggestionSessionStatus.DISCARDED.value
 
 
+class TestAnonymousSessionReaper:
+    @pytest.mark.asyncio
+    async def test_claim_occurs_inside_branch_lock(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The latest save wins before the reaper evaluates its stale claim."""
+        stale = _make_session(
+            user_id="anonymous",
+            last_activity=datetime.now(UTC) - timedelta(hours=25),
+        )
+        stale.is_anonymous = True
+        selected = MagicMock()
+        selected.scalars.return_value.all.return_value = [stale]
+        claimed = MagicMock()
+        claimed.rowcount = 1
+        inside_lock = False
+
+        @asynccontextmanager
+        async def tracked_lock(*_args: object, **_kwargs: object):
+            nonlocal inside_lock
+            inside_lock = True
+            try:
+                yield
+            finally:
+                inside_lock = False
+
+        async def execute(*_args: object, **_kwargs: object) -> MagicMock:
+            if mock_db.execute.await_count == 1:
+                return selected
+            assert inside_lock
+            return claimed
+
+        monkeypatch.setattr(
+            "ontokit.services.suggestion_service.branch_write_lock",
+            tracked_lock,
+        )
+        mock_db.execute.side_effect = execute
+
+        count = await service.reap_stale_anonymous_sessions()
+
+        assert count == 1
+        mock_git.delete_branch.assert_called_once_with(PROJECT_ID, stale.branch, force=True)
+        mock_db.commit.assert_awaited_once()
+
+
 # ---------------------------------------------------------------------------
 # get_suggestion_service factory (line 900)
 # ---------------------------------------------------------------------------

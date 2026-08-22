@@ -782,7 +782,24 @@ class EmbeddingService:
             "model_name": provider.model_id,
             "deprecated": deprecated,
         }
-        async with branch_write_lock(self._db, project_id, branch):
+        computed_fingerprint = _provider_fingerprint(provider)
+        async with (
+            embedding_config_lock(self._db, project_id),
+            branch_write_lock(self._db, project_id, branch),
+        ):
+            cfg_result = await self._db.execute(
+                select(ProjectEmbeddingConfig).where(
+                    ProjectEmbeddingConfig.project_id == project_id
+                )
+            )
+            if (
+                _effective_config_fingerprint(cfg_result.scalar_one_or_none())
+                != computed_fingerprint
+            ):
+                await self._db.rollback()
+                raise RuntimeError(
+                    "Embedding configuration changed during single-entity refresh; retry the job"
+                )
             await self._db.execute(_active_embedding_upsert(values))
             await self._db.commit()
 

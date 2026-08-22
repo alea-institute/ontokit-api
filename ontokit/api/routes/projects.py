@@ -1206,20 +1206,6 @@ async def delete_branch(
             detail="No repository found for this project",
         )
 
-    # Block deletion if branch has an open pull request
-    open_pr_count = await db.scalar(
-        select(sa_func.count()).where(
-            PullRequest.project_id == project_id,
-            PullRequest.source_branch == branch_name,
-            PullRequest.status == PRStatus.OPEN,
-        )
-    )
-    if open_pr_count and open_pr_count > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Cannot delete branch: it has an open pull request",
-        )
-
     # Author check for editors (non-admin/non-owner)
     is_privileged = project.is_superadmin or project.user_role in ("owner", "admin")
     if not is_privileged:
@@ -1237,6 +1223,21 @@ async def delete_branch(
 
     try:
         async with branch_write_lock(db, project_id, branch_name):
+            # PR creation uses the same branch lock. Recheck here, after any
+            # lock wait, so an OPEN PR and its source branch cannot cross.
+            open_pr_count = await db.scalar(
+                select(sa_func.count()).where(
+                    PullRequest.project_id == project_id,
+                    PullRequest.source_branch == branch_name,
+                    PullRequest.status == PRStatus.OPEN,
+                )
+            )
+            if open_pr_count and open_pr_count > 0:
+                await db.rollback()
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="Cannot delete branch: it has an open pull request",
+                )
             git.delete_branch(project_id, branch_name, force=force)
 
             # Clean up branch metadata
@@ -1340,28 +1341,22 @@ async def save_source_content(
     # Convert content to bytes
     content_bytes = data.content.encode("utf-8")
 
-    # Save to storage
-    try:
-        await storage.upload_file(project.source_file_path, content_bytes, "text/turtle")
-    except StorageError as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to save to storage: {e}",
-        ) from e
-
-    # Capture old graph for change event diffing (before the commit)
     old_graph = None
-    was_loaded = ontology.is_loaded(project_id, current_branch)
-    try:
-        if not was_loaded:
-            await ontology.load_from_git(project_id, current_branch, filename, git)
-        old_graph = await ontology._get_graph(project_id, current_branch)
-    except Exception:
-        logger.debug("Could not capture pre-commit graph for diff", exc_info=True)
-
-    # Commit to git on the specified branch
     try:
         async with branch_write_lock(service.db, project_id, current_branch):
+            # Storage and Git are two mirrors of one branch state. Keep their
+            # writes in the same ordered critical section so concurrent saves
+            # cannot leave them at different winning versions.
+            await storage.upload_file(project.source_file_path, content_bytes, "text/turtle")
+
+            was_loaded = ontology.is_loaded(project_id, current_branch)
+            try:
+                if not was_loaded:
+                    await ontology.load_from_git(project_id, current_branch, filename, git)
+                old_graph = await ontology._get_graph(project_id, current_branch)
+            except Exception:
+                logger.debug("Could not capture pre-commit graph for diff", exc_info=True)
+
             commit_info = git.commit_changes(
                 project_id=project_id,
                 ontology_content=content_bytes,
@@ -1372,6 +1367,12 @@ async def save_source_content(
                 branch_name=current_branch,
             )
             await service.db.commit()
+    except StorageError as e:
+        await service.db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Failed to save to storage: {e}",
+        ) from e
     except Exception as e:
         await service.db.rollback()
         raise HTTPException(

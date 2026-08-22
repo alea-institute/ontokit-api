@@ -235,8 +235,9 @@ async def test_reap_deletes_branch_and_discards() -> None:
     lock_result = MagicMock()
 
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=[select_result, claim_result, lock_result])
+    db.execute = AsyncMock(side_effect=[select_result, lock_result, claim_result])
     db.commit = AsyncMock()
+    db.rollback = AsyncMock()
     service.db = db
     service.git_service = MagicMock()
 
@@ -255,15 +256,19 @@ async def test_reap_skips_sessions_claimed_by_another_worker() -> None:
     service = SuggestionService.__new__(SuggestionService)
     stale = MagicMock()
     stale.id = uuid4()
+    stale.project_id = uuid4()
+    stale.branch = "suggest/anonymous/s_stale"
 
     select_result = MagicMock()
     select_result.scalars.return_value.all.return_value = [stale]
     claim_result = MagicMock()
     claim_result.rowcount = 0  # another worker won the claim
+    lock_result = MagicMock()
 
     db = MagicMock()
-    db.execute = AsyncMock(side_effect=[select_result, claim_result])
+    db.execute = AsyncMock(side_effect=[select_result, lock_result, claim_result])
     db.commit = AsyncMock()
+    db.rollback = AsyncMock()
     service.db = db
     service.git_service = MagicMock()
 
@@ -271,6 +276,7 @@ async def test_reap_skips_sessions_claimed_by_another_worker() -> None:
 
     assert count == 0
     service.git_service.delete_branch.assert_not_called()
+    db.rollback.assert_awaited_once()
 
 
 def test_openapi_does_not_disclose_honeypot_semantics() -> None:
