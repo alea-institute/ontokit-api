@@ -11,7 +11,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
-from ontokit.core.auth import CurrentUser, RequiredUser
+from ontokit.core.auth import CurrentUser, RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.git import get_git_service
 from ontokit.models.embedding import EmbeddingJob
@@ -19,6 +19,7 @@ from ontokit.schemas.embeddings import (
     EmbeddingConfig,
     EmbeddingConfigUpdate,
     EmbeddingGenerateResponse,
+    EmbeddingJobStatusResponse,
     EmbeddingStatus,
 )
 from ontokit.services.embedding_service import EmbeddingService
@@ -153,6 +154,59 @@ async def generate_embeddings(
         await db.commit()
         raise
     return EmbeddingGenerateResponse(job_id=str(job_id))
+
+
+@router.get(
+    "/{project_id}/embeddings/jobs/{job_id}",
+    response_model=EmbeddingJobStatusResponse,
+)
+async def get_embedding_job(
+    project_id: UUID,
+    job_id: UUID,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    user: RequiredUser,
+) -> EmbeddingJobStatusResponse:
+    """Return one accepted embedding job without exposing worker exception text."""
+    require_authenticated_identity(user)
+    project = await get_project_service(db).get(project_id, user)
+    if project.user_role is None and not user.is_superadmin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Project membership required",
+        )
+
+    result = await db.execute(
+        select(EmbeddingJob).where(
+            EmbeddingJob.id == job_id,
+            EmbeddingJob.project_id == project_id,
+        )
+    )
+    job = result.scalar_one_or_none()
+    if job is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Embedding job not found",
+        )
+
+    if job.total_entities > 0:
+        progress = round(
+            min(job.embedded_entities, job.total_entities) / job.total_entities * 100,
+            1,
+        )
+    else:
+        progress = 100.0 if job.status == "completed" else 0.0
+
+    return EmbeddingJobStatusResponse(
+        job_id=str(job.id),
+        branch=job.branch,
+        status=job.status,
+        total_entities=job.total_entities,
+        embedded_entities=job.embedded_entities,
+        progress_percent=progress,
+        error_message="Embedding generation failed" if job.error_message else None,
+        started_at=job.started_at,
+        completed_at=job.completed_at,
+    )
 
 
 @router.get("/{project_id}/embeddings/status", response_model=EmbeddingStatus)

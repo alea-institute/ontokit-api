@@ -265,6 +265,71 @@ class TestGetEmbeddingStatus:
         assert data["coverage_percent"] == 80.0
 
 
+class TestGetEmbeddingJob:
+    """Tests for GET /api/v1/projects/{id}/embeddings/jobs/{job_id}."""
+
+    def test_job_status_requires_authentication(self, client: TestClient) -> None:
+        job_id = uuid4()
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/embeddings/jobs/{job_id}")
+        assert response.status_code in (401, 403)
+
+    @patch("ontokit.api.routes.embeddings.get_project_service")
+    def test_member_can_poll_job_without_raw_worker_error(
+        self,
+        mock_get_ps: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        from datetime import UTC, datetime
+
+        client, session = authed_client
+        job_id = uuid4()
+        mock_get_ps.return_value.get = AsyncMock(
+            return_value=_make_project_response(user_role="viewer")
+        )
+        job = MagicMock(
+            id=job_id,
+            project_id=PROJECT_ID,
+            branch="main",
+            status="failed",
+            total_entities=12,
+            embedded_entities=4,
+            error_message="provider rejected secret sk-live-sensitive",
+            started_at=datetime(2026, 8, 22, tzinfo=UTC),
+            completed_at=datetime(2026, 8, 22, 0, 1, tzinfo=UTC),
+        )
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = job
+        session.execute = AsyncMock(return_value=result)
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/embeddings/jobs/{job_id}")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["job_id"] == str(job_id)
+        assert body["status"] == "failed"
+        assert body["progress_percent"] == 33.3
+        assert body["error_message"] == "Embedding generation failed"
+        assert "sk-live-sensitive" not in response.text
+
+    @patch("ontokit.api.routes.embeddings.get_project_service")
+    def test_job_id_is_scoped_to_project(
+        self,
+        mock_get_ps: MagicMock,
+        authed_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        client, session = authed_client
+        mock_get_ps.return_value.get = AsyncMock(
+            return_value=_make_project_response(user_role="editor")
+        )
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = None
+        session.execute = AsyncMock(return_value=result)
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/embeddings/jobs/{uuid4()}")
+
+        assert response.status_code == 404
+
+
 class TestClearEmbeddings:
     """Tests for DELETE /api/v1/projects/{id}/embeddings."""
 

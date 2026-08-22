@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
@@ -42,6 +43,20 @@ class EmbeddingStatus(BaseModel):
 
 class EmbeddingGenerateResponse(BaseModel):
     job_id: str
+
+
+class EmbeddingJobStatusResponse(BaseModel):
+    """Pollable status for one accepted embedding-generation job."""
+
+    job_id: str
+    branch: str
+    status: str
+    total_entities: int
+    embedded_entities: int
+    progress_percent: float
+    error_message: str | None = None
+    started_at: datetime
+    completed_at: datetime | None = None
 
 
 class SemanticSearchResult(BaseModel):
