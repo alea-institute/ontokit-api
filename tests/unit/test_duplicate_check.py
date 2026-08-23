@@ -6,6 +6,7 @@ from uuid import uuid4
 
 import pytest
 
+from ontokit.models.distinct_entity_decision import DistinctEntityDecision
 from ontokit.models.duplicate_rejection import DuplicateRejection
 from ontokit.schemas.duplicate_check import (
     DistinctDecisionResponse,
@@ -30,6 +31,7 @@ def _make_sem_result(
     label: str = "Legal Entity",
     score: float = 1.0,
     branch: str = "main",
+    embedding_text: str | None = None,
 ) -> SemanticSearchResultWithBranch:
     return SemanticSearchResultWithBranch(
         iri=iri,
@@ -38,6 +40,7 @@ def _make_sem_result(
         score=score,
         deprecated=False,
         branch=branch,
+        embedding_text=embedding_text or label,
     )
 
 
@@ -275,8 +278,8 @@ async def test_all_branch_scope():
 
 
 @pytest.mark.asyncio
-async def test_rejected_suggestion_source_does_not_conflate_distinct_decision_reason():
-    """Suggestion rejection provenance is separate from distinct-pair audit history."""
+async def test_rejected_suggestion_restores_legacy_rejection_provenance():
+    """Rejected branch candidates retain their legacy review explanation."""
     svc, _ = _make_service()
 
     sem_result = _make_sem_result(
@@ -298,6 +301,19 @@ async def test_rejected_suggestion_source_does_not_conflate_distinct_decision_re
             return_value=0.0,
         ),
         patch.object(svc, "_classify_source", new=AsyncMock(return_value="rejected")),
+        patch.object(
+            svc,
+            "_get_rejection_info",
+            new=AsyncMock(
+                return_value=DuplicateRejection(
+                    project_id=PROJECT_ID,
+                    rejected_iri=sem_result.iri,
+                    canonical_iri="http://ex.org/CanonicalEntity",
+                    rejection_reason="The suggestion used the wrong jurisdiction.",
+                    rejected_by="reviewer-1",
+                )
+            ),
+        ),
     ):
         response = await svc.check(
             project_id=PROJECT_ID,
@@ -307,8 +323,8 @@ async def test_rejected_suggestion_source_does_not_conflate_distinct_decision_re
     assert len(response.candidates) == 1
     candidate = response.candidates[0]
     assert candidate.source == "rejected"
-    assert candidate.rejection_reason is None
-    assert candidate.canonical_iri is None
+    assert candidate.rejection_reason == "The suggestion used the wrong jurisdiction."
+    assert candidate.canonical_iri == "http://ex.org/CanonicalEntity"
 
 
 @pytest.mark.asyncio
@@ -373,8 +389,11 @@ async def test_active_distinct_decision_suppresses_candidate_before_verdict():
         candidate_iri=sem_result.iri,
         candidate_label=sem_result.label,
         candidate_entity_type=sem_result.entity_type,
+        candidate_branch=sem_result.branch,
+        candidate_embedding_text=sem_result.embedding_text,
+        structural_score=None,
     )
-    decision = DuplicateRejection(
+    decision = DistinctEntityDecision(
         id=uuid4(),
         project_id=PROJECT_ID,
         iri_a=pair[0],
@@ -395,7 +414,7 @@ async def test_active_distinct_decision_suppresses_candidate_before_verdict():
         patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
         patch.object(
             svc,
-            "_active_decisions_for_pairs",
+            "_active_decisions_for_iri",
             new=AsyncMock(return_value={(pair[0], pair[1]): decision}),
         ),
     ):
@@ -424,8 +443,11 @@ async def test_stale_distinct_decision_does_not_suppress_changed_input():
         candidate_iri=sem_result.iri,
         candidate_label=sem_result.label,
         candidate_entity_type=sem_result.entity_type,
+        candidate_branch=sem_result.branch,
+        candidate_embedding_text=sem_result.embedding_text,
+        structural_score=None,
     )
-    stale_decision = DuplicateRejection(
+    stale_decision = DistinctEntityDecision(
         id=uuid4(),
         project_id=PROJECT_ID,
         iri_a=pair[0],
@@ -446,7 +468,7 @@ async def test_stale_distinct_decision_does_not_suppress_changed_input():
         patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
         patch.object(
             svc,
-            "_active_decisions_for_pairs",
+            "_active_decisions_for_iri",
             new=AsyncMock(return_value={(pair[0], pair[1]): stale_decision}),
         ) as find_decisions,
     ):
@@ -459,3 +481,212 @@ async def test_stale_distinct_decision_does_not_suppress_changed_input():
     assert find_decisions.await_count == 1
     assert response.verdict == "block"
     assert [candidate.iri for candidate in response.candidates] == [sem_result.iri]
+
+
+@pytest.mark.asyncio
+async def test_distinct_fingerprint_is_scoped_to_candidate_branch_occurrence():
+    """The same IRI on another branch is independently evaluated."""
+    svc, _ = _make_service()
+    reviewed = _make_sem_result(
+        branch="suggest/reviewed",
+        embedding_text="Legal Entity\nDefinition: reviewed branch",
+    )
+    changed = _make_sem_result(
+        branch="suggest/changed",
+        embedding_text="Legal Entity\nDefinition: changed branch",
+    )
+    pair = svc._fingerprints_for_pair(
+        proposed_iri="http://example.org/ProposedLegalEntity",
+        proposed_label="Legal Entity",
+        entity_type="class",
+        parent_iri=None,
+        candidate_iri=reviewed.iri,
+        candidate_label=reviewed.label,
+        candidate_entity_type=reviewed.entity_type,
+        candidate_branch=reviewed.branch,
+        candidate_embedding_text=reviewed.embedding_text,
+        structural_score=None,
+    )
+    decision = DistinctEntityDecision(
+        id=uuid4(),
+        project_id=PROJECT_ID,
+        iri_a=pair[0],
+        iri_b=pair[1],
+        fingerprint_a=pair[2],
+        fingerprint_b=pair[3],
+        reason="Only the reviewed branch occurrence is distinct.",
+        marked_by="reviewer-1",
+        marked_at=datetime.now(UTC),
+    )
+
+    with (
+        patch.object(
+            svc._embedding_svc,
+            "semantic_search_all_branches",
+            new=AsyncMock(return_value=[reviewed, changed]),
+        ),
+        patch.object(svc, "_classify_source", new=AsyncMock(return_value="pending")),
+        patch.object(
+            svc,
+            "_active_decisions_for_iri",
+            new=AsyncMock(return_value={(pair[0], pair[1]): decision}),
+        ),
+    ):
+        response = await svc.check(
+            PROJECT_ID,
+            "Legal Entity",
+            proposed_iri="http://example.org/ProposedLegalEntity",
+        )
+
+    assert [item.branch for item in response.candidates] == ["suggest/changed"]
+    assert [item.id for item in response.suppressed_decisions] == [decision.id]
+
+
+@pytest.mark.asyncio
+async def test_candidate_embedding_text_change_invalidates_distinct_decision():
+    svc, _ = _make_service()
+    original = _make_sem_result(embedding_text="Legal Entity\nDefinition: original")
+    changed = _make_sem_result(embedding_text="Legal Entity\nDefinition: revised")
+    pair = svc._fingerprints_for_pair(
+        proposed_iri="http://example.org/ProposedLegalEntity",
+        proposed_label="Legal Entity",
+        entity_type="class",
+        parent_iri="http://example.org/Parent",
+        candidate_iri=original.iri,
+        candidate_label=original.label,
+        candidate_entity_type=original.entity_type,
+        candidate_branch=original.branch,
+        candidate_embedding_text=original.embedding_text,
+        structural_score=0.5,
+    )
+    decision = DistinctEntityDecision(
+        id=uuid4(),
+        project_id=PROJECT_ID,
+        iri_a=pair[0],
+        iri_b=pair[1],
+        fingerprint_a=pair[2],
+        fingerprint_b=pair[3],
+        reason="Reviewed before the definition changed.",
+        marked_by="reviewer-1",
+        marked_at=datetime.now(UTC),
+    )
+
+    with (
+        patch.object(
+            svc._embedding_svc,
+            "semantic_search_all_branches",
+            new=AsyncMock(return_value=[changed]),
+        ),
+        patch.object(svc._structural_svc, "try_compute_similarity", return_value=0.5),
+        patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
+        patch.object(
+            svc,
+            "_active_decisions_for_iri",
+            new=AsyncMock(return_value={(pair[0], pair[1]): decision}),
+        ),
+    ):
+        response = await svc.check(
+            PROJECT_ID,
+            "Legal Entity",
+            parent_iri="http://example.org/Parent",
+            proposed_iri="http://example.org/ProposedLegalEntity",
+        )
+
+    assert response.verdict == "block"
+    assert [item.iri for item in response.candidates] == [changed.iri]
+
+
+def test_structural_detector_change_alters_pair_fingerprint():
+    common = {
+        "proposed_iri": "http://example.org/ProposedLegalEntity",
+        "proposed_label": "Legal Entity",
+        "entity_type": "class",
+        "parent_iri": "http://example.org/Parent",
+        "candidate_iri": "http://example.org/LegalEntity",
+        "candidate_label": "Legal Entity",
+        "candidate_entity_type": "class",
+        "candidate_branch": "main",
+        "candidate_embedding_text": "Legal Entity\nDefinition: stable",
+    }
+
+    before = DuplicateCheckService._fingerprints_for_pair(**common, structural_score=0.25)
+    after = DuplicateCheckService._fingerprints_for_pair(**common, structural_score=0.75)
+
+    assert before[:2] == after[:2]
+    assert before[2:] != after[2:]
+
+
+def test_internal_decision_fingerprints_are_not_serialized_to_api_payloads():
+    candidate = DuplicateCandidate(
+        iri="http://example.org/A",
+        label="A",
+        score=0.9,
+        source="main",
+        decision_iri_a="http://example.org/A",
+        decision_iri_b="http://example.org/B",
+        decision_fingerprint_a="a" * 64,
+        decision_fingerprint_b="b" * 64,
+    )
+
+    assert set(candidate.model_dump()) == {
+        "iri",
+        "label",
+        "entity_type",
+        "score",
+        "source",
+        "branch",
+        "rejection_reason",
+        "canonical_iri",
+    }
+
+
+@pytest.mark.asyncio
+async def test_suppressed_top_result_is_backfilled_to_requested_limit():
+    svc, _ = _make_service()
+    proposed_iri = "http://example.org/Proposed"
+    suppressed = _make_sem_result(iri="http://example.org/A", score=0.99)
+    visible = _make_sem_result(iri="http://example.org/B", label="Related", score=0.9)
+    pair = svc._fingerprints_for_pair(
+        proposed_iri=proposed_iri,
+        proposed_label="Proposal",
+        entity_type="class",
+        parent_iri=None,
+        candidate_iri=suppressed.iri,
+        candidate_label=suppressed.label,
+        candidate_entity_type=suppressed.entity_type,
+        candidate_branch=suppressed.branch,
+        candidate_embedding_text=suppressed.embedding_text,
+        structural_score=None,
+    )
+    decision = DistinctEntityDecision(
+        id=uuid4(),
+        project_id=PROJECT_ID,
+        iri_a=pair[0],
+        iri_b=pair[1],
+        fingerprint_a=pair[2],
+        fingerprint_b=pair[3],
+        reason="Reviewed pair",
+        marked_by="reviewer-1",
+        marked_at=datetime.now(UTC),
+    )
+    search = AsyncMock(return_value=[suppressed, visible])
+
+    with (
+        patch.object(svc._embedding_svc, "semantic_search_all_branches", new=search),
+        patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
+        patch.object(
+            svc,
+            "_active_decisions_for_iri",
+            new=AsyncMock(return_value={(pair[0], pair[1]): decision}),
+        ),
+    ):
+        response = await svc.check(
+            PROJECT_ID,
+            "Proposal",
+            proposed_iri=proposed_iri,
+            limit=1,
+        )
+
+    assert search.await_args.kwargs["limit"] == 2
+    assert [item.iri for item in response.candidates] == [visible.iri]
+    assert response.verdict == "warn"

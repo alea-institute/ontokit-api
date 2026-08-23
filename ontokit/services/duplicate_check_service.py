@@ -8,10 +8,11 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select, tuple_
+from sqlalchemy import or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.models.distinct_entity_decision import DistinctEntityDecision
 from ontokit.models.duplicate_rejection import DuplicateRejection
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.duplicate_check import (
@@ -65,6 +66,7 @@ class DuplicateCheckService:
         exclude_branch: str | None = None,
         exclude_iris: set[str] | None = None,
         proposed_iri: str | None = None,
+        suppress_distinct: bool = True,
     ) -> DuplicateCheckResponse:
         """Run composite duplicate check across all branches (DEDUP-04 through DEDUP-08).
 
@@ -81,11 +83,20 @@ class DuplicateCheckService:
         """
         normalized_label = label.lower().strip()
 
+        decisions_by_pair: dict[tuple[str, str], DistinctEntityDecision] = {}
+        if proposed_iri:
+            decisions_by_pair = await self._active_decisions_for_iri(project_id, proposed_iri)
+
+        # A suppressed high-ranked result must not consume the caller's top-k.
+        # One extra slot per active pair is sufficient because an active decision
+        # is bound to one canonical IRI pair and one reviewed branch occurrence.
+        search_limit = limit + len(decisions_by_pair) if suppress_distinct else limit
+
         # 1. Semantic search across ALL branches (DEDUP-08)
         semantic_candidates = await self._embedding_svc.semantic_search_all_branches(
             project_id,
             label,
-            limit=limit,
+            limit=search_limit,
             billing_user_id=billing_user_id,
             exclude_branch=exclude_branch,
             exclude_iris=exclude_iris,
@@ -104,26 +115,7 @@ class DuplicateCheckService:
         suppressed_decisions: list[DistinctDecisionResponse] = []
         best_composite = 0.0
         best_breakdown = ScoreBreakdown(exact=0.0, semantic=0.0, structural=0.0)
-        fingerprints_by_candidate: dict[str, tuple[str, str, str, str]] = {}
-        decisions_by_pair: dict[tuple[str, str], DuplicateRejection] = {}
-        if proposed_iri:
-            fingerprints_by_candidate = {
-                result.iri: self._fingerprints_for_pair(
-                    proposed_iri=proposed_iri,
-                    proposed_label=label,
-                    entity_type=entity_type,
-                    parent_iri=parent_iri,
-                    candidate_iri=result.iri,
-                    candidate_label=result.label or "",
-                    candidate_entity_type=result.entity_type,
-                )
-                for result in semantic_candidates
-                if result.iri != proposed_iri
-            }
-            decisions_by_pair = await self._active_decisions_for_pairs(
-                project_id,
-                {(value[0], value[1]) for value in fingerprints_by_candidate.values()},
-            )
+        suppressed_ids: set[UUID] = set()
 
         for sem_result in semantic_candidates:
             # Exact score: case-insensitive label match
@@ -171,19 +163,46 @@ class DuplicateCheckService:
             if exact_score == 1.0:
                 composite = 1.0
 
-            fingerprints = fingerprints_by_candidate.get(sem_result.iri)
-            if fingerprints:
+            fingerprints: tuple[str, str, str, str] | None = None
+            if proposed_iri and sem_result.iri != proposed_iri:
+                fingerprints = self._fingerprints_for_pair(
+                    proposed_iri=proposed_iri,
+                    proposed_label=label,
+                    entity_type=entity_type,
+                    parent_iri=parent_iri,
+                    candidate_iri=sem_result.iri,
+                    candidate_label=sem_result.label or "",
+                    candidate_entity_type=sem_result.entity_type,
+                    candidate_branch=sem_result.branch,
+                    candidate_embedding_text=sem_result.embedding_text,
+                    structural_score=structural_result,
+                )
+            if suppress_distinct and fingerprints:
                 iri_a, iri_b, fingerprint_a, fingerprint_b = fingerprints
                 decision = decisions_by_pair.get((iri_a, iri_b))
                 if decision is not None and (
                     decision.fingerprint_a == fingerprint_a
                     and decision.fingerprint_b == fingerprint_b
                 ):
-                    suppressed_decisions.append(DistinctDecisionResponse.model_validate(decision))
+                    if decision.id not in suppressed_ids:
+                        suppressed_decisions.append(
+                            DistinctDecisionResponse.model_validate(decision)
+                        )
+                        suppressed_ids.add(decision.id)
                     continue
 
             # Determine source (D-09)
             source = await self._classify_source(project_id, sem_result.branch)
+
+            rejection_reason = None
+            canonical_iri = None
+            if source == "rejected":
+                rejection = await self._get_rejection_info(project_id, sem_result.iri)
+                if rejection is not None:
+                    rejection_reason = rejection.rejection_reason
+                    canonical_iri = rejection.canonical_iri
+
+            decision_fields = fingerprints or (None, None, None, None)
 
             candidates.append(
                 DuplicateCandidate(
@@ -193,6 +212,12 @@ class DuplicateCheckService:
                     score=round(composite, 4),
                     source=source,
                     branch=sem_result.branch,
+                    rejection_reason=rejection_reason,
+                    canonical_iri=canonical_iri,
+                    decision_iri_a=decision_fields[0],
+                    decision_iri_b=decision_fields[1],
+                    decision_fingerprint_a=decision_fields[2],
+                    decision_fingerprint_b=decision_fields[3],
                 )
             )
 
@@ -206,6 +231,7 @@ class DuplicateCheckService:
 
         # Sort candidates by score descending
         candidates.sort(key=lambda c: c.score, reverse=True)
+        candidates = candidates[:limit]
 
         # Determine verdict (D-02)
         if best_composite > BLOCK_THRESHOLD:
@@ -229,7 +255,7 @@ class DuplicateCheckService:
         request: DistinctDecisionMarkRequest,
         actor_id: str,
         billing_user_id: str,
-    ) -> DuplicateRejection:
+    ) -> DistinctEntityDecision:
         """Record a fingerprint-bound distinct decision, preserving prior history."""
         if request.proposed_iri == request.candidate_iri:
             raise ValueError("An entity cannot be marked distinct from itself")
@@ -241,24 +267,38 @@ class DuplicateCheckService:
             entity_type=request.entity_type,
             parent_iri=request.parent_iri,
             billing_user_id=billing_user_id,
+            proposed_iri=request.proposed_iri,
+            suppress_distinct=False,
         )
         candidate = next(
-            (item for item in check.candidates if item.iri == request.candidate_iri), None
+            (
+                item
+                for item in check.candidates
+                if item.iri == request.candidate_iri
+                and (request.candidate_branch is None or item.branch == request.candidate_branch)
+            ),
+            None,
         )
         if candidate is None or candidate.score <= WARN_THRESHOLD:
             raise DuplicateCandidateUnavailableError(
                 "The selected entity is no longer a duplicate warning"
             )
 
-        iri_a, iri_b, fingerprint_a, fingerprint_b = self._fingerprints_for_pair(
-            proposed_iri=request.proposed_iri,
-            proposed_label=request.label,
-            entity_type=request.entity_type,
-            parent_iri=request.parent_iri,
-            candidate_iri=candidate.iri,
-            candidate_label=candidate.label,
-            candidate_entity_type=candidate.entity_type,
+        fingerprint_fields = (
+            candidate.decision_iri_a,
+            candidate.decision_iri_b,
+            candidate.decision_fingerprint_a,
+            candidate.decision_fingerprint_b,
         )
+        if any(value is None for value in fingerprint_fields):
+            raise DuplicateCandidateUnavailableError(
+                "The selected entity could not be fingerprinted for review"
+            )
+        iri_a, iri_b, fingerprint_a, fingerprint_b = fingerprint_fields
+        assert iri_a is not None
+        assert iri_b is not None
+        assert fingerprint_a is not None
+        assert fingerprint_b is not None
         now = datetime.now(UTC)
         active = await self._get_active_decision(project_id, iri_a, iri_b, for_update=True)
         if active is not None and (
@@ -270,7 +310,7 @@ class DuplicateCheckService:
             active.revoked_at = now
             active.revoked_by = actor_id
 
-        decision = DuplicateRejection(
+        decision = DistinctEntityDecision(
             project_id=project_id,
             iri_a=iri_a,
             iri_b=iri_b,
@@ -308,23 +348,25 @@ class DuplicateCheckService:
         include_inactive: bool = False,
         skip: int = 0,
         limit: int = 50,
-    ) -> list[DuplicateRejection]:
-        statement = select(DuplicateRejection).where(DuplicateRejection.project_id == project_id)
+    ) -> list[DistinctEntityDecision]:
+        statement = select(DistinctEntityDecision).where(
+            DistinctEntityDecision.project_id == project_id
+        )
         if not include_inactive:
-            statement = statement.where(DuplicateRejection.revoked_at.is_(None))
+            statement = statement.where(DistinctEntityDecision.revoked_at.is_(None))
         result = await self._db.execute(
-            statement.order_by(DuplicateRejection.marked_at.desc()).offset(skip).limit(limit)
+            statement.order_by(DistinctEntityDecision.marked_at.desc()).offset(skip).limit(limit)
         )
         return list(result.scalars().all())
 
     async def revoke_distinct_decision(
         self, project_id: UUID, decision_id: UUID, actor_id: str
-    ) -> DuplicateRejection | None:
+    ) -> DistinctEntityDecision | None:
         result = await self._db.execute(
-            select(DuplicateRejection)
+            select(DistinctEntityDecision)
             .where(
-                DuplicateRejection.id == decision_id,
-                DuplicateRejection.project_id == project_id,
+                DistinctEntityDecision.id == decision_id,
+                DistinctEntityDecision.project_id == project_id,
             )
             .with_for_update()
         )
@@ -338,30 +380,34 @@ class DuplicateCheckService:
             await self._db.refresh(decision)
         return decision
 
-    async def _active_decisions_for_pairs(
+    async def _active_decisions_for_iri(
         self,
         project_id: UUID,
-        pairs: set[tuple[str, str]],
-    ) -> dict[tuple[str, str], DuplicateRejection]:
-        if not pairs:
+        proposed_iri: str,
+    ) -> dict[tuple[str, str], DistinctEntityDecision]:
+        normalized_iri = self._normalize_iri(proposed_iri)
+        if normalized_iri is None:
             return {}
         result = await self._db.execute(
-            select(DuplicateRejection).where(
-                DuplicateRejection.project_id == project_id,
-                DuplicateRejection.revoked_at.is_(None),
-                tuple_(DuplicateRejection.iri_a, DuplicateRejection.iri_b).in_(pairs),
+            select(DistinctEntityDecision).where(
+                DistinctEntityDecision.project_id == project_id,
+                DistinctEntityDecision.revoked_at.is_(None),
+                or_(
+                    DistinctEntityDecision.iri_a == normalized_iri,
+                    DistinctEntityDecision.iri_b == normalized_iri,
+                ),
             )
         )
         return {(decision.iri_a, decision.iri_b): decision for decision in result.scalars()}
 
     async def _get_active_decision(
         self, project_id: UUID, iri_a: str, iri_b: str, *, for_update: bool = False
-    ) -> DuplicateRejection | None:
-        statement = select(DuplicateRejection).where(
-            DuplicateRejection.project_id == project_id,
-            DuplicateRejection.iri_a == iri_a,
-            DuplicateRejection.iri_b == iri_b,
-            DuplicateRejection.revoked_at.is_(None),
+    ) -> DistinctEntityDecision | None:
+        statement = select(DistinctEntityDecision).where(
+            DistinctEntityDecision.project_id == project_id,
+            DistinctEntityDecision.iri_a == iri_a,
+            DistinctEntityDecision.iri_b == iri_b,
+            DistinctEntityDecision.revoked_at.is_(None),
         )
         if for_update:
             statement = statement.with_for_update()
@@ -391,6 +437,9 @@ class DuplicateCheckService:
         candidate_iri: str,
         candidate_label: str,
         candidate_entity_type: str,
+        candidate_branch: str,
+        candidate_embedding_text: str,
+        structural_score: float | None,
     ) -> tuple[str, str, str, str]:
         proposed_snapshot = {
             "iri": cls._normalize_iri(proposed_iri),
@@ -402,7 +451,14 @@ class DuplicateCheckService:
             "iri": cls._normalize_iri(candidate_iri),
             "label": cls._normalize_text(candidate_label),
             "entity_type": cls._normalize_text(candidate_entity_type),
-            "parent_iri": None,
+            "branch": candidate_branch,
+            "embedding_text_sha256": hashlib.sha256(
+                candidate_embedding_text.encode("utf-8")
+            ).hexdigest(),
+            "structural_parent_iri": cls._normalize_iri(parent_iri),
+            "structural_score": (
+                format(structural_score, ".8f") if structural_score is not None else None
+            ),
         }
         proposed_key = str(proposed_snapshot["iri"])
         candidate_key = str(candidate_snapshot["iri"])
@@ -432,6 +488,21 @@ class DuplicateCheckService:
     def _fingerprint(snapshot: dict[str, str | None]) -> str:
         encoded = json.dumps(snapshot, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
+
+    async def _get_rejection_info(
+        self, project_id: UUID, rejected_iri: str
+    ) -> DuplicateRejection | None:
+        """Look up the latest legacy rejection record for candidate provenance."""
+        result = await self._db.execute(
+            select(DuplicateRejection)
+            .where(
+                DuplicateRejection.project_id == project_id,
+                DuplicateRejection.rejected_iri == rejected_iri,
+            )
+            .order_by(DuplicateRejection.rejected_at.desc())
+            .limit(1)
+        )
+        return result.scalars().first()
 
     async def _classify_source(self, project_id: UUID, branch: str) -> CandidateSource:
         """Classify a branch as main/pending/rejected per D-09."""

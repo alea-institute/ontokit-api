@@ -87,6 +87,20 @@ class PullRequest(Base):
         DateTime(timezone=True), nullable=True
     )
     github_sync_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Repository identity is part of the mirror receipt. A PR number alone is
+    # only meaningful inside one repository and must never be reused after an
+    # integration is reconfigured.
+    github_integration_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    github_repo_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    github_repo_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Monotonic local intent generation. Every durable PR mutation or manual
+    # retry claims a new generation before making a network request.
+    github_sync_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # The local merge title is durable so a failed GitHub merge can be replayed
+    # after the local PR has already transitioned to ``merged``.
+    github_sync_merge_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Internal compare-and-set token. A stale network response must not
     # overwrite the receipt produced by a newer retry attempt.
     github_sync_attempt_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)

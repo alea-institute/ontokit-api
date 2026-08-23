@@ -56,6 +56,10 @@ class DuplicateCandidate(BaseModel):
     branch: str | None = None
     rejection_reason: str | None = None
     canonical_iri: str | None = None
+    decision_iri_a: str | None = Field(default=None, exclude=True, repr=False)
+    decision_iri_b: str | None = Field(default=None, exclude=True, repr=False)
+    decision_fingerprint_a: str | None = Field(default=None, exclude=True, repr=False)
+    decision_fingerprint_b: str | None = Field(default=None, exclude=True, repr=False)
 
 
 class DuplicateCheckRequest(BaseModel):
@@ -79,6 +83,7 @@ class DistinctDecisionMarkRequest(BaseModel):
     proposed_iri: str = Field(min_length=1, max_length=2000)
     label: str = Field(min_length=1, max_length=2000)
     candidate_iri: str = Field(min_length=1, max_length=2000)
+    candidate_branch: str | None = Field(default=None, min_length=1, max_length=255)
     entity_type: str = Field(default="class", min_length=1, max_length=100)
     parent_iri: str | None = Field(default=None, max_length=2000)
     suggestion_session_id: UUID | None = None
@@ -120,6 +125,7 @@ class DistinctDecisionResponse(BaseModel):
     revoked_at: datetime | None
     revoked_by: str | None
     superseded_by_id: UUID | None
+
 
 class DuplicateCheckResponse(BaseModel):
     """Response for the duplicate check endpoint.

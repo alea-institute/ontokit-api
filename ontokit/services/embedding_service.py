@@ -895,7 +895,7 @@ class EmbeddingService:
             params[key] = iri
 
         query_str = text(f"""
-            SELECT entity_iri, label, entity_type, branch, deprecated,
+            SELECT entity_iri, label, entity_type, branch, deprecated, embedding_text,
                    1 - ({column_operand} <=> {query_operand}) AS score
             FROM entity_embeddings
             WHERE project_id = :pid
@@ -919,6 +919,7 @@ class EmbeddingService:
                 score=round(float(row.score), 4),
                 deprecated=row.deprecated,
                 branch=row.branch,
+                embedding_text=row.embedding_text,
             )
             for row in result
         ]

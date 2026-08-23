@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
+import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from ontokit.api.routes.duplicate_check import mark_distinct, revoke_distinct_decision
+from ontokit.core.auth import ANONYMOUS_USER
 from ontokit.schemas.duplicate_check import (
+    DistinctDecisionMarkRequest,
     DistinctDecisionResponse,
     DuplicateCheckResponse,
     ScoreBreakdown,
@@ -221,6 +226,37 @@ def test_suggester_cannot_mark_distinct(
     service_cls.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_anonymous_user_cannot_mark_distinct_before_project_or_service_access(
+    mock_db_session: AsyncMock,
+) -> None:
+    project_service = _patch_access(user_role="owner")
+    with (
+        patch(
+            "ontokit.api.routes.duplicate_check.get_project_service",
+            return_value=project_service,
+        ) as get_project_service,
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await mark_distinct(
+            project_id=UUID(PROJECT_ID),
+            request=DistinctDecisionMarkRequest(
+                proposed_iri="http://example.org/A",
+                label="A",
+                candidate_iri="http://example.org/B",
+                reason="Different concepts",
+            ),
+            db=mock_db_session,
+            user=ANONYMOUS_USER,
+        )
+
+    assert exc_info.value.status_code == 403
+    get_project_service.assert_not_called()
+    project_service.get.assert_not_awaited()
+    service_cls.assert_not_called()
+
+
 def test_mark_distinct_requires_non_empty_reason(
     authed_client: tuple[TestClient, AsyncMock],
 ) -> None:
@@ -269,3 +305,30 @@ def test_editor_cannot_revoke_but_admin_can(
 
     assert allowed.status_code == 200
     assert allowed.json()["revoked_by"] == "test-user-id"
+
+
+@pytest.mark.asyncio
+async def test_anonymous_user_cannot_revoke_before_project_or_service_access(
+    mock_db_session: AsyncMock,
+) -> None:
+    decision = _decision_response()
+    project_service = _patch_access(user_role="owner")
+    with (
+        patch(
+            "ontokit.api.routes.duplicate_check.get_project_service",
+            return_value=project_service,
+        ) as get_project_service,
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
+        pytest.raises(HTTPException) as exc_info,
+    ):
+        await revoke_distinct_decision(
+            project_id=UUID(PROJECT_ID),
+            decision_id=decision.id,
+            db=mock_db_session,
+            user=ANONYMOUS_USER,
+        )
+
+    assert exc_info.value.status_code == 403
+    get_project_service.assert_not_called()
+    project_service.get.assert_not_awaited()
+    service_cls.assert_not_called()

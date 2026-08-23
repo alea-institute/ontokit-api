@@ -2746,12 +2746,126 @@ class TestSubmissionContentGates:
             ex:Minted a owl:Class ; rdfs:label " existing " .
         """
 
-        with pytest.raises(HTTPException) as exc:
+        duplicate = MagicMock(verdict="block", suppressed_decisions=[])
+        with (
+            patch(
+                "ontokit.services.duplicate_check_service.DuplicateCheckService.check",
+                new=AsyncMock(return_value=duplicate),
+            ),
+            pytest.raises(HTTPException) as exc,
+        ):
             await service._validate_submission_content(
                 PROJECT_ID, "suggestion/test", "ontology.ttl", proposed
             )
 
         assert exc.value.status_code == 409
+        assert exc.value.detail == "Suggestion duplicates an existing entity label"
+
+    @pytest.mark.asyncio
+    async def test_marked_distinct_exact_label_pair_can_submit(
+        self, service: SuggestionService, mock_git: MagicMock
+    ) -> None:
+        mock_git.get_default_branch.return_value = "main"
+        mock_git.get_file_from_branch.return_value = self.BASELINE
+        proposed = """
+            @prefix ex: <http://example.org/> .
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:Existing a owl:Class ; rdfs:label "Existing" .
+            ex:Minted a owl:Class ; rdfs:label "Existing" .
+        """
+        decision = MagicMock(
+            iri_a="http://example.org/Existing",
+            iri_b="http://example.org/Minted",
+        )
+        duplicate = MagicMock(verdict="pass", suppressed_decisions=[decision])
+        check = AsyncMock(return_value=duplicate)
+
+        with (
+            patch(
+                "ontokit.services.duplicate_check_service.DuplicateCheckService.check",
+                new=check,
+            ),
+            patch(
+                "ontokit.services.validation_service.detect_project_namespace",
+                new=AsyncMock(return_value="http://example.org/"),
+            ),
+            patch(
+                "ontokit.services.validation_service.ValidationService.validate_entity",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
+            await service._validate_submission_content(
+                PROJECT_ID, "suggestion/test", "ontology.ttl", proposed
+            )
+
+        assert check.await_args.kwargs["proposed_iri"] == "http://example.org/Minted"
+
+    @pytest.mark.asyncio
+    async def test_marked_distinct_semantic_pair_can_submit(
+        self, service: SuggestionService, mock_git: MagicMock
+    ) -> None:
+        mock_git.get_default_branch.return_value = "main"
+        mock_git.get_file_from_branch.return_value = self.BASELINE
+        proposed = """
+            @prefix ex: <http://example.org/> .
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:Existing a owl:Class ; rdfs:label "Existing" .
+            ex:Minted a owl:Class ; rdfs:label "Closely Related" .
+        """
+        duplicate = MagicMock(verdict="pass", suppressed_decisions=[MagicMock()])
+        check = AsyncMock(return_value=duplicate)
+
+        with (
+            patch(
+                "ontokit.services.duplicate_check_service.DuplicateCheckService.check",
+                new=check,
+            ),
+            patch(
+                "ontokit.services.validation_service.detect_project_namespace",
+                new=AsyncMock(return_value="http://example.org/"),
+            ),
+            patch(
+                "ontokit.services.validation_service.ValidationService.validate_entity",
+                new=AsyncMock(return_value=[]),
+            ),
+        ):
+            await service._validate_submission_content(
+                PROJECT_ID, "suggestion/test", "ontology.ttl", proposed
+            )
+
+        assert check.await_args.kwargs["proposed_iri"] == "http://example.org/Minted"
+
+    @pytest.mark.asyncio
+    async def test_property_submission_preserves_entity_type_for_distinct_fingerprint(
+        self, service: SuggestionService, mock_git: MagicMock
+    ) -> None:
+        mock_git.get_default_branch.return_value = "main"
+        mock_git.get_file_from_branch.return_value = self.BASELINE
+        proposed = """
+            @prefix ex: <http://example.org/> .
+            @prefix owl: <http://www.w3.org/2002/07/owl#> .
+            @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
+            ex:Existing a owl:Class ; rdfs:label "Existing" .
+            ex:MintedProperty a owl:ObjectProperty ; rdfs:label "Closely Related" .
+        """
+        check = AsyncMock(
+            return_value=MagicMock(verdict="pass", suppressed_decisions=[])
+        )
+
+        with patch(
+            "ontokit.services.duplicate_check_service.DuplicateCheckService.check",
+            new=check,
+        ):
+            await service._validate_submission_content(
+                PROJECT_ID, "suggestion/test", "ontology.ttl", proposed
+            )
+
+        assert check.await_args.kwargs["entity_type"] == "property"
+        assert check.await_args.kwargs["proposed_iri"] == (
+            "http://example.org/MintedProperty"
+        )
 
     @pytest.mark.asyncio
     async def test_accepts_external_folio_parent_at_submit(

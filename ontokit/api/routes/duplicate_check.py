@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import RequiredUser
+from ontokit.core.auth import RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.schemas.duplicate_check import (
     DistinctDecisionMarkRequest,
@@ -109,6 +109,7 @@ async def mark_distinct(
     user: RequiredUser,
 ) -> DistinctDecisionResponse:
     """Mark a current duplicate warning as a distinct entity pair."""
+    require_authenticated_identity(user)
     await _require_project_role(
         project_id,
         db,
@@ -176,6 +177,7 @@ async def revoke_distinct_decision(
     user: RequiredUser,
 ) -> DistinctDecisionResponse:
     """Revoke a decision; only owners and admins may restore detector warnings."""
+    require_authenticated_identity(user)
     await _require_project_role(
         project_id,
         db,

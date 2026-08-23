@@ -56,6 +56,7 @@ from ontokit.services.branch_lock import branch_write_lock, pull_request_write_l
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import PullRequestService, get_pull_request_service
+from ontokit.services.rdf_utils import get_entity_type
 from ontokit.services.trust_rate_limiter import TrustLimiterRedis, check_and_consume
 from ontokit.services.trust_service import SYSTEM_AUTO_ACCEPT_ACTOR, TrustService
 from ontokit.services.verification import get_verification_provider
@@ -277,17 +278,6 @@ class SuggestionService:
             for label in baseline.objects(entity, RDFS.label)
             if isinstance(label, Literal) and str(label).strip()
         }
-        for entity in new_entities:
-            for label in proposed.objects(entity, RDFS.label):
-                if not isinstance(label, Literal):
-                    continue
-                existing = baseline_labels.get(str(label).strip().casefold())
-                if existing is not None and existing != entity:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="Suggestion duplicates an existing entity label",
-                    )
-
         if not new_entities:
             return
 
@@ -312,18 +302,41 @@ class SuggestionService:
                 if isinstance(parent, URIRef)
             ]
             if labels:
-                duplicate = await DuplicateCheckService(self.db).check(
-                    project_id,
-                    str(labels[0]),
-                    parent_iri=parents[0] if parents else None,
-                    exclude_branch=branch,
-                    exclude_iris={str(iri) for iri in new_entities},
-                )
-                if duplicate.verdict == "block":
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="Suggestion is a semantic duplicate of an existing entity",
+                duplicate_service = DuplicateCheckService(self.db)
+                checked_labels: set[str] = set()
+                for index, label in enumerate(labels):
+                    normalized_label = str(label).strip().casefold()
+                    existing = baseline_labels.get(normalized_label)
+                    if index != 0 and existing is None:
+                        continue
+                    if normalized_label in checked_labels:
+                        continue
+                    checked_labels.add(normalized_label)
+                    duplicate = await duplicate_service.check(
+                        project_id,
+                        str(label),
+                        entity_type=get_entity_type(proposed, entity),
+                        parent_iri=parents[0] if parents else None,
+                        exclude_branch=branch,
+                        exclude_iris={str(iri) for iri in new_entities},
+                        proposed_iri=str(entity),
                     )
+                    if existing is not None and existing != entity:
+                        pair = {str(entity), str(existing)}
+                        pair_is_distinct = any(
+                            {decision.iri_a, decision.iri_b} == pair
+                            for decision in duplicate.suppressed_decisions
+                        )
+                        if not pair_is_distinct:
+                            raise HTTPException(
+                                status_code=status.HTTP_409_CONFLICT,
+                                detail="Suggestion duplicates an existing entity label",
+                            )
+                    if duplicate.verdict == "block":
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail="Suggestion is a semantic duplicate of an existing entity",
+                        )
             if (entity, RDF.type, OWL.Class) in proposed:
                 errors = await ValidationService(self.db).validate_entity(
                     project_id,

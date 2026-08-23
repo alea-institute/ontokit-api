@@ -6,10 +6,11 @@ from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import delete
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.models.distinct_entity_decision import DistinctEntityDecision
 from ontokit.models.duplicate_rejection import DuplicateRejection
 from ontokit.models.embedding import EntityEmbedding, ProjectEmbeddingConfig
 from ontokit.models.project import Project
@@ -143,9 +144,9 @@ async def test_active_pair_unique_index_rejects_duplicate_rows(
         "marked_by": "editor-1",
     }
     try:
-        real_db_session.add(DuplicateRejection(**common))
+        real_db_session.add(DistinctEntityDecision(**common))
         await real_db_session.commit()
-        real_db_session.add(DuplicateRejection(**common))
+        real_db_session.add(DistinctEntityDecision(**common))
         with pytest.raises(IntegrityError):
             await real_db_session.flush()
     finally:
@@ -153,7 +154,7 @@ async def test_active_pair_unique_index_rejects_duplicate_rows(
         await _delete_project(real_db_session, project_id)
 
 
-def test_pair_fingerprints_are_symmetric_when_inputs_are_reversed() -> None:
+def test_pair_identity_is_canonical_when_detector_roles_are_reversed() -> None:
     forward = DuplicateCheckService._fingerprints_for_pair(
         proposed_iri="https://example.test/B",
         proposed_label="Entity B",
@@ -162,6 +163,9 @@ def test_pair_fingerprints_are_symmetric_when_inputs_are_reversed() -> None:
         candidate_iri="https://example.test/A",
         candidate_label="Entity A",
         candidate_entity_type="class",
+        candidate_branch="main",
+        candidate_embedding_text="Entity A",
+        structural_score=None,
     )
     reverse = DuplicateCheckService._fingerprints_for_pair(
         proposed_iri="https://example.test/A",
@@ -171,5 +175,59 @@ def test_pair_fingerprints_are_symmetric_when_inputs_are_reversed() -> None:
         candidate_iri="https://example.test/B",
         candidate_label="Entity B",
         candidate_entity_type="class",
+        candidate_branch="main",
+        candidate_embedding_text="Entity B",
+        structural_score=None,
     )
-    assert forward == reverse
+    assert forward[:2] == reverse[:2] == (
+        "https://example.test/A",
+        "https://example.test/B",
+    )
+
+
+@pytest.mark.asyncio
+async def test_legacy_rejections_and_distinct_decisions_use_separate_tables(
+    real_db_session: AsyncSession,
+) -> None:
+    """The head migration preserves legacy provenance while adding the audit table."""
+    project_id = uuid4()
+    project = Project(id=project_id, name="Separate review records", owner_id="owner-1")
+    rejection = DuplicateRejection(
+        project_id=project_id,
+        rejected_iri="https://example.test/Rejected",
+        canonical_iri="https://example.test/Canonical",
+        rejection_reason="Rejected suggestion provenance stays readable.",
+        rejected_by="reviewer-1",
+    )
+    decision = DistinctEntityDecision(
+        project_id=project_id,
+        iri_a="https://example.test/A",
+        iri_b="https://example.test/B",
+        fingerprint_a="a" * 64,
+        fingerprint_b="b" * 64,
+        reason="Explicitly distinct concepts.",
+        marked_by="reviewer-2",
+    )
+    try:
+        real_db_session.add(project)
+        await real_db_session.flush()
+        real_db_session.add_all([rejection, decision])
+        await real_db_session.commit()
+
+        stored_rejection = (
+            await real_db_session.execute(
+                select(DuplicateRejection).where(DuplicateRejection.id == rejection.id)
+            )
+        ).scalar_one()
+        stored_decision = (
+            await real_db_session.execute(
+                select(DistinctEntityDecision).where(DistinctEntityDecision.id == decision.id)
+            )
+        ).scalar_one()
+        assert stored_rejection.rejection_reason == rejection.rejection_reason
+        assert stored_decision.reason == decision.reason
+        assert stored_rejection.__tablename__ == "duplicate_rejections"
+        assert stored_decision.__tablename__ == "distinct_entity_decisions"
+    finally:
+        await real_db_session.rollback()
+        await _delete_project(real_db_session, project_id)

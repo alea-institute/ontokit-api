@@ -1,13 +1,15 @@
-"""Make distinct-entity decisions auditable and fingerprint-bound.
+"""Add auditable, fingerprint-bound distinct-entity decisions.
 
 Revision ID: f5g6h7i8j9k0
 Revises: e4f5g6h7i8j9
 Create Date: 2026-08-23
+
+The legacy ``duplicate_rejections`` table intentionally remains unchanged. It
+records rejected suggestion provenance and must stay readable by both old code
+and the duplicate-candidate API during a rolling deployment or rollback.
 """
 
 from __future__ import annotations
-
-import logging
 
 import sqlalchemy as sa
 
@@ -18,135 +20,100 @@ down_revision = "e4f5g6h7i8j9"
 branch_labels = None
 depends_on = None
 
-logger = logging.getLogger("alembic.runtime.migration")
-
 
 def upgrade() -> None:
-    bind = op.get_bind()
-    invalid_rows = list(
-        bind.execute(
-            sa.text(
-                "SELECT id FROM duplicate_rejections "
-                "WHERE rejected_iri = canonical_iri ORDER BY rejected_at DESC LIMIT 20"
-            )
-        ).scalars()
-    )
-    invalid_count = int(
-        bind.execute(
-            sa.text("SELECT count(*) FROM duplicate_rejections WHERE rejected_iri = canonical_iri")
-        ).scalar_one()
-    )
-    if invalid_count:
-        raise RuntimeError(
-            "Cannot canonicalize duplicate_rejections containing identical IRI pairs: "
-            f"count={invalid_count}, sample_ids={invalid_rows}. "
-            "Correct or remove those invalid legacy rows before retrying the migration."
-        )
-    legacy_count = int(
-        bind.execute(sa.text("SELECT count(*) FROM duplicate_rejections")).scalar_one()
-    )
-    if legacy_count:
-        sample_ids = list(
-            bind.execute(
-                sa.text("SELECT id FROM duplicate_rejections ORDER BY rejected_at DESC LIMIT 20")
-            ).scalars()
-        )
-        logger.warning(
-            "Deactivating %d legacy duplicate_rejections rows without input fingerprints; "
-            "sample_ids=%s",
-            legacy_count,
-            sample_ids,
-        )
-
-    op.drop_index("ix_duplicate_rejections_lookup", table_name="duplicate_rejections")
-    op.alter_column("duplicate_rejections", "rejected_iri", new_column_name="iri_a")
-    op.alter_column("duplicate_rejections", "canonical_iri", new_column_name="iri_b")
-    op.alter_column("duplicate_rejections", "rejection_reason", new_column_name="reason")
-    op.alter_column("duplicate_rejections", "rejected_by", new_column_name="marked_by")
-    op.alter_column("duplicate_rejections", "rejected_at", new_column_name="marked_at")
-
-    op.add_column("duplicate_rejections", sa.Column("fingerprint_a", sa.String(64), nullable=True))
-    op.add_column("duplicate_rejections", sa.Column("fingerprint_b", sa.String(64), nullable=True))
-    op.add_column(
-        "duplicate_rejections", sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True)
-    )
-    op.add_column("duplicate_rejections", sa.Column("revoked_by", sa.String(255), nullable=True))
-    op.add_column("duplicate_rejections", sa.Column("superseded_by_id", sa.UUID(), nullable=True))
-
-    # Canonicalize the unordered pair before adding its invariant. Legacy rows
-    # cannot safely suppress because they predate detector-input fingerprints,
-    # so retain them as explicitly revoked audit history.
-    op.execute(
-        """
-        UPDATE duplicate_rejections
-        SET iri_a = LEAST(iri_a, iri_b),
-            iri_b = GREATEST(iri_a, iri_b),
-            reason = COALESCE(NULLIF(BTRIM(reason), ''),
-                              'Legacy distinct decision (inactive pending re-validation)'),
-            fingerprint_a = md5(id::text || '-a') || md5(id::text || '-a-2'),
-            fingerprint_b = md5(id::text || '-b') || md5(id::text || '-b-2'),
-            revoked_at = COALESCE(marked_at, now()),
-            revoked_by = 'system:migration'
-        """
-    )
-    op.alter_column("duplicate_rejections", "reason", nullable=False)
-    op.alter_column("duplicate_rejections", "fingerprint_a", nullable=False)
-    op.alter_column("duplicate_rejections", "fingerprint_b", nullable=False)
-    op.create_foreign_key(
-        "fk_duplicate_rejections_superseded_by",
-        "duplicate_rejections",
-        "duplicate_rejections",
-        ["superseded_by_id"],
-        ["id"],
-        ondelete="SET NULL",
-    )
-    op.create_check_constraint(
-        "ck_duplicate_rejections_canonical_pair",
-        "duplicate_rejections",
-        "iri_a < iri_b",
-    )
-    op.create_check_constraint(
-        "ck_duplicate_rejections_reason",
-        "duplicate_rejections",
-        "length(trim(reason)) > 0",
+    op.create_table(
+        "distinct_entity_decisions",
+        sa.Column("id", sa.UUID(), nullable=False),
+        sa.Column("project_id", sa.UUID(), nullable=False),
+        sa.Column("iri_a", sa.String(2000), nullable=False),
+        sa.Column("iri_b", sa.String(2000), nullable=False),
+        sa.Column("fingerprint_a", sa.String(64), nullable=False),
+        sa.Column("fingerprint_b", sa.String(64), nullable=False),
+        sa.Column("reason", sa.Text(), nullable=False),
+        sa.Column("marked_by", sa.String(255), nullable=False),
+        sa.Column(
+            "marked_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column("suggestion_session_id", sa.UUID(), nullable=True),
+        sa.Column("revoked_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("revoked_by", sa.String(255), nullable=True),
+        sa.Column("superseded_by_id", sa.UUID(), nullable=True),
+        sa.CheckConstraint(
+            "iri_a < iri_b",
+            name="ck_distinct_entity_decisions_canonical_pair",
+        ),
+        sa.CheckConstraint(
+            "length(trim(reason)) > 0",
+            name="ck_distinct_entity_decisions_reason",
+        ),
+        sa.ForeignKeyConstraint(["project_id"], ["projects.id"], ondelete="CASCADE"),
+        sa.ForeignKeyConstraint(
+            ["suggestion_session_id"],
+            ["suggestion_sessions.id"],
+            ondelete="SET NULL",
+        ),
+        sa.ForeignKeyConstraint(
+            ["superseded_by_id"],
+            ["distinct_entity_decisions.id"],
+            name="fk_distinct_entity_decisions_superseded_by",
+            ondelete="SET NULL",
+        ),
+        sa.PrimaryKeyConstraint("id"),
     )
     op.create_index(
-        "uq_duplicate_rejections_active_pair",
-        "duplicate_rejections",
+        "uq_distinct_entity_decisions_active_pair",
+        "distinct_entity_decisions",
         ["project_id", "iri_a", "iri_b"],
         unique=True,
         postgresql_where=sa.text("revoked_at IS NULL"),
     )
     op.create_index(
-        "ix_duplicate_rejections_history",
-        "duplicate_rejections",
+        "ix_distinct_entity_decisions_history",
+        "distinct_entity_decisions",
         ["project_id", "iri_a", "iri_b", "marked_at"],
+    )
+    op.create_index(
+        "ix_distinct_entity_decisions_project_marked",
+        "distinct_entity_decisions",
+        ["project_id", "marked_at"],
+    )
+    op.create_index(
+        "ix_distinct_entity_decisions_active_project_marked",
+        "distinct_entity_decisions",
+        ["project_id", "marked_at"],
+        postgresql_where=sa.text("revoked_at IS NULL"),
     )
 
 
 def downgrade() -> None:
-    op.drop_index("ix_duplicate_rejections_history", table_name="duplicate_rejections")
-    op.drop_index("uq_duplicate_rejections_active_pair", table_name="duplicate_rejections")
-    op.drop_constraint("ck_duplicate_rejections_reason", "duplicate_rejections", type_="check")
-    op.drop_constraint(
-        "ck_duplicate_rejections_canonical_pair", "duplicate_rejections", type_="check"
+    bind = op.get_bind()
+    decision_count = int(
+        bind.execute(sa.text("SELECT count(*) FROM distinct_entity_decisions")).scalar_one()
     )
-    op.drop_constraint(
-        "fk_duplicate_rejections_superseded_by", "duplicate_rejections", type_="foreignkey"
+    if decision_count:
+        raise RuntimeError(
+            "Refusing to downgrade while distinct_entity_decisions contains audit data: "
+            f"count={decision_count}. Export or explicitly resolve those decisions first."
+        )
+
+    op.drop_index(
+        "ix_distinct_entity_decisions_history",
+        table_name="distinct_entity_decisions",
     )
-    op.drop_column("duplicate_rejections", "superseded_by_id")
-    op.drop_column("duplicate_rejections", "revoked_by")
-    op.drop_column("duplicate_rejections", "revoked_at")
-    op.drop_column("duplicate_rejections", "fingerprint_b")
-    op.drop_column("duplicate_rejections", "fingerprint_a")
-    op.alter_column("duplicate_rejections", "reason", nullable=True)
-    op.alter_column("duplicate_rejections", "marked_at", new_column_name="rejected_at")
-    op.alter_column("duplicate_rejections", "marked_by", new_column_name="rejected_by")
-    op.alter_column("duplicate_rejections", "reason", new_column_name="rejection_reason")
-    op.alter_column("duplicate_rejections", "iri_b", new_column_name="canonical_iri")
-    op.alter_column("duplicate_rejections", "iri_a", new_column_name="rejected_iri")
-    op.create_index(
-        "ix_duplicate_rejections_lookup",
-        "duplicate_rejections",
-        ["project_id", "rejected_iri"],
+    op.drop_index(
+        "ix_distinct_entity_decisions_project_marked",
+        table_name="distinct_entity_decisions",
     )
+    op.drop_index(
+        "ix_distinct_entity_decisions_active_project_marked",
+        table_name="distinct_entity_decisions",
+    )
+    op.drop_index(
+        "uq_distinct_entity_decisions_active_pair",
+        table_name="distinct_entity_decisions",
+    )
+    op.drop_table("distinct_entity_decisions")
