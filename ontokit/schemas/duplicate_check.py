@@ -12,9 +12,11 @@ Design decisions (per D-13):
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
+from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 # Verdict thresholds (from PROJECT.md + D-13):
 #   block  > 0.95 — hard block, entity must not be created
@@ -25,7 +27,7 @@ DuplicateVerdict = Literal["block", "warn", "pass"]
 # Source indicates where the candidate was found during duplicate search:
 #   main     — already committed to the project branch
 #   pending  — in an active suggestion session (not yet merged)
-#   rejected — previously rejected as a non-duplicate (stored in duplicate_rejections)
+#   rejected — candidate came from a rejected suggestion-session branch
 CandidateSource = Literal["main", "pending", "rejected"]
 
 
@@ -48,6 +50,7 @@ class DuplicateCandidate(BaseModel):
 
     iri: str
     label: str
+    entity_type: str = "class"
     score: float
     source: CandidateSource
     branch: str | None = None
@@ -67,6 +70,61 @@ class DuplicateCheckRequest(BaseModel):
     label: str
     entity_type: str = "class"
     parent_iri: str | None = None
+    proposed_iri: str | None = None
+    suggestion_session_id: UUID | None = None
+
+
+class DistinctDecisionMarkRequest(BaseModel):
+    """Create or idempotently reuse a human decision that two IRIs are distinct."""
+
+    proposed_iri: str = Field(min_length=1, max_length=2000)
+    label: str = Field(min_length=1, max_length=2000)
+    candidate_iri: str = Field(min_length=1, max_length=2000)
+    entity_type: str = Field(default="class", min_length=1, max_length=100)
+    parent_iri: str | None = Field(default=None, max_length=2000)
+    suggestion_session_id: UUID | None = None
+    reason: str = Field(min_length=1, max_length=4000)
+
+    @field_validator(
+        "proposed_iri", "label", "candidate_iri", "entity_type", "reason", mode="before"
+    )
+    @classmethod
+    def reject_blank_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                raise ValueError("must not be blank")
+        return value
+
+    @model_validator(mode="after")
+    def reject_self_pair(self) -> DistinctDecisionMarkRequest:
+        if self.proposed_iri == self.candidate_iri:
+            raise ValueError("an entity cannot be marked distinct from itself")
+        return self
+
+
+class DistinctDecisionResponse(BaseModel):
+    """Auditable, fingerprint-bound decision that an IRI pair is distinct."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    project_id: UUID
+    iri_a: str
+    iri_b: str
+    fingerprint_a: str
+    fingerprint_b: str
+    reason: str
+    marked_by: str
+    marked_at: datetime
+    suggestion_session_id: UUID | None
+    revoked_at: datetime | None
+    revoked_by: str | None
+    superseded_by_id: UUID | None
+
+    @property
+    def active(self) -> bool:
+        return self.revoked_at is None
 
 
 class DuplicateCheckResponse(BaseModel):
@@ -82,3 +140,4 @@ class DuplicateCheckResponse(BaseModel):
     composite_score: float
     score_breakdown: ScoreBreakdown
     candidates: list[DuplicateCandidate]
+    suppressed_decisions: list[DistinctDecisionResponse] = Field(default_factory=list)

@@ -1,5 +1,6 @@
-"""Unit tests for composite duplicate-check scoring — Plan 04 (DEDUP-04 through DEDUP-08)."""
+"""Unit tests for duplicate scoring and distinct-decision suppression."""
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -7,6 +8,7 @@ import pytest
 
 from ontokit.models.duplicate_rejection import DuplicateRejection
 from ontokit.schemas.duplicate_check import (
+    DistinctDecisionResponse,
     DuplicateCandidate,
     DuplicateCheckResponse,
     ScoreBreakdown,
@@ -181,9 +183,7 @@ async def test_composite_score_weights():
             parent_iri="http://example.org/Entity",
         )
 
-    expected_composite = round(
-        SEMANTIC_WEIGHT * 0.5 + STRUCTURAL_WEIGHT * 0.75, 4
-    )
+    expected_composite = round(SEMANTIC_WEIGHT * 0.5 + STRUCTURAL_WEIGHT * 0.75, 4)
     assert response.composite_score == expected_composite
     assert response.score_breakdown.exact == 0.0
     assert response.score_breakdown.semantic == 0.5
@@ -242,9 +242,7 @@ async def test_all_branch_scope():
         _make_sem_result(
             iri="http://ex.org/B", label="Concept B", score=0.85, branch="suggest-123"
         ),
-        _make_sem_result(
-            iri="http://ex.org/C", label="Concept C", score=0.8, branch="suggest-456"
-        ),
+        _make_sem_result(iri="http://ex.org/C", label="Concept C", score=0.8, branch="suggest-456"),
     ]
 
     with (
@@ -277,8 +275,8 @@ async def test_all_branch_scope():
 
 
 @pytest.mark.asyncio
-async def test_rejection_history_surfaced():
-    """Previously-rejected candidates include rejection_reason in the response (D-09)."""
+async def test_rejected_suggestion_source_does_not_conflate_distinct_decision_reason():
+    """Suggestion rejection provenance is separate from distinct-pair audit history."""
     svc, _ = _make_service()
 
     sem_result = _make_sem_result(
@@ -287,20 +285,6 @@ async def test_rejection_history_surfaced():
         score=0.95,
         branch="suggest-old",
     )
-
-    rej_record = DuplicateRejection(
-        project_id=PROJECT_ID,
-        rejected_iri="http://ex.org/RejectedEntity",
-        canonical_iri="http://ex.org/CanonicalEntity",
-        rejection_reason="Duplicate of Canonical Entity",
-        rejected_by="user-id-123",
-    )
-
-    async def mock_classify_source(_project_id, _branch):
-        return "rejected"
-
-    async def mock_get_rejection_info(_project_id, _rejected_iri):
-        return rej_record
 
     with (
         patch.object(
@@ -313,10 +297,7 @@ async def test_rejection_history_surfaced():
             "try_compute_similarity",
             return_value=0.0,
         ),
-        patch.object(svc, "_classify_source", new=AsyncMock(side_effect=mock_classify_source)),
-        patch.object(
-            svc, "_get_rejection_info", new=AsyncMock(side_effect=mock_get_rejection_info)
-        ),
+        patch.object(svc, "_classify_source", new=AsyncMock(return_value="rejected")),
     ):
         response = await svc.check(
             project_id=PROJECT_ID,
@@ -326,8 +307,8 @@ async def test_rejection_history_surfaced():
     assert len(response.candidates) == 1
     candidate = response.candidates[0]
     assert candidate.source == "rejected"
-    assert candidate.rejection_reason == "Duplicate of Canonical Entity"
-    assert candidate.canonical_iri == "http://ex.org/CanonicalEntity"
+    assert candidate.rejection_reason is None
+    assert candidate.canonical_iri is None
 
 
 @pytest.mark.asyncio
@@ -377,3 +358,75 @@ async def test_response_includes_score_breakdown():
     assert isinstance(candidate.label, str)
     assert isinstance(candidate.score, float)
     assert candidate.source in ("main", "pending", "rejected")
+
+
+@pytest.mark.asyncio
+async def test_active_distinct_decision_suppresses_candidate_before_verdict():
+    """A matching fingerprint-bound decision removes the candidate from scoring."""
+    svc, _ = _make_service()
+    sem_result = _make_sem_result(label="Legal Entity", score=1.0, branch="main")
+    decision = DuplicateRejection(
+        id=uuid4(),
+        project_id=PROJECT_ID,
+        iri_a="http://example.org/LegalEntity",
+        iri_b="http://example.org/ProposedLegalEntity",
+        fingerprint_a="a" * 64,
+        fingerprint_b="b" * 64,
+        reason="These are distinct concepts in this ontology.",
+        marked_by="reviewer-1",
+        marked_at=datetime.now(UTC),
+    )
+
+    with (
+        patch.object(
+            svc._embedding_svc,
+            "semantic_search_all_branches",
+            new=AsyncMock(return_value=[sem_result]),
+        ),
+        patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
+        patch.object(
+            svc,
+            "_find_matching_decision",
+            new=AsyncMock(return_value=decision),
+        ),
+    ):
+        response = await svc.check(
+            PROJECT_ID,
+            "Legal Entity",
+            proposed_iri="http://example.org/ProposedLegalEntity",
+        )
+
+    assert response.verdict == "pass"
+    assert response.composite_score == 0.0
+    assert response.candidates == []
+    assert response.suppressed_decisions == [DistinctDecisionResponse.model_validate(decision)]
+
+
+@pytest.mark.asyncio
+async def test_stale_distinct_decision_does_not_suppress_changed_input():
+    """Materially changed normalized inputs resurface the candidate."""
+    svc, _ = _make_service()
+    sem_result = _make_sem_result(label="Legal Entity", score=1.0, branch="main")
+
+    with (
+        patch.object(
+            svc._embedding_svc,
+            "semantic_search_all_branches",
+            new=AsyncMock(return_value=[sem_result]),
+        ),
+        patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
+        patch.object(
+            svc,
+            "_find_matching_decision",
+            new=AsyncMock(return_value=None),
+        ) as find_decision,
+    ):
+        response = await svc.check(
+            PROJECT_ID,
+            "Materially changed legal entity",
+            proposed_iri="http://example.org/ProposedLegalEntity",
+        )
+
+    assert find_decision.await_count == 1
+    assert response.verdict == "block"
+    assert [candidate.iri for candidate in response.candidates] == [sem_result.iri]

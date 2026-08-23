@@ -8,12 +8,14 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from ontokit.schemas.duplicate_check import (
+    DistinctDecisionResponse,
     DuplicateCheckResponse,
     ScoreBreakdown,
 )
 
 PROJECT_ID = "11111111-1111-1111-1111-111111111111"
 URL = f"/api/v1/projects/{PROJECT_ID}/duplicate-check"
+DECISIONS_URL = f"{URL}/distinct-decisions"
 
 BODY = {
     "label": "Employment Contract",
@@ -38,9 +40,7 @@ def _patch_access(
     if allowed:
         service.get = AsyncMock(return_value=MagicMock(user_role=user_role))
     else:
-        service.get = AsyncMock(
-            side_effect=HTTPException(status_code=status_code, detail="denied")
-        )
+        service.get = AsyncMock(side_effect=HTTPException(status_code=status_code, detail="denied"))
     return service
 
 
@@ -56,9 +56,7 @@ def test_private_project_denied_before_check_runs(
             "ontokit.api.routes.duplicate_check.get_project_service",
             return_value=_patch_access(allowed=False, status_code=403),
         ),
-        patch(
-            "ontokit.api.routes.duplicate_check.DuplicateCheckService"
-        ) as service_cls,
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
     ):
         resp = authed_client[0].post(URL, json=BODY)
 
@@ -98,9 +96,7 @@ def test_request_fields_forwarded_to_service(
             "ontokit.api.routes.duplicate_check.get_project_service",
             return_value=_patch_access(allowed=True),
         ),
-        patch(
-            "ontokit.api.routes.duplicate_check.DuplicateCheckService"
-        ) as service_cls,
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
     ):
         service_cls.return_value.check = check
         resp = authed_client[0].post(URL, json=BODY)
@@ -132,9 +128,7 @@ def test_branch_field_removed_and_never_forwarded(
             "ontokit.api.routes.duplicate_check.get_project_service",
             return_value=_patch_access(allowed=True),
         ),
-        patch(
-            "ontokit.api.routes.duplicate_check.DuplicateCheckService"
-        ) as service_cls,
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
     ):
         service_cls.return_value.check = check
         # A stray branch key is ignored by the schema, request still succeeds.
@@ -152,3 +146,126 @@ def test_422_on_missing_label(authed_client: tuple[TestClient, AsyncMock]) -> No
         resp = authed_client[0].post(URL, json={"entity_type": "class"})
 
     assert resp.status_code == 422
+
+
+def _decision_response() -> DistinctDecisionResponse:
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    return DistinctDecisionResponse(
+        id=UUID("22222222-2222-2222-2222-222222222222"),
+        project_id=UUID(PROJECT_ID),
+        iri_a="http://example.org/ontology#EmploymentContract",
+        iri_b="http://example.org/ontology#WorkAgreement",
+        fingerprint_a="a" * 64,
+        fingerprint_b="b" * 64,
+        reason="They have different legal effects.",
+        marked_by="test-user-id",
+        marked_at=datetime.now(UTC),
+        suggestion_session_id=None,
+        revoked_at=None,
+        revoked_by=None,
+        superseded_by_id=None,
+    )
+
+
+def test_editor_can_mark_distinct_and_inputs_are_forwarded(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    mark = AsyncMock(return_value=_decision_response())
+    body = {
+        "proposed_iri": "http://example.org/ontology#EmploymentContract",
+        "label": "Employment Contract",
+        "candidate_iri": "http://example.org/ontology#WorkAgreement",
+        "entity_type": "class",
+        "parent_iri": "http://example.org/ontology#Contract",
+        "reason": "They have different legal effects.",
+    }
+    with (
+        patch(
+            "ontokit.api.routes.duplicate_check.get_project_service",
+            return_value=_patch_access(user_role="editor"),
+        ),
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
+    ):
+        service_cls.return_value.mark_distinct = mark
+        response = authed_client[0].post(DECISIONS_URL, json=body)
+
+    assert response.status_code == 201
+    assert response.json()["reason"] == body["reason"]
+    assert mark.await_args.kwargs["actor_id"] == "test-user-id"
+    assert mark.await_args.kwargs["request"].candidate_iri == body["candidate_iri"]
+
+
+def test_suggester_cannot_mark_distinct(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    with (
+        patch(
+            "ontokit.api.routes.duplicate_check.get_project_service",
+            return_value=_patch_access(user_role="suggester"),
+        ),
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
+    ):
+        response = authed_client[0].post(
+            DECISIONS_URL,
+            json={
+                "proposed_iri": "http://example.org/A",
+                "label": "A",
+                "candidate_iri": "http://example.org/B",
+                "reason": "Different concepts",
+            },
+        )
+
+    assert response.status_code == 403
+    service_cls.assert_not_called()
+
+
+def test_mark_distinct_requires_non_empty_reason(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    with patch(
+        "ontokit.api.routes.duplicate_check.get_project_service",
+        return_value=_patch_access(user_role="editor"),
+    ):
+        response = authed_client[0].post(
+            DECISIONS_URL,
+            json={
+                "proposed_iri": "http://example.org/A",
+                "label": "A",
+                "candidate_iri": "http://example.org/B",
+                "reason": "   ",
+            },
+        )
+
+    assert response.status_code == 422
+
+
+def test_editor_cannot_revoke_but_admin_can(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    decision = _decision_response()
+    revoke_url = f"{DECISIONS_URL}/{decision.id}"
+
+    with patch(
+        "ontokit.api.routes.duplicate_check.get_project_service",
+        return_value=_patch_access(user_role="editor"),
+    ):
+        denied = authed_client[0].delete(revoke_url)
+    assert denied.status_code == 403
+
+    revoked = decision.model_copy(
+        update={"revoked_at": decision.marked_at, "revoked_by": "test-user-id"}
+    )
+    with (
+        patch(
+            "ontokit.api.routes.duplicate_check.get_project_service",
+            return_value=_patch_access(user_role="admin"),
+        ),
+        patch("ontokit.api.routes.duplicate_check.DuplicateCheckService") as service_cls,
+    ):
+        service_cls.return_value.revoke_distinct_decision = AsyncMock(return_value=revoked)
+        allowed = authed_client[0].delete(revoke_url)
+
+    assert allowed.status_code == 200
+    assert allowed.json()["revoked_by"] == "test-user-id"
