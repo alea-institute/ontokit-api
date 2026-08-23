@@ -102,6 +102,10 @@ def _make_pr(
     pr.author_email = "editor@example.com"
     pr.github_pr_number = github_pr_number
     pr.github_pr_url = None
+    pr.github_sync_status = "synced" if github_pr_number is not None else "not_configured"
+    pr.github_sync_last_attempted_at = None
+    pr.github_sync_message = None
+    pr.github_sync_attempt_id = None
     pr.merged_by = merged_by
     pr.merged_at = merged_at
     pr.merge_commit_hash = merge_commit_hash
@@ -764,12 +768,17 @@ class TestReopenPullRequest:
             project_result,
             pr_result,
             no_conflict,
+            MagicMock(rowcount=1),  # finish GitHub sync attempt
             response_project,
         ]
         service._get_github_token = AsyncMock(  # type: ignore[method-assign]
             return_value=(MagicMock(repo_owner="org", repo_name="repo"), "token")
         )
-        mock_github_service.reopen_pull_request = AsyncMock(side_effect=assert_unlocked)
+        async def reopen_and_assert(**kwargs: object) -> MagicMock:
+            await assert_unlocked(**kwargs)
+            return MagicMock(number=42, html_url="https://github.example/pr/42")
+
+        mock_github_service.reopen_pull_request = AsyncMock(side_effect=reopen_and_assert)
         monkeypatch.setattr(
             "ontokit.services.pull_request_service.branch_write_lock",
             tracked_lock,
@@ -805,6 +814,7 @@ class TestReopenPullRequest:
             pr_result,
             MagicMock(),  # source branch lock
             no_conflict_result,
+            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),  # no GitHub integration
             project_result_2,
         ]
 

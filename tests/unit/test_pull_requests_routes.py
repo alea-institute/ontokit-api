@@ -183,6 +183,15 @@ class TestReopenPullRequest:
         svc.reopen_pull_request.assert_awaited_once()
 
 
+class TestRetryGitHubSync:
+    def test_returns_200(self, svc_client: tuple[TestClient, AsyncMock]) -> None:
+        client, svc = svc_client
+        svc.retry_github_sync.return_value = _PR_RESP
+        resp = client.post(f"{BASE}/{PROJECT_ID}/pull-requests/1/github-sync/retry")
+        assert resp.status_code == 200
+        svc.retry_github_sync.assert_awaited_once()
+
+
 class TestMergePullRequest:
     @patch("ontokit.api.routes.pull_requests.get_arq_pool", new_callable=AsyncMock)
     def test_merge_success_enqueues_reindex(
