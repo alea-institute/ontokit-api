@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 # Status types
 PRStatusType = Literal["open", "merged", "closed"]
+GitHubSyncStatusType = Literal["not_configured", "pending", "synced", "failed"]
 ReviewStatusType = Literal["approved", "changes_requested", "commented"]
 
 
@@ -57,6 +58,9 @@ class PRResponse(PRBase):
     author: PRUser | None = None
     github_pr_number: int | None = None
     github_pr_url: str | None = None
+    github_sync_status: GitHubSyncStatusType = "not_configured"
+    github_sync_last_attempted_at: datetime | None = None
+    github_sync_message: str | None = None
     merged_by: str | None = None
     merged_by_user: PRUser | None = None
     merged_at: datetime | None = None

@@ -406,10 +406,13 @@ class GitHubService:
         owner: str,
         repo: str,
         state: str = "open",
+        head: str | None = None,
         base: str | None = None,
     ) -> list[GitHubPR]:
         """List pull requests for a repository."""
         endpoint = f"/repos/{_enc(owner)}/{_enc(repo)}/pulls?state={_enc(state)}"
+        if head:
+            endpoint += f"&head={_enc(head)}"
         if base:
             endpoint += f"&base={_enc(base)}"
 

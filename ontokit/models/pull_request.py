@@ -6,6 +6,7 @@ from enum import StrEnum
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -27,6 +28,15 @@ class PRStatus(StrEnum):
     OPEN = "open"
     MERGED = "merged"
     CLOSED = "closed"
+
+
+class GitHubSyncStatus(StrEnum):
+    """Visibility state for the best-effort GitHub PR mirror."""
+
+    NOT_CONFIGURED = "not_configured"
+    PENDING = "pending"
+    SYNCED = "synced"
+    FAILED = "failed"
 
 
 class ReviewStatus(StrEnum):
@@ -67,6 +77,19 @@ class PullRequest(Base):
     # GitHub integration (optional)
     github_pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     github_pr_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    github_sync_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=GitHubSyncStatus.NOT_CONFIGURED.value,
+        server_default=GitHubSyncStatus.NOT_CONFIGURED.value,
+    )
+    github_sync_last_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    github_sync_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Internal compare-and-set token. A stale network response must not
+    # overwrite the receipt produced by a newer retry attempt.
+    github_sync_attempt_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
 
     # Merge info
     merged_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -92,6 +115,10 @@ class PullRequest(Base):
 
     __table_args__ = (
         UniqueConstraint("project_id", "pr_number", name="uq_project_pr_number"),
+        CheckConstraint(
+            "github_sync_status IN ('not_configured', 'pending', 'synced', 'failed')",
+            name="ck_pull_requests_github_sync_status",
+        ),
         Index(
             "uq_pull_requests_open_source_branch",
             "project_id",

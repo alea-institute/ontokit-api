@@ -84,6 +84,10 @@ def _make_pr(
     pr.author_email = "editor@example.com"
     pr.github_pr_number = github_pr_number
     pr.github_pr_url = None
+    pr.github_sync_status = "synced" if github_pr_number is not None else "not_configured"
+    pr.github_sync_last_attempted_at = None
+    pr.github_sync_message = None
+    pr.github_sync_attempt_id = None
     pr.reviews = []
     pr.comments = []
     pr.base_commit_hash = None
@@ -491,10 +495,13 @@ class TestReopenPullRequestGitHubSync:
             _scalar_result(None),  # no conflicting open PR
             _scalar_result(integration),  # _get_github_integration
             _scalar_result(token_row),  # UserGitHubToken
+            MagicMock(rowcount=1),  # finish GitHub sync attempt
             _project_result(project),  # _to_pr_response
         ]
 
-        mock_github_service.reopen_pull_request = AsyncMock()
+        mock_github_service.reopen_pull_request = AsyncMock(
+            return_value=MagicMock(number=42, html_url="https://github.example/pr/42")
+        )
 
         with patch(
             "ontokit.services.mirror_credential.decrypt_token",
@@ -2294,6 +2301,7 @@ class TestCloseReopenExceptionHandling:
             _scalar_result(None),  # no conflicting open PR
             _scalar_result(integration),
             _scalar_result(token_row),
+            MagicMock(rowcount=1),  # finish failed GitHub sync attempt
             _project_result(project),  # _to_pr_response
         ]
         mock_db.refresh = AsyncMock()

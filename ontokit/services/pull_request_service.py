@@ -2,13 +2,15 @@
 
 import logging
 import secrets
-from datetime import UTC, datetime
-from typing import Any
+import uuid
+from datetime import UTC, datetime, timedelta
+from typing import Any, cast
 from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -21,6 +23,7 @@ from ontokit.models.branch_metadata import BranchMetadata
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.pull_request import (
     GitHubIntegration,
+    GitHubSyncStatus,
     PRStatus,
     PullRequest,
     PullRequestComment,
@@ -73,6 +76,11 @@ logger = logging.getLogger(__name__)
 
 class PullRequestService:
     """Service for pull request CRUD operations, reviews, and comments."""
+
+    GITHUB_SYNC_FAILED_MESSAGE = (
+        "GitHub synchronization failed. Retry when the integration is available."
+    )
+    GITHUB_SYNC_PENDING_TIMEOUT = timedelta(minutes=5)
 
     def __init__(
         self,
@@ -340,26 +348,7 @@ class PullRequestService:
         """Perform best-effort external synchronization after a PR claim commits."""
         pr_number = db_pr.pr_number
 
-        # Sync with GitHub if integration exists and we can resolve a token
-        gh_result = await self._get_github_token(project_id)
-        if gh_result:
-            github_integration, token = gh_result
-            try:
-                gh_pr = await self.github_service.create_pull_request(
-                    token=token,
-                    owner=github_integration.repo_owner,
-                    repo=github_integration.repo_name,
-                    title=pr_create.title,
-                    head=pr_create.source_branch,
-                    base=pr_create.target_branch,
-                    body=pr_create.description,
-                )
-                db_pr.github_pr_number = gh_pr.number
-                db_pr.github_pr_url = gh_pr.html_url
-            except Exception as e:
-                logger.warning(f"Failed to create GitHub PR: {e}")
-
-        await self.db.commit()
+        await self._sync_pull_request_to_github(project_id, db_pr, operation="create")
         await self.db.refresh(db_pr, ["reviews", "comments"])
 
         # Notify project owners/admins about the new PR
@@ -578,21 +567,270 @@ class PullRequestService:
             await self.db.commit()
             await self.db.refresh(pr)
 
-        if pr.github_pr_number:
-            gh_result = await self._get_github_token(project_id)
-            if gh_result:
-                github_integration, token = gh_result
-                try:
-                    await self.github_service.reopen_pull_request(
-                        token=token,
-                        owner=github_integration.repo_owner,
-                        repo=github_integration.repo_name,
-                        pr_number=pr.github_pr_number,
-                    )
-                except Exception as e:
-                    logger.warning(f"Failed to reopen GitHub PR: {e}")
+        await self._sync_pull_request_to_github(project_id, pr, operation="reopen")
 
         return await self._to_pr_response(pr, project_id)
+
+    async def retry_github_sync(
+        self, project_id: UUID, pr_number: int, user: CurrentUser
+    ) -> PRResponse:
+        """Safely retry an open PR's best-effort GitHub mirror.
+
+        The local branch lock protects only the claim. It is committed and
+        released before any GitHub network request. A recent ``pending`` claim
+        makes repeated/concurrent retries idempotent; a stale claim can be
+        reclaimed after the bounded timeout.
+        """
+        project = await self._get_project(project_id)
+        pr = await self._get_pr(project_id, pr_number)
+        user_role = self._get_user_role(project, user)
+        if user.id != pr.author_id and user_role not in ("owner", "admin"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only the author or admins can retry GitHub synchronization",
+            )
+        if pr.status == PRStatus.MERGED.value:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Merged pull requests cannot be synchronized again",
+            )
+        if pr.status not in (PRStatus.OPEN.value, PRStatus.CLOSED.value):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only open or closed pull requests can retry GitHub synchronization",
+            )
+
+        gh_result: tuple[GitHubIntegration, str] | None = None
+        attempt_id: uuid.UUID | None = None
+        skip_sync = False
+        async with branch_write_lock(self.db, project_id, pr.source_branch):
+            await self.db.refresh(pr)
+            if pr.status not in (PRStatus.OPEN.value, PRStatus.CLOSED.value):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Only open or closed pull requests can retry GitHub synchronization",
+                )
+            attempted_at = pr.github_sync_last_attempted_at
+            if (
+                pr.github_sync_status == GitHubSyncStatus.PENDING.value
+                and attempted_at is not None
+                and attempted_at > datetime.now(UTC) - self.GITHUB_SYNC_PENDING_TIMEOUT
+            ):
+                skip_sync = True
+            else:
+                gh_result = await self._get_github_token(project_id)
+                if gh_result is None:
+                    self._mark_github_sync_not_configured(pr)
+                    skip_sync = True
+                else:
+                    attempt_id = self._mark_github_sync_pending(pr)
+                await self.db.commit()
+
+        if skip_sync:
+            return await self._to_pr_response(pr, project_id)
+
+        if gh_result is None or attempt_id is None:  # pragma: no cover - defensive invariant
+            raise RuntimeError("GitHub synchronization claim was not initialized")
+
+        if pr.status == PRStatus.CLOSED.value:
+            operation = "close"
+        else:
+            operation = "reopen" if pr.github_pr_number is not None else "create"
+        await self._perform_github_sync(pr, gh_result, operation=operation, attempt_id=attempt_id)
+        return await self._to_pr_response(pr, project_id)
+
+    async def _sync_pull_request_to_github(
+        self,
+        project_id: UUID,
+        pr: PullRequest,
+        *,
+        operation: str,
+    ) -> None:
+        """Persist a visible receipt around one best-effort GitHub operation."""
+        gh_result = await self._get_github_token(project_id)
+        if gh_result is None:
+            self._mark_github_sync_not_configured(pr)
+            await self.db.commit()
+            return
+
+        attempt_id = self._mark_github_sync_pending(pr)
+        # This commit is intentionally before network I/O so clients can see
+        # an in-flight attempt and concurrent manual retries cannot duplicate it.
+        await self.db.commit()
+        await self._perform_github_sync(pr, gh_result, operation=operation, attempt_id=attempt_id)
+
+    async def _perform_github_sync(
+        self,
+        pr: PullRequest,
+        gh_result: tuple[GitHubIntegration, str],
+        *,
+        operation: str,
+        attempt_id: uuid.UUID,
+    ) -> None:
+        integration, token = gh_result
+        try:
+            gh_pr = await self._mirror_pull_request_to_github(
+                pr, integration, token, operation=operation
+            )
+        except Exception as exc:
+            # Exception messages can contain request or credential material.
+            # Log only the class and local identifiers; expose a fixed message.
+            logger.warning(
+                "GitHub PR synchronization failed for project=%s pr=%s error_type=%s",
+                pr.project_id,
+                pr.pr_number,
+                type(exc).__name__,
+            )
+            await self._finish_github_sync(
+                pr,
+                attempt_id,
+                sync_status=GitHubSyncStatus.FAILED,
+                message=self.GITHUB_SYNC_FAILED_MESSAGE,
+            )
+            return
+
+        await self._finish_github_sync(
+            pr,
+            attempt_id,
+            sync_status=GitHubSyncStatus.SYNCED,
+            github_pr_number=gh_pr.number,
+            github_pr_url=gh_pr.html_url,
+        )
+
+    async def _mirror_pull_request_to_github(
+        self,
+        pr: PullRequest,
+        integration: GitHubIntegration,
+        token: str,
+        *,
+        operation: str,
+    ) -> Any:
+        """Reconcile an existing exact mirror before creating or reopening."""
+        if pr.github_pr_number is not None:
+            if operation == "close":
+                return await self.github_service.close_pull_request(
+                    token=token,
+                    owner=integration.repo_owner,
+                    repo=integration.repo_name,
+                    pr_number=pr.github_pr_number,
+                )
+            return await self.github_service.reopen_pull_request(
+                token=token,
+                owner=integration.repo_owner,
+                repo=integration.repo_name,
+                pr_number=pr.github_pr_number,
+            )
+
+        candidates = await self.github_service.list_pull_requests(
+            token=token,
+            owner=integration.repo_owner,
+            repo=integration.repo_name,
+            state="all",
+            head=f"{integration.repo_owner}:{pr.source_branch}",
+            base=pr.target_branch,
+        )
+        exact_matches = [
+            candidate
+            for candidate in candidates
+            if candidate.head_ref == pr.source_branch
+            and candidate.base_ref == pr.target_branch
+        ]
+        if exact_matches:
+            candidate = max(
+                exact_matches,
+                key=lambda match: (match.updated_at, match.number),
+            )
+            if candidate.merged:
+                raise RuntimeError("Exact GitHub pull request match is already merged")
+            if operation == "close":
+                if candidate.state == "closed":
+                    return candidate
+                return await self.github_service.close_pull_request(
+                    token=token,
+                    owner=integration.repo_owner,
+                    repo=integration.repo_name,
+                    pr_number=candidate.number,
+                )
+            if candidate.state == "open":
+                return candidate
+            return await self.github_service.reopen_pull_request(
+                token=token,
+                owner=integration.repo_owner,
+                repo=integration.repo_name,
+                pr_number=candidate.number,
+            )
+
+        created = await self.github_service.create_pull_request(
+            token=token,
+            owner=integration.repo_owner,
+            repo=integration.repo_name,
+            title=pr.title,
+            head=pr.source_branch,
+            base=pr.target_branch,
+            body=pr.description,
+        )
+        if operation == "close":
+            return await self.github_service.close_pull_request(
+                token=token,
+                owner=integration.repo_owner,
+                repo=integration.repo_name,
+                pr_number=created.number,
+            )
+        return created
+
+    def _mark_github_sync_pending(self, pr: PullRequest) -> uuid.UUID:
+        attempt_id = uuid.uuid4()
+        pr.github_sync_status = GitHubSyncStatus.PENDING.value
+        pr.github_sync_last_attempted_at = datetime.now(UTC)
+        pr.github_sync_message = None
+        pr.github_sync_attempt_id = attempt_id
+        return attempt_id
+
+    def _mark_github_sync_not_configured(self, pr: PullRequest) -> None:
+        pr.github_sync_status = GitHubSyncStatus.NOT_CONFIGURED.value
+        pr.github_sync_last_attempted_at = datetime.now(UTC)
+        pr.github_sync_message = None
+        pr.github_sync_attempt_id = None
+
+    async def _finish_github_sync(
+        self,
+        pr: PullRequest,
+        attempt_id: uuid.UUID,
+        *,
+        sync_status: GitHubSyncStatus,
+        message: str | None = None,
+        github_pr_number: int | None = None,
+        github_pr_url: str | None = None,
+    ) -> None:
+        """Complete an attempt only if it still owns the per-PR claim."""
+        values: dict[str, Any] = {
+            "github_sync_status": sync_status.value,
+            "github_sync_message": message,
+            "github_sync_attempt_id": None,
+        }
+        if github_pr_number is not None:
+            values["github_pr_number"] = github_pr_number
+        if github_pr_url is not None:
+            values["github_pr_url"] = github_pr_url
+        result = cast(
+            CursorResult[Any],
+            await self.db.execute(
+                update(PullRequest)
+                .where(
+                    PullRequest.id == pr.id,
+                    PullRequest.github_sync_attempt_id == attempt_id,
+                )
+                .values(**values)
+                .execution_options(synchronize_session=False)
+            ),
+        )
+        await self.db.commit()
+        if result.rowcount == 0:
+            # A newer retry owns the receipt. Its result is authoritative.
+            await self.db.refresh(pr)
+            return
+        for key, value in values.items():
+            setattr(pr, key, value)
 
     async def _mark_pull_request_open_already_locked(
         self, project_id: UUID, pr: PullRequest
@@ -1955,6 +2193,9 @@ class PullRequestService:
             author=PRUser(id=pr.author_id, name=author_name, email=author_email),
             github_pr_number=pr.github_pr_number,
             github_pr_url=pr.github_pr_url,
+            github_sync_status=pr.github_sync_status,  # type: ignore[arg-type]
+            github_sync_last_attempted_at=pr.github_sync_last_attempted_at,
+            github_sync_message=pr.github_sync_message,
             merged_by=pr.merged_by,
             merged_by_user=PRUser(id=pr.merged_by) if pr.merged_by else None,
             merged_at=pr.merged_at,

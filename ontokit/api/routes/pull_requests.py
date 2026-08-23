@@ -177,6 +177,20 @@ async def reopen_pull_request(
     return await service.reopen_pull_request(project_id, pr_number, user)
 
 
+@router.post(
+    "/{project_id}/pull-requests/{pr_number}/github-sync/retry",
+    response_model=PRResponse,
+)
+async def retry_pull_request_github_sync(
+    project_id: UUID,
+    pr_number: int,
+    service: Annotated[PullRequestService, Depends(get_service)],
+    user: RequiredUser,
+) -> PRResponse:
+    """Retry the best-effort GitHub mirror as the PR author or a project administrator."""
+    return await service.retry_github_sync(project_id, pr_number, user)
+
+
 @router.post("/{project_id}/pull-requests/{pr_number}/merge", response_model=PRMergeResponse)
 async def merge_pull_request(
     project_id: UUID,
