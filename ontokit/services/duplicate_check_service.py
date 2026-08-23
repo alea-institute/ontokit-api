@@ -8,7 +8,7 @@ import logging
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, tuple_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -65,8 +65,6 @@ class DuplicateCheckService:
         exclude_branch: str | None = None,
         exclude_iris: set[str] | None = None,
         proposed_iri: str | None = None,
-        suggestion_session_id: UUID | None = None,
-        suppress_distinct: bool = True,
     ) -> DuplicateCheckResponse:
         """Run composite duplicate check across all branches (DEDUP-04 through DEDUP-08).
 
@@ -82,7 +80,6 @@ class DuplicateCheckService:
         Returns verdict (block/warn/pass), composite score, breakdown, and enriched candidates.
         """
         normalized_label = label.lower().strip()
-        del suggestion_session_id  # carried for audit-capable callers; check remains read-only
 
         # 1. Semantic search across ALL branches (DEDUP-08)
         semantic_candidates = await self._embedding_svc.semantic_search_all_branches(
@@ -107,6 +104,26 @@ class DuplicateCheckService:
         suppressed_decisions: list[DistinctDecisionResponse] = []
         best_composite = 0.0
         best_breakdown = ScoreBreakdown(exact=0.0, semantic=0.0, structural=0.0)
+        fingerprints_by_candidate: dict[str, tuple[str, str, str, str]] = {}
+        decisions_by_pair: dict[tuple[str, str], DuplicateRejection] = {}
+        if proposed_iri:
+            fingerprints_by_candidate = {
+                result.iri: self._fingerprints_for_pair(
+                    proposed_iri=proposed_iri,
+                    proposed_label=label,
+                    entity_type=entity_type,
+                    parent_iri=parent_iri,
+                    candidate_iri=result.iri,
+                    candidate_label=result.label or "",
+                    candidate_entity_type=result.entity_type,
+                )
+                for result in semantic_candidates
+                if result.iri != proposed_iri
+            }
+            decisions_by_pair = await self._active_decisions_for_pairs(
+                project_id,
+                {(value[0], value[1]) for value in fingerprints_by_candidate.values()},
+            )
 
         for sem_result in semantic_candidates:
             # Exact score: case-insensitive label match
@@ -154,24 +171,14 @@ class DuplicateCheckService:
             if exact_score == 1.0:
                 composite = 1.0
 
-            if proposed_iri and suppress_distinct and proposed_iri != sem_result.iri:
-                iri_a, iri_b, fingerprint_a, fingerprint_b = self._fingerprints_for_pair(
-                    proposed_iri=proposed_iri,
-                    proposed_label=label,
-                    entity_type=entity_type,
-                    parent_iri=parent_iri,
-                    candidate_iri=sem_result.iri,
-                    candidate_label=sem_result.label or "",
-                    candidate_entity_type=sem_result.entity_type,
-                )
-                decision = await self._find_matching_decision(
-                    project_id,
-                    iri_a,
-                    iri_b,
-                    fingerprint_a,
-                    fingerprint_b,
-                )
-                if decision is not None:
+            fingerprints = fingerprints_by_candidate.get(sem_result.iri)
+            if fingerprints:
+                iri_a, iri_b, fingerprint_a, fingerprint_b = fingerprints
+                decision = decisions_by_pair.get((iri_a, iri_b))
+                if decision is not None and (
+                    decision.fingerprint_a == fingerprint_a
+                    and decision.fingerprint_b == fingerprint_b
+                ):
                     suppressed_decisions.append(DistinctDecisionResponse.model_validate(decision))
                     continue
 
@@ -233,10 +240,7 @@ class DuplicateCheckService:
             label=request.label,
             entity_type=request.entity_type,
             parent_iri=request.parent_iri,
-            proposed_iri=request.proposed_iri,
-            suggestion_session_id=request.suggestion_session_id,
             billing_user_id=billing_user_id,
-            suppress_distinct=False,
         )
         candidate = next(
             (item for item in check.candidates if item.iri == request.candidate_iri), None
@@ -334,25 +338,21 @@ class DuplicateCheckService:
             await self._db.refresh(decision)
         return decision
 
-    async def _find_matching_decision(
+    async def _active_decisions_for_pairs(
         self,
         project_id: UUID,
-        iri_a: str,
-        iri_b: str,
-        fingerprint_a: str,
-        fingerprint_b: str,
-    ) -> DuplicateRejection | None:
+        pairs: set[tuple[str, str]],
+    ) -> dict[tuple[str, str], DuplicateRejection]:
+        if not pairs:
+            return {}
         result = await self._db.execute(
             select(DuplicateRejection).where(
                 DuplicateRejection.project_id == project_id,
-                DuplicateRejection.iri_a == iri_a,
-                DuplicateRejection.iri_b == iri_b,
-                DuplicateRejection.fingerprint_a == fingerprint_a,
-                DuplicateRejection.fingerprint_b == fingerprint_b,
                 DuplicateRejection.revoked_at.is_(None),
+                tuple_(DuplicateRejection.iri_a, DuplicateRejection.iri_b).in_(pairs),
             )
         )
-        return result.scalar_one_or_none()
+        return {(decision.iri_a, decision.iri_b): decision for decision in result.scalars()}
 
     async def _get_active_decision(
         self, project_id: UUID, iri_a: str, iri_b: str, *, for_update: bool = False

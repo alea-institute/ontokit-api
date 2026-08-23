@@ -71,7 +71,6 @@ class DuplicateCheckRequest(BaseModel):
     entity_type: str = "class"
     parent_iri: str | None = None
     proposed_iri: str | None = None
-    suggestion_session_id: UUID | None = None
 
 
 class DistinctDecisionMarkRequest(BaseModel):
@@ -121,11 +120,6 @@ class DistinctDecisionResponse(BaseModel):
     revoked_at: datetime | None
     revoked_by: str | None
     superseded_by_id: UUID | None
-
-    @property
-    def active(self) -> bool:
-        return self.revoked_at is None
-
 
 class DuplicateCheckResponse(BaseModel):
     """Response for the duplicate check endpoint.

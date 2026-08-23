@@ -124,7 +124,7 @@ async def test_create_sync_reconciles_exact_open_match_without_creating() -> Non
         pr,
         MagicMock(repo_owner="org", repo_name="repo"),
         "token",
-        operation="create",
+        desired_state="open",
     )
 
     assert result.number == 12
@@ -144,7 +144,7 @@ async def test_create_sync_reuses_and_reopens_exact_closed_match() -> None:
         _pr(),
         MagicMock(repo_owner="org", repo_name="repo"),
         "token",
-        operation="create",
+        desired_state="open",
     )
 
     assert result.number == 10
@@ -163,7 +163,7 @@ async def test_best_effort_sync_records_safe_failure_without_leaking_exception()
     )
     pr = _pr()
 
-    await service._sync_pull_request_to_github(PROJECT_ID, pr, operation="create")
+    await service._sync_pull_request_to_github(PROJECT_ID, pr, desired_state="open")
 
     assert pr.github_sync_status == GitHubSyncStatus.FAILED.value
     assert "secret-123" not in pr.github_sync_message
@@ -179,7 +179,7 @@ async def test_best_effort_sync_records_not_configured_without_network() -> None
     service._get_github_token = AsyncMock(return_value=None)  # type: ignore[method-assign]
     pr = _pr()
 
-    await service._sync_pull_request_to_github(PROJECT_ID, pr, operation="create")
+    await service._sync_pull_request_to_github(PROJECT_ID, pr, desired_state="open")
 
     assert pr.github_sync_status == GitHubSyncStatus.NOT_CONFIGURED.value
     assert pr.github_sync_message is None

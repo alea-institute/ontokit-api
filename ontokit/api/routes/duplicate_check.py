@@ -1,6 +1,7 @@
 """Duplicate check API — composite scoring endpoint for pre-submission validation."""
 
 import logging
+from collections.abc import Collection
 from typing import Annotated
 from uuid import UUID
 
@@ -15,6 +16,7 @@ from ontokit.schemas.duplicate_check import (
     DuplicateCheckRequest,
     DuplicateCheckResponse,
 )
+from ontokit.schemas.project import ProjectRole
 from ontokit.services.duplicate_check_service import (
     DistinctDecisionConflictError,
     DuplicateCandidateUnavailableError,
@@ -29,6 +31,12 @@ from ontokit.services.project_service import get_project_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/projects/{project_id}", tags=["duplicate-check"])
+
+MARK_DISTINCT_ROLES: frozenset[ProjectRole] = frozenset({"owner", "admin", "editor"})
+VIEW_DISTINCT_ROLES: frozenset[ProjectRole] = frozenset(
+    {"owner", "admin", "editor", "suggester", "viewer"}
+)
+REVOKE_DISTINCT_ROLES: frozenset[ProjectRole] = frozenset({"owner", "admin"})
 
 
 @router.post("/duplicate-check", response_model=DuplicateCheckResponse)
@@ -65,7 +73,6 @@ async def check_duplicate(
             entity_type=request.entity_type,
             parent_iri=request.parent_iri,
             proposed_iri=request.proposed_iri,
-            suggestion_session_id=request.suggestion_session_id,
             limit=10,
             billing_user_id=str(user.id),
         )
@@ -82,7 +89,7 @@ async def _require_project_role(
     project_id: UUID,
     db: AsyncSession,
     user: RequiredUser,
-    allowed_roles: frozenset[str],
+    allowed_roles: Collection[ProjectRole],
     detail: str,
 ) -> None:
     project = await get_project_service(db).get(project_id, user)
@@ -106,7 +113,7 @@ async def mark_distinct(
         project_id,
         db,
         user,
-        frozenset({"owner", "admin", "editor"}),
+        MARK_DISTINCT_ROLES,
         "Only owners, admins, or editors can mark entities as distinct",
     )
     try:
@@ -116,9 +123,7 @@ async def mark_distinct(
             actor_id=str(user.id),
             billing_user_id=str(user.id),
         )
-    except DuplicateCandidateUnavailableError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
-    except DistinctDecisionConflictError as exc:
+    except (DuplicateCandidateUnavailableError, DistinctDecisionConflictError) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(
@@ -151,7 +156,7 @@ async def list_distinct_decisions(
         project_id,
         db,
         user,
-        frozenset({"owner", "admin", "editor", "suggester", "viewer"}),
+        VIEW_DISTINCT_ROLES,
         "Project membership required to view distinct decisions",
     )
     decisions = await DuplicateCheckService(db).list_distinct_decisions(
@@ -175,7 +180,7 @@ async def revoke_distinct_decision(
         project_id,
         db,
         user,
-        frozenset({"owner", "admin"}),
+        REVOKE_DISTINCT_ROLES,
         "Only owners or admins can revoke distinct decisions",
     )
     decision = await DuplicateCheckService(db).revoke_distinct_decision(

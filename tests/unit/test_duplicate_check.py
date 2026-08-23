@@ -365,13 +365,22 @@ async def test_active_distinct_decision_suppresses_candidate_before_verdict():
     """A matching fingerprint-bound decision removes the candidate from scoring."""
     svc, _ = _make_service()
     sem_result = _make_sem_result(label="Legal Entity", score=1.0, branch="main")
+    pair = svc._fingerprints_for_pair(
+        proposed_iri="http://example.org/ProposedLegalEntity",
+        proposed_label="Legal Entity",
+        entity_type="class",
+        parent_iri=None,
+        candidate_iri=sem_result.iri,
+        candidate_label=sem_result.label,
+        candidate_entity_type=sem_result.entity_type,
+    )
     decision = DuplicateRejection(
         id=uuid4(),
         project_id=PROJECT_ID,
-        iri_a="http://example.org/LegalEntity",
-        iri_b="http://example.org/ProposedLegalEntity",
-        fingerprint_a="a" * 64,
-        fingerprint_b="b" * 64,
+        iri_a=pair[0],
+        iri_b=pair[1],
+        fingerprint_a=pair[2],
+        fingerprint_b=pair[3],
         reason="These are distinct concepts in this ontology.",
         marked_by="reviewer-1",
         marked_at=datetime.now(UTC),
@@ -386,8 +395,8 @@ async def test_active_distinct_decision_suppresses_candidate_before_verdict():
         patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
         patch.object(
             svc,
-            "_find_matching_decision",
-            new=AsyncMock(return_value=decision),
+            "_active_decisions_for_pairs",
+            new=AsyncMock(return_value={(pair[0], pair[1]): decision}),
         ),
     ):
         response = await svc.check(
@@ -407,6 +416,26 @@ async def test_stale_distinct_decision_does_not_suppress_changed_input():
     """Materially changed normalized inputs resurface the candidate."""
     svc, _ = _make_service()
     sem_result = _make_sem_result(label="Legal Entity", score=1.0, branch="main")
+    pair = svc._fingerprints_for_pair(
+        proposed_iri="http://example.org/ProposedLegalEntity",
+        proposed_label="Materially changed legal entity",
+        entity_type="class",
+        parent_iri=None,
+        candidate_iri=sem_result.iri,
+        candidate_label=sem_result.label,
+        candidate_entity_type=sem_result.entity_type,
+    )
+    stale_decision = DuplicateRejection(
+        id=uuid4(),
+        project_id=PROJECT_ID,
+        iri_a=pair[0],
+        iri_b=pair[1],
+        fingerprint_a="a" * 64,
+        fingerprint_b="b" * 64,
+        reason="Decision for prior inputs",
+        marked_by="reviewer-1",
+        marked_at=datetime.now(UTC),
+    )
 
     with (
         patch.object(
@@ -417,9 +446,9 @@ async def test_stale_distinct_decision_does_not_suppress_changed_input():
         patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
         patch.object(
             svc,
-            "_find_matching_decision",
-            new=AsyncMock(return_value=None),
-        ) as find_decision,
+            "_active_decisions_for_pairs",
+            new=AsyncMock(return_value={(pair[0], pair[1]): stale_decision}),
+        ) as find_decisions,
     ):
         response = await svc.check(
             PROJECT_ID,
@@ -427,6 +456,6 @@ async def test_stale_distinct_decision_does_not_suppress_changed_input():
             proposed_iri="http://example.org/ProposedLegalEntity",
         )
 
-    assert find_decision.await_count == 1
+    assert find_decisions.await_count == 1
     assert response.verdict == "block"
     assert [candidate.iri for candidate in response.candidates] == [sem_result.iri]
