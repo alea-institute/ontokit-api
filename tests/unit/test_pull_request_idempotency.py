@@ -60,11 +60,29 @@ def test_migration_names_legacy_duplicate_groups_before_ddl() -> None:
     module = _load_migration()
     fake_op = MagicMock()
     fake_op.get_bind.return_value.execute.return_value.all.return_value = [
-        ("11111111-1111-1111-1111-111111111111", "suggest/user-1", 2),
+        ("11111111-1111-1111-1111-111111111111", "suggest/user-1", 2, 1),
     ]
     module.op = fake_op
 
     with pytest.raises(RuntimeError, match=r"suggest/user-1 \(2\)"):
         module.upgrade()
 
+    fake_op.create_index.assert_not_called()
+
+
+def test_migration_bounds_and_reports_duplicate_groups() -> None:
+    module = _load_migration()
+    fake_op = MagicMock()
+    duplicate_rows = [
+        ("11111111-1111-1111-1111-111111111111", f"suggest/user-{index}", 2, 25)
+        for index in range(module.DUPLICATE_REPORT_LIMIT)
+    ]
+    fake_op.get_bind.return_value.execute.return_value.all.return_value = duplicate_rows
+    module.op = fake_op
+
+    with pytest.raises(RuntimeError, match=r"showing first 20 of 25 duplicate groups"):
+        module.upgrade()
+
+    execute_call = fake_op.get_bind.return_value.execute.call_args
+    assert execute_call.args[1] == {"report_limit": module.DUPLICATE_REPORT_LIMIT}
     fake_op.create_index.assert_not_called()

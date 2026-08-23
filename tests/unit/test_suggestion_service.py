@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError, MissingGreenlet
 from ontokit.core.auth import CurrentUser
 from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
+from ontokit.schemas.suggestion import SuggestionSubmitRequest, SuggestionSubmitResponse
 from ontokit.services.suggestion_service import SuggestionService
 
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
@@ -80,6 +81,22 @@ def _make_project(project_id: uuid.UUID = PROJECT_ID, is_public: bool = True) ->
     return project
 
 
+def _configure_editor_pr_claim(
+    pr_service: AsyncMock,
+    response: MagicMock,
+    project: MagicMock,
+) -> MagicMock:
+    """Configure the locked claim and post-lock finalization seams."""
+    db_pr = MagicMock()
+    db_pr.id = response.id
+    db_pr.pr_number = response.pr_number
+    db_pr.title = response.title
+    db_pr.github_pr_url = response.github_pr_url
+    pr_service._claim_pull_request_already_locked = AsyncMock(return_value=(db_pr, project))
+    pr_service._finalize_created_pull_request = AsyncMock(return_value=response)
+    return db_pr
+
+
 def _make_session(
     *,
     session_id: str = "s_abc12345",
@@ -118,6 +135,9 @@ def _make_session(
     session.submitter_name = None
     session.submitter_email = None
     session.client_ip = None
+    session.is_llm_generated = False
+    session.auto_accept_after = None
+    session.auto_accept_halted_at = None
     session.created_at = datetime.now(UTC)
     session.last_activity = last_activity or datetime.now(UTC)
     return session
@@ -126,12 +146,18 @@ def _make_session(
 @pytest.fixture
 def mock_db() -> AsyncMock:
     """Create an async mock of AsyncSession."""
+
+    @asynccontextmanager
+    async def savepoint() -> AsyncIterator[None]:
+        yield
+
     session = AsyncMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
     session.execute = AsyncMock()
     session.refresh = AsyncMock()
     session.add = Mock()
+    session.begin_nested = Mock(side_effect=savepoint)
     return session
 
 
@@ -157,6 +183,7 @@ def service(
         yield
 
     monkeypatch.setattr("ontokit.services.suggestion_service.branch_write_lock", unlocked)
+    monkeypatch.setattr("ontokit.services.suggestion_service.pull_request_write_locks", unlocked)
     suggestion_service = SuggestionService(db=mock_db, git_service=mock_git)
     suggestion_service._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
     return suggestion_service
@@ -899,6 +926,133 @@ class TestSave:
 
 class TestSubmit:
     @pytest.mark.asyncio
+    async def test_verification_and_fanout_run_outside_pr_lock(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        events: list[str] = []
+        session = _make_session(changes_count=1)
+        project = _make_project()
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [session_result, project_result]
+
+        @asynccontextmanager
+        async def tracked_locks(*_args: object) -> AsyncIterator[None]:
+            events.append("lock-enter")
+            try:
+                yield
+            finally:
+                events.append("lock-exit")
+
+        async def verify(*_args: object, **_kwargs: object) -> None:
+            events.append("verify")
+
+        async def consume(*_args: object, **_kwargs: object) -> None:
+            events.append("consume")
+
+        async def validate(*_args: object, **_kwargs: object) -> None:
+            events.append("validate")
+
+        async def claim(*_args: object, **_kwargs: object) -> SuggestionSubmitResponse:
+            events.append("claim")
+            return SuggestionSubmitResponse(pr_number=1, status="submitted")
+
+        async def finalize(*_args: object, **_kwargs: object) -> SuggestionSubmitResponse:
+            events.append("finalize")
+            return SuggestionSubmitResponse(pr_number=1, status="submitted")
+
+        monkeypatch.setattr(
+            "ontokit.services.suggestion_service.pull_request_write_locks", tracked_locks
+        )
+        service._verify_untrusted_human = AsyncMock(side_effect=verify)  # type: ignore[method-assign]
+        service._consume_untrusted_submission = AsyncMock(side_effect=consume)  # type: ignore[method-assign]
+        service._validate_submission_content = AsyncMock(side_effect=validate)  # type: ignore[method-assign]
+        service._create_pr_for_session_already_locked = AsyncMock(side_effect=claim)  # type: ignore[method-assign]
+        service._finalize_pr_for_session = AsyncMock(side_effect=finalize)  # type: ignore[method-assign]
+
+        await service.submit(
+            PROJECT_ID,
+            session.session_id,
+            SuggestionSubmitRequest(summary="tracked"),
+            _make_user(),
+        )
+
+        assert events == [
+            "verify",
+            "lock-enter",
+            "validate",
+            "consume",
+            "claim",
+            "lock-exit",
+            "finalize",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_invalid_content_does_not_consume_daily_allowance(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+    ) -> None:
+        session = _make_session(changes_count=1)
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = _make_project()
+        mock_db.execute.side_effect = [session_result, project_result]
+        service._verify_untrusted_human = AsyncMock()  # type: ignore[method-assign]
+        service._validate_submission_content = AsyncMock(  # type: ignore[method-assign]
+            side_effect=HTTPException(status_code=422, detail="invalid ontology")
+        )
+        service._consume_untrusted_submission = AsyncMock()  # type: ignore[method-assign]
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.submit(
+                PROJECT_ID,
+                session.session_id,
+                SuggestionSubmitRequest(summary="invalid"),
+                _make_user(),
+            )
+
+        assert exc_info.value.status_code == 422
+        service._consume_untrusted_submission.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_concurrent_submit_loser_does_not_consume_daily_allowance(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+    ) -> None:
+        session = _make_session(changes_count=1)
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = _make_project()
+        mock_db.execute.side_effect = [session_result, project_result]
+
+        async def mark_submitted(_session: object) -> None:
+            session.status = SuggestionSessionStatus.SUBMITTED.value
+
+        mock_db.refresh.side_effect = mark_submitted
+        service._verify_untrusted_human = AsyncMock()  # type: ignore[method-assign]
+        service._consume_untrusted_submission = AsyncMock()  # type: ignore[method-assign]
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.submit(
+                PROJECT_ID,
+                session.session_id,
+                SuggestionSubmitRequest(summary="lost race"),
+                _make_user(),
+            )
+
+        assert exc_info.value.status_code == 400
+        service._consume_untrusted_submission.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_submit_success(
         self,
         service: SuggestionService,
@@ -948,7 +1102,7 @@ class TestSubmit:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
@@ -1082,13 +1236,21 @@ class TestSubmit:
         )
         raced_pr_result = MagicMock()
         raced_pr_result.scalar_one_or_none.return_value = raced_pr
-        mock_db.execute.side_effect = [no_pr_result, raced_pr_result]
+        project = _make_project()
+        project.members[0].role = "suggester"
+        project.members[0].is_trusted = True
+        project.auto_accept_enabled = True
+        project.auto_accept_quiet_days = 3
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [no_pr_result, raced_pr_result, project_result]
         mock_git.get_default_branch.return_value = "main"
+        user = _make_user()
 
         with patch(
             "ontokit.services.suggestion_service.get_pull_request_service"
         ) as mock_pr_svc_factory:
-            mock_pr_svc_factory.return_value.create_pull_request = AsyncMock(
+            mock_pr_svc_factory.return_value._claim_pull_request_already_locked = AsyncMock(
                 side_effect=HTTPException(
                     status_code=409,
                     detail="An open pull request already exists for this source branch",
@@ -1097,7 +1259,7 @@ class TestSubmit:
             result = await service._create_pr_for_session(
                 PROJECT_ID,
                 session,
-                _make_user(),
+                user,
                 "summary",
                 SuggestionSessionStatus.SUBMITTED.value,
             )
@@ -1106,6 +1268,9 @@ class TestSubmit:
         assert result.pr_url == raced_pr.github_pr_url
         assert session.pr_id == raced_pr.id
         assert session.status == SuggestionSessionStatus.SUBMITTED.value
+        assert session.auto_accept_after is not None
+        assert session.auto_accept_after > datetime.now(UTC) + timedelta(days=2)
+        assert session.auto_accept_halted_at is None
         mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -1165,7 +1330,7 @@ class TestSubmit:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(
+            mock_pr_svc._claim_pull_request_already_locked = AsyncMock(
                 side_effect=HTTPException(status_code=403, detail="Forbidden")
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
@@ -1266,7 +1431,7 @@ class TestSubmit:
             patch.object(service, "_create_pr_directly", AsyncMock(return_value=direct_pr)),
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request.side_effect = HTTPException(
+            mock_pr_svc._claim_pull_request_already_locked.side_effect = HTTPException(
                 status_code=403, detail="Forbidden"
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
@@ -1278,7 +1443,7 @@ class TestSubmit:
         assert result.status == SuggestionSessionStatus.SUBMITTED.value
 
     @pytest.mark.asyncio
-    async def test_direct_pr_retry_uses_session_snapshot_after_rollback_expiry(
+    async def test_direct_pr_retry_uses_savepoint_without_expiring_session(
         self,
         service: SuggestionService,
         mock_db: AsyncMock,
@@ -1306,21 +1471,27 @@ class TestSubmit:
                 return self._read("test@example.com")
 
         session = ExpiringSession()
-        max_result = MagicMock()
-        max_result.scalar.side_effect = [5, 6]
-        mock_db.execute.return_value = max_result
+        first_existing_result = MagicMock()
+        first_existing_result.scalar_one_or_none.return_value = None
+        first_max_result = MagicMock()
+        first_max_result.scalar.return_value = 5
+        second_existing_result = MagicMock()
+        second_existing_result.scalar_one_or_none.return_value = None
+        second_max_result = MagicMock()
+        second_max_result.scalar.return_value = 6
+        mock_db.execute.side_effect = [
+            first_existing_result,
+            first_max_result,
+            second_existing_result,
+            second_max_result,
+        ]
         mock_db.flush.side_effect = [IntegrityError("duplicate", {}, Exception()), None]
 
-        async def expire_session() -> None:
-            session.expired = True
+        @asynccontextmanager
+        async def savepoint() -> AsyncIterator[None]:
+            yield
 
-        mock_db.rollback.side_effect = expire_session
-
-        async def refresh_after_retry(obj: object) -> None:
-            if obj is session:
-                session.expired = False
-
-        mock_db.refresh.side_effect = refresh_after_retry
+        mock_db.begin_nested = Mock(side_effect=savepoint)
 
         from ontokit.schemas.pull_request import PRCreate
 
@@ -1340,8 +1511,8 @@ class TestSubmit:
         assert pr.author_name == "Test User"
         assert pr.author_email == "test@example.com"
         assert mock_db.flush.await_count == 2
-        mock_db.rollback.assert_awaited_once()
-        assert mock_db.refresh.await_count == 2
+        mock_db.rollback.assert_not_awaited()
+        mock_db.refresh.assert_awaited_once_with(pr)
 
 
 # ---------------------------------------------------------------------------
@@ -2054,7 +2225,7 @@ class TestAutoSubmitStaleSessionsExtended:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
@@ -2140,7 +2311,7 @@ class TestAutoSubmitStaleSessionsExtended:
             ) as mock_pr_svc_factory,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(
+            mock_pr_svc._claim_pull_request_already_locked = AsyncMock(
                 side_effect=RuntimeError("PR creation failed")
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
@@ -2442,7 +2613,7 @@ class TestCreatePrForSession:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
@@ -2450,7 +2621,7 @@ class TestCreatePrForSession:
             await service._create_pr_for_session(PROJECT_ID, session, user, "summary", "submitted")
 
         # Verify the PR was created with the right title structure
-        call_args = mock_pr_svc.create_pull_request.call_args
+        call_args = mock_pr_svc._claim_pull_request_already_locked.call_args
         pr_create_arg = call_args[0][1]  # second positional arg
         assert "(+3 more)" in pr_create_arg.title
 
@@ -2495,14 +2666,14 @@ class TestCreatePrForSession:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
 
             await service._create_pr_for_session(PROJECT_ID, session, user, None, "submitted")
 
-        call_args = mock_pr_svc.create_pull_request.call_args
+        call_args = mock_pr_svc._claim_pull_request_already_locked.call_args
         pr_create_arg = call_args[0][1]
         assert pr_create_arg.title == "Suggestion"
 

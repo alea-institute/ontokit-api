@@ -12,6 +12,27 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _branch_locks: WeakValueDictionary[tuple[UUID, str], asyncio.Lock] = WeakValueDictionary()
+_pull_request_allocation_locks: WeakValueDictionary[UUID, asyncio.Lock] = WeakValueDictionary()
+
+
+@asynccontextmanager
+async def _pull_request_allocation_lock(db: AsyncSession, project_id: UUID) -> AsyncIterator[None]:
+    """Exclude project-wide PR number allocators.
+
+    Project locks must be acquired before branch locks.  That canonical order
+    lets project-scoped resources (such as PR numbers) coexist with branch
+    mutation without introducing cross-branch deadlocks.
+    """
+    lock = _pull_request_allocation_locks.get(project_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _pull_request_allocation_locks[project_id] = lock
+    async with lock:
+        await db.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+            {"lock_key": f"project:{project_id}:pull-request-allocation"},
+        )
+        yield
 
 
 @asynccontextmanager
@@ -47,4 +68,20 @@ async def branch_write_locks(
         yield
 
 
-__all__ = ["branch_write_lock", "branch_write_locks"]
+@asynccontextmanager
+async def pull_request_write_locks(
+    db: AsyncSession, project_id: UUID, branches: set[str]
+) -> AsyncIterator[None]:
+    """Serialize project PR-number allocation and affected branch mutation."""
+    async with (
+        _pull_request_allocation_lock(db, project_id),
+        branch_write_locks(db, project_id, branches),
+    ):
+        yield
+
+
+__all__ = [
+    "branch_write_lock",
+    "branch_write_locks",
+    "pull_request_write_locks",
+]

@@ -16,6 +16,8 @@ down_revision: str | None = "d3e4f5g6h7i8"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+DUPLICATE_REPORT_LIMIT = 20
+
 
 def upgrade() -> None:
     duplicates = (
@@ -23,25 +25,41 @@ def upgrade() -> None:
         .execute(
             sa.text(
                 """
-            SELECT project_id, source_branch, COUNT(*) AS duplicate_count
-            FROM pull_requests
-            WHERE status = 'open'
-            GROUP BY project_id, source_branch
-            HAVING COUNT(*) > 1
-            ORDER BY project_id, source_branch
-            """
-            )
+                WITH duplicate_groups AS (
+                    SELECT project_id, source_branch, COUNT(*) AS duplicate_count
+                    FROM pull_requests
+                    WHERE status = 'open'
+                    GROUP BY project_id, source_branch
+                    HAVING COUNT(*) > 1
+                )
+                SELECT
+                    project_id,
+                    source_branch,
+                    duplicate_count,
+                    COUNT(*) OVER () AS total_groups
+                FROM duplicate_groups
+                ORDER BY project_id, source_branch
+                LIMIT :report_limit
+                """
+            ),
+            {"report_limit": DUPLICATE_REPORT_LIMIT},
         )
         .all()
     )
     if duplicates:
         groups = ", ".join(
             f"{project_id}/{source_branch} ({count})"
-            for project_id, source_branch, count in duplicates
+            for project_id, source_branch, count, _total in duplicates
+        )
+        total_groups = duplicates[0][3]
+        suffix = (
+            f"; showing first {len(duplicates)} of {total_groups} duplicate groups"
+            if total_groups > len(duplicates)
+            else ""
         )
         raise RuntimeError(
             "Cannot enforce one open pull request per source branch; "
-            f"resolve duplicate groups first: {groups}"
+            f"resolve duplicate groups first: {groups}{suffix}"
         )
 
     op.create_index(

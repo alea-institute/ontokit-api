@@ -233,7 +233,13 @@ class _FakeRedis:
         self.counts[name] = self.counts.get(name, self.start) + 1
         return self.counts[name]
 
-    async def expire(self, name: str, time: int) -> bool:  # noqa: ARG002
+    async def expire(
+        self,
+        name: str,  # noqa: ARG002
+        time: int,  # noqa: ARG002
+        *,
+        nx: bool = False,  # noqa: ARG002
+    ) -> bool:
         return True
 
 

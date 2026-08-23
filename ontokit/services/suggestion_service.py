@@ -4,14 +4,9 @@ import json
 import logging
 import os
 import secrets
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 from uuid import UUID
-
-from ontokit.core.anonymous_token import create_anonymous_token
-
-if TYPE_CHECKING:
-    from ontokit.models.pull_request import PullRequest
 
 from fastapi import HTTPException, status
 from rdflib import Graph, Literal, URIRef
@@ -21,11 +16,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ontokit.core.anonymous_token import create_anonymous_token
 from ontokit.core.auth import CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.embedding import EmbeddingJob
 from ontokit.models.project import Project
+from ontokit.models.pull_request import PRStatus, PullRequest
 from ontokit.models.suggestion_outcome import SuggestionOutcomeType
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.anonymous_suggestion import (
@@ -55,10 +52,10 @@ from ontokit.schemas.suggestion import (
     SuggestionUser,
 )
 from ontokit.schemas.trust import TrustTier
-from ontokit.services.branch_lock import branch_write_lock
+from ontokit.services.branch_lock import branch_write_lock, pull_request_write_locks
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
-from ontokit.services.pull_request_service import get_pull_request_service
+from ontokit.services.pull_request_service import PullRequestService, get_pull_request_service
 from ontokit.services.trust_rate_limiter import TrustLimiterRedis, check_and_consume
 from ontokit.services.trust_service import SYSTEM_AUTO_ACCEPT_ACTOR, TrustService
 from ontokit.services.verification import get_verification_provider
@@ -68,6 +65,27 @@ logger = logging.getLogger(__name__)
 # Bound submit-time semantic duplicate checks so a malformed diff cannot fan out
 # into an unbounded sequence of embedding and pgvector queries.
 MAX_NEW_ENTITIES_PER_SUBMISSION = 25
+
+
+@dataclass(frozen=True, slots=True)
+class _ExternalPRFinalization:
+    """Complete context for synchronizing one claimed PR outside its locks."""
+
+    service: PullRequestService
+    db_pr: PullRequest
+    project: Project
+    create: PRCreate
+
+
+@dataclass(frozen=True, slots=True)
+class _PendingSuggestionPullRequest:
+    """A committed PR claim whose external fan-out must run after lock release."""
+
+    id: UUID
+    pr_number: int
+    title: str
+    github_pr_url: str | None
+    external_finalization: _ExternalPRFinalization | None = None
 
 
 class SuggestionService:
@@ -648,9 +666,18 @@ class SuggestionService:
                 detail="No changes to submit",
             )
 
+        # Human verification may call a remote provider, so keep it outside the
+        # PR allocation critical section. Consume the daily allowance only after
+        # the refreshed session and submitted content are both eligible.
+        await self._verify_untrusted_human(project, session, user, verification_token, client_ip)
+        verification_passed = session.verification_passed
+
         filename = self._get_git_ontology_path(project)
-        async with branch_write_lock(self.db, project_id, session.branch):
+        default_branch = self.git_service.get_default_branch(project_id)
+        async with pull_request_write_locks(self.db, project_id, {session.branch, default_branch}):
             await self.db.refresh(session)
+            if verification_passed:
+                session.verification_passed = True
             if session.status != SuggestionSessionStatus.ACTIVE.value:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -660,27 +687,29 @@ class SuggestionService:
             await self._validate_submission_content(
                 project_id, session.branch, filename, content.decode("utf-8")
             )
+            await self._consume_untrusted_submission(project, user, redis)
 
-            # R10 gates run BEFORE any git or PR work, so a refused submission
-            # leaves no side effects behind.
-            await self._enforce_untrusted_gates(
-                project, session, user, verification_token, client_ip, redis
+            claimed_pr = await self._create_pr_for_session_already_locked(
+                project_id,
+                session,
+                user,
+                data.summary,
+                "submitted",
+                default_branch,
             )
+        return await self._finalize_pr_for_session(
+            project_id, session, user, data.summary, "submitted", claimed_pr
+        )
 
-            return await self._create_pr_for_session(
-                project_id, session, user, data.summary, "submitted"
-            )
-
-    async def _enforce_untrusted_gates(
+    async def _verify_untrusted_human(
         self,
         project: Project,
         session: SuggestionSession,
         user: CurrentUser,
         verification_token: str | None,
         client_ip: str | None,
-        redis: TrustLimiterRedis | None,
     ) -> None:
-        """Human verification and per-account rate limiting for the untrusted rung (R10).
+        """Complete first-submission verification for the untrusted rung (R10).
 
         Only the untrusted rung is gated: trusted contributors have earned their
         way past it, and reviewers were never subject to it. Anonymous sessions
@@ -688,14 +717,12 @@ class SuggestionService:
         """
         if self.trust.resolve_tier(project, user) is not TrustTier.UNTRUSTED:
             return
-        project_id = project.id
-
         # First suggestion on this project: challenge once (F2). Persisted on
         # the session so a retry after a network blip does not re-challenge.
         if not session.verification_passed:
             provider = get_verification_provider()
             is_first_suggestion = (
-                provider.enabled and await self.trust.count_outcomes(project_id, user.id) == 0
+                provider.enabled and await self.trust.count_outcomes(project.id, user.id) == 0
             )
             if is_first_suggestion and not await provider.verify(verification_token, client_ip):
                 raise HTTPException(
@@ -707,6 +734,17 @@ class SuggestionService:
                 )
             session.verification_passed = True
 
+    async def _consume_untrusted_submission(
+        self,
+        project: Project,
+        user: CurrentUser,
+        redis: TrustLimiterRedis | None,
+    ) -> None:
+        """Consume allowance only for an eligible untrusted submission."""
+        if self.trust.resolve_tier(project, user) is not TrustTier.UNTRUSTED:
+            return
+
+        project_id = project.id
         allowed, remaining = await check_and_consume(redis, str(project_id), user.id)
         if not allowed:
             raise HTTPException(
@@ -733,7 +771,32 @@ class SuggestionService:
         summary: str | None,
         new_status: str,
     ) -> SuggestionSubmitResponse:
-        """Create a PR from a suggestion session."""
+        """Create a suggestion PR while acquiring its lock set exactly once."""
+        default_branch = self.git_service.get_default_branch(project_id)
+        async with pull_request_write_locks(self.db, project_id, {session.branch, default_branch}):
+            claimed_pr = await self._create_pr_for_session_already_locked(
+                project_id,
+                session,
+                user,
+                summary,
+                new_status,
+                default_branch,
+            )
+        return await self._finalize_pr_for_session(
+            project_id, session, user, summary, new_status, claimed_pr
+        )
+
+    async def _create_pr_for_session_already_locked(
+        self,
+        project_id: UUID,
+        session: SuggestionSession,
+        user: CurrentUser,
+        summary: str | None,
+        new_status: str,
+        default_branch: str,
+    ) -> SuggestionSubmitResponse | _PendingSuggestionPullRequest:
+        """Claim and bind a suggestion PR while the caller holds all PR locks."""
+
         entities = self._parse_entities_modified(session)
         entity_list = ", ".join(entities[:5])
         if len(entities) > 5:
@@ -761,36 +824,24 @@ class SuggestionService:
         description = "\n".join(body_parts)
 
         # Check for an existing PR on this branch (idempotency on retry)
-        from ontokit.models.pull_request import PullRequest
-
         existing_pr_result = await self.db.execute(
             select(PullRequest).where(
                 PullRequest.project_id == project_id,
                 PullRequest.source_branch == session.branch,
-                PullRequest.status == "open",
+                PullRequest.status == PRStatus.OPEN.value,
             )
         )
         existing_pr = existing_pr_result.scalar_one_or_none()
         if existing_pr:
             # PR already created (previous attempt failed after PR but before session update)
-            existing_pr_id = existing_pr.id
-            existing_pr_number = existing_pr.pr_number
-            existing_pr_url = existing_pr.github_pr_url
-            session.status = new_status
-            session.pr_number = existing_pr_number
-            session.pr_id = existing_pr_id
-            session.last_activity = datetime.now(UTC)
-            await self._schedule_auto_accept(project_id, session, user)
-            await self.db.commit()
-
+            await self._bind_session_to_pr(
+                project_id, session, user, new_status, existing_pr.id, existing_pr.pr_number
+            )
             return SuggestionSubmitResponse(
-                pr_number=existing_pr_number,
-                pr_url=existing_pr_url,
+                pr_number=existing_pr.pr_number,
+                pr_url=existing_pr.github_pr_url,
                 status=new_status,
             )
-
-        # Get default branch
-        default_branch = self.git_service.get_default_branch(project_id)
 
         # Create PR via the existing PR service
         pr_service = get_pull_request_service(self.db)
@@ -801,29 +852,31 @@ class SuggestionService:
             target_branch=default_branch,
         )
 
+        pr_project: Project | None = None
+        db_pr: PullRequest
         try:
-            pr_response = await pr_service.create_pull_request(project_id, pr_create, user)
+            db_pr, pr_project = await pr_service._claim_pull_request_already_locked(
+                project_id, pr_create, user
+            )
         except HTTPException as e:
             # If the user doesn't have editor role for PR creation,
             # fall back to creating the PR directly
             if e.status_code == status.HTTP_403_FORBIDDEN:
-                pr_response = await self._create_pr_directly(project_id, pr_create, session)  # type: ignore[assignment]
+                db_pr = await self._create_pr_directly(project_id, pr_create, session)
             elif e.status_code == status.HTTP_409_CONFLICT:
                 raced_pr_result = await self.db.execute(
                     select(PullRequest).where(
                         PullRequest.project_id == project_id,
                         PullRequest.source_branch == session.branch,
-                        PullRequest.status == "open",
+                        PullRequest.status == PRStatus.OPEN.value,
                     )
                 )
                 raced_pr = raced_pr_result.scalar_one_or_none()
                 if raced_pr is None:
                     raise
-                session.status = new_status
-                session.pr_number = raced_pr.pr_number
-                session.pr_id = raced_pr.id
-                session.last_activity = datetime.now(UTC)
-                await self.db.commit()
+                await self._bind_session_to_pr(
+                    project_id, session, user, new_status, raced_pr.id, raced_pr.pr_number
+                )
                 return SuggestionSubmitResponse(
                     pr_number=raced_pr.pr_number,
                     pr_url=raced_pr.github_pr_url,
@@ -832,24 +885,66 @@ class SuggestionService:
             else:
                 raise
 
-        # The editor path returns a Pydantic response, while the suggester
-        # fallback returns an ORM instance. Snapshot every value needed below
-        # before subsequent database work can expire ORM-backed attributes.
-        pr_id = pr_response.id
-        pr_number = pr_response.pr_number
-        pr_title = pr_response.title
-        pr_url = pr_response.github_pr_url
-        user_id = user.id
+        # Snapshot ORM fields before the session commit can expire them, then
+        # make the session-to-PR link durable while locks are still held.
+        pending = _PendingSuggestionPullRequest(
+            id=db_pr.id,
+            pr_number=db_pr.pr_number,
+            title=db_pr.title,
+            github_pr_url=db_pr.github_pr_url,
+            external_finalization=(
+                _ExternalPRFinalization(pr_service, db_pr, pr_project, pr_create)
+                if pr_project is not None
+                else None
+            ),
+        )
+        await self._bind_session_to_pr(
+            project_id, session, user, new_status, pending.id, pending.pr_number
+        )
+        return pending
 
-        # Update session
+    async def _bind_session_to_pr(
+        self,
+        project_id: UUID,
+        session: SuggestionSession,
+        user: CurrentUser,
+        new_status: str,
+        pr_id: UUID,
+        pr_number: int,
+    ) -> None:
+        """Persist the common idempotent session-to-PR state transition."""
         session.status = new_status
         session.pr_number = pr_number
         session.pr_id = pr_id
         session.last_activity = datetime.now(UTC)
-
-        # Start the auto-accept quiet clock if — and only if — this submission
-        # is eligible (R11): trusted human, on a project that opted in.
         await self._schedule_auto_accept(project_id, session, user)
+        await self.db.commit()
+
+    async def _finalize_pr_for_session(
+        self,
+        project_id: UUID,
+        session: SuggestionSession,
+        user: CurrentUser,
+        summary: str | None,
+        new_status: str,
+        claimed_pr: SuggestionSubmitResponse | _PendingSuggestionPullRequest,
+    ) -> SuggestionSubmitResponse:
+        """Run GitHub synchronization and notifications after lock release."""
+        if isinstance(claimed_pr, SuggestionSubmitResponse):
+            return claimed_pr
+
+        pr_title = claimed_pr.title
+        pr_url = claimed_pr.github_pr_url
+        if (finalization := claimed_pr.external_finalization) is not None:
+            pr_response = await finalization.service._finalize_created_pull_request(
+                project_id,
+                finalization.create,
+                user,
+                finalization.project,
+                finalization.db_pr,
+            )
+            pr_title = pr_response.title
+            pr_url = pr_response.github_pr_url
 
         # Notify project editors/admins about the suggestion
         project = await self._get_project(project_id)
@@ -866,15 +961,15 @@ class SuggestionService:
             notification_type=notification_type,
             title=f"Suggestion submitted: {pr_title[:80]}",
             body=summary[:200] if summary else None,
-            target_id=str(pr_id),
-            exclude_user_id=user_id,
+            target_id=str(claimed_pr.id),
+            exclude_user_id=user.id,
         )
 
         await self.db.commit()
         await self._enqueue_branch_refresh(project_id, session.branch, full_embedding=True)
 
         return SuggestionSubmitResponse(
-            pr_number=pr_number,
+            pr_number=claimed_pr.pr_number,
             pr_url=pr_url,
             status=new_status,
         )
@@ -885,68 +980,58 @@ class SuggestionService:
         pr_create: PRCreate,
         session: SuggestionSession,
     ) -> "PullRequest":
-        """Create a PR record directly when the user lacks editor role."""
+        """Create a PR record directly while the caller holds all PR locks."""
         from sqlalchemy import func as sa_func
 
         from ontokit.models.pull_request import PRStatus, PullRequest
 
-        # A failed allocation rolls back the session and expires ORM-backed
-        # attributes. Keep every value needed by later attempts detached from
-        # the SuggestionSession before the first flush can trigger rollback.
         author_id = session.user_id
         author_name = session.user_name
         author_email = session.user_email
 
         max_retries = 3
-        rolled_back = False
         for attempt in range(max_retries):
-            async with branch_write_lock(self.db, project_id, pr_create.source_branch):
-                existing_result = await self.db.execute(
-                    select(PullRequest).where(
-                        PullRequest.project_id == project_id,
-                        PullRequest.source_branch == pr_create.source_branch,
-                        PullRequest.status == PRStatus.OPEN.value,
-                    )
+            existing_result = await self.db.execute(
+                select(PullRequest).where(
+                    PullRequest.project_id == project_id,
+                    PullRequest.source_branch == pr_create.source_branch,
+                    PullRequest.status == PRStatus.OPEN.value,
                 )
-                existing = existing_result.scalar_one_or_none()
-                if existing is not None:
-                    return existing
+            )
+            existing = existing_result.scalar_one_or_none()
+            if existing is not None:
+                return existing
 
-                max_number_result = await self.db.execute(
-                    select(sa_func.max(PullRequest.pr_number)).where(
-                        PullRequest.project_id == project_id
-                    )
+            max_number_result = await self.db.execute(
+                select(sa_func.max(PullRequest.pr_number)).where(
+                    PullRequest.project_id == project_id
                 )
-                max_number = max_number_result.scalar() or 0
-                pr_number = max_number + 1
+            )
+            max_number = max_number_result.scalar() or 0
+            pr_number = max_number + 1
 
-                db_pr = PullRequest(
-                    project_id=project_id,
-                    pr_number=pr_number,
-                    title=pr_create.title,
-                    description=pr_create.description,
-                    source_branch=pr_create.source_branch,
-                    target_branch=pr_create.target_branch,
-                    author_id=author_id,
-                    author_name=author_name,
-                    author_email=author_email,
-                    status=PRStatus.OPEN.value,
-                )
-                self.db.add(db_pr)
-                try:
+            db_pr = PullRequest(
+                project_id=project_id,
+                pr_number=pr_number,
+                title=pr_create.title,
+                description=pr_create.description,
+                source_branch=pr_create.source_branch,
+                target_branch=pr_create.target_branch,
+                author_id=author_id,
+                author_name=author_name,
+                author_email=author_email,
+                status=PRStatus.OPEN.value,
+            )
+            try:
+                async with self.db.begin_nested():
+                    self.db.add(db_pr)
                     await self.db.flush()
-                except IntegrityError:
-                    await self.db.rollback()
-                    rolled_back = True
-                    if attempt == max_retries - 1:
-                        raise
-                    continue
-                if rolled_back:
-                    # The caller continues using this ORM instance after the
-                    # helper returns (including stale auto-submit logging).
-                    await self.db.refresh(session)
-                await self.db.refresh(db_pr)
-                return db_pr
+            except IntegrityError:
+                if attempt == max_retries - 1:
+                    raise
+                continue
+            await self.db.refresh(db_pr)
+            return db_pr
 
         # Unreachable, but satisfies type checker
         raise RuntimeError("Failed to allocate PR number")

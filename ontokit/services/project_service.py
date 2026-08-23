@@ -5,7 +5,6 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import cast
 from uuid import UUID
 
 from fastapi import HTTPException, status
@@ -550,11 +549,11 @@ class ProjectService:
 
         return self._to_response(project, user)
 
-    async def require_member_role(
+    async def require_member(
         self,
         project_id: UUID,
         user: CurrentUser,
-    ) -> ProjectRole | None:
+    ) -> None:
         """Require project membership using a narrow lookup suitable for polling."""
         result = await self.db.execute(
             select(Project.id, ProjectMember.role)
@@ -578,7 +577,6 @@ class ProjectService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Project membership required",
             )
-        return cast(ProjectRole | None, row.role)
 
     async def update(
         self,

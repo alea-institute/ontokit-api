@@ -1,14 +1,24 @@
 """Route tests for privacy-safe per-call LLM audit history."""
 
+import base64
+import json
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from ontokit.core.auth import ANONYMOUS_USER
+
 PROJECT_ID = UUID("11111111-1111-1111-1111-111111111111")
 URL = f"/api/v1/projects/{PROJECT_ID}/llm/audit"
+
+
+def _encode_cursor_payload(payload: dict[str, object]) -> str:
+    encoded = base64.urlsafe_b64encode(json.dumps(payload).encode())
+    return encoded.rstrip(b"=").decode()
 
 
 def _audit_row(created_at: datetime) -> MagicMock:
@@ -36,6 +46,25 @@ def _scalar_rows(rows: list[MagicMock]) -> MagicMock:
 def test_audit_history_requires_authentication(client: TestClient) -> None:
     response = client.get(URL)
     assert response.status_code in (401, 403)
+
+
+@pytest.mark.asyncio
+async def test_audit_history_rejects_disabled_auth_identity_before_database_access() -> None:
+    from ontokit.api.routes.llm import get_llm_audit_history
+
+    session = AsyncMock()
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_llm_audit_history(
+            PROJECT_ID,
+            session,
+            ANONYMOUS_USER,
+            cursor=None,
+            limit=50,
+        )
+
+    assert exc_info.value.status_code == 403
+    session.execute.assert_not_awaited()
 
 
 def test_owner_gets_metadata_only_keyset_page(
@@ -106,6 +135,47 @@ def test_invalid_audit_cursor_is_typed_422(
 
     assert response.status_code == 422
     session.execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("field", ["project_id", "created_at", "id"])
+@pytest.mark.parametrize("invalid_value", [None, {}, [], True, 42])
+def test_audit_cursor_rejects_non_string_fields_with_typed_422(
+    field: str,
+    invalid_value: object,
+) -> None:
+    from ontokit.api.routes.llm import _decode_audit_cursor
+
+    payload: dict[str, object] = {
+        "v": 1,
+        "project_id": str(PROJECT_ID),
+        "created_at": "2026-08-22T12:00:00+00:00",
+        "id": str(uuid4()),
+    }
+    payload[field] = invalid_value
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_audit_cursor(_encode_cursor_payload(payload), PROJECT_ID)
+
+    assert exc_info.value.status_code == 422
+
+
+@pytest.mark.parametrize("invalid_version", [None, {}, [], True, 1.0, "1", 0, 2])
+def test_audit_cursor_rejects_invalid_version_with_typed_422(
+    invalid_version: object,
+) -> None:
+    from ontokit.api.routes.llm import _decode_audit_cursor
+
+    payload: dict[str, object] = {
+        "v": invalid_version,
+        "project_id": str(PROJECT_ID),
+        "created_at": "2026-08-22T12:00:00+00:00",
+        "id": str(uuid4()),
+    }
+
+    with pytest.raises(HTTPException) as exc_info:
+        _decode_audit_cursor(_encode_cursor_payload(payload), PROJECT_ID)
+
+    assert exc_info.value.status_code == 422
 
 
 def test_audit_cursor_cannot_replay_across_projects() -> None:

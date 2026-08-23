@@ -134,8 +134,10 @@ async def test_p0_1_suggestion_save_commits_with_real_git_service(
             user,
         )
         assert result.commit_hash
-        assert git.get_repository(project_id).read_file(session.branch, "ontology.ttl").endswith(
-            b"ex:Thing a ex:Class .\n"
+        assert (
+            git.get_repository(project_id)
+            .read_file(session.branch, "ontology.ttl")
+            .endswith(b"ex:Thing a ex:Class .\n")
         )
     finally:
         await _delete_project(real_db_session, project_id)
@@ -296,8 +298,7 @@ async def test_r2_1_saved_entity_embedding_does_not_block_its_own_submit(
     git.create_branch(project_id, session.branch, from_ref="main")
     minted_iri = f"http://example.org/ontology/{project_id}#Minted"
     content = (
-        initial.decode()
-        + f'<{minted_iri}> a owl:Class ; rdfs:label "Minted concept" ; '
+        initial.decode() + f'<{minted_iri}> a owl:Class ; rdfs:label "Minted concept" ; '
         "rdfs:subClassOf owl:Thing .\n"
     )
     suggestions = SuggestionService(real_db_session, git)
@@ -324,13 +325,12 @@ async def test_r2_1_saved_entity_embedding_does_not_block_its_own_submit(
         provider = AsyncMock()
         provider.provider_name = "local"
         provider.model_id = "integration-vector"
+        provider.dimensions = 3
         provider.embed_text.return_value = [1.0, 0.0, 0.0]
         monkeypatch.setattr(EmbeddingService, "_get_provider", AsyncMock(return_value=provider))
-        await embedder.embed_single_entity(
-            project_id, session.branch, minted_iri
-        )
+        await embedder.embed_single_entity(project_id, session.branch, minted_iri)
 
-        suggestions._create_pr_for_session = AsyncMock(  # type: ignore[method-assign]
+        suggestions._create_pr_for_session_already_locked = AsyncMock(  # type: ignore[method-assign]
             return_value=SuggestionSubmitResponse(pr_number=1, pr_url=None, status="submitted")
         )
         result = await suggestions.submit(
@@ -387,8 +387,7 @@ ex:RestrictedWork a owl:Class ;
     git.create_branch(project_id, session.branch, from_ref="main")
     minted_iri = "https://folio.example/ontology/Minted"
     content = (
-        initial.decode()
-        + f'\n<{minted_iri}> a owl:Class ; rdfs:label "Minted" ; '
+        initial.decode() + f'\n<{minted_iri}> a owl:Class ; rdfs:label "Minted" ; '
         "rdfs:subClassOf ex:RestrictedWork, [\n"
         "    a owl:Restriction ;\n"
         "    owl:onProperty ex:hasRisk ;\n"
@@ -397,7 +396,7 @@ ex:RestrictedWork a owl:Class ;
     )
     suggestions = SuggestionService(real_db_session, git)
     suggestions._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
-    suggestions._create_pr_for_session = AsyncMock(  # type: ignore[method-assign]
+    suggestions._create_pr_for_session_already_locked = AsyncMock(  # type: ignore[method-assign]
         return_value=SuggestionSubmitResponse(pr_number=1, pr_url=None, status="submitted")
     )
 
@@ -460,13 +459,12 @@ folio:Actor a owl:Class ; rdfs:label "Actor" .
     git.create_branch(project_id, session.branch, from_ref="main")
     minted_iri = "https://folio.example/ontology/ZorpticWidgetClaim"
     content = (
-        initial.decode()
-        + f'\n<{minted_iri}> a owl:Class ; rdfs:label "Zorptic Widget Claim"@en ; '
+        initial.decode() + f'\n<{minted_iri}> a owl:Class ; rdfs:label "Zorptic Widget Claim"@en ; '
         "rdfs:subClassOf folio:Actor .\n"
     )
     suggestions = SuggestionService(real_db_session, git)
     suggestions._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
-    suggestions._create_pr_for_session = AsyncMock(  # type: ignore[method-assign]
+    suggestions._create_pr_for_session_already_locked = AsyncMock(  # type: ignore[method-assign]
         return_value=SuggestionSubmitResponse(pr_number=1, pr_url=None, status="submitted")
     )
 
@@ -520,8 +518,7 @@ async def test_f3_malformed_parent_422_names_rule_and_carries_errors(
     git.initialize_repository(project_id, initial, "ontology.ttl")
     git.create_branch(project_id, session.branch, from_ref="main")
     content = (
-        initial.decode()
-        + '\nex:Minted a owl:Class ; rdfs:label "Minted"@en ; '
+        initial.decode() + '\nex:Minted a owl:Class ; rdfs:label "Minted"@en ; '
         "rdfs:subClassOf <mailto:not-an-accepted-parent> .\n"
     )
     suggestions = SuggestionService(real_db_session, git)
@@ -592,8 +589,7 @@ ex:Existing a owl:Class ; rdfs:label "Zorptic Widget Claim"@en .
     git.initialize_repository(project_id, initial, "ontology.ttl")
     git.create_branch(project_id, session.branch, from_ref="main")
     content = (
-        initial.decode()
-        + '\nex:Minted a owl:Class ; rdfs:label "Zorptic Widget Claim"@en ; '
+        initial.decode() + '\nex:Minted a owl:Class ; rdfs:label "Zorptic Widget Claim"@en ; '
         "rdfs:subClassOf ex:Actor .\n"
     )
     suggestions = SuggestionService(real_db_session, git)
@@ -661,7 +657,8 @@ async def test_p0_2_database_accepts_review_action_statuses(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("parent_iri", [None, "https://example.test/UnindexedParent"])
 async def test_p0_6_identical_real_embedding_blocks_without_structure(
-    real_db_session: AsyncSession, parent_iri: str | None,
+    real_db_session: AsyncSession,
+    parent_iri: str | None,
 ) -> None:
     """An identical label in pgvector blocks even when a new IRI has no structure."""
     project_id = uuid4()
@@ -857,12 +854,17 @@ async def test_p0_4_failed_merge_keeps_real_session_and_trust_ledger_unchanged(
     pull_requests.merge_pull_request = AsyncMock(
         side_effect=HTTPException(status_code=409, detail="conflict")
     )
+    git = MagicMock()
+    git.get_default_branch.return_value = "main"
     try:
-        with patch(
-            "ontokit.services.suggestion_service.get_pull_request_service",
-            return_value=pull_requests,
-        ), pytest.raises(HTTPException) as exc_info:
-            await SuggestionService(real_db_session).approve(
+        with (
+            patch(
+                "ontokit.services.suggestion_service.get_pull_request_service",
+                return_value=pull_requests,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await SuggestionService(real_db_session, git).approve(
                 project_id, session.session_id, user
             )
         assert exc_info.value.status_code == 409

@@ -32,7 +32,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import RequiredUser
+from ontokit.core.auth import RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.models.llm_config import LLMAuditLog, ProjectLLMConfig
 from ontokit.models.project import ProjectMember
@@ -87,6 +87,7 @@ _LOCAL_PROVIDERS = {
 }
 
 _AUDIT_CURSOR_KEYS = frozenset({"v", "project_id", "created_at", "id"})
+_AUDIT_CURSOR_STRING_FIELDS = ("project_id", "created_at", "id")
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -109,7 +110,11 @@ def _decode_audit_cursor(cursor: str, project_id: UUID) -> tuple[datetime, UUID]
         payload = json.loads(base64.b64decode(padded, altchars=b"-_", validate=True))
         if not isinstance(payload, dict) or set(payload) != _AUDIT_CURSOR_KEYS:
             raise ValueError("unexpected cursor fields")
-        if payload["v"] != 1 or UUID(payload["project_id"]) != project_id:
+        if type(payload["v"]) is not int or payload["v"] != 1:
+            raise ValueError("unsupported cursor version")
+        if any(not isinstance(payload[field], str) for field in _AUDIT_CURSOR_STRING_FIELDS):
+            raise ValueError("cursor fields must be strings")
+        if UUID(payload["project_id"]) != project_id:
             raise ValueError("cursor scope mismatch")
         created_at = datetime.fromisoformat(payload["created_at"])
         if created_at.tzinfo is None:
@@ -191,9 +196,7 @@ def _config_to_response(config: ProjectLLMConfig) -> LLMConfigResponse:
     )
 
 
-def _provider_connection_failure(
-    provider: str, exc: Exception
-) -> dict[str, bool | str]:
+def _provider_connection_failure(provider: str, exc: Exception) -> dict[str, bool | str]:
     """Return a stable failure without echoing untrusted upstream details."""
     logger.warning(
         "LLM provider connection test failed: provider=%s error_type=%s",

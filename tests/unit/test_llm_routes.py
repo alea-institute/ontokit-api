@@ -12,7 +12,12 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 
-from ontokit.api.routes.llm import _provider_connection_failure, test_llm_connection
+from ontokit.api.routes.llm import (
+    _provider_connection_failure,
+)
+from ontokit.api.routes.llm import (
+    test_llm_connection as run_llm_connection_test,
+)
 from ontokit.schemas.llm import LLMProviderType
 
 
@@ -49,9 +54,7 @@ def test_list_known_models_public(client: TestClient):
 
 def test_project_llm_config_requires_auth(client: TestClient):
     """Project-scoped LLM config must NOT be reachable without authentication."""
-    resp = client.get(
-        "/api/v1/projects/00000000-0000-0000-0000-000000000000/llm/config"
-    )
+    resp = client.get("/api/v1/projects/00000000-0000-0000-0000-000000000000/llm/config")
     assert resp.status_code in (401, 403)
 
 
@@ -95,7 +98,7 @@ async def test_connection_route_redacts_provider_exception(caplog) -> None:
             new=AsyncMock(),
         ) as finalize,
     ):
-        response = await test_llm_connection(
+        response = await run_llm_connection_test(
             UUID("12345678-1234-5678-1234-567812345678"),
             AsyncMock(),
             SimpleNamespace(id="user-1", is_superadmin=False),
@@ -154,7 +157,7 @@ async def test_connection_reserves_paid_call_before_provider() -> None:
             new=AsyncMock(side_effect=finalize),
         ),
     ):
-        response = await test_llm_connection(
+        response = await run_llm_connection_test(
             UUID("12345678-1234-5678-1234-567812345678"),
             AsyncMock(),
             SimpleNamespace(id="user-1", is_superadmin=False),
@@ -193,7 +196,7 @@ async def test_connection_budget_refusal_prevents_provider() -> None:
         ),
         patch("ontokit.api.routes.llm.get_provider") as provider_factory,
     ):
-        response = await test_llm_connection(
+        response = await run_llm_connection_test(
             UUID("12345678-1234-5678-1234-567812345678"),
             AsyncMock(),
             SimpleNamespace(id="user-1", is_superadmin=False),

@@ -168,7 +168,7 @@ async def get_embedding_job(
 ) -> EmbeddingJobStatusResponse:
     """Return one accepted embedding job without exposing worker exception text."""
     require_authenticated_identity(user)
-    await get_project_service(db).require_member_role(project_id, user)
+    await get_project_service(db).require_member(project_id, user)
 
     result = await db.execute(
         select(EmbeddingJob).where(

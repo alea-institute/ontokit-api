@@ -10,6 +10,8 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from ontokit.core.auth import ANONYMOUS_USER
+
 PROJECT_ID = "12345678-1234-5678-1234-567812345678"
 
 
@@ -274,6 +276,27 @@ class TestGetEmbeddingJob:
         response = client.get(f"/api/v1/projects/{PROJECT_ID}/embeddings/jobs/{job_id}")
         assert response.status_code in (401, 403)
 
+    @pytest.mark.asyncio
+    async def test_job_status_rejects_disabled_auth_identity_before_service_access(self) -> None:
+        from ontokit.api.routes.embeddings import get_embedding_job
+
+        session = AsyncMock()
+
+        with (
+            patch("ontokit.api.routes.embeddings.get_project_service") as get_service,
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            await get_embedding_job(
+                project_id=uuid4(),
+                job_id=uuid4(),
+                db=session,
+                user=ANONYMOUS_USER,
+            )
+
+        assert exc_info.value.status_code == 403
+        get_service.assert_not_called()
+        session.execute.assert_not_awaited()
+
     @patch("ontokit.api.routes.embeddings.get_project_service")
     def test_member_can_poll_job_without_raw_worker_error(
         self,
@@ -282,7 +305,7 @@ class TestGetEmbeddingJob:
     ) -> None:
         client, session = authed_client
         job_id = uuid4()
-        mock_get_ps.return_value.require_member_role = AsyncMock(return_value="viewer")
+        mock_get_ps.return_value.require_member = AsyncMock()
         job = MagicMock(
             id=job_id,
             project_id=PROJECT_ID,
@@ -315,7 +338,7 @@ class TestGetEmbeddingJob:
         authed_client: tuple[TestClient, AsyncMock],
     ) -> None:
         client, session = authed_client
-        mock_get_ps.return_value.require_member_role = AsyncMock(return_value="editor")
+        mock_get_ps.return_value.require_member = AsyncMock()
         result = MagicMock()
         result.scalar_one_or_none.return_value = None
         session.execute = AsyncMock(return_value=result)
@@ -338,7 +361,7 @@ class TestGetEmbeddingJob:
     ) -> None:
         client, session = authed_client
         job_id = uuid4()
-        mock_get_ps.return_value.require_member_role = AsyncMock(return_value="viewer")
+        mock_get_ps.return_value.require_member = AsyncMock()
         job = MagicMock(
             id=job_id,
             branch="main",

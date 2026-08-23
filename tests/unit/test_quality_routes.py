@@ -665,10 +665,6 @@ class TestQualityJobAdmissionScope:
                 "ontokit.api.routes.quality.verify_project_access",
                 new=AsyncMock(),
             ),
-            patch(
-                "ontokit.api.routes.quality._require_quality_job_access",
-                new=AsyncMock(),
-            ),
         ):
             first = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/check")
             second = client.post(f"/api/v1/projects/{PROJECT_ID}/quality/duplicates")

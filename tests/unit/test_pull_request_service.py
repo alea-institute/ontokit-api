@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -260,6 +262,46 @@ def _setup_multi_execute(mock_db: AsyncMock, *results: MagicMock | None) -> None
 
 class TestCreatePullRequest:
     @pytest.mark.asyncio
+    async def test_external_finalization_runs_after_pr_locks_are_released(
+        self,
+        service: PullRequestService,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        held = False
+        project = _make_project()
+        user = _make_user()
+
+        @asynccontextmanager
+        async def tracked_locks(*_args: object) -> AsyncIterator[None]:
+            nonlocal held
+            held = True
+            try:
+                yield
+            finally:
+                held = False
+
+        request = PRCreate(title="New PR", source_branch="feature", target_branch="main")
+        db_pr = MagicMock()
+        response = MagicMock()
+        service._get_project = AsyncMock(return_value=project)  # type: ignore[method-assign]
+
+        async def claim(*_args: object, **_kwargs: object) -> tuple[MagicMock, MagicMock]:
+            assert held is True
+            return db_pr, project
+
+        async def finalize(*_args: object, **_kwargs: object) -> MagicMock:
+            assert held is False
+            return response
+
+        service._claim_pull_request_already_locked = AsyncMock(side_effect=claim)  # type: ignore[method-assign]
+        service._finalize_created_pull_request = AsyncMock(side_effect=finalize)  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "ontokit.services.pull_request_service.pull_request_write_locks", tracked_locks
+        )
+
+        assert await service.create_pull_request(PROJECT_ID, request, user) is response
+
+    @pytest.mark.asyncio
     async def test_create_pr_success(
         self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
     ) -> None:
@@ -297,6 +339,9 @@ class TestCreatePullRequest:
         # Use project_result as fallback for any extra _get_project lookups
         mock_db.execute.side_effect = [
             project_result,  # _get_project
+            MagicMock(),  # project-scoped PR allocation lock
+            MagicMock(),  # source branch lock
+            MagicMock(),  # target branch lock
             no_open_pr_result,  # open PR on source branch
             max_result,  # max(pr_number)
             gh_integration_result,  # _get_github_token -> _get_github_integration
@@ -366,11 +411,7 @@ class TestCreatePullRequest:
         feature_branch.name = "feature"
         mock_git_service.list_branches.return_value = [main_branch, feature_branch]
 
-        project_result = MagicMock()
-        project_result.scalar_one_or_none.return_value = project
-        existing_result = MagicMock()
-        existing_result.scalar_one_or_none.return_value = existing_pr
-        mock_db.execute.side_effect = [project_result, existing_result]
+        _setup_multi_execute(mock_db, project, None, None, None, existing_pr)
 
         request = PRCreate(title="Duplicate", source_branch="feature", target_branch="main")
         with pytest.raises(HTTPException) as error:
@@ -378,6 +419,7 @@ class TestCreatePullRequest:
 
         assert error.value.status_code == 409
         mock_db.add.assert_not_called()
+        mock_db.rollback.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_create_pr_source_branch_not_found(
@@ -682,6 +724,62 @@ class TestClosePullRequest:
 
 class TestReopenPullRequest:
     @pytest.mark.asyncio
+    async def test_github_sync_runs_after_branch_lock_is_released(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+        mock_github_service: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        held = False
+        project = _make_project()
+        pr = _make_pr(
+            author_id=EDITOR_ID,
+            status=PRStatus.CLOSED.value,
+            github_pr_number=42,
+        )
+        user = _make_user(EDITOR_ID)
+
+        @asynccontextmanager
+        async def tracked_lock(*_args: object) -> AsyncIterator[None]:
+            nonlocal held
+            held = True
+            try:
+                yield
+            finally:
+                held = False
+
+        async def assert_unlocked(**_kwargs: object) -> None:
+            assert held is False
+
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        pr_result = MagicMock()
+        pr_result.scalar_one_or_none.return_value = pr
+        no_conflict = MagicMock()
+        no_conflict.scalar_one_or_none.return_value = None
+        response_project = MagicMock()
+        response_project.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [
+            project_result,
+            pr_result,
+            no_conflict,
+            response_project,
+        ]
+        service._get_github_token = AsyncMock(  # type: ignore[method-assign]
+            return_value=(MagicMock(repo_owner="org", repo_name="repo"), "token")
+        )
+        mock_github_service.reopen_pull_request = AsyncMock(side_effect=assert_unlocked)
+        monkeypatch.setattr(
+            "ontokit.services.pull_request_service.branch_write_lock",
+            tracked_lock,
+        )
+
+        await service.reopen_pull_request(PROJECT_ID, 1, user)
+
+        mock_github_service.reopen_pull_request.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_reopen_closed_pr(
         self,
         service: PullRequestService,
@@ -697,10 +795,18 @@ class TestReopenPullRequest:
         project_result.scalar_one_or_none.return_value = project
         pr_result = MagicMock()
         pr_result.scalar_one_or_none.return_value = pr
+        no_conflict_result = MagicMock()
+        no_conflict_result.scalar_one_or_none.return_value = None
         project_result_2 = MagicMock()
         project_result_2.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [project_result, pr_result, project_result_2]
+        mock_db.execute.side_effect = [
+            project_result,
+            pr_result,
+            MagicMock(),  # source branch lock
+            no_conflict_result,
+            project_result_2,
+        ]
 
         await service.reopen_pull_request(PROJECT_ID, 1, user)
         assert pr.status == PRStatus.OPEN.value
@@ -1510,8 +1616,15 @@ class TestHandleGitHubPRWebhook:
         gh_result.scalar_one_or_none.return_value = integration
         pr_result = MagicMock()
         pr_result.scalar_one_or_none.return_value = pr
+        no_conflict_result = MagicMock()
+        no_conflict_result.scalar_one_or_none.return_value = None
 
-        mock_db.execute.side_effect = [gh_result, pr_result]
+        mock_db.execute.side_effect = [
+            gh_result,
+            pr_result,
+            MagicMock(),  # source branch lock
+            no_conflict_result,
+        ]
 
         await service.handle_github_pr_webhook(PROJECT_ID, "reopened", {"number": 42})
         assert pr.status == "open"

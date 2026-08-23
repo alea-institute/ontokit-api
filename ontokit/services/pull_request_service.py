@@ -9,6 +9,7 @@ from uuid import UUID
 from fastapi import HTTPException, status
 from sqlalchemy import delete as sa_delete
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -58,7 +59,7 @@ from ontokit.schemas.pull_request import (
     ReviewListResponse,
     ReviewResponse,
 )
-from ontokit.services.branch_lock import branch_write_locks
+from ontokit.services.branch_lock import branch_write_lock, pull_request_write_locks
 from ontokit.services.github_service import GitHubService, get_github_service
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.user_service import UserService, get_user_service
@@ -217,13 +218,41 @@ class PullRequestService:
     ) -> PRResponse:
         """Create a new pull request."""
         project = await self._get_project(project_id)
-        user_role = self._get_user_role(project, user)
-
-        if user_role not in ("owner", "admin", "editor"):
+        self._require_pull_request_author(project, user)
+        if pr_create.source_branch == pr_create.target_branch:
             raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only editors and above can create pull requests",
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Source and target branches must be different",
             )
+
+        async with pull_request_write_locks(
+            self.db,
+            project_id,
+            {pr_create.source_branch, pr_create.target_branch},
+        ):
+            db_pr, project = await self._claim_pull_request_already_locked(
+                project_id, pr_create, user, project=project
+            )
+        return await self._finalize_created_pull_request(
+            project_id, pr_create, user, project, db_pr
+        )
+
+    async def _claim_pull_request_already_locked(
+        self,
+        project_id: UUID,
+        pr_create: PRCreate,
+        user: CurrentUser,
+        *,
+        project: Project | None = None,
+    ) -> tuple[PullRequest, Project]:
+        """Claim and persist a PR while its project and branch locks are held.
+
+        This internal seam lets suggestion submission own the complete lock set
+        once. External GitHub and notification work happens only after the
+        caller releases those locks.
+        """
+        project = project or await self._get_project(project_id)
+        self._require_pull_request_author(project, user)
 
         if pr_create.source_branch == pr_create.target_branch:
             raise HTTPException(
@@ -231,64 +260,70 @@ class PullRequestService:
                 detail="Source and target branches must be different",
             )
 
+        branches = self.git_service.list_branches(project_id)
+        branch_names = {branch.name for branch in branches}
+        if pr_create.source_branch not in branch_names:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Source branch '{pr_create.source_branch}' does not exist",
+            )
+        if pr_create.target_branch not in branch_names:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Target branch '{pr_create.target_branch}' does not exist",
+            )
+
+        existing_result = await self.db.execute(
+            select(PullRequest.id)
+            .where(
+                PullRequest.project_id == project_id,
+                PullRequest.source_branch == pr_create.source_branch,
+                PullRequest.status == PRStatus.OPEN.value,
+            )
+            .limit(1)
+        )
+        if existing_result.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="An open pull request already exists for this source branch",
+            )
+
+        max_number_result = await self.db.execute(
+            select(func.max(PullRequest.pr_number)).where(PullRequest.project_id == project_id)
+        )
+        pr_number = (max_number_result.scalar() or 0) + 1
+        db_pr = PullRequest(
+            project_id=project_id,
+            pr_number=pr_number,
+            title=pr_create.title,
+            description=pr_create.description,
+            source_branch=pr_create.source_branch,
+            target_branch=pr_create.target_branch,
+            author_id=user.id,
+            author_name=user.name,
+            author_email=user.email,
+            status=PRStatus.OPEN.value,
+        )
+        self.db.add(db_pr)
         try:
-            async with branch_write_locks(
-                self.db,
-                project_id,
-                {pr_create.source_branch, pr_create.target_branch},
-            ):
-                branches = self.git_service.list_branches(project_id)
-                branch_names = {branch.name for branch in branches}
-                if pr_create.source_branch not in branch_names:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Source branch '{pr_create.source_branch}' does not exist",
-                    )
-                if pr_create.target_branch not in branch_names:
-                    raise HTTPException(
-                        status_code=status.HTTP_400_BAD_REQUEST,
-                        detail=f"Target branch '{pr_create.target_branch}' does not exist",
-                    )
-
-                existing_result = await self.db.execute(
-                    select(PullRequest.id)
-                    .where(
-                        PullRequest.project_id == project_id,
-                        PullRequest.source_branch == pr_create.source_branch,
-                        PullRequest.status == PRStatus.OPEN.value,
-                    )
-                    .limit(1)
-                )
-                if existing_result.scalar_one_or_none() is not None:
-                    raise HTTPException(
-                        status_code=status.HTTP_409_CONFLICT,
-                        detail="An open pull request already exists for this source branch",
-                    )
-
-                max_number_result = await self.db.execute(
-                    select(func.max(PullRequest.pr_number)).where(
-                        PullRequest.project_id == project_id
-                    )
-                )
-                pr_number = (max_number_result.scalar() or 0) + 1
-                db_pr = PullRequest(
-                    project_id=project_id,
-                    pr_number=pr_number,
-                    title=pr_create.title,
-                    description=pr_create.description,
-                    source_branch=pr_create.source_branch,
-                    target_branch=pr_create.target_branch,
-                    author_id=user.id,
-                    author_name=user.name,
-                    author_email=user.email,
-                    status=PRStatus.OPEN.value,
-                )
-                self.db.add(db_pr)
-                await self.db.flush()
-                await self.db.commit()
+            await self.db.flush()
+            await self.db.commit()
         except Exception:
             await self.db.rollback()
             raise
+
+        return db_pr, project
+
+    async def _finalize_created_pull_request(
+        self,
+        project_id: UUID,
+        pr_create: PRCreate,
+        user: CurrentUser,
+        project: Project,
+        db_pr: PullRequest,
+    ) -> PRResponse:
+        """Perform best-effort external synchronization after a PR claim commits."""
+        pr_number = db_pr.pr_number
 
         # Sync with GitHub if integration exists and we can resolve a token
         gh_result = await self._get_github_token(project_id)
@@ -327,6 +362,13 @@ class PullRequestService:
         await self.db.commit()
 
         return await self._to_pr_response(db_pr, project_id)
+
+    def _require_pull_request_author(self, project: Project, user: CurrentUser) -> None:
+        if self._get_user_role(project, user) not in ("owner", "admin", "editor"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only editors and above can create pull requests",
+            )
 
     async def list_pull_requests(
         self,
@@ -505,9 +547,22 @@ class PullRequestService:
                 detail="Only closed pull requests can be reopened",
             )
 
-        pr.status = PRStatus.OPEN.value
+        async with branch_write_lock(self.db, project_id, pr.source_branch):
+            # The object fetched before waiting for the lock may be stale.
+            await self.db.refresh(pr)
+            if pr.status != PRStatus.CLOSED.value:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="Only closed pull requests can be reopened",
+                )
+            await self._mark_pull_request_open_already_locked(project_id, pr)
 
-        # Sync with GitHub if integration exists
+            # Make the validated local transition durable while the branch is
+            # locked. External synchronization is best-effort and must not hold
+            # the write lock across network I/O.
+            await self.db.commit()
+            await self.db.refresh(pr)
+
         if pr.github_pr_number:
             gh_result = await self._get_github_token(project_id)
             if gh_result:
@@ -522,10 +577,37 @@ class PullRequestService:
                 except Exception as e:
                     logger.warning(f"Failed to reopen GitHub PR: {e}")
 
-        await self.db.commit()
-        await self.db.refresh(pr)
-
         return await self._to_pr_response(pr, project_id)
+
+    async def _mark_pull_request_open_already_locked(
+        self, project_id: UUID, pr: PullRequest
+    ) -> None:
+        """Enforce the one-open-source invariant before exposing a reopen."""
+        conflict_result = await self.db.execute(
+            select(PullRequest.id)
+            .where(
+                PullRequest.project_id == project_id,
+                PullRequest.source_branch == pr.source_branch,
+                PullRequest.status == PRStatus.OPEN.value,
+                PullRequest.id != pr.id,
+            )
+            .limit(1)
+        )
+        if conflict_result.scalar_one_or_none() is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Another open pull request already exists for this source branch",
+            )
+
+        pr.status = PRStatus.OPEN.value
+        try:
+            await self.db.flush()
+        except IntegrityError as exc:
+            await self.db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Another open pull request already exists for this source branch",
+            ) from exc
 
     async def merge_pull_request(
         self,
@@ -1550,8 +1632,20 @@ class PullRequestService:
 
         elif action == "reopened":
             if pr:
-                pr.status = PRStatus.OPEN.value
-                await self.db.commit()
+                async with branch_write_lock(self.db, project_id, pr.source_branch):
+                    await self.db.refresh(pr)
+                    try:
+                        await self._mark_pull_request_open_already_locked(project_id, pr)
+                    except HTTPException:
+                        logger.warning(
+                            "Rejected GitHub reopen for project=%s github_pr=%s "
+                            "source_branch=%s because another local PR is open",
+                            project_id,
+                            github_pr_number,
+                            pr.source_branch,
+                        )
+                        raise
+                    await self.db.commit()
 
         elif action == "edited" and pr:
             pr.title = pr_data["title"]
