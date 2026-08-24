@@ -1588,8 +1588,9 @@ class TestDismissAndBulkReview:
         project_result.scalar_one_or_none.return_value = project
         session_result = MagicMock()
         session_result.scalar_one_or_none.return_value = session
-        # bulk_review verifies once, then dismiss performs its normal access check.
-        mock_db.execute.side_effect = [project_result, project_result, session_result]
+        # bulk_review verifies once and passes the loaded project through the
+        # unchecked dismiss path so snapshot capture does not add an N+1 query.
+        mock_db.execute.side_effect = [project_result, session_result]
         data = BulkReviewRequest(
             session_ids=[session.session_id],
             action=BulkReviewAction.DISMISS,
