@@ -144,5 +144,5 @@ def test_deployed_worker_images_ship_the_documented_operator_command() -> None:
         assert "scripts/rewrap_pr_party_credentials.py" in contents
         assert destination in contents
 
-    runbook = (root / "deploy" / "RUNBOOK.md").read_text()
-    assert runbook.count(f"python {destination}") == 2
+    operator_doc = (root / "docs" / "PR_PARTY_CREDENTIAL_REWRAP.md").read_text()
+    assert operator_doc.count(f"python {destination}") == 2

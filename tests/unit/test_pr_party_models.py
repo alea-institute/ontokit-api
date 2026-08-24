@@ -53,10 +53,10 @@ from ontokit.models.pr_party import (
 from ontokit.services.llm.audit import log_llm_call
 
 MIGRATION_PATH = (
-    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "x1y2z3a4b5c6_add_pr_party.py"
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "h7i8j9k0l1m2_add_pr_party.py"
 )
 
-CURRENT_HEAD_BEFORE_PR_PARTY = "w0x1y2z3a4b5"
+CURRENT_HEAD_BEFORE_PR_PARTY = "g6h7i8j9k0l1"
 
 
 def _column_default(table: Table, name: str) -> Any:
@@ -500,7 +500,7 @@ class TestNullableProjectColumns:
 
 class TestMigration:
     def test_chains_onto_the_current_single_head(self, migration_module: ModuleType) -> None:
-        assert migration_module.revision == "x1y2z3a4b5c6"
+        assert migration_module.revision == "h7i8j9k0l1m2"
         assert migration_module.down_revision == CURRENT_HEAD_BEFORE_PR_PARTY
 
     def test_upgrade_creates_all_four_tables(self, migration_module: ModuleType) -> None:
