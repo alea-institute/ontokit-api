@@ -7,6 +7,8 @@ from pathlib import Path
 from types import ModuleType
 from unittest.mock import MagicMock
 
+import pytest
+
 from ontokit.models.pull_request import PullRequest
 
 INDEX_NAME = "uq_pull_requests_open_source_branch"
@@ -37,6 +39,7 @@ def test_model_declares_partial_unique_open_source_branch_index() -> None:
 def test_migration_creates_and_drops_partial_unique_index() -> None:
     module = _load_migration()
     fake_op = MagicMock()
+    fake_op.get_bind.return_value.execute.return_value.all.return_value = []
     module.op = fake_op
 
     module.upgrade()
@@ -51,3 +54,17 @@ def test_migration_creates_and_drops_partial_unique_index() -> None:
 
     module.downgrade()
     fake_op.drop_index.assert_called_once_with(INDEX_NAME, table_name="pull_requests")
+
+
+def test_migration_names_legacy_duplicate_groups_before_ddl() -> None:
+    module = _load_migration()
+    fake_op = MagicMock()
+    fake_op.get_bind.return_value.execute.return_value.all.return_value = [
+        ("11111111-1111-1111-1111-111111111111", "suggest/user-1", 2),
+    ]
+    module.op = fake_op
+
+    with pytest.raises(RuntimeError, match=r"suggest/user-1 \(2\)"):
+        module.upgrade()
+
+    fake_op.create_index.assert_not_called()

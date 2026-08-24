@@ -1040,6 +1040,54 @@ class TestSubmit:
         assert result.status == "submitted"
 
     @pytest.mark.asyncio
+    async def test_submit_reconciles_open_pr_created_after_precheck(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+    ) -> None:
+        """A concurrent winner is returned instead of surfacing a spurious 409."""
+        session = _make_session(
+            status=SuggestionSessionStatus.ACTIVE.value,
+            changes_count=2,
+            entities_modified=json.dumps(["Person"]),
+        )
+        no_pr_result = MagicMock()
+        no_pr_result.scalar_one_or_none.return_value = None
+        raced_pr = MagicMock(
+            id=uuid.uuid4(),
+            pr_number=11,
+            github_pr_url="https://github.com/org/repo/pull/11",
+        )
+        raced_pr_result = MagicMock()
+        raced_pr_result.scalar_one_or_none.return_value = raced_pr
+        mock_db.execute.side_effect = [no_pr_result, raced_pr_result]
+        mock_git.get_default_branch.return_value = "main"
+
+        with patch(
+            "ontokit.services.suggestion_service.get_pull_request_service"
+        ) as mock_pr_svc_factory:
+            mock_pr_svc_factory.return_value.create_pull_request = AsyncMock(
+                side_effect=HTTPException(
+                    status_code=409,
+                    detail="An open pull request already exists for this source branch",
+                )
+            )
+            result = await service._create_pr_for_session(
+                PROJECT_ID,
+                session,
+                _make_user(),
+                "summary",
+                SuggestionSessionStatus.SUBMITTED.value,
+            )
+
+        assert result.pr_number == 11
+        assert result.pr_url == raced_pr.github_pr_url
+        assert session.pr_id == raced_pr.id
+        assert session.status == SuggestionSessionStatus.SUBMITTED.value
+        mock_db.commit.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_submit_fallback_to_direct_pr_on_403(
         self,
         service: SuggestionService,
