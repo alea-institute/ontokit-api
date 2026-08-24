@@ -202,7 +202,10 @@ async def _source_save(
         patch("ontokit.api.routes.projects.get_arq_pool", AsyncMock(return_value=queue)),
         patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=queue)),
         patch("ontokit.main.redis_pool", queue),
-        patch("ontokit.services.translation_jobs.check_rate_limit", AsyncMock(return_value=True)),
+        patch(
+            "ontokit.services.translation_jobs.consume_rate_limit_units",
+            AsyncMock(return_value=True),
+        ),
     ):
         result = await projects.save_source_content(
             project_id,
