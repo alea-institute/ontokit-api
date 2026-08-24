@@ -403,7 +403,7 @@ async def get_generation_token_status(
         identity = await client_factory(token).get_authenticated_user()
         status = PRPartyGenerationTokenStatus(expires_at=identity.token_expires_at, last_error=None)
     except Exception as e:  # noqa: BLE001 — status surface, never a raise path
-        logger.warning("PR Party generation token check failed: %s", scrub_error(e))
+        logger.warning("PR Party generation identity check failed: %s", scrub_error(e))
         # ``last_error`` is rendered on the settings page and is derived from a
         # GitHub error body, which quotes the request. Only the class name and
         # the status survive (see :func:`~...pr_party_github.scrub_error`).
@@ -664,12 +664,9 @@ class PRPartyCredentialService:
             return None
         try:
             return decrypt_reviewer_token(credential.encrypted_token)
-        except Exception as e:  # noqa: BLE001 — degrade, don't 500 the verdict path
+        except Exception:  # noqa: BLE001 — degrade, don't 500 the verdict path
             logger.warning(
-                "PR Party: stored credential for %s could not be decrypted (%r); "
-                "treating the reviewer as degraded.",
-                reviewer.zitadel_user_id,
-                e,
+                "Stored PR Party reviewer identity is unreadable; treating reviewer as degraded"
             )
             return None
 

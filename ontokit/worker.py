@@ -1085,11 +1085,10 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
                     )
                     await db.rollback()
                 continue
-            except SQLAlchemyError as e:
-                logger.exception(
-                    "Failed to resolve GitHub mirror credential for project %s: %s",
+            except SQLAlchemyError:
+                logger.error(
+                    "GitHub mirror identity lookup failed for project %s",
                     integration.project_id,
-                    e,
                 )
                 errors += 1
                 await db.rollback()
@@ -1174,7 +1173,7 @@ async def run_pr_party_credential_rewrap_task(
     )
     if type(apply) is not bool or job_id != expected_job_id or not valid_confirmation:
         logger.error(
-            "PR Party credential rewrap rejected: job_id=%s error_code=invalid_operator_request",
+            "PR Party rewrap request rejected: job_id=%s error_code=invalid_operator_request",
             job_id,
         )
         raise RuntimeError("credential rewrap failed: invalid_operator_request")
@@ -1183,18 +1182,20 @@ async def run_pr_party_credential_rewrap_task(
         receipt = await rewrap_reviewer_credentials(ctx["db"], dry_run=not apply)
     except CredentialRewrapError as exc:
         logger.error(
-            "PR Party credential rewrap failed: job_id=%s error_code=%s credential_id=%s",
+            "PR Party rewrap failed: job_id=%s error_code=%s",
             job_id,
             exc.code,
-            exc.credential_id,
         )
         raise RuntimeError(str(exc)) from None
 
     payload = receipt.as_dict()
     logger.info(
-        "PR Party credential rewrap receipt: job_id=%s receipt=%s",
+        "PR Party rewrap completed: job_id=%s dry_run=%s scanned=%s verified=%s rewrapped=%s",
         job_id,
-        json.dumps(payload, sort_keys=True),
+        payload["dry_run"],
+        payload["credentials_scanned"],
+        payload["credentials_verified"],
+        payload["credentials_rewrapped"],
     )
     return payload
 

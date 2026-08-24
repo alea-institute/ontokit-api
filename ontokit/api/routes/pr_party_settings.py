@@ -182,7 +182,7 @@ async def save_credential(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Credential was saved but could not be read back.",
         )
-    logger.info("PR Party credential stored for reviewer %s", reviewer.zitadel_user_id)
+    logger.info("PR Party reviewer setup updated for reviewer %s", reviewer.zitadel_user_id)
     return health
 
 

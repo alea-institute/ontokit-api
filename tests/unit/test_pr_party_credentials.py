@@ -26,6 +26,7 @@ import logging
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 from cryptography.fernet import InvalidToken
@@ -474,14 +475,26 @@ class TestResolveToken:
 
         assert await service.resolve_token(reviewer) is None
 
-    async def test_undecryptable_ciphertext_degrades(self) -> None:
+    async def test_undecryptable_ciphertext_degrades(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
         reviewer = _reviewer()
         credential = _credential(reviewer)
         credential.encrypted_token = "not-a-fernet-token"
         db = _FakeSession([reviewer, credential])
         service = PRPartyCredentialService(db)  # type: ignore[arg-type]
 
-        assert await service.resolve_token(reviewer) is None
+        marker = "reviewer-secret-leak-marker"
+        with (
+            patch(
+                "ontokit.services.pr_party_credentials.decrypt_reviewer_token",
+                side_effect=RuntimeError(marker),
+            ),
+            caplog.at_level("WARNING", logger="ontokit.services.pr_party_credentials"),
+        ):
+            assert await service.resolve_token(reviewer) is None
+
+        assert marker not in caplog.text
 
 
 class TestUpdateSettings:

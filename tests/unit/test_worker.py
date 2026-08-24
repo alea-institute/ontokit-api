@@ -57,6 +57,7 @@ def project_id() -> str:
 @pytest.mark.asyncio
 async def test_pr_party_credential_rewrap_task_returns_safe_receipt(
     mock_ctx: dict[str, Any],
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The ARQ seam returns the service receipt without credential material."""
     receipt = MagicMock()
@@ -70,15 +71,19 @@ async def test_pr_party_credential_rewrap_task_returns_safe_receipt(
     }
 
     mock_ctx["job_id"] = PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID
-    with patch(
-        "ontokit.services.pr_party_credentials.rewrap_reviewer_credentials",
-        AsyncMock(return_value=receipt),
-    ) as rewrap:
+    with (
+        patch(
+            "ontokit.services.pr_party_credentials.rewrap_reviewer_credentials",
+            AsyncMock(return_value=receipt),
+        ) as rewrap,
+        caplog.at_level("INFO", logger="ontokit.worker"),
+    ):
         result = await run_pr_party_credential_rewrap_task(mock_ctx, apply=False)
 
     rewrap.assert_awaited_once_with(mock_ctx["db"], dry_run=True)
     assert result == receipt.as_dict.return_value
     assert "token" not in repr(result).lower()
+    assert "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" not in caplog.text
 
 
 @pytest.mark.asyncio
@@ -991,7 +996,7 @@ class TestSyncGithubProjects:
 
     @pytest.mark.asyncio
     async def test_credential_lookup_failure_does_not_abort_later_integrations(
-        self, mock_ctx: dict[str, Any]
+        self, mock_ctx: dict[str, Any], caplog: pytest.LogCaptureFixture
     ) -> None:
         first = MagicMock(project_id=uuid.uuid4())
         second = MagicMock(project_id=uuid.uuid4())
@@ -999,14 +1004,16 @@ class TestSyncGithubProjects:
         integrations_result.scalars.return_value.all.return_value = [first, second]
         mock_ctx["db"].execute.return_value = integrations_result
 
+        raw_error = "database-password-leak-marker"
         with (
             patch("ontokit.worker.BareGitRepositoryService"),
             patch(
                 "ontokit.services.mirror_credential.resolve_mirror_credential",
                 new_callable=AsyncMock,
-                side_effect=[SQLAlchemyError("credential db error"), "system-token"],
+                side_effect=[SQLAlchemyError(raw_error), "system-token"],
             ),
             patch("ontokit.worker.sync_github_project", new_callable=AsyncMock) as mock_sync,
+            caplog.at_level("ERROR", logger="ontokit.worker"),
         ):
             mock_sync.return_value = {"status": "ok"}
             result = await sync_github_projects(mock_ctx)
@@ -1015,6 +1022,7 @@ class TestSyncGithubProjects:
         mock_ctx["db"].rollback.assert_awaited_once()
         mock_sync.assert_awaited_once()
         assert mock_sync.await_args.args[0] is second
+        assert raw_error not in caplog.text
 
     @pytest.mark.asyncio
     async def test_target_denial_is_persisted_and_does_not_abort_batch(

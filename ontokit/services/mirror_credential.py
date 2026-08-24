@@ -49,8 +49,8 @@ async def resolve_mirror_credential(db: AsyncSession, integration: GitHubIntegra
     user_id = integration.connected_by_user_id
     if not user_id:
         logger.warning(
-            "No mirror credential for project %s: GITHUB_MIRROR_TOKEN is unset and the "
-            "integration has no connecting user",
+            "GitHub mirror identity unavailable for project %s: no system identity or "
+            "connecting user",
             integration.project_id,
         )
         return None
@@ -59,10 +59,8 @@ async def resolve_mirror_credential(db: AsyncSession, integration: GitHubIntegra
     token_row = result.scalar_one_or_none()
     if token_row is None:
         logger.warning(
-            "No mirror credential for project %s: GITHUB_MIRROR_TOKEN is unset and no stored "
-            "token for user %s",
+            "GitHub mirror identity unavailable for project %s: no usable stored identity",
             integration.project_id,
-            user_id,
         )
         return None
 
@@ -70,9 +68,8 @@ async def resolve_mirror_credential(db: AsyncSession, integration: GitHubIntegra
         token = decrypt_token(token_row.encrypted_token)
     except Exception:
         logger.warning(
-            "Failed to decrypt the stored token for project %s user %s",
+            "Stored GitHub mirror identity could not be read for project %s",
             integration.project_id,
-            user_id,
         )
         return None
 
