@@ -1,5 +1,11 @@
 # OntoKit DEV deployment runbook
 
+> **T10 synthesis scope:** this branch carries only the inert demo-refresh and
+> demo-project assets described under “Demo repository refresh.” The earlier
+> deployment sections document prerequisites owned by the separate T2
+> deployment tranche; paths absent from this branch must not be installed or
+> executed from this branch alone.
+
 This directory captures the post-auth-flip DEV environment on CPX41. The
 UAT-history companion is `ontokit-web/docs/roundup-2026-08/DEV-RUNBOOK.md`.
 The CI auto-deploy workflow and its host-side forced command are maintained in

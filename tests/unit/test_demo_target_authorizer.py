@@ -94,9 +94,7 @@ class TestProjectAwareAuthorization:
 
     async def test_missing_demo_token_fails_closed(self) -> None:
         with (
-            patch(
-                "ontokit.services.demo_target_authorizer.settings.github_demo_mirror_token", ""
-            ),
+            patch("ontokit.services.demo_target_authorizer.settings.github_demo_mirror_token", ""),
             pytest.raises(DemoTargetDenied, match="GITHUB_DEMO_MIRROR_TOKEN"),
         ):
             await authorize_integration_target(

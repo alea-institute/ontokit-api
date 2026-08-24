@@ -823,10 +823,7 @@ class BareOntologyRepository:
             if (
                 target
                 and is_demo_repository(*target)
-                and (
-                    target_authorization is None
-                    or not target_authorization.permits(*target)
-                )
+                and (target_authorization is None or not target_authorization.permits(*target))
             ):
                 return False
             branch = branch or self.get_default_branch()

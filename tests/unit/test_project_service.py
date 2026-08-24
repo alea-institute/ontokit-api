@@ -629,9 +629,7 @@ class TestToResponse:
 
         response = service._to_response(project, None)
 
-        assert response.demo_repository_full_name == (
-            "alea-institute/ontokit-demo-folio"
-        )
+        assert response.demo_repository_full_name == ("alea-institute/ontokit-demo-folio")
 
 
 # ---------------------------------------------------------------------------

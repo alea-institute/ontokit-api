@@ -1150,10 +1150,7 @@ class ProjectService:
         """Return the immutable Git target identity for a demo project."""
         if project.is_demo is not True or project.github_integration is None:
             return None
-        return (
-            f"{project.github_integration.repo_owner}/"
-            f"{project.github_integration.repo_name}"
-        )
+        return f"{project.github_integration.repo_owner}/{project.github_integration.repo_name}"
 
     def _to_response(self, project: Project, user: CurrentUser | None) -> ProjectResponse:
         """Convert Project model to response schema."""

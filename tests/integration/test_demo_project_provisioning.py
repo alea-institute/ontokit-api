@@ -65,9 +65,7 @@ async def test_provisions_exactly_one_demo_per_source(
     finally:
         await real_db_session.rollback()
         demo_result = await real_db_session.execute(
-            select(Project.id).where(
-                Project.demo_source_project_id.in_(source_ids)
-            )
+            select(Project.id).where(Project.demo_source_project_id.in_(source_ids))
         )
         demo_ids = list(demo_result.scalars().all())
         if demo_ids:

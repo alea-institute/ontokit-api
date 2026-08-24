@@ -26,9 +26,7 @@ class ProvisionedDemo:
     created: bool
 
 
-async def _find_integration(
-    db: AsyncSession, owner: str, repo: str
-) -> GitHubIntegration | None:
+async def _find_integration(db: AsyncSession, owner: str, repo: str) -> GitHubIntegration | None:
     result = await db.execute(
         select(GitHubIntegration)
         .options(selectinload(GitHubIntegration.project))

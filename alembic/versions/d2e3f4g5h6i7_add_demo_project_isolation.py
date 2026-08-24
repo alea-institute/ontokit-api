@@ -1,6 +1,6 @@
 """Add fail-closed demo project identity and source linkage.
 
-Revision ID: c2d3e4f5g6h7
+Revision ID: d2e3f4g5h6i7
 Revises: b1c2d3e4f5g6
 Create Date: 2026-08-20
 """
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 
 from alembic import op
 
-revision: str = "c2d3e4f5g6h7"
+revision: str = "d2e3f4g5h6i7"
 down_revision: str | None = "b1c2d3e4f5g6"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
@@ -22,9 +22,7 @@ def upgrade() -> None:
         "projects",
         sa.Column("is_demo", sa.Boolean(), nullable=False, server_default=sa.false()),
     )
-    op.add_column(
-        "projects", sa.Column("demo_source_project_id", sa.Uuid(), nullable=True)
-    )
+    op.add_column("projects", sa.Column("demo_source_project_id", sa.Uuid(), nullable=True))
     op.create_foreign_key(
         "fk_projects_demo_source_project_id",
         "projects",
