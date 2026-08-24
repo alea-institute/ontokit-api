@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from itertools import chain, repeat
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -74,6 +75,22 @@ def _make_project(project_id: uuid.UUID = PROJECT_ID, is_public: bool = True) ->
     return project
 
 
+def _configure_editor_pr_claim(
+    pr_service: AsyncMock,
+    response: MagicMock,
+    project: MagicMock,
+) -> MagicMock:
+    """Configure the locked claim and post-lock finalization seams."""
+    db_pr = MagicMock()
+    db_pr.id = response.id
+    db_pr.pr_number = response.pr_number
+    db_pr.title = response.title
+    db_pr.github_pr_url = response.github_pr_url
+    pr_service._claim_pull_request_already_locked = AsyncMock(return_value=(db_pr, project))
+    pr_service._finalize_created_pull_request = AsyncMock(return_value=response)
+    return db_pr
+
+
 def _make_session(
     *,
     session_id: str = "s_abc12345",
@@ -120,12 +137,18 @@ def _make_session(
 @pytest.fixture
 def mock_db() -> AsyncMock:
     """Create an async mock of AsyncSession."""
+
+    @asynccontextmanager
+    async def savepoint() -> AsyncIterator[None]:
+        yield
+
     session = AsyncMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
     session.execute = AsyncMock()
     session.refresh = AsyncMock()
     session.add = Mock()
+    session.begin_nested = Mock(side_effect=savepoint)
     return session
 
 
@@ -141,7 +164,16 @@ def mock_git() -> MagicMock:
 
 
 @pytest.fixture
-def service(mock_db: AsyncMock, mock_git: MagicMock) -> SuggestionService:
+def service(
+    mock_db: AsyncMock,
+    mock_git: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SuggestionService:
+    @asynccontextmanager
+    async def unlocked(*_args: object) -> AsyncIterator[None]:
+        yield
+
+    monkeypatch.setattr("ontokit.services.suggestion_service.pull_request_write_locks", unlocked)
     return SuggestionService(db=mock_db, git_service=mock_git)
 
 
@@ -927,7 +959,7 @@ class TestSubmit:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
@@ -1061,13 +1093,20 @@ class TestSubmit:
         )
         raced_pr_result = MagicMock()
         raced_pr_result.scalar_one_or_none.return_value = raced_pr
-        mock_db.execute.side_effect = [no_pr_result, raced_pr_result]
+        project = _make_project()
+        project.members[0].role = "suggester"
+        project.members[0].is_trusted = True
+        project.auto_accept_enabled = True
+        project.auto_accept_quiet_days = 3
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [no_pr_result, raced_pr_result, project_result]
         mock_git.get_default_branch.return_value = "main"
 
         with patch(
             "ontokit.services.suggestion_service.get_pull_request_service"
         ) as mock_pr_svc_factory:
-            mock_pr_svc_factory.return_value.create_pull_request = AsyncMock(
+            mock_pr_svc_factory.return_value._claim_pull_request_already_locked = AsyncMock(
                 side_effect=HTTPException(
                     status_code=409,
                     detail="An open pull request already exists for this source branch",
@@ -1118,7 +1157,6 @@ class TestSubmit:
             mock_session_result,  # _get_session
             mock_project_result,  # _verify_project_access
             mock_no_pr_result,  # existing PR check
-            MagicMock(),  # source-branch advisory lock
             mock_no_direct_pr_result,  # locked direct-creation check
             mock_max_result,  # max pr_number
             mock_project_result,  # _get_project for notification
@@ -1145,7 +1183,7 @@ class TestSubmit:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(
+            mock_pr_svc._claim_pull_request_already_locked = AsyncMock(
                 side_effect=HTTPException(status_code=403, detail="Forbidden")
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
@@ -1853,7 +1891,7 @@ class TestAutoSubmitStaleSessionsExtended:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
@@ -1935,7 +1973,7 @@ class TestAutoSubmitStaleSessionsExtended:
             ) as mock_pr_svc_factory,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(
+            mock_pr_svc._claim_pull_request_already_locked = AsyncMock(
                 side_effect=RuntimeError("PR creation failed")
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
@@ -2260,7 +2298,7 @@ class TestCreatePrForSession:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
@@ -2268,7 +2306,7 @@ class TestCreatePrForSession:
             await service._create_pr_for_session(PROJECT_ID, session, user, "summary", "submitted")
 
         # Verify the PR was created with the right title structure
-        call_args = mock_pr_svc.create_pull_request.call_args
+        call_args = mock_pr_svc._claim_pull_request_already_locked.call_args
         pr_create_arg = call_args[0][1]  # second positional arg
         assert "(+3 more)" in pr_create_arg.title
 
@@ -2313,14 +2351,14 @@ class TestCreatePrForSession:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
 
             await service._create_pr_for_session(PROJECT_ID, session, user, None, "submitted")
 
-        call_args = mock_pr_svc.create_pull_request.call_args
+        call_args = mock_pr_svc._claim_pull_request_already_locked.call_args
         pr_create_arg = call_args[0][1]
         assert pr_create_arg.title == "Suggestion"
 

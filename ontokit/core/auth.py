@@ -61,6 +61,11 @@ class CurrentUser(BaseModel):
     name: str | None = None
     username: str | None = None
     roles: list[str] = []
+    # AUTH_MODE=disabled deliberately returns a CurrentUser-shaped anonymous
+    # identity so browse-only surfaces remain available. Sensitive features
+    # must be able to reject that identity without relying on roles or subject
+    # string conventions.
+    is_anonymous: bool = Field(default=False, exclude=True)
 
     @property
     def is_superadmin(self) -> bool:
@@ -75,7 +80,17 @@ ANONYMOUS_USER = CurrentUser(
     name="Anonymous",
     username="anonymous",
     roles=["viewer"],
+    is_anonymous=True,
 )
+
+
+def require_authenticated_identity(user: CurrentUser) -> None:
+    """Reject the explicit disabled-auth identity at sensitive boundaries."""
+    if user.is_anonymous:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="An authenticated identity is required for this feature",
+        )
 
 # Cache for JWKS (JSON Web Key Set) with TTL
 _jwks_cache: dict[str, Any] | None = None

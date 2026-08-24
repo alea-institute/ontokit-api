@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import ANONYMOUS_USER, RequiredUser
+from ontokit.core.auth import RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.schemas.duplicate_check import (
     DistinctDecisionMarkRequest,
@@ -39,15 +39,6 @@ VIEW_DISTINCT_ROLES: frozenset[ProjectRole] = frozenset(
 REVOKE_DISTINCT_ROLES: frozenset[ProjectRole] = frozenset({"owner", "admin"})
 
 
-def _require_authenticated_identity(user: RequiredUser) -> None:
-    """Reject the explicit disabled-auth identity at mutating/compute boundaries."""
-    if user.id == ANONYMOUS_USER.id:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="An authenticated identity is required for this feature",
-        )
-
-
 @router.post("/duplicate-check", response_model=DuplicateCheckResponse)
 async def check_duplicate(
     project_id: UUID,
@@ -68,7 +59,7 @@ async def check_duplicate(
     """
     # Same access rule as /search/semantic — this endpoint reads the ontology
     # index + embeddings, so it must not leak private-project entity data.
-    _require_authenticated_identity(user)
+    require_authenticated_identity(user)
     project = await get_project_service(db).get(project_id, user)
     if project.user_role is None and not user.is_superadmin:
         raise HTTPException(
@@ -119,7 +110,7 @@ async def mark_distinct(
     user: RequiredUser,
 ) -> DistinctDecisionResponse:
     """Mark a current duplicate warning as a distinct entity pair."""
-    _require_authenticated_identity(user)
+    require_authenticated_identity(user)
     await _require_project_role(
         project_id,
         db,
@@ -163,7 +154,7 @@ async def list_distinct_decisions(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
 ) -> list[DistinctDecisionResponse]:
     """List active decisions, optionally including revoked audit history."""
-    _require_authenticated_identity(user)
+    require_authenticated_identity(user)
     await _require_project_role(
         project_id,
         db,
@@ -188,7 +179,7 @@ async def revoke_distinct_decision(
     user: RequiredUser,
 ) -> DistinctDecisionResponse:
     """Revoke a decision; only owners and admins may restore warnings."""
-    _require_authenticated_identity(user)
+    require_authenticated_identity(user)
     await _require_project_role(
         project_id,
         db,

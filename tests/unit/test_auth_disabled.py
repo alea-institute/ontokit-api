@@ -12,6 +12,7 @@ from ontokit.core.auth import (
     get_current_user,
     get_current_user_optional,
     get_current_user_with_token,
+    require_authenticated_identity,
 )
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,19 @@ class TestAnonymousUser:
     def test_anonymous_user_is_current_user_instance(self) -> None:
         """ANONYMOUS_USER is an instance of CurrentUser."""
         assert isinstance(ANONYMOUS_USER, CurrentUser)
+
+    def test_anonymous_user_is_explicitly_marked(self) -> None:
+        """Sensitive boundaries distinguish disabled-auth access without ID heuristics."""
+        assert ANONYMOUS_USER.is_anonymous is True
+        assert CurrentUser(id="real-user").is_anonymous is False
+
+    def test_sensitive_boundary_rejects_only_anonymous_identity(self) -> None:
+        """Browse-only disabled auth remains while sensitive features fail closed."""
+        with pytest.raises(HTTPException) as exc_info:
+            require_authenticated_identity(ANONYMOUS_USER)
+        assert exc_info.value.status_code == 403
+
+        require_authenticated_identity(CurrentUser(id="real-user"))
 
 
 # ---------------------------------------------------------------------------

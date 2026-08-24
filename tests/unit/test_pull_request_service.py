@@ -297,6 +297,9 @@ class TestCreatePullRequest:
         # Use project_result as fallback for any extra _get_project lookups
         mock_db.execute.side_effect = [
             project_result,  # _get_project
+            MagicMock(),  # project-scoped PR allocation lock
+            MagicMock(),  # source branch lock
+            MagicMock(),  # target branch lock
             no_open_pr_result,  # open PR on source branch
             max_result,  # max(pr_number)
             gh_integration_result,  # _get_github_token -> _get_github_integration
@@ -372,6 +375,7 @@ class TestCreatePullRequest:
         existing_result.scalar_one_or_none.return_value = existing_pr
         mock_db.execute.side_effect = [
             project_result,
+            MagicMock(),  # project-scoped PR allocation lock
             MagicMock(),  # source-branch advisory lock
             MagicMock(),  # target-branch advisory lock
             existing_result,
@@ -383,6 +387,7 @@ class TestCreatePullRequest:
 
         assert error.value.status_code == 409
         mock_db.add.assert_not_called()
+        mock_db.rollback.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_create_pr_source_branch_not_found(
@@ -702,10 +707,18 @@ class TestReopenPullRequest:
         project_result.scalar_one_or_none.return_value = project
         pr_result = MagicMock()
         pr_result.scalar_one_or_none.return_value = pr
+        no_conflict_result = MagicMock()
+        no_conflict_result.scalar_one_or_none.return_value = None
         project_result_2 = MagicMock()
         project_result_2.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [project_result, pr_result, project_result_2]
+        mock_db.execute.side_effect = [
+            project_result,
+            pr_result,
+            MagicMock(),  # source branch lock
+            no_conflict_result,
+            project_result_2,
+        ]
 
         await service.reopen_pull_request(PROJECT_ID, 1, user)
         assert pr.status == PRStatus.OPEN.value
@@ -1634,7 +1647,6 @@ class TestHandleGitHubPRWebhook:
         gh_result.scalar_one_or_none.return_value = integration
         pr_result = MagicMock()
         pr_result.scalar_one_or_none.return_value = pr
-
         mock_db.execute.side_effect = [gh_result, pr_result]
 
         await service.handle_github_pr_webhook(PROJECT_ID, "closed", {"number": 42, "merged": True})
@@ -1681,8 +1693,15 @@ class TestHandleGitHubPRWebhook:
         gh_result.scalar_one_or_none.return_value = integration
         pr_result = MagicMock()
         pr_result.scalar_one_or_none.return_value = pr
+        no_conflict_result = MagicMock()
+        no_conflict_result.scalar_one_or_none.return_value = None
 
-        mock_db.execute.side_effect = [gh_result, pr_result]
+        mock_db.execute.side_effect = [
+            gh_result,
+            pr_result,
+            MagicMock(),  # source branch lock
+            no_conflict_result,
+        ]
 
         await service.handle_github_pr_webhook(PROJECT_ID, "reopened", {"number": 42})
         assert pr.status == "open"

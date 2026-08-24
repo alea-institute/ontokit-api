@@ -487,6 +487,8 @@ class TestReopenPullRequestGitHubSync:
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
+            _scalar_result(None),  # source branch lock
+            _scalar_result(None),  # no conflicting open PR
             _scalar_result(integration),  # _get_github_integration
             _scalar_result(token_row),  # UserGitHubToken
             _project_result(project),  # _to_pr_response
@@ -1232,6 +1234,8 @@ class TestHandleGitHubPRWebhook:
         mock_db.execute.side_effect = [
             _scalar_result(integration),
             _scalar_result(pr),
+            _scalar_result(None),  # source branch lock
+            _scalar_result(None),  # no conflicting open PR
         ]
 
         await service.handle_github_pr_webhook(
@@ -2286,6 +2290,8 @@ class TestCloseReopenExceptionHandling:
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
+            _scalar_result(None),  # source branch lock
+            _scalar_result(None),  # no conflicting open PR
             _scalar_result(integration),
             _scalar_result(token_row),
             _project_result(project),  # _to_pr_response
