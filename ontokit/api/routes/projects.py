@@ -26,6 +26,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
+from ontokit.core.config import settings
 from ontokit.core.constants import ONTOLOGY_INDEX_UPDATES_CHANNEL
 from ontokit.core.database import get_db
 from ontokit.core.encryption import decrypt_token
@@ -229,10 +230,13 @@ async def import_project(
 
 
 async def _resolve_github_pat(db: AsyncSession, user_id: str) -> str:
-    """Resolve a user's GitHub PAT from the database.
+    """Resolve the system mirror token, with a legacy user PAT fallback.
 
-    Raises HTTPException if no token is stored.
+    Raises HTTPException if neither credential is configured.
     """
+    if settings.github_mirror_token:
+        return settings.github_mirror_token
+
     result = await db.execute(select(UserGitHubToken).where(UserGitHubToken.user_id == user_id))
     token_row = result.scalar_one_or_none()
     if not token_row:

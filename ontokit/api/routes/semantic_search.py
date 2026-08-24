@@ -8,7 +8,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import CurrentUser, OptionalUser, RequiredUser
+from ontokit.core.auth import CurrentUser, RequiredUser
 from ontokit.core.database import get_db
 from ontokit.schemas.embeddings import (
     RankedCandidate,
@@ -31,7 +31,7 @@ def get_embeddings(
     return EmbeddingService(db)
 
 
-async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser | None) -> None:
+async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser) -> None:
     from fastapi import HTTPException
 
     service = get_project_service(db)
@@ -47,9 +47,9 @@ async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser |
 )
 async def semantic_search(
     project_id: UUID,
+    user: RequiredUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     service: Annotated[EmbeddingService, Depends(get_embeddings)],
-    user: OptionalUser,
     q: str = Query(..., min_length=1, description="Search query"),
     branch: str | None = Query(default=None),
     limit: int = Query(default=20, ge=1, le=100),
@@ -72,9 +72,9 @@ async def semantic_search(
 async def find_similar_entities(
     project_id: UUID,
     iri: str,
+    user: RequiredUser,
     db: Annotated[AsyncSession, Depends(get_db)],
     service: Annotated[EmbeddingService, Depends(get_embeddings)],
-    user: OptionalUser,
     branch: str | None = Query(default=None),
     limit: int = Query(default=10, ge=1, le=50),
     threshold: float = Query(default=0.5, ge=0.0, le=1.0),

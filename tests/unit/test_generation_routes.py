@@ -70,13 +70,18 @@ def _llm_config(
     return config
 
 
-def _happy_path_execute(session: AsyncMock, role: str = "editor") -> None:
-    """Wire session.execute for project → membership → llm-config lookups."""
+def _happy_path_execute(
+    session: AsyncMock, role: str = "editor", *, marker_rowcount: int = 1
+) -> None:
+    """Wire project → membership → config → provenance-marker results."""
+    marker_result = MagicMock()
+    marker_result.rowcount = marker_rowcount
     session.execute = AsyncMock(
         side_effect=[
             _scalar_one_or_none(_project()),  # _load_project
             _scalar_one_or_none(_member(role)),  # _require_project_member
             _scalar_one_or_none(_llm_config()),  # _get_llm_config
+            marker_result,
         ]
     )
 
@@ -325,6 +330,73 @@ def test_generate_success_shape(authed_client: tuple[TestClient, AsyncMock]):
     # The configured model id is threaded into the pipeline for provenance
     assert svc_instance.generate.await_args.kwargs["model_id"] == "claude-sonnet-4-5"
     assert isinstance(svc_instance.generate.await_args.kwargs["provider"], MeteredLLMProvider)
+
+
+def test_success_marks_matching_active_suggestion_session_as_llm_generated(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    client, session = authed_client
+    _happy_path_execute(session)
+    svc_instance = MagicMock()
+    svc_instance.generate = AsyncMock(return_value=_generation_response())
+
+    with (
+        patch("ontokit.api.routes.generation._get_redis", return_value=None),
+        patch(
+            "ontokit.api.routes.generation.check_budget",
+            new=AsyncMock(return_value=(True, None)),
+        ),
+        patch("ontokit.api.routes.generation.get_provider", return_value=MagicMock()),
+        patch(
+            "ontokit.api.routes.generation.SuggestionGenerationService",
+            return_value=svc_instance,
+        ),
+        patch(
+            "ontokit.api.routes.generation.get_model_pricing",
+            new=AsyncMock(return_value=(0.000001, 0.000002)),
+        ),
+    ):
+        response = client.post(GENERATE_URL, json=GENERATE_BODY)
+
+    assert response.status_code == 200
+    marker_statement = session.execute.await_args_list[-1].args[0]
+    statement_text = str(marker_statement)
+    assert "suggestion_sessions.project_id" in statement_text
+    assert "suggestion_sessions.user_id" in statement_text
+    assert "suggestion_sessions.branch" in statement_text
+    assert "suggestion_sessions.status" in statement_text
+    assert marker_statement.compile().params["is_llm_generated"] is True
+    session.commit.assert_awaited_once()
+
+
+def test_generation_without_matching_active_session_is_harmless(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    client, session = authed_client
+    _happy_path_execute(session, marker_rowcount=0)
+    svc_instance = MagicMock()
+    svc_instance.generate = AsyncMock(return_value=_generation_response())
+
+    with (
+        patch("ontokit.api.routes.generation._get_redis", return_value=None),
+        patch(
+            "ontokit.api.routes.generation.check_budget",
+            new=AsyncMock(return_value=(True, None)),
+        ),
+        patch("ontokit.api.routes.generation.get_provider", return_value=MagicMock()),
+        patch(
+            "ontokit.api.routes.generation.SuggestionGenerationService",
+            return_value=svc_instance,
+        ),
+        patch(
+            "ontokit.api.routes.generation.get_model_pricing",
+            new=AsyncMock(return_value=(0.000001, 0.000002)),
+        ),
+    ):
+        response = client.post(GENERATE_URL, json=GENERATE_BODY)
+
+    assert response.status_code == 200
+    session.commit.assert_not_awaited()
 
 
 def test_generate_402_when_atomic_reservation_refuses_call(

@@ -7,6 +7,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
 from ontokit.worker import (
     auto_submit_stale_suggestions,
@@ -636,7 +637,10 @@ class TestRunRemoteCheckTask:
         ]
 
         with (
-            patch("ontokit.worker.decrypt_token", return_value="decrypted-pat"),
+            patch(
+                "ontokit.services.mirror_credential.decrypt_token",
+                return_value="decrypted-pat",
+            ),
             patch("ontokit.worker.get_storage_service") as mock_storage_fn,
             patch("ontokit.services.github_service.get_github_service") as mock_gh_fn,
         ):
@@ -779,7 +783,10 @@ class TestSyncGithubProjects:
 
         with (
             patch("ontokit.worker.BareGitRepositoryService"),
-            patch("ontokit.worker.decrypt_token", side_effect=RuntimeError("decrypt failed")),
+            patch(
+                "ontokit.services.mirror_credential.decrypt_token",
+                side_effect=RuntimeError("decrypt failed"),
+            ),
         ):
             result = await sync_github_projects(mock_ctx)
 
@@ -805,7 +812,7 @@ class TestSyncGithubProjects:
 
         with (
             patch("ontokit.worker.BareGitRepositoryService"),
-            patch("ontokit.worker.decrypt_token", return_value="pat-123"),
+            patch("ontokit.services.mirror_credential.decrypt_token", return_value="pat-123"),
             patch("ontokit.worker.sync_github_project", new_callable=AsyncMock) as mock_sync,
         ):
             mock_sync.return_value = {"status": "ok"}
@@ -834,7 +841,7 @@ class TestSyncGithubProjects:
 
         with (
             patch("ontokit.worker.BareGitRepositoryService"),
-            patch("ontokit.worker.decrypt_token", return_value="pat-123"),
+            patch("ontokit.services.mirror_credential.decrypt_token", return_value="pat-123"),
             patch(
                 "ontokit.worker.sync_github_project",
                 new_callable=AsyncMock,
@@ -845,6 +852,55 @@ class TestSyncGithubProjects:
 
         assert result["errors"] == 1
         assert result["synced"] == 0
+
+    @pytest.mark.asyncio
+    async def test_credential_lookup_failure_does_not_abort_later_integrations(
+        self, mock_ctx: dict[str, Any]
+    ) -> None:
+        first = MagicMock(project_id=uuid.uuid4())
+        second = MagicMock(project_id=uuid.uuid4())
+        integrations_result = Mock()
+        integrations_result.scalars.return_value.all.return_value = [first, second]
+        mock_ctx["db"].execute.return_value = integrations_result
+
+        with (
+            patch("ontokit.worker.BareGitRepositoryService"),
+            patch(
+                "ontokit.services.mirror_credential.resolve_mirror_credential",
+                new_callable=AsyncMock,
+                side_effect=[SQLAlchemyError("credential db error"), "system-token"],
+            ),
+            patch("ontokit.worker.sync_github_project", new_callable=AsyncMock) as mock_sync,
+        ):
+            mock_sync.return_value = {"status": "ok"}
+            result = await sync_github_projects(mock_ctx)
+
+        assert result == {"total": 2, "synced": 1, "errors": 1}
+        mock_ctx["db"].rollback.assert_awaited_once()
+        mock_sync.assert_awaited_once()
+        assert mock_sync.await_args.args[0] is second
+
+    @pytest.mark.asyncio
+    async def test_credential_programming_error_remains_visible(
+        self, mock_ctx: dict[str, Any]
+    ) -> None:
+        integration = MagicMock(project_id=uuid.uuid4())
+        integrations_result = Mock()
+        integrations_result.scalars.return_value.all.return_value = [integration]
+        mock_ctx["db"].execute.return_value = integrations_result
+
+        with (
+            patch("ontokit.worker.BareGitRepositoryService"),
+            patch(
+                "ontokit.services.mirror_credential.resolve_mirror_credential",
+                new_callable=AsyncMock,
+                side_effect=TypeError("credential resolver bug"),
+            ),
+            pytest.raises(TypeError, match="credential resolver bug"),
+        ):
+            await sync_github_projects(mock_ctx)
+
+        mock_ctx["db"].rollback.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_sync_outer_exception_reraises(self, mock_ctx: dict[str, Any]) -> None:
@@ -1375,7 +1431,10 @@ class TestRunRemoteCheckTaskAdditional:
         same_content = b"identical content"
 
         with (
-            patch("ontokit.worker.decrypt_token", return_value="decrypted-pat"),
+            patch(
+                "ontokit.services.mirror_credential.decrypt_token",
+                return_value="decrypted-pat",
+            ),
             patch("ontokit.worker.get_storage_service") as mock_storage_fn,
             patch("ontokit.services.github_service.get_github_service") as mock_gh_fn,
         ):
@@ -1433,7 +1492,10 @@ class TestRunRemoteCheckTaskAdditional:
         ]
 
         with (
-            patch("ontokit.worker.decrypt_token", return_value="decrypted-pat"),
+            patch(
+                "ontokit.services.mirror_credential.decrypt_token",
+                return_value="decrypted-pat",
+            ),
             patch("ontokit.worker.get_storage_service") as mock_storage_fn,
             patch("ontokit.services.github_service.get_github_service") as mock_gh_fn,
         ):
@@ -1494,7 +1556,7 @@ class TestRunRemoteCheckTaskAdditional:
         ]
 
         with (
-            patch("ontokit.worker.decrypt_token", return_value="pat"),
+            patch("ontokit.services.mirror_credential.decrypt_token", return_value="pat"),
             patch("ontokit.worker.get_storage_service") as mock_storage_fn,
             patch(
                 "ontokit.services.github_service.get_github_service",

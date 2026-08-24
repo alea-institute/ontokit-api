@@ -50,6 +50,18 @@ class Project(Base):
     # 0 = no approval required, 1+ = minimum number of approvals before merge
     pr_approval_required: Mapped[int] = mapped_column(Integer, default=0)
 
+    # Contribution trust ladder settings. Auto-accept remains opt-in so existing
+    # projects keep their pre-ladder behavior until an owner enables it.
+    trust_promotion_threshold: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=5, server_default="5"
+    )
+    auto_accept_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    auto_accept_quiet_days: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=7, server_default="7"
+    )
+
     # Relationships
     members: Mapped[list["ProjectMember"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
@@ -110,6 +122,18 @@ class ProjectMember(Base):
     preferred_branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     # Allows a trusted editor to self-merge structural PRs without peer review (default: off)
     can_self_merge_structural: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Materialized trust plus a sticky administrator override. Automatic
+    # promotion may only update members whose override remains ``none``.
+    is_trusted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    trust_override: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="none", server_default="none"
+    )
+    trust_granted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    trust_granted_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     project: Mapped["Project"] = relationship(back_populates="members")

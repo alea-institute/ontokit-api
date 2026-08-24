@@ -60,6 +60,24 @@ class SuggestionSession(Base):
     submitter_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     client_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
 
+    # Trust-ladder state. LLM-authored suggestions are never scheduled for
+    # automatic acceptance, irrespective of the submitter's trust tier.
+    is_llm_generated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    auto_accept_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    auto_accept_halted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    auto_accept_claimed_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    verification_passed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     # PR link (set after submit)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pr_id: Mapped[uuid.UUID | None] = mapped_column(

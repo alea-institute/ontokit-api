@@ -6,25 +6,25 @@ import logging
 import os
 import secrets
 from collections import defaultdict
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 from uuid import UUID
 
-from ontokit.core.anonymous_token import create_anonymous_token
-
-if TYPE_CHECKING:
-    from ontokit.models.pull_request import PullRequest
-
 from fastapi import HTTPException, status
-from sqlalchemy import select, update
+from rdflib import Graph, URIRef
+from rdflib.namespace import OWL, RDF, RDFS
+from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from ontokit.core.anonymous_token import create_anonymous_token
 from ontokit.core.auth import CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
 from ontokit.git import GitRepositoryService, get_git_service
-from ontokit.models.project import Project
+from ontokit.models.project import Project, ProjectMember
+from ontokit.models.pull_request import PRStatus, PullRequest
+from ontokit.models.suggestion_outcome import SuggestionOutcomeType
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.anonymous_suggestion import (
     AnonymousSessionCreateResponse,
@@ -33,7 +33,13 @@ from ontokit.schemas.anonymous_suggestion import (
 )
 from ontokit.schemas.pull_request import PRCreate
 from ontokit.schemas.suggestion import (
+    BulkReviewAction,
+    BulkReviewFailure,
+    BulkReviewRequest,
+    BulkReviewResponse,
     SuggestionBeaconRequest,
+    SuggestionCapabilitiesResponse,
+    SuggestionQueue,
     SuggestionRejectRequest,
     SuggestionRequestChangesRequest,
     SuggestionResubmitRequest,
@@ -46,13 +52,47 @@ from ontokit.schemas.suggestion import (
     SuggestionSubmitResponse,
     SuggestionUser,
 )
+from ontokit.schemas.trust import TrustTier
+from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
+from ontokit.services.trust_rate_limiter import (
+    TrustLimiterRedis,
+    TrustLimitStatus,
+    check_and_consume,
+)
+from ontokit.services.trust_service import (
+    SYSTEM_AUTO_ACCEPT_ACTOR,
+    TrustService,
+    is_anonymous_user_id,
+)
+from ontokit.services.verification import get_verification_provider
 
 logger = logging.getLogger(__name__)
 
 # Per-branch locks to serialize concurrent git writes (save + beacon_save)
 _branch_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+
+AUTO_ACCEPT_BATCH_SIZE = 100
+AUTO_ACCEPT_LEASE = timedelta(minutes=15)
+
+_ENTITY_DECLARATION_TYPES = frozenset(
+    {
+        RDFS.Class,
+        OWL.Class,
+        RDF.Property,
+        OWL.ObjectProperty,
+        OWL.DatatypeProperty,
+        OWL.AnnotationProperty,
+        OWL.FunctionalProperty,
+        OWL.InverseFunctionalProperty,
+        OWL.TransitiveProperty,
+        OWL.SymmetricProperty,
+        OWL.AsymmetricProperty,
+        OWL.ReflexiveProperty,
+        OWL.IrreflexiveProperty,
+    }
+)
 
 
 class SuggestionService:
@@ -65,6 +105,8 @@ class SuggestionService:
     ) -> None:
         self.db = db
         self.git_service = git_service or get_git_service()
+        self.trust = TrustService(db)
+        self.commit_identity = CommitIdentityService(db)
 
     # --- Helpers ---
 
@@ -73,6 +115,17 @@ class SuggestionService:
         result = await self.db.execute(
             select(Project).options(selectinload(Project.members)).where(Project.id == project_id)
         )
+        project = result.scalar_one_or_none()
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Project not found",
+            )
+        return project
+
+    async def _get_project_record(self, project_id: UUID) -> Project:
+        """Get a project without hydrating its member roster."""
+        result = await self.db.execute(select(Project).where(Project.id == project_id))
         project = result.scalar_one_or_none()
         if project is None:
             raise HTTPException(
@@ -94,8 +147,12 @@ class SuggestionService:
             return True
         return role in ("owner", "admin", "editor", "suggester")
 
-    async def _verify_project_access(self, project_id: UUID, user: CurrentUser) -> None:
-        """Verify the user still has suggest permissions on the project."""
+    async def _verify_project_access(self, project_id: UUID, user: CurrentUser) -> Project:
+        """Verify the user still has suggest permissions, and return the project.
+
+        Returning the loaded project lets callers resolve the trust tier from
+        its members collection without a second fetch.
+        """
         project = await self._get_project(project_id)
         role = self._get_user_role(project, user)
         if not self._can_suggest(role, user):
@@ -103,6 +160,7 @@ class SuggestionService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You no longer have permission to suggest changes",
             )
+        return project
 
     def _get_git_ontology_path(self, project: Project) -> str:
         """Get the ontology file path within the git repo."""
@@ -115,6 +173,39 @@ class SuggestionService:
                 )
             return path
         return "ontology.ttl"
+
+    @staticmethod
+    def _declared_entity_iris(content: bytes | str) -> set[str]:
+        """Return explicitly declared RDF class/property IRIs in Turtle content."""
+        graph = Graph()
+        try:
+            graph.parse(data=content, format="turtle")
+        except Exception as e:  # rdflib exposes parser-specific exception subclasses
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid Turtle content",
+            ) from e
+        return {
+            str(subject)
+            for subject, object_type in graph.subject_objects(RDF.type)
+            if isinstance(subject, URIRef) and object_type in _ENTITY_DECLARATION_TYPES
+        }
+
+    def _assert_branch_content_can_mint(
+        self,
+        project: Project,
+        user: CurrentUser | None,
+        current_content: bytes | str,
+        proposed_content: bytes | str,
+    ) -> None:
+        """Enforce minting from the actual branch delta, never a client hint."""
+        tier = self.trust.resolve_tier(project, user)
+        if self.trust.can_mint_entities(tier):
+            return
+        current_entities = self._declared_entity_iris(current_content)
+        proposed_entities = self._declared_entity_iris(proposed_content)
+        if proposed_entities - current_entities:
+            self._assert_can_mint(project, user)
 
     async def _get_session(self, project_id: UUID, session_id: str) -> SuggestionSession:
         """Get a suggestion session or raise 404."""
@@ -296,7 +387,18 @@ class SuggestionService:
         filename = self._get_git_ontology_path(project)
 
         # Serialize git writes per branch to prevent lost commits
+        # R14: never author with the contributor's real email address.
+        author_name, author_email = await self.commit_identity.resolve(
+            session.user_id, session.user_name
+        )
+
         async with _branch_locks[session.branch]:
+            current_content = self.git_service.get_file_from_branch(
+                project_id, session.branch, filename
+            )
+            self._assert_branch_content_can_mint(
+                project, user, current_content, data.content
+            )
             # Commit to the suggestion branch
             commit_message = f"Update {data.entity_label}"
             try:
@@ -306,8 +408,8 @@ class SuggestionService:
                     ontology_content=data.content.encode("utf-8"),
                     filename=filename,
                     message=commit_message,
-                    author_name=session.user_name or "Suggester",
-                    author_email=session.user_email or "suggester@ontokit.dev",
+                    author_name=author_name,
+                    author_email=author_email,
                 )
             except Exception as e:
                 logger.error(f"Failed to save suggestion: {e}")
@@ -349,11 +451,15 @@ class SuggestionService:
         session_id: str,
         data: SuggestionSubmitRequest,
         user: CurrentUser,
+        *,
+        verification_token: str | None = None,
+        client_ip: str | None = None,
+        redis: TrustLimiterRedis | None = None,
     ) -> SuggestionSubmitResponse:
         """Submit the suggestion session by creating a PR."""
         session = await self._get_session(project_id, session_id)
         self._verify_ownership(session, user)
-        await self._verify_project_access(project_id, user)
+        project = await self._verify_project_access(project_id, user)
 
         if session.status != SuggestionSessionStatus.ACTIVE.value:
             raise HTTPException(
@@ -367,8 +473,76 @@ class SuggestionService:
                 detail="No changes to submit",
             )
 
+        # R10 gates run BEFORE any git or PR work, so a refused submission
+        # leaves no side effects behind.
+        await self._enforce_untrusted_gates(
+            project, session, user, verification_token, client_ip, redis
+        )
+
         return await self._create_pr_for_session(
             project_id, session, user, data.summary, "submitted"
+        )
+
+    async def _enforce_untrusted_gates(
+        self,
+        project: Project,
+        session: SuggestionSession,
+        user: CurrentUser,
+        verification_token: str | None,
+        client_ip: str | None,
+        redis: TrustLimiterRedis | None,
+    ) -> None:
+        """Human verification and per-account rate limiting for the untrusted rung (R10).
+
+        Only the untrusted rung is gated: trusted contributors have earned their
+        way past it, and reviewers were never subject to it. Anonymous sessions
+        keep their separate, DB-backed per-IP session limit.
+        """
+        if self.trust.resolve_tier(project, user) is not TrustTier.UNTRUSTED:
+            return
+        project_id = project.id
+
+        # First suggestion on this project: challenge once (F2). Persisted on
+        # the session so a retry after a network blip does not re-challenge.
+        if not session.verification_passed:
+            provider = get_verification_provider()
+            is_first_suggestion = (
+                provider.enabled and await self.trust.count_outcomes(project_id, user.id) == 0
+            )
+            if is_first_suggestion and not await provider.verify(verification_token, client_ip):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail={
+                        "reason": "verification_required",
+                        "message": "Please complete the verification challenge to continue.",
+                    },
+                )
+            session.verification_passed = True
+
+        decision = await check_and_consume(redis, str(project_id), user.id)
+        if decision.status is TrustLimitStatus.UNAVAILABLE:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "reason": "submission_limiter_unavailable",
+                    "message": "Suggestion submissions are temporarily unavailable. Try again.",
+                },
+            )
+        if decision.status is TrustLimitStatus.EXHAUSTED:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail={
+                    "reason": "daily_limit_reached",
+                    "message": (
+                        "You have reached today's suggestion limit. It resets at midnight UTC."
+                    ),
+                },
+            )
+        logger.debug(
+            "Untrusted submission allowed: project=%s user=%s remaining=%s",
+            project_id,
+            user.id,
+            decision.remaining,
         )
 
     async def _create_pr_for_session(
@@ -422,6 +596,7 @@ class SuggestionService:
             session.pr_number = existing_pr.pr_number
             session.pr_id = existing_pr.id
             session.last_activity = datetime.now(UTC)
+            await self._schedule_auto_accept(project_id, session, user)
             await self.db.commit()
 
             return SuggestionSubmitResponse(
@@ -457,6 +632,10 @@ class SuggestionService:
         session.pr_number = pr_response.pr_number
         session.pr_id = pr_response.id
         session.last_activity = datetime.now(UTC)
+
+        # Start the auto-accept quiet clock if — and only if — this submission
+        # is eligible (R11): trusted human, on a project that opted in.
+        await self._schedule_auto_accept(project_id, session, user)
 
         # Notify project editors/admins about the suggestion
         project = await self._get_project(project_id)
@@ -532,17 +711,50 @@ class SuggestionService:
         # Unreachable, but satisfies type checker
         raise RuntimeError("Failed to allocate PR number")
 
-    async def _build_summary(self, s: SuggestionSession) -> SuggestionSessionSummary:
+    def _summary_tier(
+        self,
+        project: Project | None,
+        s: SuggestionSession,
+        members_by_user_id: Mapping[str, ProjectMember] | None = None,
+    ) -> TrustTier | None:
+        """Resolve the submitter's tier for a review-queue row.
+
+        Resolved from the project's already-loaded members rather than a
+        per-row query — the triage list is exactly where an N+1 would bite.
+        """
+        if project is None:
+            return None
+        if getattr(s, "is_anonymous", False):
+            return TrustTier.ANONYMOUS
+        submitter = CurrentUser(id=s.user_id, email=s.user_email, name=s.user_name)
+        if members_by_user_id is not None:
+            return self.trust.resolve_tier_for_member(
+                submitter, members_by_user_id.get(s.user_id)
+            )
+        return self.trust.resolve_tier(project, submitter)
+
+    async def _build_summary(
+        self,
+        s: SuggestionSession,
+        project: Project | None = None,
+        pull_requests: dict[UUID, "PullRequest"] | None = None,
+        submitter_tier: TrustTier | None = None,
+    ) -> SuggestionSessionSummary:
         """Build a SuggestionSessionSummary from a session model."""
         pr_url = None
         github_pr_url = None
         if s.pr_id:
-            from ontokit.models.pull_request import PullRequest
+            if pull_requests is None:
+                from ontokit.models.pull_request import PullRequest
 
-            pr_result = await self.db.execute(select(PullRequest).where(PullRequest.id == s.pr_id))
-            pr = pr_result.scalar_one_or_none()
+                pr_result = await self.db.execute(
+                    select(PullRequest).where(PullRequest.id == s.pr_id)
+                )
+                pr = pr_result.scalar_one_or_none()
+            else:
+                pr = pull_requests.get(s.pr_id)
             if pr:
-                pr_url = pr.github_pr_url if hasattr(pr, "github_pr_url") else None
+                pr_url = pr.github_pr_url
                 github_pr_url = pr_url
 
         # For anonymous sessions, prefer submitter_name/email (credit info collected at submit)
@@ -579,7 +791,160 @@ class SuggestionService:
             revision=s.revision,
             summary=s.summary,
             is_anonymous=is_anonymous,
+            submitter_tier=(
+                submitter_tier
+                if submitter_tier is not None
+                else self._summary_tier(project, s)
+            ),
+            is_llm_generated=bool(getattr(s, "is_llm_generated", False)),
+            auto_accept_after=getattr(s, "auto_accept_after", None),
+            auto_accept_halted_at=getattr(s, "auto_accept_halted_at", None),
         )
+
+    # --- Trust ladder helpers (R5, R6, R11, R12) ---
+
+    def _assert_can_mint(self, project: Project, user: CurrentUser | None) -> None:
+        """Refuse entity minting below the trusted rung (R8 / KD4).
+
+        Server-side enforcement. The capabilities endpoint is the matching
+        affordance, and both read the same ``resolve_tier``, so the UI and the
+        gate can never disagree.
+        """
+        tier = self.trust.resolve_tier(project, user)
+        if self.trust.can_mint_entities(tier):
+            return
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={
+                "reason": "trust_required_to_mint",
+                "message": (
+                    "Creating new entities requires trusted status on this project. "
+                    "Suggest edits to existing entities to earn it."
+                ),
+                "tier": str(tier),
+            },
+        )
+
+    async def get_capabilities(
+        self, project_id: UUID, user: CurrentUser | None
+    ) -> SuggestionCapabilitiesResponse:
+        """What the caller may do here, and how trust is earned (AE2).
+
+        Private projects disclose nothing to callers without access — a tier
+        readout is itself information about the project.
+        """
+        member: ProjectMember | None = None
+        anonymous_caller = user is None or is_anonymous_user_id(user.id)
+        if anonymous_caller:
+            project = await self._get_project_record(project_id)
+            tier = TrustTier.ANONYMOUS
+        else:
+            assert user is not None
+            loaded = await self.trust.load_project_and_member(project_id, user.id)
+            if loaded is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found",
+                )
+            project, member = loaded
+            tier = self.trust.resolve_tier_for_member(user, member)
+
+        is_superadmin = bool(user is not None and user.is_superadmin)
+        if not project.is_public and not is_superadmin and member is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="This project is not public",
+            )
+
+        if anonymous_caller:
+            can_suggest = bool(project.is_public)
+        else:
+            assert user is not None
+            can_suggest = self._can_suggest(member.role if member is not None else None, user)
+
+        accepted = 0
+        verification_required = False
+        if user is not None and not anonymous_caller and can_suggest:
+            accepted, total_outcomes = await self.trust.get_outcome_counts(project_id, user.id)
+            verification_required = tier is TrustTier.UNTRUSTED and total_outcomes == 0
+
+        return SuggestionCapabilitiesResponse(
+            tier=tier,
+            can_suggest=can_suggest,
+            can_mint_entities=self.trust.can_mint_entities(tier),
+            promotion_threshold=project.trust_promotion_threshold or 5,
+            accepted_count=accepted,
+            auto_accept_enabled=bool(project.auto_accept_enabled),
+            auto_accept_quiet_days=project.auto_accept_quiet_days or 7,
+            verification_required=verification_required,
+        )
+
+    async def _record_terminal_outcome(
+        self,
+        project_id: UUID,
+        session: SuggestionSession,
+        outcome: SuggestionOutcomeType,
+        decided_by: str | None,
+        note: str | None = None,
+    ) -> None:
+        """Append the outcome row and, on acceptance, run auto-promotion.
+
+        Deliberately does NOT commit: the caller commits this together with the
+        session's status change, so a resolved suggestion can never exist
+        without its outcome row (which would silently break promotion counting).
+        """
+        await self.trust.record_outcome(project_id, session, outcome, decided_by, note)
+
+        if outcome is not SuggestionOutcomeType.ACCEPTED:
+            return
+
+        project = await self._get_project(project_id)
+        promoted = await self.trust.evaluate_promotion(project, session.user_id)
+        if not promoted:
+            return
+
+        notif = NotificationService(self.db)
+        await notif.create_notification(
+            user_id=session.user_id,
+            notification_type="trust_promoted",
+            title=f"You are now a trusted contributor on {project.name}",
+            body=(
+                "Your suggestions are now reviewed on the trusted queue, and you can "
+                "create new entities on this project."
+            ),
+            project_id=project_id,
+            project_name=project.name,
+        )
+
+    def _halt_auto_accept(self, session: SuggestionSession) -> None:
+        """Stop the quiet-period clock because a reviewer objected (R12)."""
+        session.auto_accept_after = None
+        session.auto_accept_claimed_until = None
+        session.auto_accept_halted_at = datetime.now(UTC)
+
+    async def _schedule_auto_accept(
+        self, project_id: UUID, session: SuggestionSession, user: CurrentUser
+    ) -> None:
+        """Start (or restart) the quiet-period clock if the session is eligible.
+
+        Every write to ``auto_accept_after`` funnels through the single
+        eligibility predicate on TrustService, so R13's "LLM output never
+        auto-accepts" cannot be bypassed by adding a call site.
+
+        A resolved objection restarts the clock from zero (KTD11) rather than
+        resuming the remainder — a reviewer who objected gets a full fresh
+        window to look at the revision.
+        """
+        project = await self._get_project(project_id)
+        tier = self.trust.resolve_tier(project, user)
+        if not self.trust.is_auto_accept_eligible(project, session, tier):
+            session.auto_accept_after = None
+            session.auto_accept_claimed_until = None
+            return
+        quiet_days = project.auto_accept_quiet_days or 7
+        session.auto_accept_after = datetime.now(UTC) + timedelta(days=quiet_days)
+        session.auto_accept_halted_at = None
+        session.auto_accept_claimed_until = None
 
     def _can_review(self, role: str | None, user: CurrentUser) -> bool:
         """Check if the user's role allows reviewing suggestions."""
@@ -587,8 +952,13 @@ class SuggestionService:
             return True
         return role in ("owner", "admin", "editor")
 
-    async def _verify_reviewer_access(self, project_id: UUID, user: CurrentUser) -> None:
-        """Verify the user has editor/admin/owner role (can review)."""
+    async def _verify_reviewer_access(self, project_id: UUID, user: CurrentUser) -> Project:
+        """Verify the user has editor/admin/owner role, and return the project.
+
+        Returning the loaded project lets callers resolve submitter tiers from
+        its members collection without a second fetch — the triage list is
+        exactly where an extra query per row would bite.
+        """
         project = await self._get_project(project_id)
         role = self._get_user_role(project, user)
         if not self._can_review(role, user):
@@ -596,6 +966,7 @@ class SuggestionService:
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Editor access or above required to review suggestions",
             )
+        return project
 
     async def list_sessions(
         self, project_id: UUID, user: CurrentUser
@@ -615,10 +986,18 @@ class SuggestionService:
         return SuggestionSessionListResponse(items=items)
 
     async def list_pending(
-        self, project_id: UUID, user: CurrentUser
+        self,
+        project_id: UUID,
+        user: CurrentUser,
+        queue: SuggestionQueue | None = None,
     ) -> SuggestionSessionListResponse:
-        """List pending suggestion sessions for review (editors/admins)."""
-        await self._verify_reviewer_access(project_id, user)
+        """List pending suggestion sessions for review (editors/admins).
+
+        ``queue`` splits the list by submitter tier (R9): ``triage`` is the
+        anonymous + untrusted rungs, ``review`` is the trusted rung. Omitting it
+        returns everything, which keeps existing clients working unchanged.
+        """
+        project = await self._verify_reviewer_access(project_id, user)
 
         result = await self.db.execute(
             select(SuggestionSession)
@@ -634,13 +1013,103 @@ class SuggestionService:
             .order_by(SuggestionSession.last_activity.desc())
         )
         sessions = result.scalars().all()
+        members_by_user_id = {member.user_id: member for member in project.members}
+        tiers_by_session_id = {
+            session.id: self._summary_tier(project, session, members_by_user_id)
+            for session in sessions
+        }
 
-        items = [await self._build_summary(s) for s in sessions]
+        if queue == SuggestionQueue.TRIAGE:
+            sessions = [
+                session
+                for session in sessions
+                if tiers_by_session_id[session.id]
+                in (TrustTier.ANONYMOUS, TrustTier.UNTRUSTED)
+            ]
+        elif queue == SuggestionQueue.REVIEW:
+            sessions = [
+                session
+                for session in sessions
+                if tiers_by_session_id[session.id] in (TrustTier.TRUSTED, TrustTier.REVIEWER)
+            ]
+
+        pull_requests: dict[UUID, PullRequest] = {}
+        pr_ids = [session.pr_id for session in sessions if session.pr_id is not None]
+        if pr_ids:
+            pr_result = await self.db.execute(select(PullRequest).where(PullRequest.id.in_(pr_ids)))
+            pull_requests = {pr.id: pr for pr in pr_result.scalars().all()}
+
+        items = [
+            await self._build_summary(
+                s,
+                project,
+                pull_requests,
+                tiers_by_session_id[s.id],
+            )
+            for s in sessions
+        ]
         return SuggestionSessionListResponse(items=items)
 
-    async def approve(self, project_id: UUID, session_id: str, user: CurrentUser) -> None:
-        """Approve a suggestion session — merges the PR."""
+    async def bulk_review(
+        self, project_id: UUID, data: BulkReviewRequest, user: CurrentUser
+    ) -> BulkReviewResponse:
+        """Accept or dismiss many suggestions in one pass (R9).
+
+        Partial-success by design: each session is processed independently and
+        failures are reported per item, because one stale session must never
+        abort a forty-item dismissal.
+        """
         await self._verify_reviewer_access(project_id, user)
+
+        succeeded: list[str] = []
+        failed: list[BulkReviewFailure] = []
+        for session_id in data.session_ids:
+            try:
+                if data.action is BulkReviewAction.ACCEPT:
+                    await self._approve_unchecked(project_id, session_id, user)
+                else:
+                    await self._dismiss_unchecked(project_id, session_id, user, data.note)
+                succeeded.append(session_id)
+            except HTTPException as e:
+                await self.db.rollback()
+                failed.append(BulkReviewFailure(session_id=session_id, reason=str(e.detail)))
+            except Exception as e:  # noqa: BLE001 — one bad row must not abort the batch
+                await self.db.rollback()
+                logger.warning("Bulk %s failed for session %s: %s", data.action, session_id, e)
+                failed.append(BulkReviewFailure(session_id=session_id, reason="Unexpected error"))
+
+        return BulkReviewResponse(action=data.action, succeeded=succeeded, failed=failed)
+
+    async def approve(
+        self,
+        project_id: UUID,
+        session_id: str,
+        user: CurrentUser,
+        *,
+        decided_by: str | None = None,
+    ) -> None:
+        """Approve a suggestion session — merges the PR.
+
+        ``decided_by`` overrides the recorded actor so the auto-accept sweep can
+        attribute its own merges to ``system:auto-accept`` while reusing this
+        one path (and therefore the outcome log and promotion evaluation).
+        """
+        await self._verify_reviewer_access(project_id, user)
+        await self._approve_unchecked(project_id, session_id, user, decided_by)
+
+    async def _approve_unchecked(
+        self,
+        project_id: UUID,
+        session_id: str,
+        user: CurrentUser,
+        decided_by: str | None = None,
+    ) -> None:
+        """Approve without the reviewer-role gate.
+
+        Internal only. ``approve`` is the authorized entry point; the auto-accept
+        sweep is the sole other caller, and its authorization is the trust tier
+        re-check it performs immediately before calling in.
+        """
         session = await self._get_session(project_id, session_id)
 
         if session.status not in (
@@ -652,8 +1121,21 @@ class SuggestionService:
                 detail=f"Session is {session.status}, cannot approve",
             )
 
-        # Merge the PR if it exists
-        if session.pr_number:
+        # The PR service commits its merge before returning. If a later session
+        # finalization failed, a retry sees the already-merged PR and resumes
+        # here without attempting a second external/local merge.
+        pr_already_merged = False
+        if session.pr_id is not None:
+            pr_result = await self.db.execute(
+                select(PullRequest).where(PullRequest.id == session.pr_id)
+            )
+            linked_pr = pr_result.scalar_one_or_none()
+            pr_already_merged = bool(
+                linked_pr is not None and linked_pr.status == PRStatus.MERGED.value
+            )
+
+        # Merge the PR if it exists and has not already crossed that boundary.
+        if session.pr_number and not pr_already_merged:
             from ontokit.schemas.pull_request import PRMergeRequest
 
             pr_service = get_pull_request_service(self.db)
@@ -662,9 +1144,19 @@ class SuggestionService:
                     merge_message=f"Merge suggestion: {session_id}",
                     delete_source_branch=True,
                 )
-                await pr_service.merge_pull_request(project_id, session.pr_number, merge_req, user)
+                await pr_service.merge_pull_request(
+                    project_id,
+                    session.pr_number,
+                    merge_req,
+                    user,
+                    system_auto_accept=(
+                        decided_by == SYSTEM_AUTO_ACCEPT_ACTOR
+                        and user.id == SYSTEM_AUTO_ACCEPT_ACTOR
+                    ),
+                )
             except HTTPException:
-                logger.warning(f"PR merge failed for session {session_id}, marking merged anyway")
+                logger.warning("PR merge failed for suggestion session %s", session_id)
+                raise
 
         session.status = SuggestionSessionStatus.MERGED.value
         session.reviewer_id = user.id
@@ -672,6 +1164,54 @@ class SuggestionService:
         session.reviewer_email = user.email
         session.reviewed_at = datetime.now(UTC)
         session.last_activity = datetime.now(UTC)
+        session.auto_accept_after = None
+        session.auto_accept_claimed_until = None
+        await self._record_terminal_outcome(
+            project_id, session, SuggestionOutcomeType.ACCEPTED, decided_by or user.id
+        )
+        await self.db.commit()
+
+    async def dismiss(
+        self, project_id: UUID, session_id: str, user: CurrentUser, note: str | None = None
+    ) -> None:
+        """Dismiss a triage-queue suggestion without merging it (R9).
+
+        Distinct from ``reject``: dismissal is the fast skim verdict on junk and
+        carries no feedback obligation, where rejection is a considered review
+        outcome with a reason the contributor sees.
+        """
+        await self._verify_reviewer_access(project_id, user)
+        await self._dismiss_unchecked(project_id, session_id, user, note)
+
+    async def _dismiss_unchecked(
+        self,
+        project_id: UUID,
+        session_id: str,
+        user: CurrentUser,
+        note: str | None = None,
+    ) -> None:
+        """Dismiss after the caller has completed the reviewer-role gate."""
+        session = await self._get_session(project_id, session_id)
+
+        if session.status not in (
+            SuggestionSessionStatus.SUBMITTED.value,
+            SuggestionSessionStatus.AUTO_SUBMITTED.value,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Session is {session.status}, cannot dismiss",
+            )
+
+        session.status = SuggestionSessionStatus.DISCARDED.value
+        session.reviewer_id = user.id
+        session.reviewer_name = user.name
+        session.reviewer_email = user.email
+        session.reviewed_at = datetime.now(UTC)
+        session.last_activity = datetime.now(UTC)
+        self._halt_auto_accept(session)
+        await self._record_terminal_outcome(
+            project_id, session, SuggestionOutcomeType.DISMISSED, user.id, note
+        )
         await self.db.commit()
 
     async def reject(
@@ -697,6 +1237,11 @@ class SuggestionService:
         session.reviewer_feedback = data.reason
         session.reviewed_at = datetime.now(UTC)
         session.last_activity = datetime.now(UTC)
+        # An objection halts the quiet-period clock (R12).
+        self._halt_auto_accept(session)
+        await self._record_terminal_outcome(
+            project_id, session, SuggestionOutcomeType.REJECTED, user.id, data.reason
+        )
         await self.db.commit()
 
     async def request_changes(
@@ -726,6 +1271,9 @@ class SuggestionService:
         session.reviewer_feedback = data.feedback
         session.reviewed_at = datetime.now(UTC)
         session.last_activity = datetime.now(UTC)
+        # An objection halts the quiet-period clock (R12). No outcome row: the
+        # session has not reached a terminal state, it is being revised.
+        self._halt_auto_accept(session)
         await self.db.commit()
 
     async def resubmit(
@@ -752,6 +1300,8 @@ class SuggestionService:
         session.reviewer_feedback = None
         session.reviewed_at = None
         session.last_activity = datetime.now(UTC)
+        # The objection is resolved: restart the quiet clock from zero (KTD11).
+        await self._schedule_auto_accept(project_id, session, user)
         await self.db.commit()
 
         return SuggestionSubmitResponse(
@@ -852,10 +1402,28 @@ class SuggestionService:
         """Commit a beacon payload to the session branch (fire-and-forget)."""
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
+        actor = None
+        if not bool(getattr(session, "is_anonymous", False)):
+            actor = CurrentUser(
+                id=session.user_id,
+                email=session.user_email,
+                name=session.user_name,
+            )
+        author_name, author_email = await self.commit_identity.resolve(
+            session.user_id,
+            session.user_name,
+            is_anonymous=bool(getattr(session, "is_anonymous", False)),
+            session_id=session.session_id,
+        )
 
         # Serialize git writes per branch to prevent lost commits
         async with _branch_locks[session.branch]:
-            # Commit without full validation (speed over correctness for beacon)
+            current_content = self.git_service.get_file_from_branch(
+                project_id, session.branch, filename
+            )
+            self._assert_branch_content_can_mint(
+                project, actor, current_content, data.content
+            )
             try:
                 self.git_service.commit_to_branch(  # type: ignore[attr-defined]
                     project_id=project_id,
@@ -863,8 +1431,8 @@ class SuggestionService:
                     ontology_content=data.content.encode("utf-8"),
                     filename=filename,
                     message="Auto-save (beacon)",
-                    author_name=session.user_name or "Suggester",
-                    author_email=session.user_email or "suggester@ontokit.dev",
+                    author_name=author_name,
+                    author_email=author_email,
                 )
             except Exception as e:
                 logger.warning(f"Beacon save failed for session {data.session_id}: {e}")
@@ -1002,7 +1570,22 @@ class SuggestionService:
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
 
+        # R14: the credit name the submitter typed is used for the NAME only —
+        # never for the address, which is a per-session anonymous alias.
+        author_name, author_email = await self.commit_identity.resolve(
+            session.user_id,
+            session.user_name,
+            is_anonymous=True,
+            session_id=session.session_id,
+        )
+
         async with _branch_locks[session.branch]:
+            current_content = self.git_service.get_file_from_branch(
+                project_id, session.branch, filename
+            )
+            self._assert_branch_content_can_mint(
+                project, None, current_content, data.content
+            )
             commit_message = f"Update {data.entity_label}"
             try:
                 commit_info = self.git_service.commit_to_branch(  # type: ignore[attr-defined]
@@ -1011,8 +1594,8 @@ class SuggestionService:
                     ontology_content=data.content.encode("utf-8"),
                     filename=filename,
                     message=commit_message,
-                    author_name=session.user_name or "Anonymous",
-                    author_email=session.user_email or "anonymous@ontokit.dev",
+                    author_name=author_name,
+                    author_email=author_email,
                 )
             except Exception as e:
                 logger.error(f"Failed to save anonymous suggestion: {e}")
@@ -1155,6 +1738,33 @@ class SuggestionService:
 
         count = 0
         for session in stale_sessions:
+            mock_user = CurrentUser(
+                id=session.user_id,
+                email=session.user_email,
+                name=session.user_name,
+            )
+
+            # A background sweep cannot satisfy the interactive verification
+            # challenge or account limiter. Leave untrusted work ACTIVE so its
+            # owner must submit through the normal gated endpoint.
+            try:
+                project = await self._verify_project_access(session.project_id, mock_user)
+            except HTTPException:
+                session.status = SuggestionSessionStatus.DISCARDED.value
+                await self.db.commit()
+                logger.warning(
+                    "Discarded session %s: user %s lost project access",
+                    session.session_id,
+                    session.user_id,
+                )
+                continue
+            if self.trust.resolve_tier(project, mock_user) is TrustTier.UNTRUSTED:
+                logger.info(
+                    "Skipped stale auto-submit for untrusted session %s",
+                    session.session_id,
+                )
+                continue
+
             # Atomically claim the session to prevent concurrent workers from
             # processing the same session.  Only proceed if this UPDATE affects
             # exactly one row (i.e. no other worker claimed it first).
@@ -1174,24 +1784,6 @@ class SuggestionService:
             await self.db.commit()
             # Refresh so the in-memory object reflects the new status
             await self.db.refresh(session)
-
-            mock_user = CurrentUser(
-                id=session.user_id,
-                email=session.user_email,
-                name=session.user_name,
-            )
-
-            # Verify the user still has project access before auto-submitting
-            try:
-                await self._verify_project_access(session.project_id, mock_user)
-            except HTTPException:
-                session.status = SuggestionSessionStatus.DISCARDED.value
-                await self.db.commit()
-                logger.warning(
-                    f"Discarded session {session.session_id}: "
-                    f"user {session.user_id} lost project access"
-                )
-                continue
 
             try:
                 await self._create_pr_for_session(
@@ -1216,6 +1808,130 @@ class SuggestionService:
                 except Exception as revert_err:
                     logger.error(
                         f"Failed to revert session {session.session_id} to ACTIVE: {revert_err}"
+                    )
+
+        return count
+
+    async def auto_accept_ripe_sessions(self) -> int:
+        """Merge trusted suggestions whose quiet period has elapsed (R11).
+
+        Multi-instance safe: each session is claimed with a conditional UPDATE
+        carrying the full predicate, and only a rowcount of exactly 1 proceeds —
+        the same pattern ``auto_submit_stale_sessions`` uses (R17).
+
+        Tier is re-verified at merge time as well as at scheduling time: a
+        contributor whose trust was revoked while the clock ran must not
+        auto-merge. The clock is the braces; this is the belt.
+
+        Returns the number of sessions auto-merged.
+        """
+        now = datetime.now(UTC)
+        lease_until = now + AUTO_ACCEPT_LEASE
+
+        result = await self.db.execute(
+            select(SuggestionSession).where(
+                SuggestionSession.status.in_(
+                    [
+                        SuggestionSessionStatus.SUBMITTED.value,
+                        SuggestionSessionStatus.AUTO_SUBMITTED.value,
+                    ]
+                ),
+                SuggestionSession.auto_accept_after.is_not(None),
+                SuggestionSession.auto_accept_after <= now,
+                SuggestionSession.auto_accept_halted_at.is_(None),
+                SuggestionSession.is_anonymous.is_(False),
+                SuggestionSession.is_llm_generated.is_(False),
+                or_(
+                    SuggestionSession.auto_accept_claimed_until.is_(None),
+                    SuggestionSession.auto_accept_claimed_until <= now,
+                ),
+            )
+            .order_by(SuggestionSession.auto_accept_after.asc(), SuggestionSession.id.asc())
+            .limit(AUTO_ACCEPT_BATCH_SIZE)
+        )
+        ripe = result.scalars().all()
+
+        count = 0
+        for session in ripe:
+            # Atomically claim with an expiring lease. Keeping the original
+            # schedule makes the claim recoverable if this worker dies after
+            # committing the claim but before finalization.
+            claim_result = await self.db.execute(
+                update(SuggestionSession)
+                .where(
+                    SuggestionSession.id == session.id,
+                    SuggestionSession.status.in_(
+                        [
+                            SuggestionSessionStatus.SUBMITTED.value,
+                            SuggestionSessionStatus.AUTO_SUBMITTED.value,
+                        ]
+                    ),
+                    SuggestionSession.auto_accept_after.is_not(None),
+                    SuggestionSession.auto_accept_after <= now,
+                    SuggestionSession.auto_accept_halted_at.is_(None),
+                    SuggestionSession.is_anonymous.is_(False),
+                    SuggestionSession.is_llm_generated.is_(False),
+                    or_(
+                        SuggestionSession.auto_accept_claimed_until.is_(None),
+                        SuggestionSession.auto_accept_claimed_until <= now,
+                    ),
+                )
+                .values(auto_accept_claimed_until=lease_until)
+            )
+            if claim_result.rowcount != 1:  # type: ignore[attr-defined]
+                continue  # Another worker claimed it first
+            await self.db.commit()
+
+            project = await self._get_project(session.project_id)
+            submitter = CurrentUser(
+                id=session.user_id, email=session.user_email, name=session.user_name
+            )
+            tier = self.trust.resolve_tier(project, submitter)
+            if not self.trust.is_auto_accept_eligible(project, session, tier):
+                session.auto_accept_after = None
+                session.auto_accept_claimed_until = None
+                await self.db.commit()
+                logger.info(
+                    "Cancelled auto-accept for session %s: eligibility changed for submitter %s",
+                    session.session_id,
+                    session.user_id,
+                )
+                continue
+
+            # Merge through the normal approve path so the outcome row,
+            # promotion evaluation and PR merge all still happen. The reviewer
+            # gate is skipped deliberately: the tier re-check above IS this
+            # path's authorization.
+            system_actor = CurrentUser(
+                id=SYSTEM_AUTO_ACCEPT_ACTOR,
+                email=None,
+                name="OntoKit auto-accept",
+            )
+            try:
+                await self._approve_unchecked(
+                    session.project_id,
+                    session.session_id,
+                    system_actor,
+                    SYSTEM_AUTO_ACCEPT_ACTOR,
+                )
+                count += 1
+                logger.info(
+                    "Auto-accepted suggestion session %s for project %s after the quiet period",
+                    session.session_id,
+                    session.project_id,
+                )
+            except Exception as e:
+                logger.error("Failed to auto-accept session %s: %s", session.session_id, e)
+                await self.db.rollback()
+                # Revert the claim so the next sweep retries.
+                try:
+                    session.auto_accept_claimed_until = None
+                    await self.db.commit()
+                except Exception as revert_err:
+                    logger.error(
+                        "Failed to revert auto-accept claim for session %s: %s",
+                        session.session_id,
+                        revert_err,
                     )
 
         return count

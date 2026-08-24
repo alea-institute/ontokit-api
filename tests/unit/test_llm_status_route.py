@@ -48,13 +48,14 @@ def _llm_config(
     api_key_encrypted: bytes | None = b"enc",
     monthly: float | None = 100.0,
     daily: float | None = None,
+    model: str | None = "claude-sonnet-4-20250514",
 ) -> Mock:
     config = Mock()
     config.provider = provider
     config.api_key_encrypted = api_key_encrypted
     config.monthly_budget_usd = monthly
     config.daily_cap_usd = daily
-    config.model = None
+    config.model = model
     config.model_tier = "quality"
     config.base_url = None
     return config
@@ -96,6 +97,24 @@ def test_status_unconfigured_project(authed_client: tuple[TestClient, AsyncMock]
     # must not hinge on `configured`; see the viewer test below).
     assert body["daily_remaining"] == 500
     assert body["monthly_spent_usd"] == 0.0
+
+
+def test_status_provider_without_model_is_unconfigured(
+    authed_client: tuple[TestClient, AsyncMock],
+):
+    """A provider and credential are insufficient without a selected model."""
+    client, session = authed_client
+    session.execute = AsyncMock(
+        side_effect=[
+            _scalar_one_or_none(_member("editor")),
+            _scalar_one_or_none(_llm_config(model=None)),
+            _budget_row(monthly=0.0, daily=0.0, week_total=0.0),
+        ]
+    )
+
+    resp = client.get(f"/api/v1/projects/{PROJECT_ID}/llm/status")
+    assert resp.status_code == 200
+    assert resp.json()["configured"] is False
 
 
 def test_status_viewer_unconfigured_reports_zero_not_null(

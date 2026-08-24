@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
+from itertools import chain, repeat
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
@@ -15,6 +17,34 @@ from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessi
 from ontokit.services.suggestion_service import SuggestionService
 
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+
+
+def _no_commit_identity_row() -> MagicMock:
+    """Result for the U9 commit-identity preference lookup: no opt-in row.
+
+    Every suggestion commit now resolves its author identity through
+    CommitIdentityService, which reads this table before writing. Without a row
+    the contributor gets the default noreply alias, which is what these tests
+    exercise.
+    """
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    return result
+
+
+def _padded(*results: object, project: object) -> Iterator[object]:
+    """Ordered query results, then a trust-aware tail forever.
+
+    U3 added follow-on queries AFTER the state change these tests assert on —
+    the project reload for promotion evaluation and the outcome-log count. The
+    tail answers both (project row, zero accepted outcomes) so each test stays
+    pinned to the behavior it is about rather than to an exact query count.
+    """
+    tail = MagicMock()
+    tail.scalar_one_or_none.return_value = project
+    tail.scalar.return_value = 0
+    tail.scalars.return_value.all.return_value = []
+    return chain(results, repeat(tail))
 
 
 # ---------------------------------------------------------------------------
@@ -441,7 +471,11 @@ class TestAutoSubmitStaleSessions:
         mock_claim_result = MagicMock()
         mock_claim_result.rowcount = 0
 
-        mock_db.execute.side_effect = [mock_stale_result, mock_claim_result]
+        project = _make_project()
+        project.members[0].user_id = stale_session.user_id
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [mock_stale_result, project_result, mock_claim_result]
 
         count = await service.auto_submit_stale_sessions()
         assert count == 0
@@ -694,6 +728,7 @@ class TestSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         commit_info = MagicMock()
@@ -769,6 +804,7 @@ class TestSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         mock_git.commit_to_branch = MagicMock(side_effect=RuntimeError("git error"))
@@ -809,6 +845,7 @@ class TestSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         commit_info = MagicMock()
@@ -862,13 +899,13 @@ class TestSubmit:
         mock_no_pr_result = MagicMock()
         mock_no_pr_result.scalar_one_or_none.return_value = None
 
-        mock_db.execute.side_effect = [
+        mock_db.execute.side_effect = _padded(
             mock_session_result,  # _get_session
             mock_project_result,  # _verify_project_access -> _get_project
             mock_no_pr_result,  # existing PR check
             mock_project_result,  # _get_project for notification
-        ]
-
+            project=project,
+        )
         mock_git.get_default_branch = MagicMock(return_value="main")
 
         mock_pr_response = MagicMock()
@@ -986,12 +1023,12 @@ class TestSubmit:
         mock_existing_pr_result = MagicMock()
         mock_existing_pr_result.scalar_one_or_none.return_value = existing_pr
 
-        mock_db.execute.side_effect = [
+        mock_db.execute.side_effect = _padded(
             mock_session_result,  # _get_session
             mock_project_result,  # _verify_project_access
             mock_existing_pr_result,  # existing PR check
-        ]
-
+            project=project,
+        )
         from ontokit.schemas.suggestion import SuggestionSubmitRequest
 
         data = SuggestionSubmitRequest(summary="test")
@@ -1026,14 +1063,14 @@ class TestSubmit:
         mock_max_result = MagicMock()
         mock_max_result.scalar.return_value = 5
 
-        mock_db.execute.side_effect = [
+        mock_db.execute.side_effect = _padded(
             mock_session_result,  # _get_session
             mock_project_result,  # _verify_project_access
             mock_no_pr_result,  # existing PR check
             mock_max_result,  # max pr_number
             mock_project_result,  # _get_project for notification
-        ]
-
+            project=project,
+        )
         mock_git.get_default_branch = MagicMock(return_value="main")
 
         # Make the PR service raise 403
@@ -1100,7 +1137,9 @@ class TestApprove:
         mock_session_result = MagicMock()
         mock_session_result.scalar_one_or_none.return_value = session
 
-        mock_db.execute.side_effect = [mock_project_result, mock_session_result]
+        mock_db.execute.side_effect = _padded(
+            mock_project_result, mock_session_result, project=project
+        )
 
         user = _make_user()
 
@@ -1159,7 +1198,9 @@ class TestApprove:
         mock_session_result = MagicMock()
         mock_session_result.scalar_one_or_none.return_value = session
 
-        mock_db.execute.side_effect = [mock_project_result, mock_session_result]
+        mock_db.execute.side_effect = _padded(
+            mock_project_result, mock_session_result, project=project
+        )
 
         user = _make_user()
 
@@ -1193,7 +1234,9 @@ class TestApprove:
         mock_session_result = MagicMock()
         mock_session_result.scalar_one_or_none.return_value = session
 
-        mock_db.execute.side_effect = [mock_project_result, mock_session_result]
+        mock_db.execute.side_effect = _padded(
+            mock_project_result, mock_session_result, project=project
+        )
 
         user = _make_user()
         await service.approve(PROJECT_ID, session.session_id, user)
@@ -1201,12 +1244,47 @@ class TestApprove:
         assert session.status == SuggestionSessionStatus.MERGED.value
 
     @pytest.mark.asyncio
-    async def test_approve_merge_failure_still_merges(
+    async def test_approve_resumes_finalization_when_linked_pr_already_merged(
+        self, service: SuggestionService, mock_db: AsyncMock
+    ) -> None:
+        from ontokit.models.pull_request import PRStatus
+
+        pr_id = uuid.uuid4()
+        session = _make_session(
+            status=SuggestionSessionStatus.SUBMITTED.value,
+            pr_number=5,
+            pr_id=pr_id,
+        )
+        project = _make_project()
+        project.members[0].role = "admin"
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        linked_pr = MagicMock()
+        linked_pr.status = PRStatus.MERGED.value
+        pr_result = MagicMock()
+        pr_result.scalar_one_or_none.return_value = linked_pr
+        mock_db.execute.side_effect = _padded(
+            project_result, session_result, pr_result, project=project
+        )
+
+        with patch(
+            "ontokit.services.suggestion_service.get_pull_request_service"
+        ) as pr_factory:
+            await service.approve(PROJECT_ID, session.session_id, _make_user())
+
+        pr_factory.assert_not_called()
+        assert session.status == SuggestionSessionStatus.MERGED.value
+        assert mock_db.add.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_approve_merge_failure_preserves_submitted_session(
         self,
         service: SuggestionService,
         mock_db: AsyncMock,
     ) -> None:
-        """Marks session merged even if PR merge raises HTTPException."""
+        """Propagates a PR conflict without recording a terminal outcome."""
         session = _make_session(
             status=SuggestionSessionStatus.SUBMITTED.value,
             pr_number=5,
@@ -1219,7 +1297,9 @@ class TestApprove:
         mock_session_result = MagicMock()
         mock_session_result.scalar_one_or_none.return_value = session
 
-        mock_db.execute.side_effect = [mock_project_result, mock_session_result]
+        mock_db.execute.side_effect = _padded(
+            mock_project_result, mock_session_result, project=project
+        )
 
         user = _make_user()
 
@@ -1232,9 +1312,13 @@ class TestApprove:
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
 
-            await service.approve(PROJECT_ID, session.session_id, user)
+            with pytest.raises(HTTPException) as exc_info:
+                await service.approve(PROJECT_ID, session.session_id, user)
 
-        assert session.status == SuggestionSessionStatus.MERGED.value
+        assert exc_info.value.status_code == 409
+        assert session.status == SuggestionSessionStatus.SUBMITTED.value
+        mock_db.add.assert_not_called()
+        mock_db.commit.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1413,7 +1497,9 @@ class TestResubmit:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [mock_session_result, mock_project_result]
+        mock_db.execute.side_effect = _padded(
+            mock_session_result, mock_project_result, project=project
+        )
 
         from ontokit.schemas.suggestion import SuggestionResubmitRequest
 
@@ -1487,6 +1573,7 @@ class TestBeaconSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         mock_git.commit_to_branch = MagicMock()
@@ -1506,6 +1593,49 @@ class TestBeaconSave:
 
         assert session.changes_count == 2
         mock_git.commit_to_branch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_beacon_save_derives_and_blocks_untrusted_minting(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+    ) -> None:
+        session = _make_session(status=SuggestionSessionStatus.ACTIVE.value)
+        project = _make_project()
+        project.members[0].role = "suggester"
+        project.members[0].is_trusted = False
+        project.members[0].trust_override = "none"
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [
+            session_result,
+            project_result,
+            project_result,
+            _no_commit_identity_row(),
+        ]
+        mock_git.get_file_from_branch.return_value = b"@prefix : <http://example.org/> ."
+
+        from ontokit.schemas.suggestion import SuggestionBeaconRequest
+
+        data = SuggestionBeaconRequest(
+            session_id=session.session_id,
+            content=(
+                "@prefix : <http://example.org/> .\n"
+                "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+                ":NewClass a owl:Class ."
+            ),
+        )
+        with patch(
+            "ontokit.services.suggestion_service.verify_beacon_token",
+            return_value=session.session_id,
+        ), pytest.raises(HTTPException) as exc:
+            await service.beacon_save(PROJECT_ID, data, "valid-token")
+
+        assert exc.value.status_code == 403
+        mock_git.commit_to_branch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_beacon_save_invalid_token_raises_401(
@@ -1592,6 +1722,7 @@ class TestBeaconSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         mock_git.commit_to_branch = MagicMock(side_effect=RuntimeError("disk full"))
@@ -1646,14 +1777,14 @@ class TestAutoSubmitStaleSessionsExtended:
         mock_no_pr_result = MagicMock()
         mock_no_pr_result.scalar_one_or_none.return_value = None
 
-        mock_db.execute.side_effect = [
+        mock_db.execute.side_effect = _padded(
             mock_stale_result,  # select stale sessions
-            mock_claim_result,  # claim session UPDATE
             mock_project_result,  # _verify_project_access -> _get_project
+            mock_claim_result,  # claim session UPDATE
             mock_no_pr_result,  # existing PR check
             mock_project_result,  # _get_project for notification
-        ]
-
+            project=project,
+        )
         mock_git.get_default_branch = MagicMock(return_value="main")
 
         mock_pr_response = MagicMock()
@@ -1702,11 +1833,7 @@ class TestAutoSubmitStaleSessionsExtended:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [
-            mock_stale_result,
-            mock_claim_result,
-            mock_project_result,  # _verify_project_access
-        ]
+        mock_db.execute.side_effect = [mock_stale_result, mock_project_result]
 
         count = await service.auto_submit_stale_sessions()
         assert count == 0
@@ -1742,8 +1869,8 @@ class TestAutoSubmitStaleSessionsExtended:
 
         mock_db.execute.side_effect = [
             mock_stale_result,
-            mock_claim_result,
             mock_project_result,  # _verify_project_access
+            mock_claim_result,
             mock_no_pr_result,  # existing PR check
         ]
 
@@ -1764,6 +1891,29 @@ class TestAutoSubmitStaleSessionsExtended:
 
         assert count == 0
         assert stale_session.status == SuggestionSessionStatus.ACTIVE.value
+
+    @pytest.mark.asyncio
+    async def test_stale_untrusted_session_waits_for_interactive_submit(
+        self, service: SuggestionService, mock_db: AsyncMock
+    ) -> None:
+        stale_session = _make_session(
+            changes_count=2,
+            last_activity=datetime.now(UTC) - timedelta(hours=1),
+        )
+        project = _make_project()
+        project.members[0].user_id = stale_session.user_id
+        project.members[0].role = "suggester"
+        project.members[0].is_trusted = False
+        project.members[0].trust_override = "none"
+        stale_result = MagicMock()
+        stale_result.scalars.return_value.all.return_value = [stale_session]
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [stale_result, project_result]
+
+        assert await service.auto_submit_stale_sessions() == 0
+        assert stale_session.status == SuggestionSessionStatus.ACTIVE.value
+        assert mock_db.execute.await_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1790,7 +1940,9 @@ class TestListPending:
         mock_sessions_result = MagicMock()
         mock_sessions_result.scalars.return_value.all.return_value = [session]
 
-        mock_db.execute.side_effect = [mock_project_result, mock_sessions_result]
+        mock_db.execute.side_effect = _padded(
+            mock_project_result, mock_sessions_result, project=project
+        )
 
         user = _make_user()
         result = await service.list_pending(PROJECT_ID, user)
@@ -2034,7 +2186,9 @@ class TestCreatePrForSession:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [mock_no_pr_result, mock_project_result]
+        mock_db.execute.side_effect = _padded(
+            mock_no_pr_result, mock_project_result, project=project
+        )
 
         mock_git.get_default_branch = MagicMock(return_value="main")
 
@@ -2085,7 +2239,9 @@ class TestCreatePrForSession:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [mock_no_pr_result, mock_project_result]
+        mock_db.execute.side_effect = _padded(
+            mock_no_pr_result, mock_project_result, project=project
+        )
 
         mock_git.get_default_branch = MagicMock(return_value="main")
 

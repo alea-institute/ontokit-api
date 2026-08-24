@@ -10,7 +10,7 @@ from uuid import UUID
 from arq import ArqRedis, cron, func
 from arq.connections import RedisSettings
 from sqlalchemy import select
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
@@ -22,13 +22,11 @@ from ontokit.core.constants import (
     QUALITY_UPDATES_CHANNEL,
     REMOTE_SYNC_UPDATES_CHANNEL,
 )
-from ontokit.core.encryption import decrypt_token
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
-from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.services.github_sync import sync_github_project
 from ontokit.services.linter import LintResult, get_linter
 from ontokit.services.normalization_service import NormalizationService
@@ -646,6 +644,28 @@ async def auto_submit_stale_suggestions(ctx: dict[str, Any]) -> dict[str, Any]:
         raise
 
 
+async def auto_accept_suggestions(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Merge trusted suggestions whose quiet period has elapsed (R11).
+
+    Anonymous, untrusted and LLM-generated suggestions are excluded at the
+    query, at the atomic claim, and again by the merge-time tier re-check —
+    R13 ("LLM output never auto-accepts, at any tier, ever") is not allowed to
+    depend on a single guard.
+    """
+    db: AsyncSession = ctx["db"]
+
+    try:
+        from ontokit.services.suggestion_service import SuggestionService
+
+        count = await SuggestionService(db).auto_accept_ripe_sessions()
+        logger.info(f"Auto-accept complete: {count} trusted suggestions merged")
+        return {"auto_accepted": count}
+
+    except Exception as e:
+        logger.exception(f"Auto-accept sweep failed: {e}")
+        raise
+
+
 async def run_consistency_check_task(
     ctx: dict[str, Any],
     project_id: str,
@@ -982,32 +1002,24 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
         errors = 0
 
         for integration in integrations:
-            # Resolve PAT from connected_by_user_id
-            if not integration.connected_by_user_id:
-                logger.debug(
-                    f"Skipping sync for project {integration.project_id}: no connected_by_user_id"
-                )
-                continue
-
-            token_result = await db.execute(
-                select(UserGitHubToken).where(
-                    UserGitHubToken.user_id == integration.connected_by_user_id
-                )
-            )
-            token_row = token_result.scalar_one_or_none()
-            if not token_row:
-                logger.warning(
-                    f"Skipping sync for project {integration.project_id}: "
-                    f"no GitHub token for user {integration.connected_by_user_id}"
-                )
-                continue
+            # One system-owned identity pushes every mirror (KD6). The
+            # per-user PAT remains a deprecated fallback for one release so an
+            # in-flight deployment keeps syncing.
+            from ontokit.services.mirror_credential import resolve_mirror_credential
 
             try:
-                pat = decrypt_token(token_row.encrypted_token)
-            except Exception:
-                logger.warning(
-                    f"Skipping sync for project {integration.project_id}: failed to decrypt token"
+                pat = await resolve_mirror_credential(db, integration)
+            except SQLAlchemyError as e:
+                logger.exception(
+                    "Failed to resolve GitHub mirror credential for project %s: %s",
+                    integration.project_id,
+                    e,
                 )
+                errors += 1
+                await db.rollback()
+                continue
+
+            if pat is None:
                 continue
 
             try:
@@ -1083,15 +1095,10 @@ async def run_remote_check_task(
         )
         integration = integration_result.scalar_one_or_none()
 
-        if integration and integration.connected_by_user_id:
-            token_result = await db.execute(
-                select(UserGitHubToken).where(
-                    UserGitHubToken.user_id == integration.connected_by_user_id
-                )
-            )
-            token_row = token_result.scalar_one_or_none()
-            if token_row:
-                token = decrypt_token(token_row.encrypted_token)
+        if integration:
+            from ontokit.services.mirror_credential import resolve_mirror_credential
+
+            token = await resolve_mirror_credential(db, integration)
 
         if not token:
             config.status = "error"
@@ -1266,15 +1273,20 @@ async def on_job_end(ctx: dict[str, Any]) -> None:
 
 
 def get_redis_settings() -> RedisSettings:
-    """Get Redis settings from application config."""
-    # Parse Redis URL
-    redis_url = str(settings.redis_url)
-    # RedisSettings expects host, port, database separately
-    # URL format: redis://host:port/db
+    """Get Redis settings from application config.
 
-    from urllib.parse import urlparse
+    ARQ's RedisSettings takes the URL apart into fields, so every part of the
+    DSN has to be carried across explicitly. Dropping the credentials silently
+    produced a worker that could not authenticate against a password-protected
+    Redis (found on the FOLIO DEV deploy 2026-07-06); the repo's own compose
+    file uses a password-less Redis, which hid it.
 
-    parsed = urlparse(redis_url)
+    Credentials are URL-decoded: a password containing reserved characters is
+    percent-encoded in the DSN and must be decoded before it reaches the wire.
+    """
+    from urllib.parse import unquote, urlparse
+
+    parsed = urlparse(str(settings.redis_url))
     host = parsed.hostname or "localhost"
     port = parsed.port or 6379
     database = int(parsed.path.lstrip("/") or "0")
@@ -1283,6 +1295,10 @@ def get_redis_settings() -> RedisSettings:
         host=host,
         port=port,
         database=database,
+        username=unquote(parsed.username) if parsed.username else None,
+        password=unquote(parsed.password) if parsed.password else None,
+        # rediss:// means TLS; without this the scheme was silently ignored.
+        ssl=parsed.scheme == "rediss",
     )
 
 
@@ -1299,6 +1315,7 @@ class WorkerSettings:
         check_all_projects_normalization,
         sync_github_projects,
         auto_submit_stale_suggestions,
+        auto_accept_suggestions,
         run_embedding_generation_task,
         run_single_entity_embed_task,
         run_batch_entity_embed_task,
@@ -1326,6 +1343,13 @@ class WorkerSettings:
             auto_submit_stale_suggestions,
             hour=None,
             minute={5, 15, 25, 35, 45, 55},
+        ),
+        # Auto-accept ripe trusted suggestions every 15 minutes. The quiet
+        # period is measured in days, so finer granularity buys nothing.
+        cron(
+            auto_accept_suggestions,
+            hour=None,
+            minute={0, 15, 30, 45},
         ),
     ]
 

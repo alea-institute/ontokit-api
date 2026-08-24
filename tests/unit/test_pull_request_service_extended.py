@@ -437,7 +437,7 @@ class TestClosePullRequestGitHubSync:
         mock_github_service.close_pull_request = AsyncMock()
 
         with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
+            "ontokit.services.mirror_credential.decrypt_token",
             return_value="decrypted-token",
         ):
             await service.close_pull_request(PROJECT_ID, 1, user)
@@ -495,7 +495,7 @@ class TestReopenPullRequestGitHubSync:
         mock_github_service.reopen_pull_request = AsyncMock()
 
         with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
+            "ontokit.services.mirror_credential.decrypt_token",
             return_value="decrypted-token",
         ):
             await service.reopen_pull_request(PROJECT_ID, 1, user)
@@ -625,6 +625,7 @@ class TestCreateReviewNotification:
         mock_notif = AsyncMock()
         mock_notif.create_notification = AsyncMock()
         mock_notif_cls.return_value = mock_notif
+        service._halt_linked_suggestion_auto_accept = AsyncMock()  # type: ignore[method-assign]
 
         # After refresh, populate id and created_at on the ORM object
         def _populate(obj: object) -> None:
@@ -1379,6 +1380,69 @@ class TestHandleGitHubReviewWebhook:
             _scalar_result(integration),
             _scalar_result(None),  # no local PR
         ]
+        halt = AsyncMock()
+        service._halt_linked_suggestion_auto_accept = halt  # type: ignore[attr-defined,method-assign]
+
+        await service.handle_github_review_webhook(
+            PROJECT_ID,
+            action="submitted",
+            review_data={
+                "id": 999,
+                "state": "CHANGES_REQUESTED",
+                "body": "Please revise",
+                "user": {"login": "ghuser"},
+            },
+            pr_data={"number": 42},
+        )
+
+        mock_db.add.assert_not_called()
+        halt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])
+    async def test_github_objection_halts_linked_suggestion(
+        self,
+        state: str,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+    ) -> None:
+        integration = MagicMock(sync_enabled=True)
+        pr = _make_pr(github_pr_number=42)
+        mock_db.execute.side_effect = [
+            _scalar_result(integration),
+            _scalar_result(pr),
+            _scalar_result(None),
+        ]
+        halt = AsyncMock()
+        service._halt_linked_suggestion_auto_accept = halt  # type: ignore[attr-defined,method-assign]
+
+        await service.handle_github_review_webhook(
+            PROJECT_ID,
+            action="submitted",
+            review_data={
+                "id": 999,
+                "state": state,
+                "body": "Please revisit this",
+                "user": {"login": "reviewer"},
+            },
+            pr_data={"number": 42},
+        )
+
+        halt.assert_awaited_once_with(pr.id)
+
+    @pytest.mark.asyncio
+    async def test_github_approval_does_not_halt_linked_suggestion(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        integration = MagicMock(sync_enabled=True)
+        pr = _make_pr(github_pr_number=42)
+        mock_db.execute.side_effect = [
+            _scalar_result(integration),
+            _scalar_result(pr),
+            _scalar_result(None),
+        ]
+        halt = AsyncMock()
+        service._halt_linked_suggestion_auto_accept = halt  # type: ignore[attr-defined,method-assign]
 
         await service.handle_github_review_webhook(
             PROJECT_ID,
@@ -1387,12 +1451,12 @@ class TestHandleGitHubReviewWebhook:
                 "id": 999,
                 "state": "APPROVED",
                 "body": "LGTM",
-                "user": {"login": "ghuser"},
+                "user": {"login": "reviewer"},
             },
             pr_data={"number": 42},
         )
 
-        mock_db.add.assert_not_called()
+        halt.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1414,14 +1478,35 @@ class TestHandleGitHubPushWebhook:
         mock_db.execute.return_value = _scalar_result(integration)
         mock_git_service.pull_branch = MagicMock()
 
-        await service.handle_github_push_webhook(
-            PROJECT_ID,
-            ref="refs/heads/main",
-            commits=[],
-        )
+        with patch("ontokit.services.pull_request_service.settings") as mock_settings:
+            mock_settings.github_mirror_outbound_only = False
+            await service.handle_github_push_webhook(
+                PROJECT_ID,
+                ref="refs/heads/main",
+                commits=[],
+            )
 
         mock_git_service.pull_branch.assert_called_once_with(PROJECT_ID, "main", "origin")
         mock_db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_outbound_only_push_never_pulls_canonical_state(
+        self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
+    ) -> None:
+        integration = MagicMock(sync_enabled=True, default_branch="main")
+        mock_db.execute.return_value = _scalar_result(integration)
+        mock_git_service.pull_branch = MagicMock()
+
+        with patch("ontokit.services.pull_request_service.settings") as mock_settings:
+            mock_settings.github_mirror_outbound_only = True
+            await service.handle_github_push_webhook(
+                PROJECT_ID,
+                ref="refs/heads/main",
+                commits=[],
+            )
+
+        mock_git_service.pull_branch.assert_not_called()
+        mock_db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_push_to_non_default_branch_ignored(
@@ -1980,7 +2065,7 @@ class TestCreateReviewGitHubSync:
         mock_db.refresh.side_effect = _populate
 
         with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
+            "ontokit.services.mirror_credential.decrypt_token",
             return_value="decrypted-token",
         ):
             result = await service.create_review(
@@ -2053,7 +2138,7 @@ class TestUpdatePullRequestGitHubSync:
         mock_db.refresh = AsyncMock()
 
         with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
+            "ontokit.services.mirror_credential.decrypt_token",
             return_value="decrypted-token",
         ):
             result = await service.update_pull_request(
@@ -2115,7 +2200,7 @@ class TestMergePullRequestGitHubSync:
         ]
 
         with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
+            "ontokit.services.mirror_credential.decrypt_token",
             return_value="decrypted-token",
         ):
             result = await service.merge_pull_request(PROJECT_ID, 1, PRMergeRequest(), user)
@@ -2163,7 +2248,7 @@ class TestCloseReopenExceptionHandling:
         mock_db.refresh = AsyncMock()
 
         with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
+            "ontokit.services.mirror_credential.decrypt_token",
             return_value="decrypted-token",
         ):
             result = await service.close_pull_request(PROJECT_ID, 1, user)
@@ -2208,7 +2293,7 @@ class TestCloseReopenExceptionHandling:
         mock_db.refresh = AsyncMock()
 
         with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
+            "ontokit.services.mirror_credential.decrypt_token",
             return_value="decrypted-token",
         ):
             result = await service.reopen_pull_request(PROJECT_ID, 1, user)
@@ -2272,7 +2357,7 @@ class TestGetGitHubToken:
         ]
 
         with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
+            "ontokit.services.mirror_credential.decrypt_token",
             side_effect=ValueError("bad key"),
         ):
             result = await service._get_github_token(PROJECT_ID)

@@ -1,15 +1,21 @@
 """Suggestion session management endpoints."""
 
-from typing import Annotated
+import logging
+from typing import Annotated, cast
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ontokit.core.auth import RequiredUser
+from ontokit.api.utils.redis import get_arq_pool
+from ontokit.core.auth import OptionalUser, RequiredUser
 from ontokit.core.database import get_db
 from ontokit.schemas.suggestion import (
+    BulkReviewRequest,
+    BulkReviewResponse,
     SuggestionBeaconRequest,
+    SuggestionCapabilitiesResponse,
+    SuggestionQueue,
     SuggestionRejectRequest,
     SuggestionRequestChangesRequest,
     SuggestionResubmitRequest,
@@ -21,6 +27,9 @@ from ontokit.schemas.suggestion import (
     SuggestionSubmitResponse,
 )
 from ontokit.services.suggestion_service import SuggestionService, get_suggestion_service
+from ontokit.services.trust_rate_limiter import TrustLimiterRedis
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -67,11 +76,34 @@ async def submit_session(
     project_id: UUID,
     session_id: str,
     data: SuggestionSubmitRequest,
+    request: Request,
     service: Annotated[SuggestionService, Depends(get_service)],
     user: RequiredUser,
+    x_verification_token: Annotated[str | None, Header()] = None,
 ) -> SuggestionSubmitResponse:
-    """Submit a suggestion session by creating a pull request."""
-    return await service.submit(project_id, session_id, data, user)
+    """Submit a suggestion session by creating a pull request.
+
+    Untrusted contributors pass a human-verification challenge on their first
+    suggestion and are rate-limited per account thereafter (R10). Both gates run
+    before any git or PR work, so a refused submission leaves nothing behind.
+    """
+    redis = None
+    try:
+        redis = await get_arq_pool()
+    except Exception:  # noqa: BLE001 — the limiter fails closed on a missing client
+        logger.warning("Redis pool unavailable for the trust submission limiter")
+
+    return await service.submit(
+        project_id,
+        session_id,
+        data,
+        user,
+        verification_token=x_verification_token,
+        client_ip=request.client.host if request.client else None,
+        # ArqRedis satisfies TrustLimiterRedis structurally; the protocol
+        # exists so the limiter does not depend on the ARQ client type.
+        redis=cast("TrustLimiterRedis | None", redis),
+    )
 
 
 @router.get(
@@ -127,9 +159,18 @@ async def list_pending(
     project_id: UUID,
     service: Annotated[SuggestionService, Depends(get_service)],
     user: RequiredUser,
+    queue: Annotated[
+        SuggestionQueue | None,
+        Query(
+            description=(
+                "Split the queue by submitter tier (R9): 'triage' for anonymous and "
+                "untrusted submissions, 'review' for trusted ones. Omit for all."
+            )
+        ),
+    ] = None,
 ) -> SuggestionSessionListResponse:
     """List pending suggestion sessions for review (editors/admins only)."""
-    return await service.list_pending(project_id, user)
+    return await service.list_pending(project_id, user, queue)
 
 
 @router.post(
@@ -189,3 +230,54 @@ async def resubmit_session(
 ) -> SuggestionSubmitResponse:
     """Resubmit a suggestion session after addressing requested changes."""
     return await service.resubmit(project_id, session_id, data, user)
+
+
+@router.get(
+    "/{project_id}/suggestions/capabilities",
+    response_model=SuggestionCapabilitiesResponse,
+)
+async def get_capabilities(
+    project_id: UUID,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: OptionalUser,
+) -> SuggestionCapabilitiesResponse:
+    """What the caller may do on this project, and how trust is earned.
+
+    Drives the editor's explained-disabled affordances (AE2). Reads the same
+    tier resolution the server-side gates use, so the UI and the enforcement
+    can never disagree.
+    """
+    return await service.get_capabilities(project_id, user)
+
+
+@router.post(
+    "/{project_id}/suggestions/sessions/{session_id}/dismiss",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+async def dismiss_session(
+    project_id: UUID,
+    session_id: str,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: RequiredUser,
+    note: str | None = Query(None, max_length=1000),
+) -> None:
+    """Dismiss a triage-queue suggestion without merging it (editors/admins)."""
+    await service.dismiss(project_id, session_id, user, note)
+
+
+@router.post(
+    "/{project_id}/suggestions/bulk-review",
+    response_model=BulkReviewResponse,
+)
+async def bulk_review(
+    project_id: UUID,
+    data: BulkReviewRequest,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: RequiredUser,
+) -> BulkReviewResponse:
+    """Accept or dismiss many suggestions at once (editors/admins only).
+
+    Partial-success: the response reports per-session failures rather than
+    aborting the batch on the first stale row.
+    """
+    return await service.bulk_review(project_id, data, user)

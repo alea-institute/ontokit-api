@@ -23,7 +23,7 @@ from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.routes.llm import _LOCAL_PROVIDERS
@@ -31,6 +31,7 @@ from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
 from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.project import Project, ProjectMember
+from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.generation import (
     GenerateSuggestionsRequest,
     GenerateSuggestionsResponse,
@@ -117,6 +118,32 @@ async def _load_project(db: AsyncSession, project_id: UUID) -> Project:
             detail="Project not found",
         )
     return project
+
+
+async def _mark_active_session_llm_generated(
+    db: AsyncSession, project_id: UUID, user_id: str, branch: str
+) -> bool:
+    """Persist sticky LLM provenance on the matching active suggestion session.
+
+    Generation can also run against an ordinary project branch. In that case
+    the constrained UPDATE matches no row and remains harmless. Once set, the
+    flag is never cleared, so later submission cannot schedule that session for
+    quiet-period auto-accept.
+    """
+    result = await db.execute(
+        update(SuggestionSession)
+        .where(
+            SuggestionSession.project_id == project_id,
+            SuggestionSession.user_id == user_id,
+            SuggestionSession.branch == branch,
+            SuggestionSession.status == SuggestionSessionStatus.ACTIVE.value,
+        )
+        .values(is_llm_generated=True)
+    )
+    if result.rowcount == 0:  # type: ignore[attr-defined]
+        return False
+    await db.commit()
+    return True
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -354,6 +381,12 @@ async def generate_suggestions(
             exc_info=True,
         )
         raise
+
+    # A successful generation that produced proposals permanently marks the
+    # matching active suggestion session. This server-owned provenance is what
+    # the trust scheduler reads; client flags cannot opt LLM work back in.
+    if response.suggestions:
+        await _mark_active_session_llm_generated(db, project_id, user.id, request.branch)
 
     return response
 

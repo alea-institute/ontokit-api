@@ -1,4 +1,14 @@
-"""User settings endpoints for GitHub token management."""
+"""User settings endpoints.
+
+The per-user GitHub PAT WRITE endpoints are retired (R3/KD6): all mirror
+operations now authenticate as the system mirror identity, and a lay
+contributor should never be asked for a GitHub credential.
+
+The read paths remain for one release (KTD15) so an in-flight deployment with
+stored tokens does not break: the status endpoint lets an older client render a
+coherent state, and repo listing still works while a project is being migrated
+onto the system identity. A follow-up drops the table.
+"""
 
 import logging
 from typing import Annotated
@@ -9,17 +19,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
-from ontokit.core.encryption import decrypt_token, encrypt_token
+from ontokit.core.encryption import decrypt_token
 from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.schemas.user_settings import (
+    CommitIdentityResponse,
+    CommitIdentityUpdate,
     GitHubRepoInfo,
     GitHubRepoListResponse,
-    GitHubTokenCreate,
-    GitHubTokenResponse,
     GitHubTokenStatus,
     UserSearchResponse,
     UserSearchResult,
 )
+from ontokit.services.commit_identity import CommitIdentityService, noreply_alias
 from ontokit.services.github_service import GitHubService, get_github_service
 from ontokit.services.user_service import UserService, get_user_service
 
@@ -28,23 +39,16 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
-def _token_preview(encrypted: str) -> str:
-    """Return a masked preview of the decrypted token (first 4 + last 4 chars)."""
-    try:
-        plain = decrypt_token(encrypted)
-        if len(plain) > 8:
-            return f"{plain[:4]}...{plain[-4:]}"
-        return "****"
-    except Exception:
-        return "****"
-
-
 @router.get("/me/github-token", response_model=GitHubTokenStatus)
 async def get_github_token_status(
     user: RequiredUser,
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> GitHubTokenStatus:
-    """Check whether the authenticated user has a stored GitHub token."""
+    """Report whether a legacy stored GitHub token exists.
+
+    Read-only and deprecated. There is no longer any way to create one — see
+    the module docstring.
+    """
     result = await db.execute(select(UserGitHubToken).where(UserGitHubToken.user_id == user.id))
     token_row = result.scalar_one_or_none()
     if not token_row:
@@ -53,85 +57,6 @@ async def get_github_token_status(
         has_token=True,
         github_username=token_row.github_username,
     )
-
-
-@router.post(
-    "/me/github-token", response_model=GitHubTokenResponse, status_code=status.HTTP_201_CREATED
-)
-async def save_github_token(
-    body: GitHubTokenCreate,
-    user: RequiredUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
-    github_service: Annotated[GitHubService, Depends(get_github_service)],
-) -> GitHubTokenResponse:
-    """Validate a GitHub PAT and store it (encrypted) for the authenticated user.
-
-    The token is validated via GET /user. It must include the `repo` scope.
-    If the user already has a token, it is replaced (upsert).
-    """
-    # Validate the token against GitHub
-    try:
-        username, scopes = await github_service.get_authenticated_user(body.token)
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid GitHub token: {e}",
-        ) from e
-
-    # Check for repo scope
-    scope_list = [s.strip() for s in scopes.split(",") if s.strip()]
-    if "repo" not in scope_list:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Token must include the 'repo' scope. Found scopes: {scopes}",
-        )
-
-    encrypted = encrypt_token(body.token)
-
-    # Upsert: check if row exists
-    result = await db.execute(select(UserGitHubToken).where(UserGitHubToken.user_id == user.id))
-    token_row = result.scalar_one_or_none()
-
-    if token_row:
-        token_row.encrypted_token = encrypted
-        token_row.github_username = username
-        token_row.token_scopes = scopes
-    else:
-        token_row = UserGitHubToken(
-            user_id=user.id,
-            encrypted_token=encrypted,
-            github_username=username,
-            token_scopes=scopes,
-        )
-        db.add(token_row)
-
-    await db.commit()
-    await db.refresh(token_row)
-
-    return GitHubTokenResponse(
-        github_username=token_row.github_username,
-        token_scopes=token_row.token_scopes,
-        token_preview=_token_preview(token_row.encrypted_token),
-        created_at=token_row.created_at,
-        updated_at=token_row.updated_at,
-    )
-
-
-@router.delete("/me/github-token", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_github_token(
-    user: RequiredUser,
-    db: Annotated[AsyncSession, Depends(get_db)],
-) -> None:
-    """Remove the stored GitHub token for the authenticated user."""
-    result = await db.execute(select(UserGitHubToken).where(UserGitHubToken.user_id == user.id))
-    token_row = result.scalar_one_or_none()
-    if not token_row:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No GitHub token found",
-        )
-    await db.delete(token_row)
-    await db.commit()
 
 
 @router.get("/me/github-repos", response_model=GitHubRepoListResponse)
@@ -208,3 +133,49 @@ async def search_users(
     ]
 
     return UserSearchResponse(items=items, total=total)
+
+
+@router.get("/me/commit-identity", response_model=CommitIdentityResponse)
+async def get_commit_identity(
+    user: RequiredUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CommitIdentityResponse:
+    """How this contributor's commits are authored (R14, R15).
+
+    The default is a synthetic noreply alias — a real address never enters
+    permanent, publicly mirrored git history unless the contributor explicitly
+    opts in with a verified one.
+    """
+    service = CommitIdentityService(db)
+    preference = await service.get_preference(user.id)
+    _, effective = await service.resolve(user.id, user.name)
+
+    return CommitIdentityResponse(
+        display_name=user.name,
+        noreply_alias=noreply_alias(user.id, user.name),
+        commit_email=preference.commit_email if preference else None,
+        commit_email_verified=bool(preference and preference.commit_email_verified),
+        use_verified_email=bool(preference and preference.use_verified_email),
+        effective_email=effective,
+    )
+
+
+@router.patch("/me/commit-identity", response_model=CommitIdentityResponse)
+async def update_commit_identity(
+    body: CommitIdentityUpdate,
+    user: RequiredUser,
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> CommitIdentityResponse:
+    """Set the opt-in authoring address, or toggle its use (R15).
+
+    Changing the address resets verification: an unverified address is never
+    honored, and re-pointing the preference is exactly when someone would try
+    to slip one through.
+    """
+    service = CommitIdentityService(db)
+    # exclude_unset preserves PATCH semantics: omission means unchanged, while
+    # an explicit JSON null for commit_email clears the stored address.
+    await service.set_preference(user.id, **body.model_dump(exclude_unset=True))
+    await db.commit()
+
+    return await get_commit_identity(user, db)

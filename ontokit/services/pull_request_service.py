@@ -8,11 +8,12 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ontokit.core.auth import CurrentUser
+from ontokit.core.config import settings
 from ontokit.core.encryption import decrypt_token
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.branch_metadata import BranchMetadata
@@ -26,6 +27,7 @@ from ontokit.models.pull_request import (
     ReviewStatus,
 )
 from ontokit.models.remote_sync import RemoteSyncConfig
+from ontokit.models.suggestion_session import SuggestionSession
 from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.schemas.project import ProjectRole
 from ontokit.schemas.pull_request import (
@@ -59,7 +61,9 @@ from ontokit.schemas.pull_request import (
     ReviewResponse,
 )
 from ontokit.services.github_service import GitHubService, get_github_service
+from ontokit.services.mirror_credential import resolve_mirror_credential
 from ontokit.services.notification_service import NotificationService
+from ontokit.services.trust_service import SYSTEM_AUTO_ACCEPT_ACTOR
 from ontokit.services.user_service import UserService, get_user_service
 
 logger = logging.getLogger(__name__)
@@ -79,6 +83,17 @@ class PullRequestService:
         self.git_service = git_service or get_git_service()
         self.github_service = github_service or get_github_service()
         self.user_service = user_service or get_user_service()
+
+    async def _halt_linked_suggestion_auto_accept(self, pr_id: UUID) -> None:
+        """Stop auto-accept when a reviewer objects to a linked suggestion PR."""
+        await self.db.execute(
+            update(SuggestionSession)
+            .where(SuggestionSession.pr_id == pr_id)
+            .values(
+                auto_accept_after=None,
+                auto_accept_halted_at=datetime.now(UTC),
+            )
+        )
 
     async def _sync_merge_commits_to_prs(self, project_id: UUID) -> None:
         """Sync merge commits from git history to PR records.
@@ -512,18 +527,29 @@ class PullRequestService:
         pr_number: int,
         merge_request: PRMergeRequest,
         user: CurrentUser,
+        *,
+        system_auto_accept: bool = False,
     ) -> PRMergeResponse:
-        """Merge a pull request."""
+        """Merge a pull request.
+
+        ``system_auto_accept`` is an internal-only authorization seam for the
+        quiet-period worker. It is fail-closed unless the caller also supplies
+        the reserved system actor; HTTP routes never set this flag.
+        """
         project = await self._get_project(project_id)
         pr = await self._get_pr(project_id, pr_number)
 
-        # Only admin or owner can merge
-        user_role = self._get_user_role(project, user)
-        if user_role not in ("owner", "admin"):
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="Only admins and owners can merge pull requests",
-            )
+        if system_auto_accept:
+            if user.id != SYSTEM_AUTO_ACCEPT_ACTOR:
+                raise RuntimeError("System auto-accept requires the reserved system actor")
+        else:
+            # Only admin or owner can merge through the interactive path.
+            user_role = self._get_user_role(project, user)
+            if user_role not in ("owner", "admin"):
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="Only admins and owners can merge pull requests",
+                )
 
         if pr.status != PRStatus.OPEN.value:
             raise HTTPException(
@@ -533,7 +559,7 @@ class PullRequestService:
 
         # Check approval requirements
         approval_count = sum(1 for r in pr.reviews if r.status == ReviewStatus.APPROVED.value)
-        if approval_count < project.pr_approval_required:
+        if not system_auto_accept and approval_count < project.pr_approval_required:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Pull request requires {project.pr_approval_required} approvals, but has {approval_count}",
@@ -664,6 +690,15 @@ class PullRequestService:
         )
         self.db.add(db_review)
 
+        is_reviewer = user.is_superadmin or user_role in ("owner", "admin", "editor")
+        is_objection = review_create.status == ReviewStatus.CHANGES_REQUESTED.value or (
+            review_create.status == ReviewStatus.COMMENTED.value
+            and is_reviewer
+            and user.id != pr.author_id
+        )
+        if is_objection:
+            await self._halt_linked_suggestion_auto_accept(pr.id)
+
         # Sync with GitHub if integration exists
         if pr.github_pr_number:
             gh_result = await self._get_github_token(project_id)
@@ -768,6 +803,12 @@ class PullRequestService:
             parent_id=comment_create.parent_id,
         )
         self.db.add(db_comment)
+
+        if user.id != pr.author_id and (
+            user.is_superadmin
+            or self._get_user_role(project, user) in ("owner", "admin", "editor")
+        ):
+            await self._halt_linked_suggestion_auto_accept(pr.id)
 
         # Sync with GitHub if integration exists (only for top-level comments)
         if not comment_create.parent_id and pr.github_pr_number:
@@ -1579,6 +1620,11 @@ class PullRequestService:
             github_review_id=github_review_id,
         )
         self.db.add(db_review)
+        if status_value in (
+            ReviewStatus.COMMENTED.value,
+            ReviewStatus.CHANGES_REQUESTED.value,
+        ):
+            await self._halt_linked_suggestion_auto_accept(pr.id)
         await self.db.commit()
 
     async def handle_github_push_webhook(
@@ -1594,6 +1640,13 @@ class PullRequestService:
 
         # Only sync pushes to main branch
         if ref != f"refs/heads/{integration.default_branch}":
+            return
+
+        if settings.github_mirror_outbound_only:
+            logger.info(
+                "Ignoring inbound GitHub push for outbound-only mirror on project %s",
+                project_id,
+            )
             return
 
         # Pull latest changes
@@ -1700,35 +1753,17 @@ class PullRequestService:
         return result.scalar_one_or_none()
 
     async def _get_github_token(self, project_id: UUID) -> tuple[GitHubIntegration, str] | None:
-        """Resolve a PAT for GitHub API calls on this project.
+        """Resolve the system mirror credential for GitHub API calls.
 
-        Looks up integration -> connected_by_user_id -> UserGitHubToken -> decrypt.
-        Returns None if any link is missing (graceful degradation).
+        ``resolve_mirror_credential`` retains the explicitly time-limited
+        per-user fallback for an in-flight deployment, while ensuring every
+        configured installation prefers the system-owned identity.
         """
         integration = await self._get_github_integration(project_id)
         if not integration or not integration.sync_enabled:
             return None
-        if not integration.connected_by_user_id:
-            return None
-        result = await self.db.execute(
-            select(UserGitHubToken).where(
-                UserGitHubToken.user_id == integration.connected_by_user_id
-            )
-        )
-        token_row = result.scalar_one_or_none()
-        if not token_row:
-            return None
-        try:
-            token = decrypt_token(token_row.encrypted_token)
-        except Exception:
-            # The interpolated value is a user_id (str | None), not a
-            # credential. The message string mentions "credential" only as
-            # part of the human-readable failure context.
-            # nosemgrep: python.lang.security.audit.logging.logger-credential-leak.python-logger-credential-disclosure
-            logger.warning(
-                "Failed to decrypt GitHub credential for user %s",
-                integration.connected_by_user_id,
-            )
+        token = await resolve_mirror_credential(self.db, integration)
+        if token is None:
             return None
         return integration, token
 
