@@ -62,7 +62,7 @@ jobs:
       # checking out a fork's head would put attacker-controlled files on a
       # runner that holds an API key.
       - name: Answer as a single pull request comment
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@c81e3bc69d1b18badbb63ba39581218f02421678 # v1
         with:
           anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
 
