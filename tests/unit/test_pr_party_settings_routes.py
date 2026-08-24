@@ -26,6 +26,7 @@ from fastapi.testclient import TestClient
 
 from ontokit.api.routes import include_pr_party_routes
 from ontokit.api.routes.pr_party_settings import get_credential_service
+from ontokit.core.config import settings
 from ontokit.main import app
 from ontokit.models.pr_party import PRPartyCredential, PRPartyMergeDefault, PRPartyReviewer
 from ontokit.schemas.pr_party import PRPartyGenerationTokenStatus
@@ -38,6 +39,15 @@ from ontokit.services.pr_party_credentials import (
 
 BASE = "/api/v1/pr-party"
 USER_ID = "test-user-id"
+
+
+def _enabled_app() -> FastAPI:
+    """Build an app whose PR Party routes are explicitly enabled for this suite."""
+    target = APIRouter()
+    include_pr_party_routes(target, auth_mode="required", reviewers="zit-1:octocat")
+    probe_app = FastAPI()
+    probe_app.include_router(target, prefix="/api/v1")
+    return probe_app
 
 
 def _reviewer(login: str = "octocat", ntfy_topic: str | None = None) -> PRPartyReviewer:
@@ -123,7 +133,10 @@ def wired(
     monkeypatch: pytest.MonkeyPatch,
 ) -> Any:
     """(client, install) — ``install(service)`` binds a fake service to the routes."""
-    client, _db = authed_client
+    _global_client, _db = authed_client
+    probe_app = _enabled_app()
+    probe_app.dependency_overrides.update(app.dependency_overrides)
+    client = TestClient(probe_app, raise_server_exceptions=False)
 
     async def _no_generation_status(**_kwargs: Any) -> PRPartyGenerationTokenStatus | None:
         return None
@@ -134,10 +147,13 @@ def wired(
     )
 
     def install(service: _FakeService) -> _FakeService:
-        app.dependency_overrides[get_credential_service] = lambda: service
+        probe_app.dependency_overrides[get_credential_service] = lambda: service
         return service
 
-    return client, install
+    try:
+        yield client, install
+    finally:
+        probe_app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -244,8 +260,7 @@ class TestCapability:
     def test_unauthenticated_is_401(self) -> None:
         # No auth override installed: RequiredUser rejects the anonymous caller
         # before any reviewer lookup happens.
-        app.dependency_overrides.clear()
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(_enabled_app(), raise_server_exceptions=False)
         assert client.get(f"{BASE}/me").status_code == 401
         assert client.get(f"{BASE}/settings").status_code == 401
         assert client.put(f"{BASE}/credential", json={"token": "x"}).status_code == 401
@@ -419,7 +434,9 @@ class TestRouterGating:
     @staticmethod
     def _probe(auth_mode: str) -> tuple[bool, int]:
         target = APIRouter()
-        mounted = include_pr_party_routes(target, auth_mode=auth_mode)
+        mounted = include_pr_party_routes(
+            target, auth_mode=auth_mode, reviewers="zit-1:octocat"
+        )
         probe_app = FastAPI()
         probe_app.include_router(target, prefix="/api/v1")
         app.dependency_overrides.clear()
@@ -440,12 +457,23 @@ class TestRouterGating:
         # Present, and gated: 401 rather than 404.
         assert status_code == 401
 
+    def test_not_mounted_without_a_valid_reviewer_registry(self) -> None:
+        target = APIRouter()
+
+        assert (
+            include_pr_party_routes(
+                target, auth_mode="required", reviewers="malformed-entry"
+            )
+            is False
+        )
+
     def test_mounted_in_the_live_app(self) -> None:
         paths = app.openapi()["paths"]
+        expected = settings.is_pr_party_enabled()
 
-        assert f"{BASE}/me" in paths
-        assert f"{BASE}/credential" in paths
-        assert f"{BASE}/settings" in paths
+        assert (f"{BASE}/me" in paths) is expected
+        assert (f"{BASE}/credential" in paths) is expected
+        assert (f"{BASE}/settings" in paths) is expected
 
 
 # ---------------------------------------------------------------------------

@@ -113,7 +113,7 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     # WARNING (retried next startup) and any failure here is logged rather than
     # raised, because a reviewer-registry problem must never keep the whole API
     # from serving ontology traffic.
-    if settings.pr_party_reviewers:
+    if settings.is_pr_party_enabled():
         _startup_print("Reconciling PR Party reviewers...")
         try:
             from ontokit.core.database import async_session_maker
@@ -131,23 +131,14 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
             logger.exception("PR Party reviewer reconcile failed — continuing startup")
 
     # --- PR Party ready notifications (U9, R22) -----------------------------
-    # The hook seam lives in pr_party_intake, and the arq worker registers the
-    # same hook in its own process. Registration is unconditional and idempotent
-    # on purpose: it costs nothing where no reviewer is registered (the fan-out
-    # finds no recipients), and doing it here means an API-side transition — a
-    # webhook that releases a card — is never the one that goes unannounced.
-    from ontokit.services.pr_party_notifications import register_ready_hook
+    # Both hook seams are identity-bound PR Party behavior, so they stay under
+    # the same enablement predicate as routes and registry reconciliation.
+    if settings.is_pr_party_enabled():
+        from ontokit.services.pr_party_notifications import register_ready_hook
+        from ontokit.services.pr_party_qa import register_qa_hook
 
-    register_ready_hook()
-
-    # --- PR Party Q&A ingestion (U7, R13) -----------------------------------
-    # Q&A rides the same intake seam, and only the API process receives webhook
-    # deliveries — so unlike the ready hook, this one has no worker-side twin.
-    # It stores nothing (GitHub owns the thread); what it buys is a greppable
-    # record that a question or an answer crossed the boundary.
-    from ontokit.services.pr_party_qa import register_qa_hook
-
-    register_qa_hook()
+        register_ready_hook()
+        register_qa_hook()
 
     _startup_print("Startup complete")
     logger.info("Startup complete")

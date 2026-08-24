@@ -1428,7 +1428,10 @@ class TestSweepWorkerRegistration:
         import ontokit.worker as worker_module
         from ontokit.core.config import settings
 
-        monkeypatch.setattr(settings, "pr_party_reviewers", "damienriehl", raising=False)
+        monkeypatch.setattr(settings, "auth_mode", "required", raising=False)
+        monkeypatch.setattr(
+            settings, "pr_party_reviewers", "zit-damien:damienriehl", raising=False
+        )
         try:
             reloaded = importlib.reload(worker_module)
             jobs = [
@@ -1442,3 +1445,50 @@ class TestSweepWorkerRegistration:
         finally:
             monkeypatch.undo()
             importlib.reload(worker_module)
+
+    def test_disabled_auth_omits_the_sweep_cron(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import importlib
+
+        import ontokit.worker as worker_module
+        from ontokit.core.config import settings
+
+        monkeypatch.setattr(settings, "auth_mode", "disabled", raising=False)
+        monkeypatch.setattr(
+            settings, "pr_party_reviewers", "zit-damien:damienriehl", raising=False
+        )
+        try:
+            reloaded = importlib.reload(worker_module)
+            jobs = [
+                job
+                for job in reloaded.WorkerSettings.cron_jobs
+                if "sweep_pr_party_prs" in getattr(job, "name", "")
+            ]
+
+            assert jobs == []
+        finally:
+            monkeypatch.undo()
+            importlib.reload(worker_module)
+
+
+@pytest.mark.asyncio
+async def test_disabled_pr_party_tasks_refuse_stale_queue_jobs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ontokit.core.config import settings
+    from ontokit.worker import generate_pr_brief, sweep_pr_party_prs
+
+    monkeypatch.setattr(settings, "auth_mode", "disabled", raising=False)
+    monkeypatch.setattr(
+        settings, "pr_party_reviewers", "zit-damien:damienriehl", raising=False
+    )
+
+    assert await sweep_pr_party_prs({}) == {
+        "status": "disabled",
+        "reason": "pr_party_disabled",
+    }
+    assert await generate_pr_brief({}, "pr-id", "org/repo", 1, "head") == {
+        "status": "disabled",
+        "reason": "pr_party_disabled",
+    }

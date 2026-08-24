@@ -32,7 +32,6 @@ from fastapi.testclient import TestClient
 from ontokit.api.routes import include_pr_party_routes
 from ontokit.core.config import settings
 from ontokit.core.database import get_db
-from ontokit.main import app
 from ontokit.services.pr_party_intake import DELIVERY_KEY_PREFIX
 
 URL = "/api/v1/pr-party/webhooks/github"
@@ -96,12 +95,16 @@ def receiver(monkeypatch: pytest.MonkeyPatch) -> Any:
     async def _override_get_db() -> Any:
         yield object()
 
-    app.dependency_overrides[get_db] = _override_get_db
-    client = TestClient(app, raise_server_exceptions=False)
+    target = APIRouter()
+    include_pr_party_routes(target, auth_mode="required", reviewers="zit-1:octocat")
+    probe_app = FastAPI()
+    probe_app.include_router(target, prefix="/api/v1")
+    probe_app.dependency_overrides[get_db] = _override_get_db
+    client = TestClient(probe_app, raise_server_exceptions=False)
     try:
         yield client, spy, pool
     finally:
-        app.dependency_overrides.clear()
+        probe_app.dependency_overrides.clear()
 
 
 def _post(
@@ -206,14 +209,18 @@ class TestSignature:
         async def _override_get_db() -> Any:
             yield object()
 
-        app.dependency_overrides[get_db] = _override_get_db
+        target = APIRouter()
+        include_pr_party_routes(target, auth_mode="required", reviewers="zit-1:octocat")
+        probe_app = FastAPI()
+        probe_app.include_router(target, prefix="/api/v1")
+        probe_app.dependency_overrides[get_db] = _override_get_db
         try:
-            client = TestClient(app, raise_server_exceptions=False)
+            client = TestClient(probe_app, raise_server_exceptions=False)
             response = _post(client)
             assert response.status_code == 503
             assert spy.calls == []
         finally:
-            app.dependency_overrides.clear()
+            probe_app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -392,10 +399,11 @@ class TestMounting:
     @staticmethod
     def _probe(auth_mode: str) -> tuple[bool, int]:
         target = APIRouter()
-        mounted = include_pr_party_routes(target, auth_mode=auth_mode)
+        mounted = include_pr_party_routes(
+            target, auth_mode=auth_mode, reviewers="zit-1:octocat"
+        )
         probe_app = FastAPI()
         probe_app.include_router(target, prefix="/api/v1")
-        app.dependency_overrides.clear()
         client = TestClient(probe_app, raise_server_exceptions=False)
         return mounted, client.post(URL, content=b"{}").status_code
 

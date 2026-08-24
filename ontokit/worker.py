@@ -1131,6 +1131,9 @@ async def sweep_pr_party_prs(ctx: dict[str, Any]) -> dict[str, Any]:
 
     ``ctx["redis"]`` is the pool the sweep enqueues U5's brief jobs on.
     """
+    if not settings.is_pr_party_enabled():
+        return {"status": "disabled", "reason": "pr_party_disabled"}
+
     db: AsyncSession = ctx["db"]
 
     try:
@@ -1219,6 +1222,9 @@ async def generate_pr_brief(
 
     Everything testable lives in ``pr_party_brief``; this is the arq seam.
     """
+    if not settings.is_pr_party_enabled():
+        return {"status": "disabled", "reason": "pr_party_disabled"}
+
     db: AsyncSession = ctx["db"]
 
     try:
@@ -1453,9 +1459,10 @@ async def startup(ctx: dict[str, Any]) -> None:
     # brief worker both fire the intake hook seam from *this* process, so the
     # notifier has to be attached here as well as in the API lifespan — the two
     # processes share no imports. register_ready_hook() is idempotent.
-    from ontokit.services.pr_party_notifications import register_ready_hook
+    if settings.is_pr_party_enabled():
+        from ontokit.services.pr_party_notifications import register_ready_hook
 
-    register_ready_hook()
+        register_ready_hook()
 
     logger.info("ARQ worker started successfully")
 
@@ -1563,7 +1570,7 @@ class WorkerSettings:
                     timeout=settings.pr_party_sweep_timeout_seconds,
                 )
             ]
-            if settings.pr_party_reviewers
+            if settings.is_pr_party_enabled()
             else []
         ),
     ]

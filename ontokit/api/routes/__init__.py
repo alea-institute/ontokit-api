@@ -38,8 +38,12 @@ from ontokit.core.config import settings
 router = APIRouter()
 
 
-def include_pr_party_routes(target: APIRouter, auth_mode: str | None = None) -> bool:
-    """Mount PR Party unless authentication is disabled (KTD19).
+def include_pr_party_routes(
+    target: APIRouter,
+    auth_mode: str | None = None,
+    reviewers: str | None = None,
+) -> bool:
+    """Mount PR Party only with authentication and a reviewer registry (KTD19).
 
     Every PR Party route binds to a *named* reviewer: the registry is keyed by
     Zitadel user id, and the write PAT it stores acts on GitHub as that person.
@@ -55,7 +59,7 @@ def include_pr_party_routes(target: APIRouter, auth_mode: str | None = None) -> 
 
     Returns whether it mounted, so the gate is testable without an app rebuild.
     """
-    if (auth_mode or settings.auth_mode) == "disabled":
+    if not settings.is_pr_party_enabled(auth_mode=auth_mode, reviewers=reviewers):
         return False
     target.include_router(pr_party_settings.router, prefix="/pr-party", tags=["PR Party"])
     target.include_router(pr_party_webhooks.router, prefix="/pr-party", tags=["PR Party"])

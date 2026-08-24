@@ -34,9 +34,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 import yaml
+from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 
 import ontokit
+from ontokit.api.routes import include_pr_party_routes
 from ontokit.api.routes.pr_party import (
     get_actions_redis,
     get_qa_service,
@@ -266,7 +268,13 @@ def _service(
 @pytest.fixture
 def wired(authed_client: tuple[TestClient, AsyncMock]) -> Any:
     """(client, install) — ``install(...)`` binds every fake in one call."""
-    client, _db = authed_client
+    _global_client, _db = authed_client
+    target = APIRouter()
+    include_pr_party_routes(target, auth_mode="required", reviewers="zit-1:octocat")
+    probe_app = FastAPI()
+    probe_app.include_router(target, prefix="/api/v1")
+    probe_app.dependency_overrides.update(app.dependency_overrides)
+    client = TestClient(probe_app, raise_server_exceptions=False)
 
     def install(
         reviewer: PRPartyReviewer | None,
@@ -282,12 +290,12 @@ def wired(authed_client: tuple[TestClient, AsyncMock]) -> Any:
         reader = _FakeReader(prs)
         redis = redis if redis is not None else _FakeRedis()
 
-        app.dependency_overrides[get_credential_service] = lambda: _FakeCredentialServiceForAuth(
+        probe_app.dependency_overrides[get_credential_service] = lambda: _FakeCredentialServiceForAuth(
             reviewer
         )
-        app.dependency_overrides[get_queue_reader] = lambda: reader
-        app.dependency_overrides[get_qa_service] = lambda: service
-        app.dependency_overrides[get_actions_redis] = lambda: redis
+        probe_app.dependency_overrides[get_queue_reader] = lambda: reader
+        probe_app.dependency_overrides[get_qa_service] = lambda: service
+        probe_app.dependency_overrides[get_actions_redis] = lambda: redis
         return {
             "service": service,
             "github": actuation,
@@ -297,7 +305,10 @@ def wired(authed_client: tuple[TestClient, AsyncMock]) -> Any:
             "reader": reader,
         }
 
-    return client, install
+    try:
+        yield client, install
+    finally:
+        probe_app.dependency_overrides.clear()
 
 
 # ---------------------------------------------------------------------------

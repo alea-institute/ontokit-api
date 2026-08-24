@@ -215,6 +215,31 @@ class Settings(BaseSettings):
                 pairs[zitadel_id] = github_login
         return pairs
 
+    def is_pr_party_enabled(
+        self,
+        *,
+        auth_mode: str | None = None,
+        reviewers: str | None = None,
+    ) -> bool:
+        """Return whether the identity-bound PR Party subsystem may run.
+
+        Route mounting, startup hooks, and worker automation all use this one
+        predicate so disabled authentication cannot leave a background-only
+        half of the feature running. Overrides keep import-time gates directly
+        testable without rebuilding the process settings object.
+        """
+        effective_auth_mode = self.auth_mode if auth_mode is None else auth_mode
+        if effective_auth_mode == "disabled":
+            return False
+        if reviewers is None:
+            return bool(self.pr_party_reviewer_map)
+
+        for entry in reviewers.split(","):
+            zitadel_id, separator, github_login = entry.partition(":")
+            if separator and zitadel_id.strip() and github_login.strip():
+                return True
+        return False
+
     # Superadmin - comma-separated list of user IDs with full system access
     superadmin_user_ids: str = ""
 
