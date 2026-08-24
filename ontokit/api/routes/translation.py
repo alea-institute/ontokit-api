@@ -53,7 +53,12 @@ from ontokit.services.llm import consume_rate_limit_units
 from ontokit.services.llm.crypto import encrypt_secret
 from ontokit.services.translation_backfill import preview_backfill_cost, select_backfill_literals
 from ontokit.services.translation_coverage import TranslationCoverageService
-from ontokit.services.translation_jobs import TranslationTask, enqueue_translation_tasks
+from ontokit.services.translation_jobs import (
+    TranslationEnqueueError,
+    TranslationTask,
+    enqueue_translation_tasks,
+    translation_entity_job_id,
+)
 from ontokit.services.translation_review import TranslationReviewConflict, TranslationReviewService
 
 logger = logging.getLogger(__name__)
@@ -441,14 +446,6 @@ async def translate_entity_field(
     config = await _get_config(db, project_id)
     if config is None:
         raise HTTPException(status_code=409, detail="Translation is not configured")
-    call_units = len(config.language_tags) * (
-        4 if config.verification_mechanism == "consensus" else 2
-    )
-    if not await consume_rate_limit_units(redis, str(project_id), user.id, role, call_units):
-        raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-            detail=f"Daily LLM call limit cannot cover {call_units} provider calls",
-        )
     pool = await get_arq_pool()
     if pool is None:
         raise HTTPException(
@@ -457,12 +454,35 @@ async def translate_entity_field(
         )
     predicate = SKOS.definition if data.predicate == "skos:definition" else SKOS.example
     task = TranslationTask(data.entity_iri, str(predicate), None, None, None, "fast")
+    reservation_id = translation_entity_job_id(project_id, data.branch, task)
+    call_units = len(config.language_tags) * (
+        4 if config.verification_mechanism == "consensus" else 2
+    )
+    if not await consume_rate_limit_units(
+        redis,
+        str(project_id),
+        user.id,
+        role,
+        call_units,
+        reservation_id=reservation_id,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=f"Daily LLM call limit cannot cover {call_units} provider calls",
+        )
     try:
         job_ids = await enqueue_translation_tasks(
             pool, redis, project_id, data.branch, user.id, [task]
         )
-    except RuntimeError as exc:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc)) from exc
+    except TranslationEnqueueError as exc:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_503_SERVICE_UNAVAILABLE
+                if exc.queue_unavailable
+                else status.HTTP_429_TOO_MANY_REQUESTS
+            ),
+            detail=str(exc),
+        ) from exc
     return TranslationJobAccepted(job_id=job_ids[0])
 
 

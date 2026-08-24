@@ -34,7 +34,7 @@ class BackfillLiteral:
     entity_iri: str
     predicate: str
     source_value: str
-    source_language: str
+    source_language: str | None
     target_language: str
     context_labels: tuple[str, ...] = ()
 
@@ -104,7 +104,7 @@ async def select_backfill_literals(
                     record.entity_iri,
                     record.predicate,
                     record.source_value,
-                    source.language or "und",
+                    source.language,
                     record.language,
                 )
             )
@@ -116,7 +116,7 @@ async def select_backfill_literals(
             source.entity_iri,
             source.predicate,
             source.value,
-            source.language or "und",
+            source.language,
             target,
             context,
         )
@@ -158,7 +158,7 @@ async def preview_backfill_cost(
         context = list(literal.context_labels)
         translate = build_translate_messages(
             literal.source_value,
-            literal.source_language,
+            literal.source_language or "und",
             literal.target_language,
             context,
             include_confidence=mechanism == "confidence",
@@ -171,7 +171,7 @@ async def preview_backfill_cost(
                 (
                     build_translate_messages(
                         literal.source_value,
-                        literal.source_language,
+                        literal.source_language or "und",
                         literal.target_language,
                         context,
                     ),
@@ -181,7 +181,7 @@ async def preview_backfill_cost(
         calls.append(
             (
                 build_back_translate_messages(
-                    placeholder, literal.source_language, literal.target_language
+                    placeholder, literal.source_language or "und", literal.target_language
                 ),
                 verifier_prices,
             )
@@ -191,7 +191,7 @@ async def preview_backfill_cost(
                 (
                     build_verify_messages(
                         literal.source_value,
-                        literal.source_language,
+                        literal.source_language or "und",
                         literal.target_language,
                         placeholder,
                         placeholder,

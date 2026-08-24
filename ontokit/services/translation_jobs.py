@@ -40,6 +40,11 @@ logger = logging.getLogger(__name__)
 AUTO_PREDICATES = frozenset((RDFS.label, SKOS.prefLabel, SKOS.altLabel))
 SCOPED_PREDICATES = {SKOS.definition: "translate_definitions", SKOS.example: "translate_examples"}
 MAX_PENDING_TRANSLATIONS_PER_PROJECT = 100
+# Five default ARQ attempts can each consume the worker's five-minute timeout.
+# Keep the release receipt beyond that retry window, but below the worker's
+# one-hour result retention so a later legitimate reuse of the deterministic
+# job ID starts after its old exactly-once receipt has expired.
+RELEASE_RECEIPT_TTL_SECONDS = 45 * 60
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +55,19 @@ class TranslationTask:
     source_language: str | None
     target_language: str | None
     mode: str
+
+
+class TranslationEnqueueError(RuntimeError):
+    """Queue failure carrying how much of the logical batch is already durable."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        queue_unavailable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.queue_unavailable = queue_unavailable
 
 
 def discover_translation_tasks(
@@ -76,9 +94,10 @@ def discover_translation_tasks(
         # A remove+add at the same entity/predicate is an edit, not a mint.
         if any(True for _ in (parent - current).triples((subject, predicate, None))):
             continue
-        source_language = literal.language or "und"
+        source_language = literal.language
+        prompt_language = source_language or "und"
         for language in config.language_tags:
-            if language.casefold() == source_language.casefold():
+            if language.casefold() == prompt_language.casefold():
                 continue
             key = (str(subject), str(predicate), str(literal), language)
             if key not in covered:
@@ -97,6 +116,28 @@ def discover_translation_tasks(
 
 def _pending_key(project_id: UUID) -> str:
     return f"translation:pending:{project_id}"
+
+
+def translation_entity_job_id(
+    project_id: UUID,
+    branch: str,
+    task: TranslationTask,
+    *,
+    commit_hash: str | None = None,
+) -> str:
+    """Return a deterministic identity isolated across projects and branches."""
+    identity = ":".join(
+        (
+            str(project_id),
+            branch,
+            commit_hash or "on-demand",
+            task.entity_iri,
+            task.predicate,
+            hash_literal_value(task.source_value or ""),
+            task.target_language or "all",
+        )
+    )
+    return f"translation-entity:{hash_literal_value(identity)}"
 
 
 def _provider_call_units(config: ProjectTranslationConfig, task_count: int) -> int:
@@ -121,18 +162,14 @@ async def enqueue_translation_tasks(
     pending = int(await redis.incrby(_pending_key(project_id), reserved))
     if pending > MAX_PENDING_TRANSLATIONS_PER_PROJECT:
         await redis.decrby(_pending_key(project_id), reserved)
-        raise RuntimeError("project translation fan-out cap reached")
+        raise TranslationEnqueueError("project translation fan-out cap reached")
     job_ids: list[str] = []
+    newly_queued = 0
+    owned_slots = reserved
     try:
         for task in tasks:
-            identity = ":".join(
-                (
-                    commit_hash or "on-demand",
-                    task.entity_iri,
-                    task.predicate,
-                    hash_literal_value(task.source_value or ""),
-                    task.target_language or "all",
-                )
+            requested_job_id = translation_entity_job_id(
+                project_id, branch, task, commit_hash=commit_hash
             )
             job = await pool.enqueue_job(
                 "run_translation_entity_task",
@@ -145,14 +182,26 @@ async def enqueue_translation_tasks(
                 task.target_language,
                 actor_id,
                 task.mode,
-                _job_id=f"translation-entity:{hash_literal_value(identity)}",
+                _job_id=requested_job_id,
             )
             if job is None:
-                raise RuntimeError("translation queue refused the job")
-            job_ids.append(str(job.job_id))
-    except Exception:
-        await redis.decrby(_pending_key(project_id), reserved - len(job_ids))
-        raise
+                # ARQ returns None when this deterministic job already exists.
+                # That existing job owns the original pending slot; release only
+                # the duplicate reservation made by this invocation.
+                await redis.decrby(_pending_key(project_id), 1)
+                owned_slots -= 1
+                job_ids.append(requested_job_id)
+            else:
+                newly_queued += 1
+                job_ids.append(str(job.job_id))
+    except Exception as exc:
+        unqueued_slots = owned_slots - newly_queued
+        if unqueued_slots:
+            await redis.decrby(_pending_key(project_id), unqueued_slots)
+        raise TranslationEnqueueError(
+            "translation queue failed to accept the batch",
+            queue_unavailable=True,
+        ) from exc
     return job_ids
 
 
@@ -303,7 +352,7 @@ async def run_translation_entity_job(
             if not candidates:
                 raise RuntimeError("requested source field is absent")
             literal = candidates[0]
-            source_value, source_language = str(literal), literal.language or "und"
+            source_value, source_language = str(literal), literal.language
         service = TranslationService(db, config, llm_config, actor_id, git_service=git)
         languages = [target_language] if target_language else None
         results = await service.translate(source_value, source_language or "und", languages)
@@ -313,7 +362,7 @@ async def run_translation_entity_job(
             entity_iri=entity_iri,
             predicate=predicate,
             source_value=source_value,
-            source_language=source_language or "und",
+            source_language=source_language,
             source_value_hash=hash_literal_value(source_value),
             results=results,
             model_version=config.primary_model or "unknown",
@@ -323,8 +372,11 @@ async def run_translation_entity_job(
         if release_slot:
             arq_job_id = str(ctx.get("job_id", ""))
             release_key = f"translation:released:{project_uuid}"
-            if arq_job_id and await ctx["redis"].sadd(release_key, arq_job_id):
-                await ctx["redis"].decrby(_pending_key(project_uuid), 1)
+            if arq_job_id:
+                first_release = await ctx["redis"].sadd(release_key, arq_job_id)
+                await ctx["redis"].expire(release_key, RELEASE_RECEIPT_TTL_SECONDS)
+                if first_release:
+                    await ctx["redis"].decrby(_pending_key(project_uuid), 1)
 
 
 async def _run_backfill_literal(
@@ -407,11 +459,14 @@ async def run_translation_backfill_job(
 
 __all__ = [
     "MAX_PENDING_TRANSLATIONS_PER_PROJECT",
+    "RELEASE_RECEIPT_TTL_SECONDS",
     "TranslationTask",
+    "TranslationEnqueueError",
     "discover_translation_tasks",
     "enqueue_translation_tasks",
     "enqueue_label_diff_after_commit",
     "run_label_diff_job",
     "run_translation_backfill_job",
     "run_translation_entity_job",
+    "translation_entity_job_id",
 ]

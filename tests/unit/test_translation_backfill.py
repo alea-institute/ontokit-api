@@ -220,8 +220,8 @@ def test_translation_job_active_index_is_project_scoped() -> None:
 
 
 @pytest.mark.asyncio
-async def test_new_language_scope_selects_only_that_languages_gaps() -> None:
-    labels = [LabelValue("https://example.test/cat", str(SKOS.prefLabel), "en", "Cat")]
+async def test_new_language_scope_preserves_untagged_source_identity() -> None:
+    labels = [LabelValue("https://example.test/cat", str(SKOS.prefLabel), None, "Cat")]
     with patch.object(
         TranslationCoverageService,
         "_load",
@@ -232,6 +232,7 @@ async def test_new_language_scope_selects_only_that_languages_gaps() -> None:
         )
 
     assert [literal.target_language for literal in selected] == ["fr"]
+    assert selected[0].source_language is None
 
 
 @pytest.mark.asyncio

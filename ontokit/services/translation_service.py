@@ -185,7 +185,7 @@ class TranslationService:
         entity_iri: str,
         predicate: str,
         source_value: str,
-        source_language: str,
+        source_language: str | None,
         source_value_hash: str,
         results: dict[str, TranslationResult],
         model_version: str,
