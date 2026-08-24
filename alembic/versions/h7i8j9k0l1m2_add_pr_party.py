@@ -199,10 +199,7 @@ def downgrade() -> None:
         "DELETE FROM notifications WHERE type = 'pr_party_ready' "
         "AND (project_id IS NULL OR project_name IS NULL)"
     )
-    op.execute(
-        "DELETE FROM llm_audit_logs WHERE project_id IS NULL "
-        "AND endpoint LIKE 'pr-party/%'"
-    )
+    op.execute("DELETE FROM llm_audit_logs WHERE project_id IS NULL AND endpoint LIKE 'pr-party/%'")
 
     op.alter_column("llm_audit_logs", "project_id", existing_type=sa.Uuid(), nullable=False)
     op.alter_column(
