@@ -7,6 +7,7 @@ Key format: llm:rate:{project_id}:{user_id}:{YYYY-MM-DD}
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
@@ -68,6 +69,19 @@ class RateLimitRedis(Protocol):
     async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> int: ...
 
 
+@dataclass(frozen=True)
+class RateLimitReservation:
+    """Outcome of an idempotent multi-unit rate reservation.
+
+    ``acquired`` is true only when this attempt incremented the counter.  A
+    caller may therefore compensate a failed downstream operation without
+    refunding a reservation owned by an earlier successful attempt.
+    """
+
+    accepted: bool
+    acquired: bool
+
+
 def _rate_key(project_id: str, user_id: str, today: str | None = None) -> str:
     """Build the Redis key for today's call count.
 
@@ -81,6 +95,9 @@ def _rate_key(project_id: str, user_id: str, today: str | None = None) -> str:
 _CONSUME_UNITS_SCRIPT = """
 local receipt_enabled = ARGV[4] == '1'
 if receipt_enabled and redis.call('EXISTS', KEYS[2]) == 1 then
+  if tonumber(redis.call('GET', KEYS[2])) ~= tonumber(ARGV[1]) then
+    return -1
+  end
   return 1
 end
 local current = tonumber(redis.call('GET', KEYS[1]) or '0')
@@ -94,10 +111,63 @@ if redis.call('TTL', KEYS[1]) < 0 then
   redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 end
 if receipt_enabled then
-  redis.call('SET', KEYS[2], '1', 'EX', tonumber(ARGV[3]))
+  redis.call('SET', KEYS[2], ARGV[1], 'EX', tonumber(ARGV[3]))
+end
+return 2
+"""
+
+_RELEASE_UNITS_SCRIPT = """
+local reserved = tonumber(redis.call('GET', KEYS[2]))
+if reserved == nil then
+  return 0
+end
+if reserved ~= tonumber(ARGV[1]) then
+  return -1
+end
+redis.call('DEL', KEYS[2])
+local remaining = redis.call('DECRBY', KEYS[1], reserved)
+if remaining <= 0 then
+  redis.call('DEL', KEYS[1])
 end
 return 1
 """
+
+
+async def reserve_rate_limit_units(
+    redis: RateLimitRedis,
+    project_id: str,
+    user_id: str,
+    role: str,
+    units: int,
+    *,
+    reservation_id: str | None = None,
+) -> RateLimitReservation:
+    """Reserve units and report whether this attempt owns the increment."""
+    if units <= 0:
+        raise ValueError("rate-limit units must be positive")
+    limit = RATE_LIMITS.get(role, 0)
+    if limit == 0:
+        return RateLimitReservation(accepted=False, acquired=False)
+    if limit is None:
+        return RateLimitReservation(accepted=True, acquired=False)
+
+    key = _rate_key(project_id, user_id)
+    receipt_key = f"{key}:reservation:{reservation_id or 'none'}"
+    try:
+        result = await redis.eval(
+            _CONSUME_UNITS_SCRIPT,
+            2,
+            key,
+            receipt_key,
+            units,
+            limit,
+            86400,
+            1 if reservation_id else 0,
+        )
+        return RateLimitReservation(accepted=result > 0, acquired=result == 2)
+    except _REDIS_INFRA_ERRORS as exc:
+        _alert_fail_open("reserve_rate_limit_units", project_id, user_id, exc)
+        return RateLimitReservation(accepted=True, acquired=False)
 
 
 async def consume_rate_limit_units(
@@ -114,31 +184,62 @@ async def consume_rate_limit_units(
     ``reservation_id`` makes a retry of the same logical fan-out idempotent for
     the current UTC rate window.
     """
+    reservation = await reserve_rate_limit_units(
+        redis,
+        project_id,
+        user_id,
+        role,
+        units,
+        reservation_id=reservation_id,
+    )
+    return reservation.accepted
+
+
+async def release_rate_limit_units(
+    redis: RateLimitRedis,
+    project_id: str,
+    user_id: str,
+    role: str,
+    units: int,
+    *,
+    reservation_id: str,
+) -> bool:
+    """Atomically refund a reservation acquired by a failed downstream action.
+
+    The receipt stores the reserved unit count, and the Lua script deletes it
+    together with the decrement. Repeated releases are therefore harmless.
+    """
     if units <= 0:
         raise ValueError("rate-limit units must be positive")
+    if not reservation_id:
+        raise ValueError("reservation_id is required to release rate-limit units")
     limit = RATE_LIMITS.get(role, 0)
+    if limit is None:
+        return False
     if limit == 0:
         return False
-    if limit is None:
-        return True
 
     key = _rate_key(project_id, user_id)
-    receipt_key = f"{key}:reservation:{reservation_id or 'none'}"
+    receipt_key = f"{key}:reservation:{reservation_id}"
     try:
-        accepted = await redis.eval(
-            _CONSUME_UNITS_SCRIPT,
+        released = await redis.eval(
+            _RELEASE_UNITS_SCRIPT,
             2,
             key,
             receipt_key,
             units,
-            limit,
-            86400,
-            1 if reservation_id else 0,
         )
-        return bool(accepted)
+        if released < 0:
+            logger.error(
+                "rate-limit reservation unit mismatch during release — project=%s user=%s",
+                project_id,
+                user_id,
+            )
+            return False
+        return bool(released)
     except _REDIS_INFRA_ERRORS as exc:
-        _alert_fail_open("consume_rate_limit_units", project_id, user_id, exc)
-        return True
+        _alert_fail_open("release_rate_limit_units", project_id, user_id, exc)
+        return False
 
 
 async def check_rate_limit(

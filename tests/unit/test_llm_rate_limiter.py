@@ -13,10 +13,13 @@ import pytest
 
 from ontokit.services.llm.rate_limiter import (
     RATE_LIMITS,
+    RateLimitReservation,
     _rate_key,
     check_rate_limit,
     consume_rate_limit_units,
     get_remaining_calls,
+    release_rate_limit_units,
+    reserve_rate_limit_units,
 )
 
 
@@ -95,7 +98,7 @@ async def test_editor_over_limit_blocked():
 @pytest.mark.asyncio
 async def test_multi_unit_reservation_is_atomic_and_can_be_idempotent():
     redis = _redis()
-    redis.eval = AsyncMock(side_effect=[1, 1, 0])
+    redis.eval = AsyncMock(side_effect=[2, 1, 0])
 
     assert await consume_rate_limit_units(redis, "p", "u", "editor", 4, reservation_id="commit-1")
     assert await consume_rate_limit_units(redis, "p", "u", "editor", 4, reservation_id="commit-1")
@@ -104,10 +107,61 @@ async def test_multi_unit_reservation_is_atomic_and_can_be_idempotent():
 
 
 @pytest.mark.asyncio
+async def test_reservation_reports_whether_this_attempt_acquired_units():
+    redis = _redis()
+    redis.eval = AsyncMock(side_effect=[2, 1, 0])
+
+    acquired = await reserve_rate_limit_units(
+        redis, "p", "u", "editor", 4, reservation_id="commit-1"
+    )
+    duplicate = await reserve_rate_limit_units(
+        redis, "p", "u", "editor", 4, reservation_id="commit-1"
+    )
+    rejected = await reserve_rate_limit_units(
+        redis, "p", "u", "editor", 500, reservation_id="commit-2"
+    )
+
+    assert acquired == RateLimitReservation(accepted=True, acquired=True)
+    assert duplicate == RateLimitReservation(accepted=True, acquired=False)
+    assert rejected == RateLimitReservation(accepted=False, acquired=False)
+
+
+@pytest.mark.asyncio
 async def test_multi_unit_reservation_rejects_invalid_units_without_redis():
     redis = _redis()
     with pytest.raises(ValueError, match="positive"):
         await consume_rate_limit_units(redis, "p", "u", "editor", 0)
+    redis.eval.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_multi_unit_reservation_release_is_atomic_and_idempotent():
+    redis = _redis()
+    redis.eval = AsyncMock(side_effect=[1, 0])
+
+    assert await release_rate_limit_units(
+        redis, "p", "u", "editor", 4, reservation_id="commit-1"
+    )
+    assert not await release_rate_limit_units(
+        redis, "p", "u", "editor", 4, reservation_id="commit-1"
+    )
+
+    first_call = redis.eval.await_args_list[0]
+    assert first_call.args[1:4] == (
+        2,
+        _rate_key("p", "u"),
+        f"{_rate_key('p', 'u')}:reservation:commit-1",
+    )
+    assert first_call.args[4] == 4
+
+
+@pytest.mark.asyncio
+async def test_multi_unit_reservation_release_requires_identity_and_positive_units():
+    redis = _redis()
+    with pytest.raises(ValueError, match="positive"):
+        await release_rate_limit_units(redis, "p", "u", "editor", 0, reservation_id="commit-1")
+    with pytest.raises(ValueError, match="reservation_id"):
+        await release_rate_limit_units(redis, "p", "u", "editor", 1, reservation_id="")
     redis.eval.assert_not_awaited()
 
 

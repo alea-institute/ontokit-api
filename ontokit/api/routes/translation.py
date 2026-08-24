@@ -49,7 +49,7 @@ from ontokit.schemas.translation import (
 )
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.language_palette import LANGUAGE_PALETTE
-from ontokit.services.llm import consume_rate_limit_units
+from ontokit.services.llm import release_rate_limit_units, reserve_rate_limit_units
 from ontokit.services.llm.crypto import encrypt_secret
 from ontokit.services.translation_backfill import preview_backfill_cost, select_backfill_literals
 from ontokit.services.translation_coverage import TranslationCoverageService
@@ -458,14 +458,15 @@ async def translate_entity_field(
     call_units = len(config.language_tags) * (
         4 if config.verification_mechanism == "consensus" else 2
     )
-    if not await consume_rate_limit_units(
+    reservation = await reserve_rate_limit_units(
         redis,
         str(project_id),
         user.id,
         role,
         call_units,
         reservation_id=reservation_id,
-    ):
+    )
+    if not reservation.accepted:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Daily LLM call limit cannot cover {call_units} provider calls",
@@ -475,6 +476,15 @@ async def translate_entity_field(
             pool, redis, project_id, data.branch, user.id, [task]
         )
     except TranslationEnqueueError as exc:
+        if reservation.acquired:
+            await release_rate_limit_units(
+                redis,
+                str(project_id),
+                user.id,
+                role,
+                call_units,
+                reservation_id=reservation_id,
+            )
         raise HTTPException(
             status_code=(
                 status.HTTP_503_SERVICE_UNAVAILABLE

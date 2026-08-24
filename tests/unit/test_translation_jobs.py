@@ -15,6 +15,7 @@ from ontokit.api.routes.translation import translate_entity_field
 from ontokit.core.auth import CurrentUser
 from ontokit.models.translation import ProjectTranslationConfig
 from ontokit.schemas.translation import TranslateFieldRequest
+from ontokit.services.llm.rate_limiter import RateLimitReservation
 from ontokit.services.translation_jobs import (
     MAX_PENDING_TRANSLATIONS_PER_PROJECT,
     RELEASE_RECEIPT_TTL_SECONDS,
@@ -284,8 +285,8 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
         ),
         patch("ontokit.api.routes.translation._get_redis", return_value=AsyncMock()),
         patch(
-            "ontokit.api.routes.translation.consume_rate_limit_units",
-            AsyncMock(return_value=False),
+            "ontokit.api.routes.translation.reserve_rate_limit_units",
+            AsyncMock(return_value=RateLimitReservation(accepted=False, acquired=False)),
         ),
         patch("ontokit.api.routes.translation.get_arq_pool", AsyncMock(return_value=pool)),
         pytest.raises(HTTPException) as limited,
@@ -293,7 +294,9 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
         await translate_entity_field(project_id, request, db, user)
     assert limited.value.status_code == 429
 
-    consume_units = AsyncMock(return_value=True)
+    reserve_units = AsyncMock(
+        return_value=RateLimitReservation(accepted=True, acquired=True)
+    )
     with (
         patch("ontokit.api.routes.translation._require_member", AsyncMock(return_value="editor")),
         patch(
@@ -301,17 +304,19 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
             AsyncMock(return_value=_config(language_tags=["fr"])),
         ),
         patch("ontokit.api.routes.translation._get_redis", return_value=AsyncMock()),
-        patch("ontokit.api.routes.translation.consume_rate_limit_units", consume_units),
+        patch("ontokit.api.routes.translation.reserve_rate_limit_units", reserve_units),
         patch("ontokit.api.routes.translation.get_arq_pool", AsyncMock(return_value=None)),
         pytest.raises(HTTPException) as unavailable,
     ):
         await translate_entity_field(project_id, request, db, user)
     assert unavailable.value.status_code == 503
-    consume_units.assert_not_awaited()
+    reserve_units.assert_not_awaited()
 
     redis = AsyncMock()
     redis.incrby.return_value = 1
-    consume_units = AsyncMock(return_value=True)
+    reserve_units = AsyncMock(
+        return_value=RateLimitReservation(accepted=True, acquired=True)
+    )
     with (
         patch("ontokit.api.routes.translation._require_member", AsyncMock(return_value="editor")),
         patch(
@@ -322,14 +327,14 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
         ),
         patch("ontokit.api.routes.translation._get_redis", return_value=redis),
         patch(
-            "ontokit.api.routes.translation.consume_rate_limit_units",
-            consume_units,
+            "ontokit.api.routes.translation.reserve_rate_limit_units",
+            reserve_units,
         ),
         patch("ontokit.api.routes.translation.get_arq_pool", AsyncMock(return_value=pool)),
     ):
         response = await translate_entity_field(project_id, request, db, user)
     assert response.job_id == "translation-1"
-    consume_call = consume_units.await_args
+    consume_call = reserve_units.await_args
     assert consume_call.args == (redis, str(project_id), "actor-1", "editor", 2)
     assert consume_call.kwargs["reservation_id"]
     pool.enqueue_job.assert_awaited_once_with(
@@ -357,7 +362,13 @@ async def test_on_demand_duplicate_and_enqueue_failure_reuse_idempotent_reservat
     user = CurrentUser(id="actor-1", name="Actor", email="actor@example.test")
     redis = AsyncMock()
     redis.incrby.return_value = 1
-    consume_units = AsyncMock(return_value=True)
+    reserve_units = AsyncMock(
+        side_effect=[
+            RateLimitReservation(accepted=True, acquired=False),
+            RateLimitReservation(accepted=True, acquired=True),
+        ]
+    )
+    release_units = AsyncMock(return_value=True)
     pool = AsyncMock()
     pool.enqueue_job.return_value = None
 
@@ -370,13 +381,15 @@ async def test_on_demand_duplicate_and_enqueue_failure_reuse_idempotent_reservat
             ),
         ),
         patch("ontokit.api.routes.translation._get_redis", return_value=redis),
-        patch("ontokit.api.routes.translation.consume_rate_limit_units", consume_units),
+        patch("ontokit.api.routes.translation.reserve_rate_limit_units", reserve_units),
+        patch("ontokit.api.routes.translation.release_rate_limit_units", release_units),
         patch("ontokit.api.routes.translation.get_arq_pool", AsyncMock(return_value=pool)),
     ):
         duplicate = await translate_entity_field(project_id, request, db, user)
 
     assert duplicate.job_id.startswith("translation-entity:")
     redis.decrby.assert_awaited_once()
+    release_units.assert_not_awaited()
 
     pool.enqueue_job.side_effect = ConnectionError("queue down")
     with (
@@ -388,7 +401,8 @@ async def test_on_demand_duplicate_and_enqueue_failure_reuse_idempotent_reservat
             ),
         ),
         patch("ontokit.api.routes.translation._get_redis", return_value=redis),
-        patch("ontokit.api.routes.translation.consume_rate_limit_units", consume_units),
+        patch("ontokit.api.routes.translation.reserve_rate_limit_units", reserve_units),
+        patch("ontokit.api.routes.translation.release_rate_limit_units", release_units),
         patch("ontokit.api.routes.translation.get_arq_pool", AsyncMock(return_value=pool)),
         pytest.raises(HTTPException) as refused,
     ):
@@ -396,5 +410,13 @@ async def test_on_demand_duplicate_and_enqueue_failure_reuse_idempotent_reservat
 
     assert refused.value.status_code == 503
     assert redis.decrby.await_count == 2
-    reservation_ids = [call.kwargs["reservation_id"] for call in consume_units.await_args_list]
+    reservation_ids = [call.kwargs["reservation_id"] for call in reserve_units.await_args_list]
     assert reservation_ids == [duplicate.job_id, duplicate.job_id]
+    release_units.assert_awaited_once_with(
+        redis,
+        str(project_id),
+        "actor-1",
+        "editor",
+        2,
+        reservation_id=duplicate.job_id,
+    )
