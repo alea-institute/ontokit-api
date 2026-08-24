@@ -55,6 +55,7 @@ from ontokit.services.llm import (
     validate_base_url,
 )
 from ontokit.services.llm.audit import finalize_llm_call, reserve_llm_call
+from ontokit.services.llm.budget import BudgetLimits
 from ontokit.services.llm.rate_limiter import RATE_LIMITS
 from ontokit.services.llm.registry import (
     KNOWN_MODELS,
@@ -323,7 +324,10 @@ async def test_llm_connection(
     reservation_id, budget_reason = await reserve_llm_call(
         db,
         project_id=project_id,
-        config=config,
+        config=BudgetLimits(
+            monthly_budget_usd=config.monthly_budget_usd,
+            daily_cap_usd=config.daily_cap_usd,
+        ),
         user_id=user.id,
         model=config.model or "",
         provider=config.provider,

@@ -71,6 +71,8 @@ async def test_connection_route_redacts_provider_exception(caplog) -> None:
         base_url=None,
         api_key_encrypted=None,
         model="gateway-model",
+        monthly_budget_usd=None,
+        daily_cap_usd=None,
     )
     provider = MagicMock()
     provider.test_connection = AsyncMock(side_effect=RuntimeError(marker))
