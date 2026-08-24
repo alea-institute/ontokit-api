@@ -222,7 +222,5 @@ async def test_private_project_unauthenticated_or_non_member_is_denied(
     mock_db_session.execute.side_effect = [project_result, member_result]
 
     with pytest.raises(HTTPException) as exc:
-        await get_translation_coverage(
-            PROJECT_ID, "main", mock_db_session, user, Mock()
-        )
+        await get_translation_coverage(PROJECT_ID, "main", mock_db_session, user, Mock())
     assert exc.value.status_code == 403

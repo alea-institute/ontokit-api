@@ -152,4 +152,6 @@ def test_invalid_state_is_rejected_by_create_all_schema(
 
 
 def test_hash_literal_value_normalizes_nfc_and_strips() -> None:
-    assert hash_literal_value("  Cafe\N{COMBINING ACUTE ACCENT}  ") == hash_literal_value("Caf\N{LATIN SMALL LETTER E WITH ACUTE}")
+    assert hash_literal_value("  Cafe\N{COMBINING ACUTE ACCENT}  ") == hash_literal_value(
+        "Caf\N{LATIN SMALL LETTER E WITH ACUTE}"
+    )

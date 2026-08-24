@@ -120,9 +120,7 @@ async def select_backfill_literals(
             target,
             context,
         )
-        for source, target, context in await service.missing_literals(
-            project_id, branch, language
-        )
+        for source, target, context in await service.missing_literals(project_id, branch, language)
     ]
 
 

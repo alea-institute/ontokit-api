@@ -182,7 +182,9 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
         patch("ontokit.api.routes.translation._require_member", AsyncMock(return_value="editor")),
         patch(
             "ontokit.api.routes.translation._get_config",
-            AsyncMock(return_value=_config(language_tags=["fr"], verification_mechanism="confidence")),
+            AsyncMock(
+                return_value=_config(language_tags=["fr"], verification_mechanism="confidence")
+            ),
         ),
         patch("ontokit.api.routes.translation._get_redis", return_value=AsyncMock()),
         patch(
@@ -198,12 +200,12 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
     redis = AsyncMock()
     redis.incrby.return_value = 1
     with (
-        patch(
-            "ontokit.api.routes.translation._require_member", AsyncMock(return_value="editor")
-        ),
+        patch("ontokit.api.routes.translation._require_member", AsyncMock(return_value="editor")),
         patch(
             "ontokit.api.routes.translation._get_config",
-            AsyncMock(return_value=_config(language_tags=["fr"], verification_mechanism="confidence")),
+            AsyncMock(
+                return_value=_config(language_tags=["fr"], verification_mechanism="confidence")
+            ),
         ),
         patch("ontokit.api.routes.translation._get_redis", return_value=redis),
         patch(

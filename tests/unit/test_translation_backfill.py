@@ -205,7 +205,9 @@ async def test_registered_backfill_wrapper_delegates_lifecycle_payload() -> None
         if getattr(function, "__name__", "") == "run_translation_backfill_task"
     )
     expected = {"job_id": "job", "completed": 0}
-    with patch.object(worker, "run_translation_backfill_job", AsyncMock(return_value=expected)) as run:
+    with patch.object(
+        worker, "run_translation_backfill_job", AsyncMock(return_value=expected)
+    ) as run:
         result = await registered({}, str(PROJECT_ID), "main", "job", "actor")
     assert result == expected
     run.assert_awaited_once_with({}, str(PROJECT_ID), "main", "job", "actor")
@@ -283,8 +285,7 @@ async def test_era_scope_excludes_native_confirmed_records() -> None:
                 [],
                 Graph().parse(
                     data=(
-                        f'@prefix skos: <{SKOS}> . '
-                        f'<{machine.entity_iri}> skos:prefLabel "Cat"@en .'
+                        f'@prefix skos: <{SKOS}> . <{machine.entity_iri}> skos:prefLabel "Cat"@en .'
                     ),
                     format="turtle",
                 ),

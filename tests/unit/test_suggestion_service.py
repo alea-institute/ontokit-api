@@ -1363,9 +1363,7 @@ class TestApprove:
             project_result, session_result, pr_result, project=project
         )
 
-        with patch(
-            "ontokit.services.suggestion_service.get_pull_request_service"
-        ) as pr_factory:
+        with patch("ontokit.services.suggestion_service.get_pull_request_service") as pr_factory:
             await service.approve(PROJECT_ID, session.session_id, _make_user())
 
         pr_factory.assert_not_called()
@@ -1722,10 +1720,13 @@ class TestBeaconSave:
                 ":NewClass a owl:Class ."
             ),
         )
-        with patch(
-            "ontokit.services.suggestion_service.verify_beacon_token",
-            return_value=session.session_id,
-        ), pytest.raises(HTTPException) as exc:
+        with (
+            patch(
+                "ontokit.services.suggestion_service.verify_beacon_token",
+                return_value=session.session_id,
+            ),
+            pytest.raises(HTTPException) as exc,
+        ):
             await service.beacon_save(PROJECT_ID, data, "valid-token")
 
         assert exc.value.status_code == 403

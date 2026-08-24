@@ -15,9 +15,7 @@ _branch_locks: WeakValueDictionary[tuple[UUID, str], asyncio.Lock] = WeakValueDi
 _pull_request_allocation_locks: WeakValueDictionary[UUID, asyncio.Lock] = WeakValueDictionary()
 
 
-async def acquire_pull_request_allocation_db_lock(
-    db: AsyncSession, project_id: UUID
-) -> None:
+async def acquire_pull_request_allocation_db_lock(db: AsyncSession, project_id: UUID) -> None:
     """Acquire the transaction-scoped cross-process PR allocation lock."""
     await db.execute(
         text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
@@ -43,9 +41,7 @@ async def _pull_request_allocation_lock(db: AsyncSession, project_id: UUID) -> A
 
 
 @asynccontextmanager
-async def branch_write_lock(
-    db: AsyncSession, project_id: UUID, branch: str
-) -> AsyncIterator[None]:
+async def branch_write_lock(db: AsyncSession, project_id: UUID, branch: str) -> AsyncIterator[None]:
     """Exclude concurrent writers to a branch in this process and every DB-sharing process.
 
     The process-local asyncio lock is paired with a transaction-scoped PostgreSQL advisory

@@ -61,9 +61,7 @@ class InlineQueue:
         self.redis = redis
         self.jobs: list[tuple[str, tuple[object, ...]]] = []
 
-    async def enqueue_job(
-        self, name: str, *args: object, **kwargs: object
-    ) -> SimpleNamespace:
+    async def enqueue_job(self, name: str, *args: object, **kwargs: object) -> SimpleNamespace:
         self.jobs.append((name, args))
         return SimpleNamespace(job_id=kwargs.get("_job_id", f"inline-{len(self.jobs)}"))
 

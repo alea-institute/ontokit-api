@@ -116,6 +116,7 @@ _ENTITY_DECLARATION_TYPES = frozenset(
     }
 )
 
+
 class SuggestionService:
     """Service for suggestion session CRUD, save, submit, and auto-submit."""
 
@@ -587,9 +588,7 @@ class SuggestionService:
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
-            self._assert_branch_content_can_mint(
-                project, user, current_content, data.content
-            )
+            self._assert_branch_content_can_mint(project, user, current_content, data.content)
             # Commit to the suggestion branch
             commit_message = f"Update {data.entity_label}"
             try:
@@ -667,16 +666,12 @@ class SuggestionService:
         # Human verification may call a remote provider, so keep it outside the
         # PR allocation critical section. Consume the daily allowance only after
         # the refreshed session and submitted content are both eligible.
-        await self._verify_untrusted_human(
-            project, session, user, verification_token, client_ip
-        )
+        await self._verify_untrusted_human(project, session, user, verification_token, client_ip)
         verification_passed = session.verification_passed
 
         filename = self._get_git_ontology_path(project)
         default_branch = self.git_service.get_default_branch(project_id)
-        async with pull_request_write_locks(
-            self.db, project_id, {session.branch, default_branch}
-        ):
+        async with pull_request_write_locks(self.db, project_id, {session.branch, default_branch}):
             await self.db.refresh(session)
             if verification_passed:
                 session.verification_passed = True
@@ -685,9 +680,7 @@ class SuggestionService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Session is {session.status}, cannot submit",
                 )
-            content = self.git_service.get_file_from_branch(
-                project_id, session.branch, filename
-            )
+            content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
             await self._validate_submission_content(
                 project_id,
                 session.branch,
@@ -790,9 +783,7 @@ class SuggestionService:
     ) -> SuggestionSubmitResponse:
         """Create a suggestion PR while acquiring its lock set exactly once."""
         default_branch = self.git_service.get_default_branch(project_id)
-        async with pull_request_write_locks(
-            self.db, project_id, {session.branch, default_branch}
-        ):
+        async with pull_request_write_locks(self.db, project_id, {session.branch, default_branch}):
             claimed_pr = await self._create_pr_for_session_already_locked(
                 project_id,
                 session,
@@ -1079,9 +1070,7 @@ class SuggestionService:
             return TrustTier.ANONYMOUS
         submitter = CurrentUser(id=s.user_id, email=s.user_email, name=s.user_name)
         if members_by_user_id is not None:
-            return self.trust.resolve_tier_for_member(
-                submitter, members_by_user_id.get(s.user_id)
-            )
+            return self.trust.resolve_tier_for_member(submitter, members_by_user_id.get(s.user_id))
         return self.trust.resolve_tier(project, submitter)
 
     async def _build_summary(
@@ -1143,9 +1132,7 @@ class SuggestionService:
             summary=s.summary,
             is_anonymous=is_anonymous,
             submitter_tier=(
-                submitter_tier
-                if submitter_tier is not None
-                else self._summary_tier(project, s)
+                submitter_tier if submitter_tier is not None else self._summary_tier(project, s)
             ),
             is_llm_generated=bool(getattr(s, "is_llm_generated", False)),
             auto_accept_after=getattr(s, "auto_accept_after", None),
@@ -1374,8 +1361,7 @@ class SuggestionService:
             sessions = [
                 session
                 for session in sessions
-                if tiers_by_session_id[session.id]
-                in (TrustTier.ANONYMOUS, TrustTier.UNTRUSTED)
+                if tiers_by_session_id[session.id] in (TrustTier.ANONYMOUS, TrustTier.UNTRUSTED)
             ]
         elif queue == SuggestionQueue.REVIEW:
             sessions = [
@@ -1795,9 +1781,7 @@ class SuggestionService:
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
-            self._assert_branch_content_can_mint(
-                project, actor, current_content, data.content
-            )
+            self._assert_branch_content_can_mint(project, actor, current_content, data.content)
             try:
                 self.git_service.commit_to_branch(  # type: ignore[attr-defined]
                     project_id=project_id,
@@ -1963,9 +1947,7 @@ class SuggestionService:
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
-            self._assert_branch_content_can_mint(
-                project, None, current_content, data.content
-            )
+            self._assert_branch_content_can_mint(project, None, current_content, data.content)
             commit_message = f"Update {data.entity_label}"
             try:
                 commit_info = self.git_service.commit_to_branch(  # type: ignore[attr-defined]
@@ -2209,7 +2191,8 @@ class SuggestionService:
         lease_until = now + AUTO_ACCEPT_LEASE
 
         result = await self.db.execute(
-            select(SuggestionSession).where(
+            select(SuggestionSession)
+            .where(
                 SuggestionSession.status.in_(
                     [
                         SuggestionSessionStatus.SUBMITTED.value,
