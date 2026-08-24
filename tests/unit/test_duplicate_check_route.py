@@ -1,9 +1,7 @@
 """Endpoint tests for POST /projects/{id}/duplicate-check (PR-6).
 
-The route is an ontology-index read (labels + embedding similarity), so its
-access rule mirrors /search/semantic: public projects are readable by anyone
-(including anonymous), private projects require membership — enforced by
-``project_service.get`` (403/404) BEFORE the duplicate check runs.
+The route performs authenticated semantic compute and can spend a project key,
+so public visibility does not grant anonymous access to this endpoint.
 """
 
 from __future__ import annotations
@@ -40,7 +38,7 @@ def _pass_response() -> DuplicateCheckResponse:
 def _patch_access(allowed: bool = True, status_code: int = 403) -> MagicMock:
     service = MagicMock()
     if allowed:
-        service.get = AsyncMock(return_value=MagicMock())
+        service.get = AsyncMock(return_value=MagicMock(user_role="editor"))
     else:
         service.get = AsyncMock(
             side_effect=HTTPException(status_code=status_code, detail="denied")
@@ -51,7 +49,9 @@ def _patch_access(allowed: bool = True, status_code: int = 403) -> MagicMock:
 # ── Access control (mirrors /search/semantic) ────────────────────────────────
 
 
-def test_private_project_denied_before_check_runs(client: TestClient) -> None:
+def test_private_project_denied_before_check_runs(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
     """403 from the project access rule must fire before any scoring work."""
     with (
         patch(
@@ -62,45 +62,39 @@ def test_private_project_denied_before_check_runs(client: TestClient) -> None:
             "ontokit.api.routes.duplicate_check.DuplicateCheckService"
         ) as service_cls,
     ):
-        resp = client.post(URL, json=BODY)
+        resp = authed_client[0].post(URL, json=BODY)
 
     assert resp.status_code == 403
     service_cls.assert_not_called()
 
 
-def test_unknown_project_404(client: TestClient) -> None:
+def test_unknown_project_404(authed_client: tuple[TestClient, AsyncMock]) -> None:
     with patch(
         "ontokit.api.routes.duplicate_check.get_project_service",
         return_value=_patch_access(allowed=False, status_code=404),
     ):
-        resp = client.post(URL, json=BODY)
+        resp = authed_client[0].post(URL, json=BODY)
 
     assert resp.status_code == 404
 
 
-def test_public_project_allows_anonymous(client: TestClient) -> None:
-    """Anonymous read of a public project passes the gate and gets a verdict."""
-    check = AsyncMock(return_value=_pass_response())
-    with (
-        patch(
-            "ontokit.api.routes.duplicate_check.get_project_service",
-            return_value=_patch_access(allowed=True),
-        ),
-        patch(
-            "ontokit.api.routes.duplicate_check.DuplicateCheckService"
-        ) as service_cls,
-    ):
-        service_cls.return_value.check = check
+def test_public_project_rejects_anonymous_before_check_runs(client: TestClient) -> None:
+    """Anonymous callers cannot spend a public project's stored embedding key."""
+    with patch(
+        "ontokit.api.routes.duplicate_check.DuplicateCheckService"
+    ) as service_cls:
         resp = client.post(URL, json=BODY)
 
-    assert resp.status_code == 200
-    assert resp.json()["verdict"] == "pass"
+    assert resp.status_code == 401
+    service_cls.assert_not_called()
 
 
 # ── Wiring ────────────────────────────────────────────────────────────────────
 
 
-def test_request_fields_forwarded_to_service(client: TestClient) -> None:
+def test_request_fields_forwarded_to_service(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
     """label / entity_type / parent_iri from the request reach the service."""
     check = AsyncMock(return_value=_pass_response())
     with (
@@ -113,7 +107,7 @@ def test_request_fields_forwarded_to_service(client: TestClient) -> None:
         ) as service_cls,
     ):
         service_cls.return_value.check = check
-        resp = client.post(URL, json=BODY)
+        resp = authed_client[0].post(URL, json=BODY)
 
     assert resp.status_code == 200
     check.assert_awaited_once()
@@ -122,9 +116,12 @@ def test_request_fields_forwarded_to_service(client: TestClient) -> None:
     assert kwargs["entity_type"] == BODY["entity_type"]
     assert kwargs["parent_iri"] == BODY["parent_iri"]
     assert kwargs["limit"] == 10
+    assert kwargs["billing_user_id"] == "test-user-id"
 
 
-def test_branch_field_removed_and_never_forwarded(client: TestClient) -> None:
+def test_branch_field_removed_and_never_forwarded(
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
     """Pins the contract: `branch` is NOT a request field. Duplicate detection
     always searches ALL branches (DEDUP-08), so a per-request branch scope would
     be silently ignored — the field was removed. A stray `branch` in the body is
@@ -146,17 +143,17 @@ def test_branch_field_removed_and_never_forwarded(client: TestClient) -> None:
     ):
         service_cls.return_value.check = check
         # A stray branch key is ignored by the schema, request still succeeds.
-        resp = client.post(URL, json={**BODY, "branch": "feature-x"})
+        resp = authed_client[0].post(URL, json={**BODY, "branch": "feature-x"})
 
     assert resp.status_code == 200
     assert "branch" not in check.await_args.kwargs
 
 
-def test_422_on_missing_label(client: TestClient) -> None:
+def test_422_on_missing_label(authed_client: tuple[TestClient, AsyncMock]) -> None:
     with patch(
         "ontokit.api.routes.duplicate_check.get_project_service",
         return_value=_patch_access(allowed=True),
     ):
-        resp = client.post(URL, json={"entity_type": "class"})
+        resp = authed_client[0].post(URL, json={"entity_type": "class"})
 
     assert resp.status_code == 422

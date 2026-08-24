@@ -37,20 +37,27 @@ class StructuralSimilarityService:
 
     def compute_similarity(self, iri_a: str, iri_b: str, max_depth: int = 3) -> float:
         """Jaccard similarity between parent sets of two IRIs. Returns 0.0-1.0."""
+        score = self.try_compute_similarity(iri_a, iri_b, max_depth)
+        return score if score is not None else 0.0
+
+    def try_compute_similarity(
+        self, iri_a: str, iri_b: str, max_depth: int = 3
+    ) -> float | None:
+        """Return similarity, or ``None`` when structural evidence is unavailable."""
         folio = _get_folio_instance()
         if folio is None:
-            return 0.0
+            return None
         try:
             parents_a = {c.iri for c in folio.get_parents(iri_a, max_depth=max_depth)}
             parents_b = {c.iri for c in folio.get_parents(iri_b, max_depth=max_depth)}
             if not parents_a and not parents_b:
-                return 0.0
+                return None
             intersection = parents_a & parents_b
             union = parents_a | parents_b
             return len(intersection) / len(union) if union else 0.0
         except Exception:
             logger.exception("Structural similarity failed for %s vs %s", iri_a, iri_b)
-            return 0.0
+            return None
 
     def get_structural_context(
         self, iri: str, max_depth: int = 3

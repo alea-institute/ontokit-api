@@ -87,3 +87,4 @@ class SemanticSearchResultWithBranch(BaseModel):
     score: float
     deprecated: bool = False
     branch: str
+    embedding_text: str

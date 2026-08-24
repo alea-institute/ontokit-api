@@ -2,6 +2,7 @@
 
 from ontokit.models.branch_metadata import BranchMetadata
 from ontokit.models.change_event import ChangeEventType, EntityChangeEvent
+from ontokit.models.distinct_entity_decision import DistinctEntityDecision
 from ontokit.models.duplicate_rejection import DuplicateRejection
 from ontokit.models.embedding import EmbeddingJob, EntityEmbedding, ProjectEmbeddingConfig
 from ontokit.models.join_request import JoinRequest, JoinRequestStatus
@@ -43,6 +44,7 @@ __all__ = [
     "LLMAuditLog",
     "ProjectLLMConfig",
     "ChangeEventType",
+    "DistinctEntityDecision",
     "DuplicateRejection",
     "EmbeddingJob",
     "EntityChangeEvent",

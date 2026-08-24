@@ -136,6 +136,7 @@ def mock_git() -> MagicMock:
     git.create_branch = MagicMock()
     git.delete_branch = MagicMock()
     git.get_default_branch = MagicMock(return_value="main")
+    git.get_file_from_branch = MagicMock(return_value=b"")
     return git
 
 

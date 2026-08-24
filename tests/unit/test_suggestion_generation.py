@@ -728,6 +728,10 @@ async def test_auto_validate_in_pipeline(
     assert mock_validator.validate_entity.call_count == 2
     # Dedup was called once per suggestion
     assert mock_duplicate_check_service.check.call_count == 2
+    assert {
+        call.kwargs["proposed_iri"]
+        for call in mock_duplicate_check_service.check.await_args_list
+    } == {suggestion.iri for suggestion in resp.suggestions}
 
 
 @pytest.mark.asyncio

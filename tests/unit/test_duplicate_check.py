@@ -14,7 +14,6 @@ from ontokit.schemas.duplicate_check import (
 from ontokit.schemas.embeddings import SemanticSearchResultWithBranch
 from ontokit.services.duplicate_check_service import (
     BLOCK_THRESHOLD,
-    EXACT_WEIGHT,
     SEMANTIC_WEIGHT,
     STRUCTURAL_WEIGHT,
     WARN_THRESHOLD,
@@ -37,6 +36,7 @@ def _make_sem_result(
         score=score,
         deprecated=False,
         branch=branch,
+        embedding_text=label,
     )
 
 
@@ -63,7 +63,7 @@ async def test_exact_label_match_returns_block_verdict():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=1.0,
         ),
         patch.object(
@@ -87,8 +87,8 @@ async def test_semantic_similarity_warn_range():
     """Composite score in (0.80, 0.95] produces verdict='warn' — UI surfaces warning (DEDUP-06)."""
     svc, _ = _make_service()
 
-    # exact=1.0, semantic=0.8, structural=0.5 → 0.4+0.32+0.1 = 0.82 → warn
-    sem_result = _make_sem_result(label="Legal Entity", score=0.8, branch="main")
+    # With no structural signal, a non-exact 0.85 semantic match remains a warning.
+    sem_result = _make_sem_result(label="Related Legal Entity", score=0.85, branch="main")
 
     with (
         patch.object(
@@ -98,7 +98,7 @@ async def test_semantic_similarity_warn_range():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.5,
         ),
         patch.object(
@@ -109,8 +109,8 @@ async def test_semantic_similarity_warn_range():
     ):
         response = await svc.check(
             project_id=PROJECT_ID,
-            label="Legal Entity",  # exact match → exact_score=1.0
-            parent_iri="http://example.org/Entity",
+            label="Legal Entity",
+            parent_iri=None,
         )
 
     assert response.verdict == "warn"
@@ -133,7 +133,7 @@ async def test_below_threshold_passes_silently():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.3,
         ),
         patch.object(
@@ -157,9 +157,8 @@ async def test_composite_score_weights():
     """Composite = 0.40 * exact + 0.40 * semantic + 0.20 * structural (DEDUP-04, D-01)."""
     svc, _ = _make_service()
 
-    # exact=1.0 (label matches), semantic=0.5, structural=0.75
-    # Expected composite = 0.4*1.0 + 0.4*0.5 + 0.2*0.75 = 0.4 + 0.2 + 0.15 = 0.75
-    sem_result = _make_sem_result(label="Target Label", score=0.5, branch="main")
+    # exact=0.0, semantic=0.5, structural=0.75
+    sem_result = _make_sem_result(label="Related Label", score=0.5, branch="main")
 
     with (
         patch.object(
@@ -169,7 +168,7 @@ async def test_composite_score_weights():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.75,
         ),
         patch.object(
@@ -180,15 +179,13 @@ async def test_composite_score_weights():
     ):
         response = await svc.check(
             project_id=PROJECT_ID,
-            label="Target Label",  # exact match → exact_score=1.0
+            label="Target Label",
             parent_iri="http://example.org/Entity",
         )
 
-    expected_composite = round(
-        EXACT_WEIGHT * 1.0 + SEMANTIC_WEIGHT * 0.5 + STRUCTURAL_WEIGHT * 0.75, 4
-    )
+    expected_composite = round(SEMANTIC_WEIGHT * 0.5 + STRUCTURAL_WEIGHT * 0.75, 4)
     assert response.composite_score == expected_composite
-    assert response.score_breakdown.exact == 1.0
+    assert response.score_breakdown.exact == 0.0
     assert response.score_breakdown.semantic == 0.5
     assert response.score_breakdown.structural == 0.75
 
@@ -217,7 +214,7 @@ async def test_all_branch_scope():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.0,
         ),
         patch.object(
@@ -272,7 +269,7 @@ async def test_rejection_history_surfaced():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.0,
         ),
         patch.object(svc, "_classify_source", new=AsyncMock(side_effect=mock_classify_source)),
@@ -307,7 +304,7 @@ async def test_response_includes_score_breakdown():
         ),
         patch.object(
             svc._structural_svc,
-            "compute_similarity",
+            "try_compute_similarity",
             return_value=0.5,
         ),
         patch.object(

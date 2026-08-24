@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from rdflib import Graph, URIRef
+from rdflib import Graph, Literal, URIRef
 from rdflib.namespace import OWL, RDF, RDFS
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ontokit.core.anonymous_token import create_anonymous_token
-from ontokit.core.auth import CurrentUser
+from ontokit.core.auth import ANONYMOUS_USER, CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.project import Project, ProjectMember
@@ -56,6 +56,7 @@ from ontokit.schemas.trust import TrustTier
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.pull_request_service import get_pull_request_service
+from ontokit.services.rdf_utils import get_entity_type
 from ontokit.services.trust_rate_limiter import (
     TrustLimiterRedis,
     TrustLimitStatus,
@@ -75,6 +76,7 @@ _branch_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
 
 AUTO_ACCEPT_BATCH_SIZE = 100
 AUTO_ACCEPT_LEASE = timedelta(minutes=15)
+MAX_NEW_ENTITIES_PER_SUBMISSION = 25
 
 _ENTITY_DECLARATION_TYPES = frozenset(
     {
@@ -190,6 +192,121 @@ class SuggestionService:
             for subject, object_type in graph.subject_objects(RDF.type)
             if isinstance(subject, URIRef) and object_type in _ENTITY_DECLARATION_TYPES
         }
+
+    @staticmethod
+    def _declared_entities(graph: Graph) -> set[URIRef]:
+        """Return explicitly declared RDF class/property subjects from a graph."""
+        return {
+            subject
+            for subject, object_type in graph.subject_objects(RDF.type)
+            if isinstance(subject, URIRef) and object_type in _ENTITY_DECLARATION_TYPES
+        }
+
+    async def _validate_submission_content(
+        self,
+        project_id: UUID,
+        branch: str,
+        filename: str,
+        content: str,
+        billing_user_id: str | None,
+    ) -> None:
+        """Re-run duplicate gates against current fingerprint-bound decisions."""
+        proposed = Graph()
+        try:
+            proposed.parse(data=content, format="turtle")
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Suggestion content is not valid Turtle",
+            ) from exc
+
+        baseline = Graph()
+        default_branch = self.git_service.get_default_branch(project_id)
+        try:
+            baseline_content = self.git_service.get_file_from_branch(
+                project_id, default_branch, filename
+            )
+            baseline.parse(data=baseline_content.decode("utf-8"), format="turtle")
+        except KeyError:
+            pass
+
+        new_entities = self._declared_entities(proposed) - self._declared_entities(baseline)
+        if len(new_entities) > MAX_NEW_ENTITIES_PER_SUBMISSION:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={
+                    "message": "Suggestion adds too many entities for duplicate validation",
+                    "code": "SUGGESTION_ENTITY_LIMIT",
+                    "new_entity_count": len(new_entities),
+                    "max_new_entities": MAX_NEW_ENTITIES_PER_SUBMISSION,
+                },
+            )
+        if not new_entities:
+            return
+        if billing_user_id is None or billing_user_id == ANONYMOUS_USER.id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="An authenticated identity is required to validate new entities",
+            )
+
+        baseline_entities = self._declared_entities(baseline)
+        baseline_labels = {
+            str(label).strip().casefold(): entity
+            for entity in baseline_entities
+            for label in baseline.objects(entity, RDFS.label)
+            if isinstance(label, Literal) and str(label).strip()
+        }
+
+        from ontokit.services.duplicate_check_service import DuplicateCheckService
+
+        duplicate_service = DuplicateCheckService(self.db)
+        excluded_iris = {str(iri) for iri in new_entities}
+        for entity in new_entities:
+            labels = [
+                label
+                for label in proposed.objects(entity, RDFS.label)
+                if isinstance(label, Literal)
+            ]
+            parents = [
+                str(parent)
+                for parent in proposed.objects(entity, RDFS.subClassOf)
+                if isinstance(parent, URIRef)
+            ]
+            checked_labels: set[str] = set()
+            for index, label in enumerate(labels):
+                normalized_label = str(label).strip().casefold()
+                existing = baseline_labels.get(normalized_label)
+                if index != 0 and existing is None:
+                    continue
+                if normalized_label in checked_labels:
+                    continue
+                checked_labels.add(normalized_label)
+                duplicate = await duplicate_service.check(
+                    project_id,
+                    str(label),
+                    entity_type=get_entity_type(proposed, entity),
+                    parent_iri=parents[0] if parents else None,
+                    billing_user_id=billing_user_id,
+                    exclude_branch=branch,
+                    exclude_iris=excluded_iris,
+                    proposed_iri=str(entity),
+                )
+                if existing is not None and existing != entity:
+                    pair = {str(entity), str(existing)}
+                    pair_is_distinct = any(
+                        {decision.iri_a, decision.iri_b} == pair
+                        for decision in duplicate.suppressed_decisions
+                    )
+                    if not pair_is_distinct:
+                        raise HTTPException(
+                            status_code=status.HTTP_409_CONFLICT,
+                            detail="Suggestion duplicates an existing entity label",
+                        )
+                if duplicate.verdict == "block":
+                    raise HTTPException(
+                        status_code=status.HTTP_409_CONFLICT,
+                        detail="Suggestion is a semantic duplicate of an existing entity",
+                    )
 
     def _assert_branch_content_can_mint(
         self,
@@ -473,6 +590,16 @@ class SuggestionService:
                 detail="No changes to submit",
             )
 
+        filename = self._get_git_ontology_path(project)
+        content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
+        await self._validate_submission_content(
+            project_id,
+            session.branch,
+            filename,
+            content.decode("utf-8"),
+            str(user.id),
+        )
+
         # R10 gates run BEFORE any git or PR work, so a refused submission
         # leaves no side effects behind.
         await self._enforce_untrusted_gates(
@@ -603,6 +730,18 @@ class SuggestionService:
                 pr_number=existing_pr.pr_number,
                 pr_url=existing_pr.github_pr_url,
                 status=new_status,
+            )
+
+        if new_status != SuggestionSessionStatus.SUBMITTED.value or is_anonymous:
+            project = await self._get_project(project_id)
+            filename = self._get_git_ontology_path(project)
+            content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
+            await self._validate_submission_content(
+                project_id,
+                session.branch,
+                filename,
+                content.decode("utf-8"),
+                None if is_anonymous else str(user.id),
             )
 
         # Get default branch

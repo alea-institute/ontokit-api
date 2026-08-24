@@ -189,6 +189,7 @@ class SuggestionGenerationService:
                         project_id,
                         label=parsed["dedup_label"],
                         parent_iri=parsed["dedup_parent"],
+                        proposed_iri=parsed["iri"],
                     )
                     duplicate_verdict = dedup_result.verdict
                     duplicate_candidates = [
