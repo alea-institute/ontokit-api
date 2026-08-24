@@ -619,16 +619,14 @@ class TestUntrustedSubmissionLimiter:
         self, service: SuggestionService
     ) -> None:
         project = _project([_member("contributor-1")])
-        session = _session(status=SuggestionSessionStatus.ACTIVE.value)
-        session.verification_passed = True
         with patch(
             "ontokit.services.suggestion_service.check_and_consume",
             new=AsyncMock(
                 return_value=TrustLimitDecision(TrustLimitStatus.UNAVAILABLE, 0)
             ),
         ), pytest.raises(HTTPException) as exc:
-            await service._enforce_untrusted_gates(
-                project, session, _user("contributor-1"), None, None, None
+            await service._consume_untrusted_submission(
+                project, _user("contributor-1"), None
             )
         assert exc.value.status_code == 503
         assert exc.value.detail["reason"] == "submission_limiter_unavailable"

@@ -35,6 +35,24 @@ def upgrade() -> None:
         "pull_requests", sa.Column("github_sync_message", sa.Text(), nullable=True)
     )
     op.add_column(
+        "pull_requests", sa.Column("github_integration_id", sa.UUID(), nullable=True)
+    )
+    op.add_column(
+        "pull_requests", sa.Column("github_repo_owner", sa.String(length=255), nullable=True)
+    )
+    op.add_column(
+        "pull_requests", sa.Column("github_repo_name", sa.String(length=255), nullable=True)
+    )
+    op.add_column(
+        "pull_requests",
+        sa.Column(
+            "github_sync_generation", sa.Integer(), server_default="0", nullable=False
+        ),
+    )
+    op.add_column(
+        "pull_requests", sa.Column("github_sync_merge_title", sa.Text(), nullable=True)
+    )
+    op.add_column(
         "pull_requests", sa.Column("github_sync_attempt_id", sa.UUID(), nullable=True)
     )
     op.create_check_constraint(
@@ -56,6 +74,11 @@ def downgrade() -> None:
         "ck_pull_requests_github_sync_status", "pull_requests", type_="check"
     )
     op.drop_column("pull_requests", "github_sync_attempt_id")
+    op.drop_column("pull_requests", "github_sync_merge_title")
+    op.drop_column("pull_requests", "github_sync_generation")
+    op.drop_column("pull_requests", "github_repo_name")
+    op.drop_column("pull_requests", "github_repo_owner")
+    op.drop_column("pull_requests", "github_integration_id")
     op.drop_column("pull_requests", "github_sync_message")
     op.drop_column("pull_requests", "github_sync_last_attempted_at")
     op.drop_column("pull_requests", "github_sync_status")

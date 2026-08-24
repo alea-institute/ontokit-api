@@ -10,7 +10,7 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Requ
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
-from ontokit.core.auth import OptionalUser, RequiredUser
+from ontokit.core.auth import OptionalUser, RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.schemas.pull_request import (
     BranchCreate,
@@ -188,6 +188,7 @@ async def retry_pull_request_github_sync(
     user: RequiredUser,
 ) -> PRResponse:
     """Retry the best-effort GitHub mirror as the PR author or a project administrator."""
+    require_authenticated_identity(user)
     return await service.retry_github_sync(project_id, pr_number, user)
 
 

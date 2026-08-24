@@ -106,6 +106,11 @@ def _make_pr(
     pr.github_sync_last_attempted_at = None
     pr.github_sync_message = None
     pr.github_sync_attempt_id = None
+    pr.github_integration_id = None
+    pr.github_repo_owner = None
+    pr.github_repo_name = None
+    pr.github_sync_generation = 0
+    pr.github_sync_merge_title = None
     pr.merged_by = merged_by
     pr.merged_at = merged_at
     pr.merge_commit_hash = merge_commit_hash
@@ -293,6 +298,8 @@ class TestCreatePullRequest:
         max_result.scalar.return_value = 0
 
         # _get_github_token: _get_github_integration returns None
+        sync_claim_result = MagicMock()
+        sync_claim_result.scalar_one_or_none.side_effect = lambda: mock_db.add.call_args.args[0]
         gh_integration_result = MagicMock()
         gh_integration_result.scalar_one_or_none.return_value = None
 
@@ -308,6 +315,7 @@ class TestCreatePullRequest:
             MagicMock(),  # target branch lock
             no_open_pr_result,  # open PR on source branch
             max_result,  # max(pr_number)
+            sync_claim_result,  # latest durable PR sync intent
             gh_integration_result,  # _get_github_token -> _get_github_integration
             project_result_2,  # _to_pr_response -> _get_project
             project_result,  # additional _get_project calls
@@ -604,6 +612,7 @@ class TestUpdatePullRequest:
         project_result_2.scalar_one_or_none.return_value = project
 
         mock_db.execute.side_effect = [project_result, pr_result, project_result_2]
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
         pr_update = PRUpdate(title="Updated Title")
         await service.update_pull_request(PROJECT_ID, 1, pr_update, user)
@@ -670,6 +679,7 @@ class TestClosePullRequest:
         project_result_2.scalar_one_or_none.return_value = project
 
         mock_db.execute.side_effect = [project_result, pr_result, project_result_2]
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
         await service.close_pull_request(PROJECT_ID, 1, user)
         assert pr.status == PRStatus.CLOSED.value
@@ -702,7 +712,7 @@ class TestReopenPullRequest:
         self,
         service: PullRequestService,
         mock_db: AsyncMock,
-        mock_github_service: MagicMock,
+        mock_github_service: MagicMock,  # noqa: ARG002
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         held = False
@@ -734,21 +744,14 @@ class TestReopenPullRequest:
         no_conflict.scalar_one_or_none.return_value = None
         response_project = MagicMock()
         response_project.scalar_one_or_none.return_value = project
-        mock_db.execute.side_effect = [
-            project_result,
-            pr_result,
-            no_conflict,
-            MagicMock(rowcount=1),  # finish GitHub sync attempt
-            response_project,
-        ]
-        service._get_github_token = AsyncMock(  # type: ignore[method-assign]
-            return_value=(MagicMock(repo_owner="org", repo_name="repo"), "token")
-        )
-        async def reopen_and_assert(**kwargs: object) -> MagicMock:
-            await assert_unlocked(**kwargs)
-            return MagicMock(number=42, html_url="https://github.example/pr/42")
+        mock_db.execute.side_effect = [project_result, pr_result, no_conflict, response_project]
 
-        mock_github_service.reopen_pull_request = AsyncMock(side_effect=reopen_and_assert)
+        async def sync_and_assert(*_args: object, **_kwargs: object) -> None:
+            await assert_unlocked()
+
+        service._sync_pull_request_to_github = AsyncMock(  # type: ignore[method-assign]
+            side_effect=sync_and_assert
+        )
         monkeypatch.setattr(
             "ontokit.services.pull_request_service.branch_write_lock",
             tracked_lock,
@@ -756,7 +759,7 @@ class TestReopenPullRequest:
 
         await service.reopen_pull_request(PROJECT_ID, 1, user)
 
-        mock_github_service.reopen_pull_request.assert_awaited_once()
+        service._sync_pull_request_to_github.assert_awaited_once_with(PROJECT_ID, pr)
 
     @pytest.mark.asyncio
     async def test_reopen_closed_pr(
@@ -894,6 +897,7 @@ class TestMergePullRequest:
         merge_result = MagicMock(success=True, merge_commit_hash="ccc333")
         mock_git_service.merge_branch.return_value = merge_result
         _setup_project_and_pr_lookup(mock_db, project, pr)
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
         result = await service.merge_pull_request(
             PROJECT_ID,

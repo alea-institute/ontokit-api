@@ -417,6 +417,31 @@ class TestGetPullRequest:
         assert pr.merged is True
         assert pr.merged_at is not None
 
+    @pytest.mark.asyncio
+    async def test_optional_get_returns_none_only_for_404(
+        self, github_service: GitHubService
+    ) -> None:
+        mock_resp = _mock_response(404, {"message": "Not Found"})
+        mock_client = _make_async_client(request_response=mock_resp)
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            pr = await github_service.get_pull_request_or_none(TOKEN, "org", "repo", 404)
+
+        assert pr is None
+
+    @pytest.mark.asyncio
+    async def test_optional_get_propagates_non_404_failures(
+        self, github_service: GitHubService
+    ) -> None:
+        mock_resp = _mock_response(503, {"message": "Unavailable"})
+        mock_client = _make_async_client(request_response=mock_resp)
+
+        with (
+            patch("httpx.AsyncClient", return_value=mock_client),
+            pytest.raises(httpx.HTTPStatusError),
+        ):
+            await github_service.get_pull_request_or_none(TOKEN, "org", "repo", 5)
+
 
 class TestCreateReview:
     """Tests for create_review()."""
@@ -634,6 +659,29 @@ class TestUrlEncoding:
         assert "evil/owner" not in called_url
         assert "evil%2Fowner" in called_url
         assert pr.number == 7
+
+    @pytest.mark.asyncio
+    async def test_update_pull_request_can_explicitly_clear_body(
+        self, github_service: GitHubService
+    ) -> None:
+        github_service._request = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "number": 7,
+                "title": "Updated",
+                "body": None,
+                "state": "open",
+                "html_url": "https://github.com/org/repo/pull/7",
+                "head": {"ref": "feature"},
+                "base": {"ref": "main"},
+                "user": {"login": "dev"},
+                "created_at": "2024-02-01T10:00:00Z",
+                "updated_at": "2024-02-02T08:00:00Z",
+            }
+        )
+
+        await github_service.update_pull_request(TOKEN, "org", "repo", 7, body=None)
+
+        assert github_service._request.await_args.args[3] == {"body": ""}
 
     @pytest.mark.asyncio
     async def test_merge_pull_request_encodes_owner_and_repo(

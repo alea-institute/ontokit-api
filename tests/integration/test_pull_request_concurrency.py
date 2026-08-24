@@ -21,6 +21,7 @@ from ontokit.services.branch_lock import pull_request_write_locks
 from ontokit.services.pull_request_service import PullRequestService
 from ontokit.services.suggestion_service import SuggestionService
 
+
 async def _delete_project(db: AsyncSession, project_id: UUID) -> None:
     await db.rollback()
     await db.execute(delete(Project).where(Project.id == project_id))
