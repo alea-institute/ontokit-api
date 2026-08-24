@@ -290,7 +290,7 @@ class TestSyncMergeCommitsToPRs:
         # DB calls: select merged PRs, select max PR number
         merged_prs_result = _scalars_result([existing_pr])
         max_number_result = _scalar_result(1)
-        mock_db.execute.side_effect = [merged_prs_result, max_number_result]
+        mock_db.execute.side_effect = [MagicMock(), merged_prs_result, max_number_result]
 
         await service._sync_merge_commits_to_prs(PROJECT_ID)
 
@@ -311,7 +311,7 @@ class TestSyncMergeCommitsToPRs:
         # No existing merged PRs
         merged_prs_result = _scalars_result([])
         max_number_result = _scalar_result(5)
-        mock_db.execute.side_effect = [merged_prs_result, max_number_result]
+        mock_db.execute.side_effect = [MagicMock(), merged_prs_result, max_number_result]
 
         await service._sync_merge_commits_to_prs(PROJECT_ID)
 
@@ -323,7 +323,7 @@ class TestSyncMergeCommitsToPRs:
     async def test_no_commit_when_nothing_changed(
         self, service: PullRequestService, mock_git_service: MagicMock, mock_db: AsyncMock
     ) -> None:
-        """No DB commit when merge commits all have existing PRs with hashes."""
+        """A no-op import still releases its transaction-scoped allocator lock."""
         merge_commit = _make_merge_commit(merged_branch="feature")
         mock_git_service.get_history.return_value = [merge_commit]
 
@@ -336,11 +336,11 @@ class TestSyncMergeCommitsToPRs:
 
         merged_prs_result = _scalars_result([existing_pr])
         max_number_result = _scalar_result(1)
-        mock_db.execute.side_effect = [merged_prs_result, max_number_result]
+        mock_db.execute.side_effect = [MagicMock(), merged_prs_result, max_number_result]
 
         await service._sync_merge_commits_to_prs(PROJECT_ID)
 
-        mock_db.commit.assert_not_awaited()
+        mock_db.commit.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -367,6 +367,7 @@ class TestListPullRequestsFilters:
 
         mock_db.execute.side_effect = [
             _project_result(project),
+            MagicMock(),
             merged_prs_result,
             max_number_result,
             list_result,
@@ -395,6 +396,7 @@ class TestListPullRequestsFilters:
 
         mock_db.execute.side_effect = [
             _project_result(project),
+            MagicMock(),
             merged_prs_result,
             max_number_result,
             list_result,
@@ -2081,7 +2083,7 @@ class TestSyncMergeCommitsTimestampError:
 
         merged_prs_result = _scalars_result([])
         max_number_result = _scalar_result(0)
-        mock_db.execute.side_effect = [merged_prs_result, max_number_result]
+        mock_db.execute.side_effect = [MagicMock(), merged_prs_result, max_number_result]
 
         await service._sync_merge_commits_to_prs(PROJECT_ID)
 

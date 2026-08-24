@@ -62,6 +62,18 @@ def upgrade() -> None:
     )
     op.execute(
         """
+        UPDATE pull_requests AS pr
+        SET
+            github_integration_id = integration.id,
+            github_repo_owner = integration.repo_owner,
+            github_repo_name = integration.repo_name
+        FROM github_integrations AS integration
+        WHERE integration.project_id = pr.project_id
+          AND (pr.github_pr_number IS NOT NULL OR pr.github_pr_url IS NOT NULL)
+        """
+    )
+    op.execute(
+        """
         UPDATE pull_requests
         SET github_sync_status = 'synced'
         WHERE github_pr_number IS NOT NULL OR github_pr_url IS NOT NULL

@@ -542,8 +542,8 @@ class TestListPullRequests:
         # _sync_merge_commits_to_prs: get_history returns empty
         mock_git_service.get_history.return_value = []
 
-        # Execute calls: _get_project, sync (existing merged PRs), sync (max PR number),
-        # list query (count), list query (results), _to_pr_response -> _get_project
+        # Execute calls: _get_project, sync allocation lock, sync queries,
+        # list results, _to_pr_response -> _get_project
         sync_merged_result = MagicMock()
         sync_merged_result.scalars.return_value.all.return_value = []
 
@@ -560,6 +560,7 @@ class TestListPullRequests:
 
         mock_db.execute.side_effect = [
             project_result,  # _get_project
+            MagicMock(),  # _sync: project allocation advisory lock
             sync_merged_result,  # _sync: existing merged PRs
             sync_max_result,  # _sync: max PR number
             list_result,  # list query with pagination
@@ -1865,11 +1866,11 @@ class TestSyncMergeCommitsToPrs:
         max_result = MagicMock()
         max_result.scalar.return_value = 0
 
-        mock_db.execute.side_effect = [merged_result, max_result]
+        mock_db.execute.side_effect = [MagicMock(), merged_result, max_result]
 
         await service._sync_merge_commits_to_prs(PROJECT_ID)
-        # No commit because nothing was created/updated
-        mock_db.commit.assert_not_awaited()
+        # The read-only transaction commits to release its advisory lock.
+        mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_sync_history_exception_returns_early(

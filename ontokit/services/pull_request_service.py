@@ -64,7 +64,11 @@ from ontokit.schemas.pull_request import (
     ReviewListResponse,
     ReviewResponse,
 )
-from ontokit.services.branch_lock import branch_write_lock, pull_request_write_locks
+from ontokit.services.branch_lock import (
+    acquire_pull_request_allocation_db_lock,
+    branch_write_lock,
+    pull_request_write_locks,
+)
 from ontokit.services.github_service import GitHubPR, GitHubService, get_github_service
 from ontokit.services.mirror_credential import resolve_mirror_credential
 from ontokit.services.notification_service import NotificationService
@@ -136,6 +140,11 @@ class PullRequestService:
                 # Only keep the most recent merge for each branch
                 merge_commits_by_branch[commit.merged_branch] = commit
 
+        # This legacy import path also allocates project-scoped PR numbers.
+        # Share the same transaction lock as interactive and suggestion PRs so
+        # concurrent list requests cannot race each other or a new PR claim.
+        await acquire_pull_request_allocation_db_lock(self.db, project_id)
+
         # Get all existing merged PRs for this project
         result = await self.db.execute(
             select(PullRequest).where(
@@ -146,7 +155,6 @@ class PullRequestService:
         existing_prs = {pr.source_branch: pr for pr in result.scalars().all()}
 
         # Backfill commit hashes for existing PRs that are missing them
-        prs_updated = False
         for source_branch, pr in existing_prs.items():
             if pr.merge_commit_hash and pr.base_commit_hash and pr.head_commit_hash:
                 # Already has all commit hashes
@@ -178,7 +186,6 @@ class PullRequestService:
                 if not pr.author_email:
                     pr.author_email = commit.author_email
 
-                prs_updated = True
                 logger.info(
                     f"Backfilled commit hashes for PR #{pr.pr_number} "
                     f"'{source_branch}' (merge commit {commit.short_hash})"
@@ -191,7 +198,6 @@ class PullRequestService:
         next_pr_number = (max_number_result.scalar() or 0) + 1
 
         # Create new PRs for merge commits that don't have corresponding PRs
-        new_prs_created = False
         for merged_branch, commit in merge_commits_by_branch.items():
             # Skip if we already have a PR for this branch
             if merged_branch in existing_prs:
@@ -230,15 +236,15 @@ class PullRequestService:
             # Track this in existing_prs to avoid duplicates in this batch
             existing_prs[merged_branch] = db_pr
             next_pr_number += 1
-            new_prs_created = True
-
             logger.info(
                 f"Created retroactive PR #{db_pr.pr_number} for merge of "
                 f"'{merged_branch}' (commit {commit.short_hash})"
             )
 
-        if new_prs_created or prs_updated:
-            await self.db.commit()
+        # This method already owns the history-import unit of work. Commit even
+        # when it was read-only so the transaction-scoped allocation lock is
+        # released before the caller serializes the list response.
+        await self.db.commit()
 
     # Pull Request CRUD
 
@@ -581,6 +587,10 @@ class PullRequestService:
 
         gh_result: tuple[GitHubIntegration, str] | None = None
         attempt_id: uuid.UUID | None = None
+        intent: GitHubPRSyncIntent | None = None
+        pull_request_id: UUID | None = None
+        pull_request_number: int | None = None
+        generation: int | None = None
         skip_sync = False
         async with branch_write_lock(self.db, project_id, pr.source_branch):
             await self.db.refresh(pr)
@@ -607,20 +617,34 @@ class PullRequestService:
                     skip_sync = True
                 else:
                     attempt_id = self._mark_github_sync_pending(pr, gh_result[0])
+                    intent = self._github_sync_intent(pr)
+                    pull_request_id = pr.id
+                    pull_request_number = pr.pr_number
+                    generation = pr.github_sync_generation
                 await self.db.commit()
 
         if skip_sync:
             await self._refresh_pr_for_response(pr)
             return await self._to_pr_response(pr, project_id)
 
-        if gh_result is None or attempt_id is None:  # pragma: no cover - defensive invariant
+        if (
+            gh_result is None
+            or attempt_id is None
+            or intent is None
+            or pull_request_id is None
+            or pull_request_number is None
+            or generation is None
+        ):  # pragma: no cover - defensive invariant
             raise RuntimeError("GitHub synchronization claim was not initialized")
 
         await self._perform_github_sync(
             pr,
             gh_result,
             attempt_id=attempt_id,
-            generation=pr.github_sync_generation,
+            generation=generation,
+            intent=intent,
+            pull_request_id=pull_request_id,
+            pull_request_number=pull_request_number,
         )
         return await self._to_pr_response(pr, project_id)
 
@@ -654,15 +678,21 @@ class PullRequestService:
             return
 
         attempt_id = self._mark_github_sync_pending(pr, gh_result[0])
+        intent = self._github_sync_intent(pr, desired_state=desired_state)
+        pull_request_id = pr.id
+        pull_request_number = pr.pr_number
+        generation = pr.github_sync_generation
         # This commit is intentionally before network I/O so clients can see
         # the complete local intent before any remote mutation.
         await self.db.commit()
         await self._perform_github_sync(
             pr,
             gh_result,
-            desired_state=desired_state,
             attempt_id=attempt_id,
-            generation=pr.github_sync_generation,
+            generation=generation,
+            intent=intent,
+            pull_request_id=pull_request_id,
+            pull_request_number=pull_request_number,
         )
 
     async def _perform_github_sync(
@@ -673,10 +703,15 @@ class PullRequestService:
         attempt_id: uuid.UUID,
         generation: int,
         desired_state: GitHubPRIntentState | None = None,
+        intent: GitHubPRSyncIntent | None = None,
+        pull_request_id: UUID | None = None,
+        pull_request_number: int | None = None,
         repair_budget: int = 3,
     ) -> None:
         integration, token = gh_result
-        intent = self._github_sync_intent(pr, desired_state=desired_state)
+        intent = intent or self._github_sync_intent(pr, desired_state=desired_state)
+        pull_request_id = pull_request_id or pr.id
+        pull_request_number = pull_request_number or pr.pr_number
         try:
             gh_pr = await self.github_reconciler.reconcile(
                 token=token,
@@ -688,14 +723,15 @@ class PullRequestService:
             # Exception messages can contain request or credential material.
             # Log only the class and local identifiers; expose a fixed message.
             logger.warning(
-                "GitHub PR synchronization failed for project=%s pr=%s error_type=%s",
-                pr.project_id,
-                pr.pr_number,
+                "GitHub PR synchronization failed for pull_request_id=%s pr=%s error_type=%s",
+                pull_request_id,
+                pull_request_number,
                 type(exc).__name__,
             )
             finished = await self._finish_github_sync(
                 pr,
                 attempt_id,
+                pull_request_id=pull_request_id,
                 generation=generation,
                 sync_status=GitHubSyncStatus.FAILED,
                 message=self.GITHUB_SYNC_FAILED_MESSAGE,
@@ -704,6 +740,7 @@ class PullRequestService:
             finished = await self._finish_github_sync(
                 pr,
                 attempt_id,
+                pull_request_id=pull_request_id,
                 generation=generation,
                 sync_status=GitHubSyncStatus.SYNCED,
                 github_pr_number=gh_pr.number,
@@ -715,7 +752,9 @@ class PullRequestService:
         if not finished and repair_budget > 0:
             # A stale remote side effect may have landed last; boundedly replay
             # the newest durable intent instead of discarding only its receipt.
-            await self._repair_superseded_github_sync(pr.id, repair_budget - 1)
+            await self._repair_superseded_github_sync(
+                pull_request_id, repair_budget - 1
+            )
 
     async def _mirror_pull_request_to_github(
         self,
@@ -832,6 +871,7 @@ class PullRequestService:
         github_repo_owner: str | None = None,
         github_repo_name: str | None = None,
         generation: int | None = None,
+        pull_request_id: UUID | None = None,
     ) -> bool:
         """Complete an attempt only if it still owns the per-PR claim."""
         values: dict[str, Any] = {
@@ -848,7 +888,7 @@ class PullRequestService:
         if github_repo_name is not None:
             values["github_repo_name"] = github_repo_name
         conditions = [
-            PullRequest.id == pr.id,
+            PullRequest.id == (pull_request_id or pr.id),
             PullRequest.github_sync_attempt_id == attempt_id,
         ]
         if generation is not None:
@@ -897,6 +937,9 @@ class PullRequestService:
             await self._refresh_pr_for_response(latest)
             return
         attempt_id = self._mark_github_sync_pending(latest, gh_result[0])
+        intent = self._github_sync_intent(latest)
+        pull_request_id = latest.id
+        pull_request_number = latest.pr_number
         generation = latest.github_sync_generation
         await self.db.commit()
         await self._perform_github_sync(
@@ -904,6 +947,9 @@ class PullRequestService:
             gh_result,
             attempt_id=attempt_id,
             generation=generation,
+            intent=intent,
+            pull_request_id=pull_request_id,
+            pull_request_number=pull_request_number,
             repair_budget=repair_budget,
         )
 

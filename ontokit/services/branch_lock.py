@@ -15,6 +15,16 @@ _branch_locks: WeakValueDictionary[tuple[UUID, str], asyncio.Lock] = WeakValueDi
 _pull_request_allocation_locks: WeakValueDictionary[UUID, asyncio.Lock] = WeakValueDictionary()
 
 
+async def acquire_pull_request_allocation_db_lock(
+    db: AsyncSession, project_id: UUID
+) -> None:
+    """Acquire the transaction-scoped cross-process PR allocation lock."""
+    await db.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
+        {"lock_key": f"project:{project_id}:pull-request-allocation"},
+    )
+
+
 @asynccontextmanager
 async def _pull_request_allocation_lock(db: AsyncSession, project_id: UUID) -> AsyncIterator[None]:
     """Exclude project-wide PR number allocators.
@@ -28,10 +38,7 @@ async def _pull_request_allocation_lock(db: AsyncSession, project_id: UUID) -> A
         lock = asyncio.Lock()
         _pull_request_allocation_locks[project_id] = lock
     async with lock:
-        await db.execute(
-            text("SELECT pg_advisory_xact_lock(hashtext(:lock_key))"),
-            {"lock_key": f"project:{project_id}:pull-request-allocation"},
-        )
+        await acquire_pull_request_allocation_db_lock(db, project_id)
         yield
 
 
@@ -81,6 +88,7 @@ async def pull_request_write_locks(
 
 
 __all__ = [
+    "acquire_pull_request_allocation_db_lock",
     "branch_write_lock",
     "branch_write_locks",
     "pull_request_write_locks",
