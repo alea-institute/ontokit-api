@@ -95,10 +95,10 @@ class ValidationError(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-class GeneratedSuggestion(BaseModel):
-    """A single LLM-generated ontology entity suggestion.
+class _SuggestionBase(BaseModel):
+    """Fields shared by flat wire suggestions and strict construction models.
 
-    Core proposal type returned by the generate endpoint (D-04).
+    Defines the common proposal contract returned by the generate endpoint (D-04).
     Includes embedded validation status so the frontend can render per-entity
     errors without a separate validate call (D-09).
     """
@@ -127,6 +127,10 @@ class GeneratedSuggestion(BaseModel):
     duplicate_verdict: str = "pass"  # "pass" | "warn" | "block"
     duplicate_candidates: list[dict[str, Any]] = Field(default_factory=list)
 
+
+class GeneratedSuggestion(_SuggestionBase):
+    """Flat wire representation of a generated ontology suggestion."""
+
     # ── Type-specific payload (flat, all optional) ────────────────────────────
     # These carry the semantic content for annotation and edge suggestions.
     # They live on the base type (not on subclasses) because the response is
@@ -144,7 +148,7 @@ class GeneratedSuggestion(BaseModel):
     relationship_type: str | None = None  # one of CONTROLLED_RELATIONSHIP_TYPES
 
 
-class EdgeSuggestion(GeneratedSuggestion):
+class EdgeSuggestion(_SuggestionBase):
     """An edge / relationship suggestion between ontology entities (GEN-05).
 
     Retained for the strict-typed construction/validation path; the wire type is
@@ -156,7 +160,7 @@ class EdgeSuggestion(GeneratedSuggestion):
     relationship_type: str  # one of CONTROLLED_RELATIONSHIP_TYPES
 
 
-class AnnotationSuggestion(GeneratedSuggestion):
+class AnnotationSuggestion(_SuggestionBase):
     """An annotation property value suggestion (GEN-03).
 
     Retained for strict-typed construction; the wire type is the flat base
@@ -165,6 +169,7 @@ class AnnotationSuggestion(GeneratedSuggestion):
 
     property_iri: str
     value: str
+    lang: str | None = None
 
 
 # ---------------------------------------------------------------------------

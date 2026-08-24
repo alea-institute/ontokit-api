@@ -128,6 +128,16 @@ def test_edge_suggestion_has_target_and_type():
     assert edge.relationship_type == "seeAlso"
 
 
+def test_edge_suggestion_requires_target_and_type():
+    """Strict edge construction rejects a missing target payload."""
+    with pytest.raises(PydanticValidationError):
+        EdgeSuggestion(
+            iri="http://example.org#Foo",
+            suggestion_type="edges",
+            label="Foo",
+        )
+
+
 def test_annotation_suggestion_has_property_and_value():
     """AnnotationSuggestion extends GeneratedSuggestion with property_iri, value, lang."""
     ann = AnnotationSuggestion(
@@ -153,6 +163,16 @@ def test_annotation_suggestion_lang_optional():
         value="Definition text.",
     )
     assert ann.lang is None
+
+
+def test_annotation_suggestion_requires_property_and_value():
+    """Strict annotation construction rejects a missing annotation payload."""
+    with pytest.raises(PydanticValidationError):
+        AnnotationSuggestion(
+            iri="http://example.org#Foo",
+            suggestion_type="annotations",
+            label="Foo",
+        )
 
 
 # ---------------------------------------------------------------------------
