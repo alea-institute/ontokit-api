@@ -12,6 +12,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
@@ -28,12 +29,6 @@ from sqlalchemy import text as sql_text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ontokit.core.database import Base
-
-# Import Vector conditionally to avoid hard failure if pgvector not installed
-try:
-    from pgvector.sqlalchemy import Vector  # type: ignore
-except ImportError:
-    Vector = None  # noqa: N806
 
 
 class ProjectEmbeddingConfig(Base):
@@ -71,7 +66,7 @@ class EntityEmbedding(Base):
     entity_type: Mapped[str] = mapped_column(String(50))
     label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     embedding_text: Mapped[str] = mapped_column(Text)
-    embedding: Mapped[Any] = mapped_column(Vector() if Vector is not None else Text, nullable=False)
+    embedding: Mapped[Any] = mapped_column(Vector(), nullable=False)
     dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
     provider: Mapped[str] = mapped_column(String(50))
     model_name: Mapped[str] = mapped_column(String(200))
