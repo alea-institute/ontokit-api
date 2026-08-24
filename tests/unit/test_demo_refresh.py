@@ -70,13 +70,40 @@ def test_tokens_must_exist_and_be_distinct() -> None:
     ) == ("read-only-token", "two-repo-write-token")
 
 
-def test_git_credentials_use_askpass_not_command_arguments(tmp_path: Path) -> None:
+def test_git_credentials_use_askpass_not_command_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(refresh.SOURCE_TOKEN_ENV, "source-token")
+    monkeypatch.setenv(refresh.DESTINATION_TOKEN_ENV, "destination-token")
     environment = refresh.git_environment("secret-token", tmp_path / "askpass")
+
     assert environment["DEMO_GIT_TOKEN"] == "secret-token"
+    assert refresh.SOURCE_TOKEN_ENV not in environment
+    assert refresh.DESTINATION_TOKEN_ENV not in environment
     assert environment["GIT_TERMINAL_PROMPT"] == "0"
     assert environment["GIT_CONFIG_KEY_0"] == "credential.helper"
     assert environment["GIT_CONFIG_VALUE_0"] == ""
+    assert environment["GIT_HTTP_LOW_SPEED_LIMIT"] == str(
+        refresh.GIT_LOW_SPEED_LIMIT_BYTES_PER_SECOND
+    )
+    assert environment["GIT_HTTP_LOW_SPEED_TIME"] == str(refresh.GIT_LOW_SPEED_TIME_SECONDS)
     assert "secret-token" not in refresh.repository_url("alea-institute/FOLIO")
+
+
+def test_command_timeout_refuses_with_clear_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def time_out(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        raise subprocess.TimeoutExpired(cmd=["git", "clone"], timeout=0.25)
+
+    monkeypatch.setattr(subprocess, "run", time_out)
+
+    with pytest.raises(SystemExit) as exc:
+        refresh.run_command(["git", "clone"], timeout_seconds=0.25)
+
+    assert exc.value.code == 64
+    assert "refused: git command timed out after 0.25 seconds" in capsys.readouterr().err
 
 
 def test_resync_environment_never_receives_git_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -116,7 +143,7 @@ def test_destination_push_updates_only_the_default_branch(
         return RevisionResult()
 
     monkeypatch.setattr(refresh, "run_command", fake_run)
-    monkeypatch.setattr(refresh.subprocess, "run", fake_revision_run)
+    monkeypatch.setattr(subprocess, "run", fake_revision_run)
     mirror = refresh.load_manifest(_manifest(tmp_path))[0]
 
     refresh.refresh_one(

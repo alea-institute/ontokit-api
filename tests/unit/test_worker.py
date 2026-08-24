@@ -14,6 +14,9 @@ from ontokit.core.constants import (
     PR_PARTY_CREDENTIAL_REWRAP_CONFIRMATION,
     PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID,
 )
+from ontokit.models.project import Project
+from ontokit.models.pull_request import GitHubIntegration
+from ontokit.services.demo_target_authorizer import DemoTargetDenied
 from ontokit.services.pr_party_credentials import (
     CredentialRewrapError,
     CredentialRewrapErrorCode,
@@ -1012,6 +1015,91 @@ class TestSyncGithubProjects:
         mock_ctx["db"].rollback.assert_awaited_once()
         mock_sync.assert_awaited_once()
         assert mock_sync.await_args.args[0] is second
+
+    @pytest.mark.asyncio
+    async def test_target_denial_is_persisted_and_does_not_abort_batch(
+        self, mock_ctx: dict[str, Any]
+    ) -> None:
+        first = MagicMock(project_id=uuid.uuid4(), sync_status="idle", sync_error=None)
+        second = MagicMock(project_id=uuid.uuid4())
+        integrations_result = Mock()
+        integrations_result.scalars.return_value.all.return_value = [first, second]
+        mock_ctx["db"].execute.return_value = integrations_result
+        denial = DemoTargetDenied("mirror credential resolution refused: wrong demo target")
+
+        with (
+            patch("ontokit.worker.BareGitRepositoryService"),
+            patch(
+                "ontokit.services.mirror_credential.resolve_mirror_credential",
+                new_callable=AsyncMock,
+                side_effect=[denial, "system-token"],
+            ),
+            patch("ontokit.worker.sync_github_project", new_callable=AsyncMock) as mock_sync,
+        ):
+            mock_sync.return_value = {"status": "ok"}
+            result = await sync_github_projects(mock_ctx)
+
+        assert result == {"total": 2, "synced": 1, "errors": 1}
+        assert first.sync_status == "error"
+        assert first.sync_error == str(denial)
+        mock_ctx["db"].commit.assert_awaited_once()
+        mock_sync.assert_awaited_once()
+        assert mock_sync.await_args.args[0] is second
+
+    @pytest.mark.asyncio
+    async def test_batch_reuses_one_eager_loaded_target_context_query(
+        self, mock_ctx: dict[str, Any]
+    ) -> None:
+        integrations: list[GitHubIntegration] = []
+        repositories: list[MagicMock] = []
+        for index in range(2):
+            project = Project(
+                id=uuid.uuid4(),
+                name=f"Project {index}",
+                owner_id="owner",
+                is_demo=False,
+            )
+            integration = GitHubIntegration(
+                project_id=project.id,
+                repo_owner="ordinary-owner",
+                repo_name=f"repository-{index}",
+                default_branch="main",
+                connected_by_user_id=None,
+                sync_enabled=True,
+                sync_status="idle",
+            )
+            integration.project = project
+            integrations.append(integration)
+
+            reference = MagicMock(target="same-commit")
+            references = MagicMock()
+            references.__getitem__.return_value = reference
+            repository = MagicMock()
+            repository.fetch.return_value = True
+            repository.repo.references = references
+            repositories.append(repository)
+
+        integrations_result = Mock()
+        integrations_result.scalars.return_value.all.return_value = integrations
+        mock_ctx["db"].execute.return_value = integrations_result
+        git_service = MagicMock()
+        git_service.repository_exists.return_value = True
+        git_service.get_repository.side_effect = repositories
+
+        with (
+            patch("ontokit.worker.BareGitRepositoryService", return_value=git_service),
+            patch("ontokit.services.mirror_credential.settings") as mock_settings,
+        ):
+            mock_settings.github_mirror_token = "system-token"
+            result = await sync_github_projects(mock_ctx)
+
+        assert result == {"total": 2, "synced": 2, "errors": 0}
+        assert mock_ctx["db"].execute.await_count == 1
+        statement = mock_ctx["db"].execute.await_args.args[0]
+        loader_paths = {str(option.path) for option in statement._with_options}
+        assert any("GitHubIntegration.project" in path for path in loader_paths)
+        assert any("Project.demo_source_project" in path for path in loader_paths)
+        assert any("Project.github_integration" in path for path in loader_paths)
 
     @pytest.mark.asyncio
     async def test_credential_programming_error_remains_visible(

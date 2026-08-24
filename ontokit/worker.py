@@ -31,6 +31,7 @@ from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
+from ontokit.services.demo_target_authorizer import DemoTargetDenied, integration_target_load
 from ontokit.services.github_sync import sync_github_project
 from ontokit.services.linter import LintResult, get_linter
 from ontokit.services.normalization_service import NormalizationService
@@ -1045,7 +1046,9 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
     try:
         # Get all integrations with sync_enabled=True and sync_status != "conflict"
         result = await db.execute(
-            select(GitHubIntegration).where(
+            select(GitHubIntegration)
+            .options(integration_target_load())
+            .where(
                 GitHubIntegration.sync_enabled == True,  # noqa: E712
                 GitHubIntegration.sync_status != "conflict",
             )
@@ -1064,6 +1067,24 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
 
             try:
                 pat = await resolve_mirror_credential(db, integration)
+            except DemoTargetDenied as exc:
+                integration.sync_status = "error"
+                integration.sync_error = str(exc)
+                errors += 1
+                logger.warning(
+                    "GitHub mirror target refused for project %s: %s",
+                    integration.project_id,
+                    exc,
+                )
+                try:
+                    await db.commit()
+                except SQLAlchemyError:
+                    logger.exception(
+                        "Failed to persist GitHub mirror target refusal for project %s",
+                        integration.project_id,
+                    )
+                    await db.rollback()
+                continue
             except SQLAlchemyError as e:
                 logger.exception(
                     "Failed to resolve GitHub mirror credential for project %s: %s",

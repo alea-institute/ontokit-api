@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import cast
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Load, joinedload
 
 from ontokit.core.config import settings
 from ontokit.core.demo_targets import (
@@ -26,6 +28,38 @@ class DemoTargetDenied(RuntimeError):
 class AuthorizedTarget:
     token: str | None
     capability: DemoTargetAuthorization | None
+
+
+def integration_target_load() -> Load:
+    """Eager-load the persisted context needed by both authorization passes."""
+    return cast(
+        Load,
+        joinedload(GitHubIntegration.project)
+        .joinedload(Project.demo_source_project)
+        .joinedload(Project.github_integration),
+    )
+
+
+async def _demo_source_integration(
+    db: AsyncSession,
+    project: Project,
+) -> GitHubIntegration | None:
+    if "demo_source_project" in project.__dict__:
+        source_project = project.__dict__["demo_source_project"]
+        if source_project is None:
+            return None
+        if "github_integration" in source_project.__dict__:
+            return cast(
+                GitHubIntegration | None,
+                source_project.__dict__["github_integration"],
+            )
+
+    result = await db.execute(
+        select(GitHubIntegration).where(
+            GitHubIntegration.project_id == project.demo_source_project_id
+        )
+    )
+    return result.scalar_one_or_none()
 
 
 async def authorize_integration_target(
@@ -55,7 +89,11 @@ async def authorize_integration_target(
                     f"{owner}/{repo}"
                 )
             return AuthorizedTarget(token=None, capability=None)
-        result = await db.execute(select(Project).where(Project.id == integration.project_id))
+        result = await db.execute(
+            select(Project)
+            .options(joinedload(Project.demo_source_project).joinedload(Project.github_integration))
+            .where(Project.id == integration.project_id)
+        )
         project = result.scalar_one_or_none()
     if project is None:
         raise DemoTargetDenied(f"{operation} refused: project does not exist")
@@ -71,12 +109,7 @@ async def authorize_integration_target(
             )
         if project.demo_source_project_id is None:
             raise DemoTargetDenied(f"{operation} refused: demo project has no live source")
-        source_result = await db.execute(
-            select(GitHubIntegration).where(
-                GitHubIntegration.project_id == project.demo_source_project_id
-            )
-        )
-        source = source_result.scalar_one_or_none()
+        source = await _demo_source_integration(db, project)
         if source is None:
             raise DemoTargetDenied(f"{operation} refused: demo project's live source has no target")
         source_target = normalize_repository(source.repo_owner, source.repo_name)

@@ -14,6 +14,7 @@ from ontokit.core.demo_targets import (
     repository_from_remote_url,
 )
 from ontokit.git.bare_repository import BareOntologyRepository
+from ontokit.models.project import Project
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.services.demo_target_authorizer import (
     DemoTargetDenied,
@@ -61,6 +62,42 @@ def _integration(owner: str = DEMO_OWNER, repo: str = DEMO_REPO) -> GitHubIntegr
 
 
 class TestProjectAwareAuthorization:
+    async def test_eager_loaded_demo_context_needs_no_followup_queries(self) -> None:
+        source_project = Project(
+            id=uuid.uuid4(),
+            name="FOLIO",
+            owner_id="owner",
+            is_demo=False,
+        )
+        source = GitHubIntegration(
+            project_id=source_project.id,
+            repo_owner="alea-institute",
+            repo_name="FOLIO",
+        )
+        source_project.github_integration = source
+        demo_project = Project(
+            id=PROJECT_ID,
+            name="FOLIO Demo",
+            owner_id="owner",
+            is_demo=True,
+            demo_source_project_id=source_project.id,
+        )
+        demo_project.demo_source_project = source_project
+        integration = _integration()
+        integration.project = demo_project
+        db = AsyncMock()
+
+        with patch(
+            "ontokit.services.demo_target_authorizer.settings.github_demo_mirror_token",
+            "demo-token",
+        ):
+            first = await authorize_integration_target(db, integration, operation="credential")
+            second = await authorize_integration_target(db, integration, operation="sync")
+
+        assert first == second
+        assert first.token == "demo-token"
+        db.execute.assert_not_awaited()
+
     async def test_demo_project_uses_only_dedicated_token(self) -> None:
         with patch(
             "ontokit.services.demo_target_authorizer.settings.github_demo_mirror_token",

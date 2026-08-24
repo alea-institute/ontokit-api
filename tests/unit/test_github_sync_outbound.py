@@ -13,6 +13,9 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 
+from ontokit.models.project import Project
+from ontokit.models.pull_request import GitHubIntegration
+from ontokit.services.demo_target_authorizer import DemoTargetDenied
 from ontokit.services.github_sync import sync_github_project
 from ontokit.services.mirror_credential import (
     PAT_FALLBACK_EVENT,
@@ -186,6 +189,26 @@ def _token_row(encrypted: str = "ciphertext") -> MagicMock:
 
 
 class TestResolveMirrorCredential:
+    async def test_target_denial_remains_typed_for_the_caller(self) -> None:
+        project = Project(
+            id=PROJECT_ID,
+            name="Live project",
+            owner_id="owner",
+            is_demo=False,
+        )
+        integration = GitHubIntegration(
+            project_id=PROJECT_ID,
+            repo_owner="alea-institute",
+            repo_name="ontokit-demo-folio",
+        )
+        integration.project = project
+        db = AsyncMock()
+
+        with pytest.raises(DemoTargetDenied, match="live project cannot target demo"):
+            await resolve_mirror_credential(db, integration)
+
+        db.execute.assert_not_awaited()
+
     async def test_prefers_the_system_token(self) -> None:
         db = _db(_token_row())
         with patch("ontokit.services.mirror_credential.settings") as mock_settings:

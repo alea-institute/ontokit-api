@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import NoReturn
 
+from rdflib import Graph
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
@@ -23,8 +24,12 @@ from sqlalchemy.orm import selectinload
 from ontokit.core.config import settings
 from ontokit.core.demo_targets import DEMO_REPOSITORY_PAIRS
 from ontokit.git.bare_repository import BareGitRepositoryService, BareOntologyRepository
+from ontokit.models.ontology_index import IndexingStatus
 from ontokit.models.project import Project, get_git_ontology_path
-from ontokit.services.demo_project_provisioning import ensure_demo_projects
+from ontokit.services.demo_project_provisioning import (
+    ensure_demo_projects,
+    finalize_demo_publication,
+)
 from ontokit.services.ontology import get_ontology_service
 from ontokit.services.ontology_index import OntologyIndexService
 from ontokit.services.storage import get_storage_service
@@ -102,29 +107,58 @@ def refreshed_repository(
     if staging.exists() or backup.exists():
         refuse("generated demo refresh paths unexpectedly exist")
 
-    BareOntologyRepository.clone_bare(
-        f"https://github.com/{repository}.git",
-        staging,
-        token,
-    )
-    had_target = target.exists()
     try:
-        if had_target:
-            target.rename(backup)
-        staging.rename(target)
-        yield
-    except BaseException:
-        if target.exists():
-            shutil.rmtree(target)
-        if backup.exists():
-            backup.rename(target)
-        raise
-    else:
-        if backup.exists():
-            shutil.rmtree(backup)
+        BareOntologyRepository.clone_bare(
+            f"https://github.com/{repository}.git",
+            staging,
+            token,
+        )
+        had_target = target.exists()
+        try:
+            if had_target:
+                target.rename(backup)
+            staging.rename(target)
+            yield
+        except BaseException:
+            if target.exists():
+                shutil.rmtree(target)
+            if backup.exists():
+                backup.rename(target)
+            raise
+        else:
+            if backup.exists():
+                shutil.rmtree(backup)
     finally:
         if staging.exists():
             shutil.rmtree(staging)
+
+
+async def _full_reindex_verified(
+    index_service: OntologyIndexService,
+    project_id: uuid.UUID,
+    branch: str,
+    graph: Graph,
+    commit_hash: str,
+) -> int:
+    """Reindex and require persisted readiness for the freshly cloned commit."""
+    count = await index_service.full_reindex(
+        project_id,
+        branch,
+        graph,
+        commit_hash,
+    )
+    status = await index_service.get_index_status(project_id, branch)
+    if status is None:
+        raise RuntimeError("demo project index verification failed: status row is missing")
+    if status.status != IndexingStatus.READY.value:
+        raise RuntimeError(
+            f"demo project index verification failed: status {status.status!r} is not ready"
+        )
+    if status.commit_hash != commit_hash:
+        raise RuntimeError(
+            "demo project index verification failed: persisted commit does not match cloned commit"
+        )
+    return count
 
 
 async def resync(manifest: Path, token_file: Path | None) -> None:
@@ -163,7 +197,8 @@ async def resync(manifest: Path, token_file: Path | None) -> None:
                         get_git_ontology_path(project),
                         git_service,
                     )
-                    count = await OntologyIndexService(db).full_reindex(
+                    count = await _full_reindex_verified(
+                        OntologyIndexService(db),
                         project.id,
                         branch,
                         graph,
@@ -173,6 +208,7 @@ async def resync(manifest: Path, token_file: Path | None) -> None:
                     f"demo_project={project.id} repository={item.destination_repository} "
                     f"commit={commit_hash} entities={count} created={str(item.created).lower()}"
                 )
+            await finalize_demo_publication(db, provisioned)
     finally:
         await engine.dispose()
 

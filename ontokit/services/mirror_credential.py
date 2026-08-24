@@ -21,10 +21,7 @@ from ontokit.core.config import settings
 from ontokit.core.encryption import decrypt_token
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.models.user_github_token import UserGitHubToken
-from ontokit.services.demo_target_authorizer import (
-    DemoTargetDenied,
-    authorize_integration_target,
-)
+from ontokit.services.demo_target_authorizer import authorize_integration_target
 
 logger = logging.getLogger(__name__)
 
@@ -33,18 +30,16 @@ PAT_FALLBACK_EVENT = "github_mirror_per_user_pat_fallback"
 
 
 async def resolve_mirror_credential(db: AsyncSession, integration: GitHubIntegration) -> str | None:
-    """Return the token to authenticate the mirror push, or None to skip.
+    """Return the token to authenticate the mirror push, or None when absent.
 
-    Never raises: this runs inside the sync cron, where one project's missing
-    credential must not abort the sweep for every other project.
+    A missing or undecryptable credential returns ``None``. Target-policy
+    failures remain typed ``DemoTargetDenied`` exceptions so each caller can
+    persist and surface the authorization refusal instead of misreporting it as
+    an ordinary missing credential.
     """
-    try:
-        authorization = await authorize_integration_target(
-            db, integration, operation="mirror credential resolution"
-        )
-    except DemoTargetDenied as exc:
-        logger.warning("%s", exc)
-        return None
+    authorization = await authorize_integration_target(
+        db, integration, operation="mirror credential resolution"
+    )
 
     if authorization.token:
         return authorization.token

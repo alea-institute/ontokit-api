@@ -37,6 +37,33 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Remove demo columns only after their identity and linkage are no longer in use.
+
+    Operators must archive or remove demo identity and linkage before downgrading;
+    dropping populated columns would silently turn demos into indistinguishable live projects.
+    """
+    has_demo_identity = (
+        op.get_bind()
+        .execute(
+            sa.text(
+                """
+            SELECT EXISTS (
+                SELECT 1
+                FROM projects
+                WHERE is_demo IS TRUE
+                   OR demo_source_project_id IS NOT NULL
+            )
+            """
+            )
+        )
+        .scalar_one()
+    )
+    if has_demo_identity:
+        raise RuntimeError(
+            "Cannot downgrade demo project isolation: archive or remove demo identity and "
+            "linkage before dropping the columns"
+        )
+
     op.drop_constraint("uq_projects_demo_source_project_id", "projects", type_="unique")
     op.drop_constraint("fk_projects_demo_source_project_id", "projects", type_="foreignkey")
     op.drop_column("projects", "demo_source_project_id")

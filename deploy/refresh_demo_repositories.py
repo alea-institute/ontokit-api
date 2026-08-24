@@ -18,6 +18,12 @@ from typing import NoReturn
 
 SOURCE_TOKEN_ENV = "GITHUB_DEMO_SOURCE_TOKEN"
 DESTINATION_TOKEN_ENV = "GITHUB_DEMO_MIRROR_TOKEN"
+# Large ontology mirrors should comfortably finish within this ceiling. The
+# low-speed guard terminates a stalled HTTP transfer sooner, while the hard
+# timeout also bounds local Git commands and the database resync child.
+DEFAULT_COMMAND_TIMEOUT_SECONDS = 15 * 60
+GIT_LOW_SPEED_LIMIT_BYTES_PER_SECOND = 1024
+GIT_LOW_SPEED_TIME_SECONDS = 60
 EXPECTED_MIRRORS = {
     "folio": ("alea-institute/FOLIO", "alea-institute/ontokit-demo-folio", "main"),
     "semantic-canon": (
@@ -89,7 +95,7 @@ def require_tokens(environment: Mapping[str, str]) -> tuple[str, str]:
 
 
 def git_environment(token: str, askpass: Path) -> dict[str, str]:
-    environment = os.environ.copy()
+    environment = scrubbed_environment()
     environment.update(
         {
             "DEMO_GIT_TOKEN": token,
@@ -98,15 +104,49 @@ def git_environment(token: str, askpass: Path) -> dict[str, str]:
             "GIT_CONFIG_KEY_0": "credential.helper",
             "GIT_CONFIG_VALUE_0": "",
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_HTTP_LOW_SPEED_LIMIT": str(GIT_LOW_SPEED_LIMIT_BYTES_PER_SECOND),
+            "GIT_HTTP_LOW_SPEED_TIME": str(GIT_LOW_SPEED_TIME_SECONDS),
         }
     )
     return environment
 
 
+def _run_subprocess(
+    command: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+    capture_output: bool = False,
+    timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(  # noqa: S603
+            command,
+            cwd=cwd,
+            env=environment,
+            check=True,
+            capture_output=capture_output,
+            text=True,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired:
+        executable = Path(command[0]).name if command else "subprocess"
+        refuse(f"{executable} command timed out after {timeout_seconds:g} seconds")
+
+
 def run_command(
-    command: Sequence[str], *, cwd: Path | None = None, environment: Mapping[str, str] | None = None
+    command: Sequence[str],
+    *,
+    cwd: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+    timeout_seconds: float = DEFAULT_COMMAND_TIMEOUT_SECONDS,
 ) -> None:
-    subprocess.run(command, cwd=cwd, env=environment, check=True)  # noqa: S603
+    _run_subprocess(
+        command,
+        cwd=cwd,
+        environment=environment,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def repository_url(repository: str) -> str:
@@ -148,13 +188,11 @@ def refresh_one(
         ],
         environment=git_environment(source_token, askpass),
     )
-    source_sha = subprocess.run(  # noqa: S603
+    source_sha = _run_subprocess(
         ["git", "rev-parse", "HEAD"],
         cwd=checkout,
-        env=scrubbed_environment(),
-        check=True,
+        environment=scrubbed_environment(),
         capture_output=True,
-        text=True,
     ).stdout.strip()
     readme = (
         "# OntoKit demo mirror\n\n"
