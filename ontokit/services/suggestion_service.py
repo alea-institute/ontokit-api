@@ -1412,7 +1412,7 @@ class SuggestionService:
         for session_id in data.session_ids:
             try:
                 if data.action is BulkReviewAction.ACCEPT:
-                    await self._approve_unchecked(project_id, session_id, user, project)
+                    await self._approve_unchecked(session_id, user, project)
                 else:
                     await self._dismiss_unchecked(project_id, session_id, user, project, data.note)
                 succeeded.append(session_id)

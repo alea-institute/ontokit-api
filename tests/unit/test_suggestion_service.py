@@ -1607,6 +1607,33 @@ class TestDismissAndBulkReview:
         assert outcomes[0].snapshot_role == "admin"
         assert outcomes[0].snapshot_captured_at is not None
 
+    async def test_bulk_accept_reuses_the_authorized_project(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+    ) -> None:
+        from ontokit.schemas.suggestion import BulkReviewAction, BulkReviewRequest
+
+        project = _make_project()
+        project.members[0].role = "admin"
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.return_value = project_result
+        user = _make_user()
+        data = BulkReviewRequest(
+            session_ids=["session-1"],
+            action=BulkReviewAction.ACCEPT,
+        )
+
+        with patch.object(
+            service, "_approve_unchecked", new_callable=AsyncMock
+        ) as approve_unchecked:
+            response = await service.bulk_review(PROJECT_ID, data, user)
+
+        assert response.succeeded == ["session-1"]
+        assert response.failed == []
+        approve_unchecked.assert_awaited_once_with("session-1", user, project)
+
 
 # ---------------------------------------------------------------------------
 # request_changes
