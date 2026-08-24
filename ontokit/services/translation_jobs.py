@@ -30,7 +30,7 @@ from ontokit.models.translation import (
     TranslationRecord,
     hash_literal_value,
 )
-from ontokit.services.llm import check_llm_access, check_rate_limit
+from ontokit.services.llm import check_llm_access, consume_rate_limit_units
 from ontokit.services.translation_annotations import read_annotation, translation_record_digest
 from ontokit.services.translation_backfill import BackfillLiteral, select_backfill_literals
 from ontokit.services.translation_service import TranslationService
@@ -99,6 +99,11 @@ def _pending_key(project_id: UUID) -> str:
     return f"translation:pending:{project_id}"
 
 
+def _provider_call_units(config: ProjectTranslationConfig, task_count: int) -> int:
+    calls_per_task = 4 if config.verification_mechanism == "consensus" else 2
+    return task_count * calls_per_task
+
+
 async def enqueue_translation_tasks(
     pool: Any,
     redis: Any,
@@ -158,21 +163,19 @@ async def enqueue_label_diff_after_commit(
     if not check_llm_access(role, is_anonymous=False):
         return False
     from ontokit.api.utils.redis import get_arq_pool
-    from ontokit.main import redis_pool
 
     pool = await get_arq_pool()
-    if (
-        pool is None
-        or redis_pool is None
-        or not await check_rate_limit(cast(Any, redis_pool), str(project_id), actor_id, role)
-    ):
+    if pool is None:
         return False
+    identity = hash_literal_value(f"{project_id}:{branch}:{commit_hash}")
     job = await pool.enqueue_job(
         "run_translation_label_diff_task",
         str(project_id),
         branch,
         commit_hash,
         actor_id,
+        role,
+        _job_id=f"translation-label-diff:{identity}",
     )
     return job is not None
 
@@ -200,7 +203,12 @@ async def _covered_values(
 
 
 async def run_label_diff_job(
-    ctx: dict[str, Any], project_id: str, branch: str, commit_hash: str, actor_id: str
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str,
+    commit_hash: str,
+    actor_id: str,
+    role: str,
 ) -> dict[str, Any]:
     db: AsyncSession = ctx["db"]
     redis = ctx["redis"]
@@ -230,6 +238,19 @@ async def run_label_diff_job(
     tasks = discover_translation_tasks(
         parent, current, config, await _covered_values(db, project_uuid, current)
     )
+    if tasks:
+        reservation_id = hash_literal_value(
+            f"translation-label-diff:{project_id}:{branch}:{commit_hash}:{actor_id}"
+        )
+        if not await consume_rate_limit_units(
+            redis,
+            project_id,
+            actor_id,
+            role,
+            _provider_call_units(config, len(tasks)),
+            reservation_id=reservation_id,
+        ):
+            return {"queued": 0, "job_ids": [], "rate_limited": True}
     job_ids = await enqueue_translation_tasks(
         redis, redis, project_uuid, branch, actor_id, tasks, commit_hash=commit_hash
     )

@@ -21,17 +21,17 @@ from ontokit.git.bare_repository import (
     CommitInfo,
     serialize_deterministic,
 )
-from ontokit.models.llm_config import LLMAuditLog, ProjectLLMConfig
+from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.translation import (
     ProjectTranslationConfig,
     TranslationRecord,
     hash_literal_value,
 )
 from ontokit.services.branch_lock import branch_write_lock
-from ontokit.services.llm.audit import log_llm_call
 from ontokit.services.llm.base import LLMProvider
-from ontokit.services.llm.budget import check_budget
+from ontokit.services.llm.budget import BudgetLimits
 from ontokit.services.llm.crypto import decrypt_secret
+from ontokit.services.llm.metering import LLMBudgetExceeded, MeteredLLMProvider
 from ontokit.services.llm.pricing import get_model_pricing
 from ontokit.services.llm.prompts.translation import (
     build_back_translate_messages,
@@ -51,10 +51,7 @@ from ontokit.services.translation_index import enqueue_ontology_index
 logger = logging.getLogger(__name__)
 
 ProviderFactory = Callable[..., LLMProvider]
-BudgetChecker = Callable[
-    [AsyncSession, uuid.UUID, ProjectLLMConfig], Awaitable[tuple[bool, str | None]]
-]
-AuditLogger = Callable[..., Awaitable[LLMAuditLog]]
+MeteredProviderFactory = Callable[..., LLMProvider]
 PricingResolver = Callable[[str], Awaitable[tuple[float, float]]]
 IndexEnqueuer = Callable[..., Awaitable[None]]
 
@@ -135,9 +132,8 @@ class TranslationService:
         user_id: str,
         *,
         provider_factory: ProviderFactory = get_provider,
+        metered_provider_factory: MeteredProviderFactory = MeteredLLMProvider,
         decrypt_key: Callable[[str], str] = decrypt_secret,
-        budget_checker: BudgetChecker = check_budget,
-        audit_logger: AuditLogger = log_llm_call,
         pricing_resolver: PricingResolver = get_model_pricing,
         git_service: BareGitRepositoryService | None = None,
         index_enqueuer: IndexEnqueuer | None = None,
@@ -147,8 +143,7 @@ class TranslationService:
         self._llm_config = llm_config
         self._user_id = user_id
         self._provider_factory = provider_factory
-        self._budget_checker = budget_checker
-        self._audit_logger = audit_logger
+        self._metered_provider_factory = metered_provider_factory
         self._pricing_resolver = pricing_resolver
         self._git_service = git_service
         self._index_enqueuer = index_enqueuer or enqueue_ontology_index
@@ -476,13 +471,6 @@ class TranslationService:
     async def _call(
         self, resolved: _ResolvedProvider, messages: list[dict[str, str]], endpoint: str
     ) -> str:
-        allowed, reason = await self._budget_checker(
-            self._db, self._translation_config.project_id, self._llm_config
-        )
-        if not allowed:
-            raise _TranslationCallError(
-                TranslationErrorCode.budget_exhausted, reason or "budget exhausted"
-            )
         try:
             input_price, output_price = await self._pricing_resolver(resolved.model)
         except Exception as exc:
@@ -490,39 +478,32 @@ class TranslationService:
                 TranslationErrorCode.metering_error, "pricing unavailable before provider call"
             ) from exc
 
-        provider = self._provider_factory(
+        raw_provider = self._provider_factory(
             resolved.name,
             api_key=resolved.api_key,
             base_url=resolved.base_url,
             model=resolved.model,
         )
-        input_tokens = output_tokens = 0
-        provider_error: Exception | None = None
-        text = ""
+        provider = self._metered_provider_factory(
+            raw_provider,
+            project_id=self._translation_config.project_id,
+            config=BudgetLimits(
+                monthly_budget_usd=self._llm_config.monthly_budget_usd,
+                daily_cap_usd=self._llm_config.daily_cap_usd,
+            ),
+            user_id=self._user_id,
+            model=resolved.model,
+            provider_name=resolved.name,
+            endpoint=endpoint,
+            input_cost_per_token=input_price,
+            output_cost_per_token=output_price,
+            is_byo_key=False,
+        )
         try:
-            text, input_tokens, output_tokens = await provider.chat(messages)
+            text, _input_tokens, _output_tokens = await provider.chat(messages)
+        except LLMBudgetExceeded as exc:
+            raise _TranslationCallError(TranslationErrorCode.budget_exhausted, exc.reason) from exc
         except Exception as exc:
-            provider_error = exc
-
-        cost = input_tokens * input_price + output_tokens * output_price
-        try:
-            await self._audit_logger(
-                db=self._db,
-                project_id=str(self._translation_config.project_id),
-                user_id=self._user_id,
-                model=resolved.model,
-                provider=resolved.name,
-                endpoint=endpoint,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cost_estimate_usd=cost,
-                is_byo_key=False,
-            )
-        except Exception as exc:
-            raise _TranslationCallError(
-                TranslationErrorCode.metering_error, "provider call could not be audited"
-            ) from exc
-        if provider_error is not None:
             logger.warning(
                 "Translation provider call failed (provider=%s model=%s endpoint=%s)",
                 resolved.name,
@@ -531,7 +512,7 @@ class TranslationService:
             )
             raise _TranslationCallError(
                 TranslationErrorCode.provider_error, "translation provider call failed"
-            ) from provider_error
+            ) from exc
         return text
 
 

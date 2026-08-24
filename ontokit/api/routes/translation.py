@@ -49,7 +49,7 @@ from ontokit.schemas.translation import (
 )
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.language_palette import LANGUAGE_PALETTE
-from ontokit.services.llm import check_rate_limit, get_remaining_calls
+from ontokit.services.llm import consume_rate_limit_units
 from ontokit.services.llm.crypto import encrypt_secret
 from ontokit.services.translation_backfill import preview_backfill_cost, select_backfill_literals
 from ontokit.services.translation_coverage import TranslationCoverageService
@@ -397,7 +397,12 @@ async def update_translation_config(
     values = data.model_dump(exclude_unset=True, exclude={"verifier_api_key"})
     for field, value in values.items():
         if value is None:
-            if field in {"primary_provider", "primary_model"}:
+            if field in {
+                "primary_provider",
+                "primary_model",
+                "verifier_provider",
+                "verifier_model",
+            }:
                 setattr(config, field, None)
             continue
         setattr(config, field, value.value if hasattr(value, "value") else value)
@@ -439,18 +444,11 @@ async def translate_entity_field(
     call_units = len(config.language_tags) * (
         4 if config.verification_mechanism == "consensus" else 2
     )
-    remaining = await get_remaining_calls(redis, str(project_id), user.id, role)
-    if remaining is not None and remaining < call_units:
+    if not await consume_rate_limit_units(redis, str(project_id), user.id, role, call_units):
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=f"Daily LLM call limit cannot cover {call_units} provider calls",
         )
-    for _ in range(call_units):
-        if not await check_rate_limit(redis, str(project_id), user.id, role):
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"Daily LLM call limit cannot cover {call_units} provider calls",
-            )
     pool = await get_arq_pool()
     if pool is None:
         raise HTTPException(
@@ -528,6 +526,8 @@ async def get_my_reviewer_languages(
 ) -> ReviewerLanguagesResponse:
     member = await _get_member(db, project_id, user.id)
     if member is None:
+        if user.is_superadmin:
+            return ReviewerLanguagesResponse(languages=[])
         raise HTTPException(status_code=403, detail="Not a project member")
     return ReviewerLanguagesResponse(languages=sorted(await _reviewer_languages(db, member.id)))
 

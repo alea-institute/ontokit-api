@@ -236,7 +236,7 @@ async def _run_mint_jobs(
             new=AsyncMock(side_effect=_fake_chat),
         ),
     ):
-        await run_label_diff_job(ctx, str(project_id), "main", commit_hash, actor_id)
+        await run_label_diff_job(ctx, str(project_id), "main", commit_hash, actor_id, "owner")
         entity_jobs = [args for name, args in queue.jobs if name == "run_translation_entity_task"]
         return [await run_translation_entity_job(ctx, *args) for args in entity_jobs]
 
@@ -518,6 +518,7 @@ async def test_in_flight_source_edit_discards_stale_result_without_translation_c
                 "main",
                 mint_hash,
                 owner.id,
+                "owner",
             )
         task = next(args for name, args in queue.jobs if name == "run_translation_entity_task")
         await _source_save(real_db_session, git, InlineQueue(real_redis), project_id, owner, edited)

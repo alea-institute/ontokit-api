@@ -65,6 +65,8 @@ class RateLimitRedis(Protocol):
 
     async def get(self, name: str) -> bytes | None: ...
 
+    async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> int: ...
+
 
 def _rate_key(project_id: str, user_id: str, today: str | None = None) -> str:
     """Build the Redis key for today's call count.
@@ -74,6 +76,69 @@ def _rate_key(project_id: str, user_id: str, today: str | None = None) -> str:
     """
     day = today or datetime.now(UTC).date().isoformat()
     return f"llm:rate:{project_id}:{user_id}:{day}"
+
+
+_CONSUME_UNITS_SCRIPT = """
+local receipt_enabled = ARGV[4] == '1'
+if receipt_enabled and redis.call('EXISTS', KEYS[2]) == 1 then
+  return 1
+end
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local units = tonumber(ARGV[1])
+local limit = tonumber(ARGV[2])
+if current + units > limit then
+  return 0
+end
+redis.call('INCRBY', KEYS[1], units)
+if redis.call('TTL', KEYS[1]) < 0 then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+end
+if receipt_enabled then
+  redis.call('SET', KEYS[2], '1', 'EX', tonumber(ARGV[3]))
+end
+return 1
+"""
+
+
+async def consume_rate_limit_units(
+    redis: RateLimitRedis,
+    project_id: str,
+    user_id: str,
+    role: str,
+    units: int,
+    *,
+    reservation_id: str | None = None,
+) -> bool:
+    """Atomically reserve multiple provider-call units without partial burns.
+
+    ``reservation_id`` makes a retry of the same logical fan-out idempotent for
+    the current UTC rate window.
+    """
+    if units <= 0:
+        raise ValueError("rate-limit units must be positive")
+    limit = RATE_LIMITS.get(role, 0)
+    if limit == 0:
+        return False
+    if limit is None:
+        return True
+
+    key = _rate_key(project_id, user_id)
+    receipt_key = f"{key}:reservation:{reservation_id or 'none'}"
+    try:
+        accepted = await redis.eval(
+            _CONSUME_UNITS_SCRIPT,
+            2,
+            key,
+            receipt_key,
+            units,
+            limit,
+            86400,
+            1 if reservation_id else 0,
+        )
+        return bool(accepted)
+    except _REDIS_INFRA_ERRORS as exc:
+        _alert_fail_open("consume_rate_limit_units", project_id, user_id, exc)
+        return True
 
 
 async def check_rate_limit(

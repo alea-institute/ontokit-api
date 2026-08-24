@@ -132,6 +132,38 @@ async def test_admin_can_clear_primary_translation_provider_and_model(
     assert response.primary_model is None
 
 
+@pytest.mark.asyncio
+async def test_admin_can_clear_verifier_provider_and_model(
+    mock_db_session: AsyncMock,
+) -> None:
+    config = ProjectTranslationConfig(
+        project_id=PROJECT_ID,
+        language_tags=[],
+        verification_mechanism="consensus",
+        consensus_threshold=0.85,
+        confidence_threshold=0.80,
+        translate_definitions=False,
+        translate_examples=False,
+        speed_mode="batch",
+        provisional_gate=False,
+        verifier_provider="anthropic",
+        verifier_model="claude-sonnet-4-5",
+    )
+    mock_db_session.execute.side_effect = [_result(Mock(role="admin")), _result(config)]
+
+    response = await update_translation_config(
+        PROJECT_ID,
+        TranslationConfigUpdate(verifier_provider=None, verifier_model=None),
+        mock_db_session,
+        CurrentUser(id="admin"),
+    )
+
+    assert config.verifier_provider is None
+    assert config.verifier_model is None
+    assert response.verifier_provider is None
+    assert response.verifier_model is None
+
+
 @pytest.mark.parametrize("tag", ["", " ", "not_a_tag", "x" * 36])
 def test_invalid_language_tags_are_rejected(tag: str) -> None:
     with pytest.raises(ValidationError):

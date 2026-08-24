@@ -13,6 +13,7 @@ from rdflib import Graph, Literal, URIRef
 from rdflib.namespace import RDFS
 
 from ontokit.api.routes import translation as routes
+from ontokit.core.auth import CurrentUser
 from ontokit.core.constants import ONTOKIT_COMMITTER_EMAIL, ONTOKIT_COMMITTER_NAME
 from ontokit.git.bare_repository import BareGitRepositoryService, BareOntologyRepository
 from ontokit.models.project import ProjectMember
@@ -221,6 +222,23 @@ def test_fixed_reviewer_route_contract_is_mounted() -> None:
         "/{project_id}/translation/records/{record_id}/reject",
         "/{project_id}/translation/records/confirm-bulk",
     } <= paths
+
+
+@pytest.mark.asyncio
+async def test_nonmember_superadmin_reads_empty_reviewer_languages(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db = AsyncMock()
+    result = Mock()
+    result.scalar_one_or_none.return_value = None
+    db.execute.return_value = result
+
+    user = CurrentUser(id="root")
+    monkeypatch.setattr(type(user), "is_superadmin", property(lambda _self: True), raising=False)
+
+    response = await routes.get_my_reviewer_languages(uuid4(), db, user)
+
+    assert response.languages == []
 
 
 @pytest.mark.asyncio

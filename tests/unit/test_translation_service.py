@@ -13,6 +13,7 @@ import pytest
 
 from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.translation import ProjectTranslationConfig
+from ontokit.services.llm.metering import LLMBudgetExceeded
 from ontokit.services.llm.prompts.translation import parse_translation_response
 from ontokit.services.translation_service import (
     TranslationErrorCode,
@@ -82,6 +83,50 @@ def _service(
         assert kwargs["model"] == "verifier-model"
         return verifier
 
+    def metered_factory(provider: FakeProvider, **kwargs: Any) -> object:
+        class FakeMeteredProvider:
+            async def chat(
+                self, messages: list[dict[str, str]], **_chat_kwargs: Any
+            ) -> tuple[str, int, int]:
+                allowed, reason = await budget()
+                if not allowed:
+                    raise LLMBudgetExceeded(reason or "budget_exhausted")
+                try:
+                    result = await provider.chat(messages)
+                except Exception:
+                    await audit(
+                        db=None,
+                        project_id=str(kwargs["project_id"]),
+                        user_id=kwargs["user_id"],
+                        model=kwargs["model"],
+                        provider=kwargs["provider_name"],
+                        endpoint=kwargs["endpoint"],
+                        input_tokens=0,
+                        output_tokens=0,
+                        cost_estimate_usd=0.0,
+                        is_byo_key=kwargs["is_byo_key"],
+                    )
+                    raise
+                _, input_tokens, output_tokens = result
+                await audit(
+                    db=None,
+                    project_id=str(kwargs["project_id"]),
+                    user_id=kwargs["user_id"],
+                    model=kwargs["model"],
+                    provider=kwargs["provider_name"],
+                    endpoint=kwargs["endpoint"],
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    cost_estimate_usd=(
+                        input_tokens * kwargs["input_cost_per_token"]
+                        + output_tokens * kwargs["output_cost_per_token"]
+                    ),
+                    is_byo_key=kwargs["is_byo_key"],
+                )
+                return result
+
+        return FakeMeteredProvider()
+
     return (
         TranslationService(
             db=AsyncMock(),
@@ -89,9 +134,8 @@ def _service(
             llm_config=llm,
             user_id="translator-bot",
             provider_factory=factory,
+            metered_provider_factory=metered_factory,
             decrypt_key=lambda value: "primary-key" if value else None,
-            budget_checker=budget,
-            audit_logger=audit,
             pricing_resolver=AsyncMock(return_value=(0.001, 0.002)),
         ),
         audit,

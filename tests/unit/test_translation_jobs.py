@@ -17,6 +17,7 @@ from ontokit.schemas.translation import TranslateFieldRequest
 from ontokit.services.translation_jobs import (
     MAX_PENDING_TRANSLATIONS_PER_PROJECT,
     TranslationTask,
+    _provider_call_units,
     discover_translation_tasks,
     enqueue_label_diff_after_commit,
     enqueue_translation_tasks,
@@ -104,6 +105,11 @@ def test_definition_scope_off_is_skipped() -> None:
     assert discover_translation_tasks(Graph(), current, _config(), covered=set()) == []
 
 
+def test_provider_call_units_cover_every_fanned_out_provider_call() -> None:
+    assert _provider_call_units(_config(verification_mechanism="consensus"), 3) == 12
+    assert _provider_call_units(_config(verification_mechanism="confidence"), 3) == 6
+
+
 @pytest.mark.asyncio
 async def test_enqueue_attributes_actor_and_stops_at_fanout_cap() -> None:
     redis = AsyncMock()
@@ -119,36 +125,43 @@ async def test_enqueue_attributes_actor_and_stops_at_fanout_cap() -> None:
 
 
 @pytest.mark.asyncio
-async def test_mint_rate_limit_is_attributed_per_actor() -> None:
+async def test_label_diff_enqueue_is_deterministic_and_carries_actor_role() -> None:
     pool = AsyncMock()
-    pool.enqueue_job.return_value = Mock(job_id="diff-1")
+    pool.enqueue_job.side_effect = [Mock(job_id="diff-1"), None]
+    project_id = uuid4()
 
-    async def actor_limit(_redis: object, _project: str, actor: str, _role: str) -> bool:
-        return actor != "churning-actor"
-
-    with (
-        patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=pool)),
-        patch("ontokit.main.redis_pool", pool),
-        patch("ontokit.services.translation_jobs.check_rate_limit", side_effect=actor_limit),
-    ):
-        refused = await enqueue_label_diff_after_commit(
-            project_id=uuid4(),
+    with patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=pool)):
+        accepted = await enqueue_label_diff_after_commit(
+            project_id=project_id,
             branch="main",
             commit_hash="abc",
-            actor_id="churning-actor",
+            actor_id="actor-1",
             role="editor",
         )
-        accepted = await enqueue_label_diff_after_commit(
-            project_id=uuid4(),
+        duplicate = await enqueue_label_diff_after_commit(
+            project_id=project_id,
             branch="main",
-            commit_hash="def",
-            actor_id="other-actor",
+            commit_hash="abc",
+            actor_id="actor-1",
             role="editor",
         )
 
-    assert refused is False
     assert accepted is True
-    pool.enqueue_job.assert_awaited_once()
+    assert duplicate is False
+    first, second = pool.enqueue_job.await_args_list
+    assert (
+        first.args[:6]
+        == second.args[:6]
+        == (
+            "run_translation_label_diff_task",
+            str(project_id),
+            "main",
+            "abc",
+            "actor-1",
+            "editor",
+        )
+    )
+    assert first.kwargs["_job_id"] == second.kwargs["_job_id"]
 
 
 def test_translation_jobs_are_registered_with_arq_worker() -> None:
@@ -188,10 +201,9 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
         ),
         patch("ontokit.api.routes.translation._get_redis", return_value=AsyncMock()),
         patch(
-            "ontokit.api.routes.translation.get_remaining_calls",
-            AsyncMock(return_value=100),
+            "ontokit.api.routes.translation.consume_rate_limit_units",
+            AsyncMock(return_value=False),
         ),
-        patch("ontokit.api.routes.translation.check_rate_limit", AsyncMock(return_value=False)),
         pytest.raises(HTTPException) as limited,
     ):
         await translate_entity_field(project_id, request, db, user)
@@ -199,6 +211,7 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
 
     redis = AsyncMock()
     redis.incrby.return_value = 1
+    consume_units = AsyncMock(return_value=True)
     with (
         patch("ontokit.api.routes.translation._require_member", AsyncMock(return_value="editor")),
         patch(
@@ -209,14 +222,14 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
         ),
         patch("ontokit.api.routes.translation._get_redis", return_value=redis),
         patch(
-            "ontokit.api.routes.translation.get_remaining_calls",
-            AsyncMock(return_value=100),
+            "ontokit.api.routes.translation.consume_rate_limit_units",
+            consume_units,
         ),
-        patch("ontokit.api.routes.translation.check_rate_limit", AsyncMock(return_value=True)),
         patch("ontokit.api.routes.translation.get_arq_pool", AsyncMock(return_value=pool)),
     ):
         response = await translate_entity_field(project_id, request, db, user)
     assert response.job_id == "translation-1"
+    consume_units.assert_awaited_once_with(redis, str(project_id), "actor-1", "editor", 2)
     pool.enqueue_job.assert_awaited_once_with(
         "run_translation_entity_task",
         str(project_id),

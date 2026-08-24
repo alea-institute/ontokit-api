@@ -993,10 +993,15 @@ async def run_batch_entity_embed_task(
 
 
 async def run_translation_label_diff_task(
-    ctx: dict[str, Any], project_id: str, branch: str, commit_hash: str, actor_id: str
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str,
+    commit_hash: str,
+    actor_id: str,
+    role: str,
 ) -> dict[str, Any]:
     """Discover newly minted labels and enqueue bounded per-language work."""
-    return await run_label_diff_job(ctx, project_id, branch, commit_hash, actor_id)
+    return await run_label_diff_job(ctx, project_id, branch, commit_hash, actor_id, role)
 
 
 async def run_translation_backfill_task(

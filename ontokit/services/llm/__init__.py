@@ -25,7 +25,11 @@ from ontokit.services.llm.budget import (
 from ontokit.services.llm.crypto import decrypt_secret, encrypt_secret, rotate_secret
 from ontokit.services.llm.metering import LLMBudgetExceeded, MeteredLLMProvider
 from ontokit.services.llm.pricing import PricingUnavailableError, get_model_pricing
-from ontokit.services.llm.rate_limiter import check_rate_limit, get_remaining_calls
+from ontokit.services.llm.rate_limiter import (
+    check_rate_limit,
+    consume_rate_limit_units,
+    get_remaining_calls,
+)
 from ontokit.services.llm.registry import get_provider
 from ontokit.services.llm.role_gates import check_llm_access
 from ontokit.services.llm.ssrf import (
@@ -43,6 +47,7 @@ __all__ = [
     "check_budget",
     "check_llm_access",
     "check_rate_limit",
+    "consume_rate_limit_units",
     "decrypt_secret",
     "encrypt_secret",
     "get_budget_status",

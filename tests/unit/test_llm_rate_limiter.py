@@ -15,6 +15,7 @@ from ontokit.services.llm.rate_limiter import (
     RATE_LIMITS,
     _rate_key,
     check_rate_limit,
+    consume_rate_limit_units,
     get_remaining_calls,
 )
 
@@ -89,6 +90,25 @@ async def test_editor_at_exact_limit_still_allowed():
 async def test_editor_over_limit_blocked():
     redis = _redis(incr=501)
     assert await check_rate_limit(redis, "p", "u", "editor") is False
+
+
+@pytest.mark.asyncio
+async def test_multi_unit_reservation_is_atomic_and_can_be_idempotent():
+    redis = _redis()
+    redis.eval = AsyncMock(side_effect=[1, 1, 0])
+
+    assert await consume_rate_limit_units(redis, "p", "u", "editor", 4, reservation_id="commit-1")
+    assert await consume_rate_limit_units(redis, "p", "u", "editor", 4, reservation_id="commit-1")
+    assert not await consume_rate_limit_units(redis, "p", "u", "editor", 500)
+    assert redis.eval.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_multi_unit_reservation_rejects_invalid_units_without_redis():
+    redis = _redis()
+    with pytest.raises(ValueError, match="positive"):
+        await consume_rate_limit_units(redis, "p", "u", "editor", 0)
+    redis.eval.assert_not_awaited()
 
 
 @pytest.mark.asyncio
