@@ -1,7 +1,7 @@
 """Add durable machine-translation provenance records.
 
 Revision ID: b5c6d7e8f9a0
-Revises: a4b5c6d7e8f9
+Revises: h7i8j9k0l1m2
 Create Date: 2026-08-09
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "b5c6d7e8f9a0"
-down_revision: str | None = "a4b5c6d7e8f9"
+down_revision: str | None = "h7i8j9k0l1m2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
