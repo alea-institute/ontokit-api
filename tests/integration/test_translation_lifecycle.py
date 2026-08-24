@@ -15,7 +15,7 @@ from fastapi import HTTPException
 from rdflib import Graph, Literal, URIRef
 from rdflib.namespace import SKOS
 from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from ontokit.api.routes import projects, translation
 from ontokit.core.auth import CurrentUser
@@ -232,8 +232,10 @@ async def _run_mint_jobs(
     actor_id: str,
 ) -> list[dict[str, object]]:
     ctx = {"db": db, "redis": queue}
+    audit_session_factory = async_sessionmaker(db.bind, expire_on_commit=False)
     with (
         patch("ontokit.services.translation_jobs.get_git_service", return_value=git),
+        patch("ontokit.core.database.async_session_maker", audit_session_factory),
         patch(
             "ontokit.services.llm.openai_compat.OpenAICompatProvider.chat",
             new=AsyncMock(side_effect=_fake_chat),
@@ -413,6 +415,10 @@ async def test_cost_preview_spends_nothing_then_backfill_fills_added_language(
         with (
             patch("ontokit.services.translation_jobs.get_git_service", return_value=git),
             patch(
+                "ontokit.core.database.async_session_maker",
+                async_sessionmaker(real_db_session.bind, expire_on_commit=False),
+            ),
+            patch(
                 "ontokit.services.llm.openai_compat.OpenAICompatProvider.chat",
                 new=AsyncMock(side_effect=_fake_chat),
             ),
@@ -528,6 +534,10 @@ async def test_in_flight_source_edit_discards_stale_result_without_translation_c
         edited_head = git.get_repository(project_id).get_branch_commit_hash("main")
         with (
             patch("ontokit.services.translation_jobs.get_git_service", return_value=git),
+            patch(
+                "ontokit.core.database.async_session_maker",
+                async_sessionmaker(real_db_session.bind, expire_on_commit=False),
+            ),
             patch(
                 "ontokit.services.llm.openai_compat.OpenAICompatProvider.chat",
                 new=AsyncMock(side_effect=_fake_chat),
