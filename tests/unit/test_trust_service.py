@@ -414,9 +414,7 @@ class TestSetTrustOverride:
         project = _project([member])
         actor = _user("admin-1")
         db = _db_with_count(0)
-        result = await _svc(db).set_trust_override(
-            project, "u1", TrustOverride.GRANTED, actor
-        )
+        result = await _svc(db).set_trust_override(project, "u1", TrustOverride.GRANTED, actor)
         assert result.is_trusted is True
         assert result.trust_override == "granted"
         assert result.trust_granted_by == "admin-1"
@@ -506,9 +504,7 @@ class TestAutoAcceptEligibility:
         session = _session("anonymous-abc", is_anonymous=True)
         assert TrustService.is_auto_accept_eligible(project, session, TrustTier.ANONYMOUS) is False
 
-    @pytest.mark.parametrize(
-        "tier", [TrustTier.ANONYMOUS, TrustTier.UNTRUSTED, TrustTier.REVIEWER]
-    )
+    @pytest.mark.parametrize("tier", [TrustTier.ANONYMOUS, TrustTier.UNTRUSTED, TrustTier.REVIEWER])
     def test_only_the_trusted_tier_is_eligible(self, tier: TrustTier) -> None:
         project = _project(auto_accept_enabled=True)
         assert TrustService.is_auto_accept_eligible(project, _session("u1"), tier) is False

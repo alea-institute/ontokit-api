@@ -235,9 +235,7 @@ class TrustService:
         )
         return int(result.scalar() or 0)
 
-    async def count_accepted_by_user(
-        self, project_id: UUID, user_ids: list[str]
-    ) -> dict[str, int]:
+    async def count_accepted_by_user(self, project_id: UUID, user_ids: list[str]) -> dict[str, int]:
         """Count promotion-eligible acceptances for a member roster in one query."""
         if not user_ids:
             return {}

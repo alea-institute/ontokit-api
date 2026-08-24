@@ -482,9 +482,7 @@ class TestSuggestionOutcomeAudit:
 
         # The total grows because a newer row was inserted, but that row is before
         # the saved keyset boundary and cannot duplicate or displace older rows.
-        second_page = client.get(
-            f"{BASE}/outcomes", params={"limit": 2, "cursor": first_cursor}
-        )
+        second_page = client.get(f"{BASE}/outcomes", params={"limit": 2, "cursor": first_cursor})
         assert second_page.status_code == 200
         assert second_page.json()["total"] == 6
         assert [item["user_id"] for item in second_page.json()["items"]] == [
@@ -494,9 +492,7 @@ class TestSuggestionOutcomeAudit:
         second_cursor = second_page.json()["next_cursor"]
         assert second_cursor is not None
 
-        third_page = client.get(
-            f"{BASE}/outcomes", params={"limit": 2, "cursor": second_cursor}
-        )
+        third_page = client.get(f"{BASE}/outcomes", params={"limit": 2, "cursor": second_cursor})
         assert third_page.status_code == 200
         assert [item["user_id"] for item in third_page.json()["items"]] == ["user-1"]
         assert third_page.json()["next_cursor"] is None
@@ -515,9 +511,7 @@ class TestSuggestionOutcomeAudit:
         client, session = authed_client
         now = datetime(2026, 8, 10, 12, tzinfo=UTC)
         newest = _outcome("00000000-0000-0000-0000-000000000002", now)
-        older = _outcome(
-            "00000000-0000-0000-0000-000000000001", now - timedelta(minutes=1)
-        )
+        older = _outcome("00000000-0000-0000-0000-000000000001", now - timedelta(minutes=1))
         session.execute.side_effect = [
             *_outcome_results(admin_project, [newest, older], 2),
             *_outcome_results(admin_project, [], 0),

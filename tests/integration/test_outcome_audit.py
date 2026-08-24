@@ -35,7 +35,7 @@ pytestmark = pytest.mark.integration
 
 FILE = "ontology.ttl"
 BASE_CONTENT = b"@prefix ex: <https://example.test/> .\n"
-MERGED_CONTENT = BASE_CONTENT + b"ex:Audited ex:status \"merged\" .\n"
+MERGED_CONTENT = BASE_CONTENT + b'ex:Audited ex:status "merged" .\n'
 
 
 @dataclass
@@ -57,9 +57,7 @@ async def _seed_project(
     auto_accept: bool = False,
 ) -> AuditProject:
     project_id = uuid4()
-    owner = CurrentUser(
-        id=f"owner-{project_id}", name="Project Owner", email="owner@example.test"
-    )
+    owner = CurrentUser(id=f"owner-{project_id}", name="Project Owner", email="owner@example.test")
     submitter = CurrentUser(
         id=f"submitter-{project_id}",
         name="Account Submitter",
@@ -201,9 +199,7 @@ async def _auto_accept_with_real_merge(
         return await service.auto_accept_ripe_sessions()
 
 
-async def _outcome_for_session(
-    db: AsyncSession, session: SuggestionSession
-) -> SuggestionOutcome:
+async def _outcome_for_session(db: AsyncSession, session: SuggestionSession) -> SuggestionOutcome:
     row = await db.scalar(
         select(SuggestionOutcome).where(SuggestionOutcome.session_id == session.id)
     )
