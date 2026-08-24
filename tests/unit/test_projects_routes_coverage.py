@@ -19,7 +19,7 @@ from ontokit.api.routes.projects import (
     get_storage,
 )
 from ontokit.main import app
-from ontokit.schemas.project import ProjectResponse
+from ontokit.schemas.project import ProjectListResponse, ProjectResponse
 from ontokit.services.project_service import ProjectService
 
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
@@ -131,6 +131,63 @@ def mock_ontology_service() -> Generator[MagicMock, None, None]:
         yield mock_onto
     finally:
         app.dependency_overrides.pop(get_ontology, None)
+
+
+# ---------------------------------------------------------------------------
+# list_projects — bounded demo discovery filters
+# ---------------------------------------------------------------------------
+
+
+class TestListProjectsDemoDiscovery:
+    def test_forwards_demo_and_source_filters(
+        self,
+        authed_client: tuple[TestClient, AsyncMock],
+        mock_project_service: AsyncMock,
+    ) -> None:
+        """The public list contract parses and forwards bounded demo lookup filters."""
+        client, _db = authed_client
+        source_project_id = uuid.uuid4()
+        mock_project_service.list_accessible = AsyncMock(
+            return_value=ProjectListResponse(items=[], total=0, unfiltered_total=3, skip=0, limit=2)
+        )
+
+        response = client.get(
+            "/api/v1/projects",
+            params={
+                "filter": "public",
+                "limit": 2,
+                "is_demo": "true",
+                "demo_source_project_id": str(source_project_id),
+            },
+        )
+
+        assert response.status_code == 200
+        call = mock_project_service.list_accessible.await_args
+        assert call.args[0].id == "test-user-id"
+        assert call.kwargs == {
+            "skip": 0,
+            "limit": 2,
+            "filter_type": "public",
+            "search": None,
+            "is_demo": True,
+            "demo_source_project_id": source_project_id,
+        }
+
+    def test_rejects_invalid_source_project_id(
+        self,
+        authed_client: tuple[TestClient, AsyncMock],
+        mock_project_service: AsyncMock,
+    ) -> None:
+        """Malformed source identifiers fail validation before service access."""
+        client, _db = authed_client
+
+        response = client.get(
+            "/api/v1/projects",
+            params={"is_demo": "true", "demo_source_project_id": "not-a-uuid"},
+        )
+
+        assert response.status_code == 422
+        mock_project_service.list_accessible.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------

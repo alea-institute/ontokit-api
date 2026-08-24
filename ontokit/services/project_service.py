@@ -445,6 +445,8 @@ class ProjectService:
         limit: int = 20,
         filter_type: str | None = None,
         search: str | None = None,
+        is_demo: bool | None = None,
+        demo_source_project_id: UUID | None = None,
     ) -> ProjectListResponse:
         """
         List projects accessible to the user.
@@ -455,6 +457,8 @@ class ProjectService:
             limit: Maximum results to return
             filter_type: Filter by 'public', 'private', 'mine', or None for all accessible
             search: Case-insensitive search on name and description
+            is_demo: Filter by resettable demo-project status when provided
+            demo_source_project_id: Filter by the linked source project when provided
         """
         # Build base query with eager-loading options
         opts = [selectinload(Project.members), selectinload(Project.github_integration)]
@@ -512,6 +516,15 @@ class ProjectService:
                     Project.description.ilike(search_pattern, escape="\\"),
                 )
             )
+
+        # Demo discovery filters are deliberately applied to the SQL query before
+        # counting or pagination. Access control remains the first, independent
+        # predicate, so these filters never expose a private demo to a caller who
+        # could not otherwise list it.
+        if is_demo is not None:
+            query = query.where(Project.is_demo == is_demo)
+        if demo_source_project_id is not None:
+            query = query.where(Project.demo_source_project_id == demo_source_project_id)
 
         # Count filtered total
         count_query = select(func.count()).select_from(query.subquery())

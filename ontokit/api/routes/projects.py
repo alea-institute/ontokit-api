@@ -139,6 +139,14 @@ async def list_projects(
     search: str | None = Query(
         default=None, max_length=200, description="Search by project name or description"
     ),
+    is_demo: Annotated[
+        bool | None,
+        Query(description="Filter by resettable demo-project status when provided"),
+    ] = None,
+    demo_source_project_id: Annotated[
+        UUID | None,
+        Query(description="Filter demos linked to this source project when provided"),
+    ] = None,
 ) -> ProjectListResponse:
     """
     List projects accessible to the current user.
@@ -151,7 +159,13 @@ async def list_projects(
     - filter=null: All accessible (public + user's private projects)
     """
     return await service.list_accessible(
-        user, skip=skip, limit=limit, filter_type=filter, search=search
+        user,
+        skip=skip,
+        limit=limit,
+        filter_type=filter,
+        search=search,
+        is_demo=is_demo,
+        demo_source_project_id=demo_source_project_id,
     )
 
 

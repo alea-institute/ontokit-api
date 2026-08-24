@@ -56,6 +56,8 @@ def _make_project(
     project.updated_at = None
     project.github_integration = None
     project.pr_approval_required = 0
+    project.is_demo = False
+    project.demo_source_project_id = None
     if members is None:
         members = [_make_member(owner_id, "owner", project_id)]
     project.members = members
@@ -760,6 +762,69 @@ class TestListAccessible:
         result = await service.list_accessible(user, skip=0, limit=20, search="Animals")
 
         assert len(result.items) == 1
+
+    @pytest.mark.asyncio
+    async def test_list_anonymous_demo_filter_is_sql_scoped_and_public_only(
+        self, service: ProjectService, mock_db: AsyncMock
+    ) -> None:
+        """Demo discovery filters before pagination without weakening anonymous access."""
+        project = _make_project(is_public=True)
+        project.is_demo = True
+
+        mock_db.scalar = AsyncMock(side_effect=[7, 1])
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [project]
+        mock_db.execute.return_value = mock_result
+
+        result = await service.list_accessible(None, limit=2, is_demo=True)
+
+        unfiltered_query = mock_db.scalar.await_args_list[0].args[0]
+        filtered_count_query = mock_db.scalar.await_args_list[1].args[0]
+        page_query = mock_db.execute.await_args.args[0]
+        unfiltered_sql = str(unfiltered_query.compile(compile_kwargs={"literal_binds": True}))
+        filtered_sql = str(filtered_count_query.compile(compile_kwargs={"literal_binds": True}))
+        page_sql = str(page_query.compile(compile_kwargs={"literal_binds": True}))
+
+        assert "projects.is_demo" not in unfiltered_sql
+        assert "projects.is_public = true" in filtered_sql
+        assert "projects.is_demo = true" in filtered_sql
+        assert "projects.is_public = true" in page_sql
+        assert "projects.is_demo = true" in page_sql
+        assert result.unfiltered_total == 7
+        assert result.total == 1
+        assert result.limit == 2
+
+    @pytest.mark.asyncio
+    async def test_list_source_specific_demo_filter_precedes_pagination(
+        self, service: ProjectService, mock_db: AsyncMock
+    ) -> None:
+        """A public source lookup is one bounded SQL query, not a post-page scan."""
+        source_project_id = uuid.uuid4()
+        demo = _make_project(is_public=True)
+        demo.is_demo = True
+        demo.demo_source_project_id = source_project_id
+
+        mock_db.scalar = AsyncMock(side_effect=[11, 1])
+        mock_result = MagicMock()
+        mock_result.scalars.return_value.all.return_value = [demo]
+        mock_db.execute.return_value = mock_result
+
+        result = await service.list_accessible(
+            _make_user(),
+            limit=1,
+            filter_type="public",
+            is_demo=True,
+            demo_source_project_id=source_project_id,
+        )
+
+        page_query = mock_db.execute.await_args.args[0]
+        page_sql = str(page_query.compile(compile_kwargs={"literal_binds": True}))
+        assert "projects.is_public = true" in page_sql
+        assert "projects.is_demo = true" in page_sql
+        assert f"projects.demo_source_project_id = '{source_project_id.hex}'" in page_sql
+        assert "LIMIT 1" in page_sql
+        assert result.total == 1
+        assert result.items[0].demo_source_project_id == source_project_id
 
     @pytest.mark.asyncio
     async def test_list_pagination(self, service: ProjectService, mock_db: AsyncMock) -> None:
