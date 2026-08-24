@@ -23,7 +23,7 @@ from collections.abc import AsyncIterable, AsyncIterator, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
-from typing import Any
+from typing import Any, cast
 from urllib.parse import urlparse
 
 import httpcore
@@ -243,7 +243,7 @@ class PinnedDNSBackend(httpcore.AsyncNetworkBackend):
         backend: httpcore.AsyncNetworkBackend | None = None,
     ) -> None:
         self._allow_private = allow_private
-        self._backend = backend or httpcore.AnyIOBackend()
+        self._backend = backend or cast(httpcore.AsyncNetworkBackend, httpcore.AnyIOBackend())
 
     async def connect_tcp(
         self,
