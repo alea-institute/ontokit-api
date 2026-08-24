@@ -792,14 +792,17 @@ class EmbeddingService:
         # NOTE: must use CAST(:query_vec AS vector) — SQLAlchemy's text() parser silently
         # drops :name bindparams when immediately followed by ::type (Postgres cast syntax),
         # producing a syntax error at the literal ":" in the wire SQL.
-        query_str = text(f"""
-            SELECT entity_iri, label, entity_type, deprecated,
-                   1 - ({column_operand} <=> {query_operand}) AS score
-            FROM entity_embeddings
-            WHERE project_id = :pid AND branch = :br AND dimensions = :dimensions
-            ORDER BY {column_operand} <=> {query_operand}
-            LIMIT :lim
-        """)  # nosec B608 -- operands come only from the fixed dimension map above
+        # Dynamic operands come only from _distance_operands()'s fixed dimension map.
+        query_str = text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+            f"""
+                SELECT entity_iri, label, entity_type, deprecated,
+                       1 - ({column_operand} <=> {query_operand}) AS score
+                FROM entity_embeddings
+                WHERE project_id = :pid AND branch = :br AND dimensions = :dimensions
+                ORDER BY {column_operand} <=> {query_operand}
+                LIMIT :lim
+            """
+        )  # nosec B608
 
         result = await self._db.execute(
             query_str,
@@ -894,17 +897,20 @@ class EmbeddingService:
             exclusions += f" AND entity_iri != :{key}"
             params[key] = iri
 
-        query_str = text(f"""
-            SELECT entity_iri, label, entity_type, branch, deprecated, embedding_text,
-                   1 - ({column_operand} <=> {query_operand}) AS score
-            FROM entity_embeddings
-            WHERE project_id = :pid
-              AND dimensions = :dimensions
-              AND (1 - ({column_operand} <=> {query_operand})) >= :threshold
-              {exclusions}
-            ORDER BY {column_operand} <=> {query_operand}
-            LIMIT :lim
-        """)  # nosec B608 -- only fixed SQL fragments and generated bind names are interpolated
+        # Operands are allowlisted; exclusions contain fixed SQL and generated bind names only.
+        query_str = text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+            f"""
+                SELECT entity_iri, label, entity_type, branch, deprecated, embedding_text,
+                       1 - ({column_operand} <=> {query_operand}) AS score
+                FROM entity_embeddings
+                WHERE project_id = :pid
+                  AND dimensions = :dimensions
+                  AND (1 - ({column_operand} <=> {query_operand})) >= :threshold
+                  {exclusions}
+                ORDER BY {column_operand} <=> {query_operand}
+                LIMIT :lim
+            """
+        )  # nosec B608
 
         result = await self._db.execute(
             query_str,
@@ -950,15 +956,18 @@ class EmbeddingService:
         column_operand, query_operand = _distance_operands(dimensions)
 
         # kNN search excluding self. See note in semantic_search() above re: CAST() vs ::vector.
-        query_str = text(f"""
-            SELECT entity_iri, label, entity_type, deprecated,
-                   1 - ({column_operand} <=> {query_operand}) AS score
-            FROM entity_embeddings
-            WHERE project_id = :pid AND branch = :br
-              AND dimensions = :dimensions AND entity_iri != :self_iri
-            ORDER BY {column_operand} <=> {query_operand}
-            LIMIT :lim
-        """)  # nosec B608 -- operands come only from the fixed dimension map above
+        # Dynamic operands come only from _distance_operands()'s fixed dimension map.
+        query_str = text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+            f"""
+                SELECT entity_iri, label, entity_type, deprecated,
+                       1 - ({column_operand} <=> {query_operand}) AS score
+                FROM entity_embeddings
+                WHERE project_id = :pid AND branch = :br
+                  AND dimensions = :dimensions AND entity_iri != :self_iri
+                ORDER BY {column_operand} <=> {query_operand}
+                LIMIT :lim
+            """
+        )  # nosec B608
 
         result = await self._db.execute(
             query_str,
