@@ -97,7 +97,7 @@ class EntityEmbeddingStaging(Base):
     entity_type: Mapped[str] = mapped_column(String(50))
     label: Mapped[str | None] = mapped_column(String(500), nullable=True)
     embedding_text: Mapped[str] = mapped_column(Text)
-    embedding: Mapped[Any] = mapped_column(Vector() if Vector is not None else Text, nullable=False)
+    embedding: Mapped[Any] = mapped_column(Vector(), nullable=False)
     dimensions: Mapped[int] = mapped_column(Integer, nullable=False)
     provider: Mapped[str] = mapped_column(String(50))
     model_name: Mapped[str] = mapped_column(String(200))

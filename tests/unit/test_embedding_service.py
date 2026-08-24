@@ -1258,31 +1258,15 @@ class TestSemanticSearch:
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:
         """Returns text_fallback mode when no embeddings exist."""
-        from unittest.mock import patch
-
         count_result = MagicMock()
         count_result.scalar.return_value = 0
 
         mock_db.execute.side_effect = [count_result]
 
-        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
-            result = await service.semantic_search(PROJECT_ID, BRANCH, "test query")
+        result = await service.semantic_search(PROJECT_ID, BRANCH, "test query")
 
         assert result.search_mode == "text_fallback"
         assert result.results == []
-
-    @pytest.mark.asyncio
-    async def test_raises_when_pgvector_not_installed(
-        self, service: EmbeddingService, mock_db: AsyncMock
-    ) -> None:
-        """Raises RuntimeError when Vector is None (pgvector not installed)."""
-        from unittest.mock import patch
-
-        with (
-            patch("ontokit.services.embedding_service.Vector", new=None),
-            pytest.raises(RuntimeError, match="pgvector is not installed"),
-        ):
-            await service.semantic_search(PROJECT_ID, BRANCH, "test query")
 
     @pytest.mark.asyncio
     async def test_returns_semantic_results(
@@ -1320,7 +1304,6 @@ class TestSemanticSearch:
         mock_db.execute.side_effect = [count_result, cfg_result, search_result]
 
         with (
-            patch("ontokit.services.embedding_service.Vector", new="not-None"),
             patch(
                 "ontokit.services.embedding_service.get_embedding_provider",
                 return_value=mock_provider,
@@ -1364,7 +1347,6 @@ class TestSemanticSearch:
         mock_db.execute.side_effect = [count_result, cfg_result, search_result]
 
         with (
-            patch("ontokit.services.embedding_service.Vector", new="not-None"),
             patch(
                 "ontokit.services.embedding_service.get_embedding_provider",
                 return_value=mock_provider,
@@ -1402,31 +1384,15 @@ class TestFindSimilar:
     """Tests for find_similar()."""
 
     @pytest.mark.asyncio
-    async def test_raises_when_pgvector_not_installed(
-        self, service: EmbeddingService, mock_db: AsyncMock
-    ) -> None:
-        """Raises RuntimeError when Vector is None."""
-        from unittest.mock import patch
-
-        with (
-            patch("ontokit.services.embedding_service.Vector", new=None),
-            pytest.raises(RuntimeError, match="pgvector is not installed"),
-        ):
-            await service.find_similar(PROJECT_ID, BRANCH, "http://example.org/X")
-
-    @pytest.mark.asyncio
     async def test_returns_empty_when_entity_not_embedded(
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:
         """Returns empty list when the source entity has no embedding."""
-        from unittest.mock import patch
-
         emb_result = MagicMock()
         emb_result.scalar_one_or_none.return_value = None
         mock_db.execute.return_value = emb_result
 
-        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
-            results = await service.find_similar(PROJECT_ID, BRANCH, "http://example.org/Missing")
+        results = await service.find_similar(PROJECT_ID, BRANCH, "http://example.org/Missing")
 
         assert results == []
 
@@ -1435,8 +1401,6 @@ class TestFindSimilar:
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:
         """Returns similar entities above threshold."""
-        from unittest.mock import patch
-
         # Source entity embedding
         source_emb = MagicMock()
         source_emb.embedding = [0.1, 0.2, 0.3]
@@ -1460,8 +1424,7 @@ class TestFindSimilar:
 
         mock_db.execute.side_effect = [emb_result, search_result]
 
-        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
-            results = await service.find_similar(PROJECT_ID, BRANCH, "http://example.org/Source")
+        results = await service.find_similar(PROJECT_ID, BRANCH, "http://example.org/Source")
 
         assert len(results) == 1
         assert results[0].iri == "http://example.org/Similar"
@@ -1480,8 +1443,6 @@ class TestFindSimilar:
         every call. Assert the kNN query bound to find_similar() resolves all
         named placeholders.
         """
-        from unittest.mock import patch
-
         source_emb = MagicMock()
         source_emb.embedding = [0.1, 0.2, 0.3]
         source_emb.dimensions = 3
@@ -1493,8 +1454,7 @@ class TestFindSimilar:
 
         mock_db.execute.side_effect = [emb_result, search_result]
 
-        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
-            await service.find_similar(PROJECT_ID, BRANCH, "http://example.org/Source")
+        await service.find_similar(PROJECT_ID, BRANCH, "http://example.org/Source")
 
         # Inspect the kNN query (second execute call) — its compiled SQL must
         # contain zero ``:name`` placeholders and must declare the expected
@@ -1527,34 +1487,14 @@ class TestRankSuggestions:
     """Tests for rank_suggestions()."""
 
     @pytest.mark.asyncio
-    async def test_raises_when_pgvector_not_installed(
-        self, service: EmbeddingService, mock_db: AsyncMock
-    ) -> None:
-        """Raises RuntimeError when Vector is None."""
-        from unittest.mock import patch
-
-        body = MagicMock()
-        body.candidates = ["http://example.org/A"]
-        body.branch = BRANCH
-
-        with (
-            patch("ontokit.services.embedding_service.Vector", new=None),
-            pytest.raises(RuntimeError, match="pgvector is not installed"),
-        ):
-            await service.rank_suggestions(PROJECT_ID, body)
-
-    @pytest.mark.asyncio
     async def test_returns_empty_for_empty_candidates(
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:
         """Returns empty list when candidates list is empty."""
-        from unittest.mock import patch
-
         body = MagicMock()
         body.candidates = []
 
-        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
-            results = await service.rank_suggestions(PROJECT_ID, body)
+        results = await service.rank_suggestions(PROJECT_ID, body)
 
         assert results == []
 
@@ -1563,8 +1503,6 @@ class TestRankSuggestions:
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:
         """Returns empty list when context entity has no embedding."""
-        from unittest.mock import patch
-
         body = MagicMock()
         body.candidates = ["http://example.org/A"]
         body.branch = BRANCH
@@ -1574,8 +1512,7 @@ class TestRankSuggestions:
         ctx_result.scalar_one_or_none.return_value = None
         mock_db.execute.return_value = ctx_result
 
-        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
-            results = await service.rank_suggestions(PROJECT_ID, body)
+        results = await service.rank_suggestions(PROJECT_ID, body)
 
         assert results == []
 
@@ -1584,8 +1521,6 @@ class TestRankSuggestions:
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:
         """Ranks candidates by descending cosine similarity."""
-        from unittest.mock import patch
-
         body = MagicMock()
         body.candidates = ["http://example.org/A", "http://example.org/B"]
         body.branch = BRANCH
@@ -1615,8 +1550,7 @@ class TestRankSuggestions:
 
         mock_db.execute.side_effect = [ctx_result, cand_result]
 
-        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
-            results = await service.rank_suggestions(PROJECT_ID, body)
+        results = await service.rank_suggestions(PROJECT_ID, body)
 
         assert len(results) == 2
         # A should be ranked first (higher similarity)
@@ -1630,8 +1564,6 @@ class TestRankSuggestions:
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:
         """Returns empty list when context vector norm is zero."""
-        from unittest.mock import patch
-
         body = MagicMock()
         body.candidates = ["http://example.org/A"]
         body.branch = BRANCH
@@ -1648,8 +1580,7 @@ class TestRankSuggestions:
 
         mock_db.execute.side_effect = [ctx_result, cand_result]
 
-        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
-            results = await service.rank_suggestions(PROJECT_ID, body)
+        results = await service.rank_suggestions(PROJECT_ID, body)
 
         assert results == []
 
@@ -1658,8 +1589,6 @@ class TestRankSuggestions:
         self, service: EmbeddingService, mock_db: AsyncMock
     ) -> None:
         """Candidates with zero-norm embeddings are excluded."""
-        from unittest.mock import patch
-
         body = MagicMock()
         body.candidates = ["http://example.org/A"]
         body.branch = BRANCH
@@ -1682,8 +1611,7 @@ class TestRankSuggestions:
 
         mock_db.execute.side_effect = [ctx_result, cand_result]
 
-        with patch("ontokit.services.embedding_service.Vector", new="not-None"):
-            results = await service.rank_suggestions(PROJECT_ID, body)
+        results = await service.rank_suggestions(PROJECT_ID, body)
 
         assert results == []
 
@@ -1708,7 +1636,6 @@ class TestRankSuggestions:
         mock_db.execute.return_value = ctx_result
 
         with (
-            patch("ontokit.services.embedding_service.Vector", new="not-None"),
             patch(
                 "ontokit.git.get_git_service",
                 return_value=mock_git_service,

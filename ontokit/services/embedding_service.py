@@ -22,7 +22,6 @@ from ontokit.models.embedding import (
     EntityEmbedding,
     EntityEmbeddingStaging,
     ProjectEmbeddingConfig,
-    Vector,
 )
 from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.schemas.embeddings import (
@@ -753,10 +752,6 @@ class EmbeddingService:
         billing_user_id: str = "system:semantic-search",
     ) -> SemanticSearchResponse:
         """Semantic search using cosine similarity."""
-        if Vector is None:
-            raise RuntimeError(
-                "pgvector is not installed. Semantic search requires the pgvector extension."
-            )
         # Check if embeddings exist
         count_q = (
             select(func.count())
@@ -847,11 +842,6 @@ class EmbeddingService:
         suggestion branches. Used by DuplicateCheckService for cross-branch
         duplicate detection.
         """
-        if Vector is None:
-            raise RuntimeError(
-                "pgvector is not installed. Semantic search requires the pgvector extension."
-            )
-
         # Check if any embeddings exist for this project
         count_q = (
             select(func.count())
@@ -939,10 +929,6 @@ class EmbeddingService:
         threshold: float = 0.5,
     ) -> list[SimilarEntity]:
         """Find entities similar to a given entity."""
-        if Vector is None:
-            raise RuntimeError(
-                "pgvector is not installed. Similarity search requires the pgvector extension."
-            )
         # Get entity's embedding
         emb_q = select(EntityEmbedding).where(
             EntityEmbedding.project_id == project_id,
@@ -1002,10 +988,6 @@ class EmbeddingService:
         body: RankSuggestionRequest,
     ) -> list[RankedCandidate]:
         """Rank candidate entities by similarity to context entity."""
-        if Vector is None:
-            raise RuntimeError(
-                "pgvector is not installed. Ranking suggestions requires the pgvector extension."
-            )
         if not body.candidates:
             return []
 

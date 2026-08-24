@@ -116,7 +116,7 @@ def test_generated_suggestion_carries_model_and_prompt_template():
 
 
 def test_edge_suggestion_has_target_and_type():
-    """EdgeSuggestion extends GeneratedSuggestion with target_iri and relationship_type."""
+    """EdgeSuggestion shares proposal fields and requires its edge payload."""
     edge = EdgeSuggestion(
         iri="http://example.org#Foo",
         suggestion_type="edges",
@@ -139,7 +139,7 @@ def test_edge_suggestion_requires_target_and_type():
 
 
 def test_annotation_suggestion_has_property_and_value():
-    """AnnotationSuggestion extends GeneratedSuggestion with property_iri, value, lang."""
+    """AnnotationSuggestion shares proposal fields and requires its annotation payload."""
     ann = AnnotationSuggestion(
         iri="http://example.org#Foo",
         suggestion_type="annotations",
