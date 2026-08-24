@@ -40,9 +40,7 @@ class StructuralSimilarityService:
         score = self.try_compute_similarity(iri_a, iri_b, max_depth)
         return score if score is not None else 0.0
 
-    def try_compute_similarity(
-        self, iri_a: str, iri_b: str, max_depth: int = 3
-    ) -> float | None:
+    def try_compute_similarity(self, iri_a: str, iri_b: str, max_depth: int = 3) -> float | None:
         """Return similarity, or ``None`` when structural evidence is unavailable."""
         folio = _get_folio_instance()
         if folio is None:
@@ -72,8 +70,7 @@ class StructuralSimilarityService:
                 for c in folio.get_parents(iri, max_depth=max_depth)
             ]
             children = [
-                {"iri": c.iri, "label": c.label}
-                for c in folio.get_children(iri, max_depth=1)
+                {"iri": c.iri, "label": c.label} for c in folio.get_children(iri, max_depth=1)
             ]
             return {"parents": parents, "siblings": children}
         except Exception:

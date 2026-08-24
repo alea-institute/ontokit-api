@@ -92,6 +92,7 @@ def require_authenticated_identity(user: CurrentUser) -> None:
             detail="An authenticated identity is required for this feature",
         )
 
+
 # Cache for JWKS (JSON Web Key Set) with TTL
 _jwks_cache: dict[str, Any] | None = None
 _jwks_cache_time: float = 0.0

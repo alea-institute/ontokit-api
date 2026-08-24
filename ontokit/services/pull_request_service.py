@@ -752,9 +752,7 @@ class PullRequestService:
         if not finished and repair_budget > 0:
             # A stale remote side effect may have landed last; boundedly replay
             # the newest durable intent instead of discarding only its receipt.
-            await self._repair_superseded_github_sync(
-                pull_request_id, repair_budget - 1
-            )
+            await self._repair_superseded_github_sync(pull_request_id, repair_budget - 1)
 
     async def _mirror_pull_request_to_github(
         self,
@@ -831,16 +829,13 @@ class PullRequestService:
             previous_owner = getattr(pr, "github_repo_owner", None)
             previous_repo = getattr(pr, "github_repo_name", None)
             if (
-                (
-                    previous_integration_id is not None
-                    or previous_owner is not None
-                    or previous_repo is not None
-                )
-                and (
-                    previous_integration_id not in (None, integration.id)
-                    or previous_owner != integration.repo_owner
-                    or previous_repo != integration.repo_name
-                )
+                previous_integration_id is not None
+                or previous_owner is not None
+                or previous_repo is not None
+            ) and (
+                previous_integration_id not in (None, integration.id)
+                or previous_owner != integration.repo_owner
+                or previous_repo != integration.repo_name
             ):
                 pr.github_pr_number = None
                 pr.github_pr_url = None
@@ -1161,9 +1156,7 @@ class PullRequestService:
             if gh_result:
                 github_integration, token = gh_result
                 try:
-                    mirror = await self._verified_stored_github_pr(
-                        pr, github_integration, token
-                    )
+                    mirror = await self._verified_stored_github_pr(pr, github_integration, token)
                     if mirror is None:
                         raise RuntimeError("Stored GitHub pull request is not a verified mirror")
                     # Map status to GitHub event
@@ -1266,8 +1259,7 @@ class PullRequestService:
         self.db.add(db_comment)
 
         if user.id != pr.author_id and (
-            user.is_superadmin
-            or self._get_user_role(project, user) in ("owner", "admin", "editor")
+            user.is_superadmin or self._get_user_role(project, user) in ("owner", "admin", "editor")
         ):
             await self._halt_linked_suggestion_auto_accept(pr.id)
 
@@ -1277,9 +1269,7 @@ class PullRequestService:
             if gh_result:
                 github_integration, token = gh_result
                 try:
-                    mirror = await self._verified_stored_github_pr(
-                        pr, github_integration, token
-                    )
+                    mirror = await self._verified_stored_github_pr(pr, github_integration, token)
                     if mirror is None:
                         raise RuntimeError("Stored GitHub pull request is not a verified mirror")
                     gh_comment = await self.github_service.create_comment(

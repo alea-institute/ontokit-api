@@ -124,10 +124,10 @@ class GitHubPullRequestReconciler:
         intent: GitHubPRSyncIntent,
     ) -> GitHubPR | None:
         """Resolve a mirror only after checking repository, head, and base."""
-        stored_repo_matches = (
-            intent.stored_repo_owner in (None, owner)
-            and intent.stored_repo_name in (None, repo)
-        )
+        stored_repo_matches = intent.stored_repo_owner in (
+            None,
+            owner,
+        ) and intent.stored_repo_name in (None, repo)
         if intent.stored_number is not None and stored_repo_matches:
             stored = await self.github.get_pull_request_or_none(
                 token=token,

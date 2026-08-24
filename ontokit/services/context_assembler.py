@@ -64,9 +64,7 @@ class OntologyContextAssembler:
         parent_iris: list[str] = detail.get("parent_iris", []) or []
         parents = []
         for parent_iri in parent_iris[:3]:
-            parent_detail = await self._index.get_class_detail(
-                project_id, branch, parent_iri
-            )
+            parent_detail = await self._index.get_class_detail(project_id, branch, parent_iri)
             if parent_detail is not None:
                 parent_labels = parent_detail.get("labels", [])
                 # Use the first label value as the display label
@@ -87,8 +85,9 @@ class OntologyContextAssembler:
             else:
                 # Parent not indexed — use label from parent_labels map if available
                 parent_labels_map: dict[str, str] = detail.get("parent_labels", {}) or {}
-                label = parent_labels_map.get(parent_iri) or (
-                    parent_iri.rsplit("/", 1)[-1].rsplit("#", 1)[-1]
+                label = (
+                    parent_labels_map.get(parent_iri)
+                    or (parent_iri.rsplit("/", 1)[-1].rsplit("#", 1)[-1])
                 )
                 parents.append(
                     {
@@ -113,12 +112,8 @@ class OntologyContextAssembler:
             ][:max_siblings]
 
         # Step 4: Get existing children
-        raw_children = await self._index.get_class_children(
-            project_id, branch, class_iri
-        )
-        existing_children = [
-            {"iri": c["iri"], "label": c["label"]} for c in raw_children
-        ]
+        raw_children = await self._index.get_class_children(project_id, branch, class_iri)
+        existing_children = [{"iri": c["iri"], "label": c["label"]} for c in raw_children]
 
         return {
             "current_class": {

@@ -483,16 +483,20 @@ class DuplicateCheckService:
         """Classify a branch as main/pending/rejected per D-09."""
         # Check if branch matches a suggestion session
         session = (
-            await self._db.execute(
-                select(SuggestionSession)
-                .where(
-                    SuggestionSession.project_id == project_id,
-                    SuggestionSession.branch == branch,
+            (
+                await self._db.execute(
+                    select(SuggestionSession)
+                    .where(
+                        SuggestionSession.project_id == project_id,
+                        SuggestionSession.branch == branch,
+                    )
+                    .order_by(SuggestionSession.created_at.desc())
+                    .limit(1)
                 )
-                .order_by(SuggestionSession.created_at.desc())
-                .limit(1)
             )
-        ).scalars().first()
+            .scalars()
+            .first()
+        )
 
         if not session:
             return "main"
