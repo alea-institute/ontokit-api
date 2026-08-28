@@ -1,0 +1,474 @@
+diff --git a/ontokit/api/routes/projects.py b/ontokit/api/routes/projects.py
+index 123313ed..a486ab6d 100644
+--- a/ontokit/api/routes/projects.py
++++ b/ontokit/api/routes/projects.py
+@@ -30,6 +30,7 @@ from ontokit.core.config import settings
+ from ontokit.core.constants import ONTOLOGY_INDEX_UPDATES_CHANNEL
+ from ontokit.core.database import get_db
+ from ontokit.core.encryption import decrypt_token
++from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
+ from ontokit.git import GitRepositoryService, get_git_service
+ from ontokit.models.branch_metadata import BranchMetadata
+ from ontokit.models.pull_request import GitHubIntegration, PRStatus, PullRequest
+@@ -77,8 +78,8 @@ logger = logging.getLogger(__name__)
+ 
+ router = APIRouter()
+ 
+-# Maximum file size for import (50 MB)
+-MAX_IMPORT_FILE_SIZE = 50 * 1024 * 1024
++# Imports and full-document editor saves share one Turtle size contract.
++MAX_IMPORT_FILE_SIZE = MAX_TURTLE_PAYLOAD_BYTES
+ 
+ 
+ def get_service(db: Annotated[AsyncSession, Depends(get_db)]) -> ProjectService:
+diff --git a/ontokit/core/middleware.py b/ontokit/core/middleware.py
+index 27910aca..3aafdb49 100644
+--- a/ontokit/core/middleware.py
++++ b/ontokit/core/middleware.py
+@@ -1,16 +1,127 @@
+ """Request middleware for OntoKit API."""
+ 
+ import logging
++import re
+ import time
+ import uuid
+ from typing import Any
+ 
+ from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
+ from starlette.requests import Request
+-from starlette.responses import Response
++from starlette.responses import JSONResponse, Response
++from starlette.types import ASGIApp, Message, Receive, Scope, Send
++
++from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
+ 
+ logger = logging.getLogger(__name__)
+ 
++_ANONYMOUS_SAVE_PATH = re.compile(
++    r"^/api/v1/projects/[^/]+/suggestions/anonymous/sessions/[^/]+/save$"
++)
++_ANONYMOUS_BEACON_PATH = re.compile(
++    r"^/api/v1/projects/[^/]+/suggestions/anonymous/beacon$"
++)
++
++
++class AnonymousSuggestionBodyLimitMiddleware:
++    """Reject oversized anonymous save bodies before request parsing.
++
++    ``Content-Length`` provides an early refusal for honest clients. The
++    bounded pre-read is authoritative for chunked, missing, or spoofed lengths;
++    the downstream application is not invoked until the complete body is known
++    to fit.
++    """
++
++    def __init__(
++        self,
++        app: ASGIApp,
++        *,
++        max_body_bytes: int = MAX_TURTLE_PAYLOAD_BYTES,
++    ) -> None:
++        self.app = app
++        self.max_body_bytes = max_body_bytes
++
++    @staticmethod
++    def _is_limited_request(scope: Scope) -> bool:
++        if scope["type"] != "http":
++            return False
++        method = scope.get("method", "")
++        path = scope.get("path", "")
++        return bool(
++            (method == "PUT" and _ANONYMOUS_SAVE_PATH.fullmatch(path))
++            or (method == "POST" and _ANONYMOUS_BEACON_PATH.fullmatch(path))
++        )
++
++    @staticmethod
++    def _declared_length(scope: Scope) -> int | None:
++        values = [
++            value
++            for name, value in scope.get("headers", [])
++            if name.lower() == b"content-length"
++        ]
++        if not values:
++            return None
++        try:
++            lengths = {int(value) for value in values}
++        except ValueError:
++            return -1
++        if len(lengths) != 1:
++            return -1
++        return lengths.pop()
++
++    @staticmethod
++    async def _respond(
++        scope: Scope,
++        receive: Receive,
++        send: Send,
++        status_code: int,
++        detail: str,
++    ) -> None:
++        response = JSONResponse(status_code=status_code, content={"detail": detail})
++        await response(scope, receive, send)
++
++    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
++        if not self._is_limited_request(scope):
++            await self.app(scope, receive, send)
++            return
++
++        declared = self._declared_length(scope)
++        if declared is not None and declared < 0:
++            await self._respond(scope, receive, send, 400, "Invalid Content-Length")
++            return
++        if declared is not None and declared > self.max_body_bytes:
++            await self._respond(scope, receive, send, 413, "Request body too large")
++            return
++
++        messages: list[Message] = []
++        total = 0
++        while True:
++            message = await receive()
++            messages.append(message)
++            if message["type"] == "http.request":
++                total += len(message.get("body", b""))
++                if total > self.max_body_bytes:
++                    await self._respond(
++                        scope, receive, send, 413, "Request body too large"
++                    )
++                    return
++                if not message.get("more_body", False):
++                    break
++            elif message["type"] == "http.disconnect":
++                break
++
++        index = 0
++
++        async def replay() -> Message:
++            nonlocal index
++            if index < len(messages):
++                message = messages[index]
++                index += 1
++                return message
++            return {"type": "http.request", "body": b"", "more_body": False}
++
++        await self.app(scope, replay, send)
++
+ 
+ class RequestIDMiddleware(BaseHTTPMiddleware):
+     """Attach a unique request ID to every request and include it in the response.
+diff --git a/ontokit/main.py b/ontokit/main.py
+index 5e164bbb..e3d15cdb 100644
+--- a/ontokit/main.py
++++ b/ontokit/main.py
+@@ -22,6 +22,7 @@ from ontokit.core.database import engine
+ from ontokit.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
+ from ontokit.core.middleware import (
+     AccessLogMiddleware,
++    AnonymousSuggestionBodyLimitMiddleware,
+     RequestIDMiddleware,
+     SecurityHeadersMiddleware,
+ )
+@@ -348,6 +349,9 @@ app.state.limiter = limiter
+ 
+ # --- Middleware (applied in reverse order — last added runs first) ----------
+ 
++# Bound anonymous full-document saves before FastAPI parses their JSON bodies.
++app.add_middleware(AnonymousSuggestionBodyLimitMiddleware)
++
+ # CORS (outermost — must run before anything else touches the response)
+ app.add_middleware(
+     CORSMiddleware,
+diff --git a/ontokit/models/suggestion_session.py b/ontokit/models/suggestion_session.py
+index 655c3472..8413808d 100644
+--- a/ontokit/models/suggestion_session.py
++++ b/ontokit/models/suggestion_session.py
+@@ -59,6 +59,9 @@ class SuggestionSession(Base):
+     submitter_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+     submitter_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+     client_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
++    anonymous_content_bytes: Mapped[int] = mapped_column(
++        Integer, nullable=False, default=0, server_default="0"
++    )
+ 
+     # Trust-ladder state. LLM-authored suggestions are never scheduled for
+     # automatic acceptance, irrespective of the submitter's trust tier.
+diff --git a/ontokit/schemas/suggestion.py b/ontokit/schemas/suggestion.py
+index df8d5491..4708d9a5 100644
+--- a/ontokit/schemas/suggestion.py
++++ b/ontokit/schemas/suggestion.py
+@@ -5,6 +5,7 @@ from enum import StrEnum
+ 
+ from pydantic import BaseModel, ConfigDict, Field
+ 
++from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
+ from ontokit.schemas.trust import TrustTier
+ 
+ 
+@@ -22,7 +23,11 @@ class SuggestionSessionResponse(BaseModel):
+ class SuggestionSaveRequest(BaseModel):
+     """Request body for saving content to a suggestion session."""
+ 
+-    content: str = Field(..., description="Full Turtle source content")
++    content: str = Field(
++        ...,
++        max_length=MAX_TURTLE_PAYLOAD_BYTES,
++        description="Full Turtle source content",
++    )
+     entity_iri: str = Field(..., description="IRI of the entity being modified")
+     entity_label: str = Field(..., description="Human-readable label of the entity")
+     mints_entity: bool = Field(
+@@ -102,7 +107,7 @@ class SuggestionBeaconRequest(BaseModel):
+     """Request body for beacon save (sendBeacon flush)."""
+ 
+     session_id: str
+-    content: str
++    content: str = Field(..., max_length=MAX_TURTLE_PAYLOAD_BYTES)
+ 
+ 
+ # --- Review request schemas ---
+diff --git a/ontokit/services/suggestion_service.py b/ontokit/services/suggestion_service.py
+index 81984dc4..5e975ecd 100644
+--- a/ontokit/services/suggestion_service.py
++++ b/ontokit/services/suggestion_service.py
+@@ -20,6 +20,10 @@ from sqlalchemy.orm import selectinload
+ from ontokit.core.anonymous_token import create_anonymous_token
+ from ontokit.core.auth import ANONYMOUS_USER, CurrentUser
+ from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
++from ontokit.core.limits import (
++    MAX_ANONYMOUS_SESSION_BYTES,
++    MAX_ANONYMOUS_SESSION_COMMITS,
++)
+ from ontokit.git import GitRepositoryService, get_git_service
+ from ontokit.models.embedding import EmbeddingJob
+ from ontokit.models.project import Project, ProjectMember
+@@ -132,6 +136,27 @@ class SuggestionService:
+ 
+     # --- Helpers ---
+ 
++    @staticmethod
++    def _check_anonymous_write_budget(
++        session: SuggestionSession,
++        content: str,
++    ) -> int:
++        """Return the UTF-8 write size or refuse an exhausted session budget."""
++        if session.changes_count >= MAX_ANONYMOUS_SESSION_COMMITS:
++            raise HTTPException(
++                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
++                detail="Anonymous session commit limit reached",
++            )
++
++        content_bytes = len(content.encode("utf-8"))
++        recorded_bytes = session.anonymous_content_bytes or 0
++        if recorded_bytes + content_bytes > MAX_ANONYMOUS_SESSION_BYTES:
++            raise HTTPException(
++                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
++                detail="Anonymous session content limit reached",
++            )
++        return content_bytes
++
+     async def _get_project(self, project_id: UUID) -> Project:
+         """Get a project by ID with members loaded, or raise 404."""
+         result = await self.db.execute(
+@@ -1804,6 +1829,19 @@ class SuggestionService:
+             await self.db.refresh(session)
+             if session.status != SuggestionSessionStatus.ACTIVE.value:
+                 return
++            anonymous_write_bytes: int | None = None
++            if session.is_anonymous:
++                try:
++                    anonymous_write_bytes = self._check_anonymous_write_budget(
++                        session, data.content
++                    )
++                except HTTPException as exc:
++                    logger.info(
++                        "Beacon save refused for anonymous session %s: %s",
++                        session.session_id,
++                        exc.detail,
++                    )
++                    return
+             current_content = self.git_service.get_file_from_branch(
+                 project_id, session.branch, filename
+             )
+@@ -1823,6 +1861,8 @@ class SuggestionService:
+                 return  # Beacon is fire-and-forget
+ 
+             session.changes_count += 1
++            if anonymous_write_bytes is not None:
++                session.anonymous_content_bytes += anonymous_write_bytes
+             session.last_activity = datetime.now(UTC)
+             await self.db.commit()
+ 
+@@ -1970,6 +2010,7 @@ class SuggestionService:
+                     status_code=status.HTTP_400_BAD_REQUEST,
+                     detail=f"Session is {session.status}, cannot save",
+                 )
++            content_bytes = self._check_anonymous_write_budget(session, data.content)
+             current_content = self.git_service.get_file_from_branch(
+                 project_id, session.branch, filename
+             )
+@@ -1993,6 +2034,7 @@ class SuggestionService:
+                 ) from e
+ 
+             session.changes_count += 1
++            session.anonymous_content_bytes += content_bytes
+             self._update_entities_modified(session, data.entity_label)
+             session.last_activity = datetime.now(UTC)
+             try:
+diff --git a/tests/unit/test_suggestion_service.py b/tests/unit/test_suggestion_service.py
+index 6c2c656a..2b2dc0d9 100644
+--- a/tests/unit/test_suggestion_service.py
++++ b/tests/unit/test_suggestion_service.py
+@@ -106,6 +106,8 @@ def _make_session(
+     pr_number: int | None = None,
+     pr_id: uuid.UUID | None = None,
+     last_activity: datetime | None = None,
++    is_anonymous: bool = False,
++    anonymous_content_bytes: int = 0,
+ ) -> MagicMock:
+     session = MagicMock(spec=SuggestionSession)
+     session.id = uuid.uuid4()
+@@ -129,7 +131,8 @@ def _make_session(
+     session.revision = 1
+     session.summary = None
+     # Anonymous-suggestion columns (PR-7): authenticated session defaults
+-    session.is_anonymous = False
++    session.is_anonymous = is_anonymous
++    session.anonymous_content_bytes = anonymous_content_bytes
+     session.submitter_name = None
+     session.submitter_email = None
+     session.client_ip = None
+@@ -1971,6 +1974,136 @@ class TestBeaconSave:
+         assert session.changes_count == 1
+ 
+ 
++# ---------------------------------------------------------------------------
++# anonymous write budgets
++# ---------------------------------------------------------------------------
++
++
++class TestAnonymousWriteBudgets:
++    @pytest.mark.asyncio
++    async def test_beacon_silently_refuses_an_exhausted_anonymous_session(
++        self,
++        service: SuggestionService,
++        mock_db: AsyncMock,
++        mock_git: MagicMock,
++        monkeypatch: pytest.MonkeyPatch,
++    ) -> None:
++        session = _make_session(is_anonymous=True, changes_count=2)
++        project = _make_project()
++        service._get_project = AsyncMock(return_value=project)  # type: ignore[method-assign]
++        service.commit_identity.resolve = AsyncMock(return_value=("Anonymous", "anon@example"))
++        monkeypatch.setattr(
++            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_COMMITS", 2
++        )
++
++        from ontokit.schemas.suggestion import SuggestionBeaconRequest
++
++        await service._beacon_flush(
++            PROJECT_ID,
++            session,
++            SuggestionBeaconRequest(
++                session_id=session.session_id,
++                content="@prefix : <http://example.org/> .",
++            ),
++        )
++
++        mock_git.commit_to_branch.assert_not_called()
++        mock_db.commit.assert_not_awaited()
++
++    @pytest.mark.asyncio
++    async def test_save_rejects_the_commit_limit_before_git(
++        self,
++        service: SuggestionService,
++        mock_db: AsyncMock,
++        mock_git: MagicMock,
++        monkeypatch: pytest.MonkeyPatch,
++    ) -> None:
++        session = _make_session(is_anonymous=True, changes_count=2)
++        project = _make_project()
++        session_result = MagicMock()
++        session_result.scalar_one_or_none.return_value = session
++        project_result = MagicMock()
++        project_result.scalar_one_or_none.return_value = project
++        mock_db.execute.side_effect = [session_result, project_result]
++        monkeypatch.setattr(
++            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_COMMITS", 2
++        )
++
++        from ontokit.schemas.suggestion import SuggestionSaveRequest
++
++        data = SuggestionSaveRequest(
++            content="@prefix : <http://example.org/> .",
++            entity_iri="http://example.org/Foo",
++            entity_label="Foo",
++        )
++        with pytest.raises(HTTPException) as exc:
++            await service.save_anonymous(
++                PROJECT_ID, session.session_id, data, session.session_id
++            )
++
++        assert exc.value.status_code == 429
++        mock_git.commit_to_branch.assert_not_called()
++
++    @pytest.mark.asyncio
++    async def test_repeated_saves_account_for_committed_utf8_bytes(
++        self,
++        service: SuggestionService,
++        mock_db: AsyncMock,
++        mock_git: MagicMock,
++        monkeypatch: pytest.MonkeyPatch,
++    ) -> None:
++        session = _make_session(is_anonymous=True)
++        project = _make_project()
++        session_result = MagicMock()
++        session_result.scalar_one_or_none.return_value = session
++        project_result = MagicMock()
++        project_result.scalar_one_or_none.return_value = project
++        mock_db.execute.side_effect = [
++            session_result,
++            project_result,
++            session_result,
++            project_result,
++            session_result,
++            project_result,
++        ]
++        commit = MagicMock(hash="abc123")
++        mock_git.commit_to_branch.return_value = commit
++        from ontokit.schemas.suggestion import SuggestionSaveRequest
++
++        first_content = '@prefix : <http://example.org/> .\n:s :p "éé" .'
++        second_content = '@prefix : <http://example.org/> .\n:s :p "ééé" .'
++        first_size = len(first_content.encode("utf-8"))
++        second_size = len(second_content.encode("utf-8"))
++        monkeypatch.setattr(
++            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_BYTES",
++            first_size + second_size - 1,
++        )
++
++        first = SuggestionSaveRequest(
++            content=first_content,
++            entity_iri="http://example.org/Foo",
++            entity_label="Foo",
++        )
++        second = SuggestionSaveRequest(
++            content=second_content,
++            entity_iri="http://example.org/Foo",
++            entity_label="Foo",
++        )
++
++        await service.save_anonymous(
++            PROJECT_ID, session.session_id, first, session.session_id
++        )
++        with pytest.raises(HTTPException) as exc:
++            await service.save_anonymous(
++                PROJECT_ID, session.session_id, second, session.session_id
++            )
++
++        assert exc.value.status_code == 413
++        assert session.anonymous_content_bytes == first_size
++        assert session.changes_count == 1
++        assert mock_git.commit_to_branch.call_count == 1
++
++
+ # ---------------------------------------------------------------------------
+ # auto_submit_stale_sessions (extended)
+ # ---------------------------------------------------------------------------
