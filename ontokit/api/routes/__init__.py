@@ -33,6 +33,7 @@ from ontokit.api.routes import (
 from ontokit.api.routes import (
     llm as llm_routes,
 )
+from ontokit.core.api_paths import PROJECTS_PREFIX
 from ontokit.core.config import settings
 
 router = APIRouter()
@@ -86,7 +87,9 @@ router.include_router(properties.router, tags=["Properties"])
 router.include_router(suggestions.router, prefix="/projects", tags=["Suggestions"])
 router.include_router(trust.router, prefix="/projects", tags=["Trust Ladder"])
 router.include_router(
-    anonymous_suggestions.router, prefix="/projects", tags=["anonymous-suggestions"]
+    anonymous_suggestions.router,
+    prefix=PROJECTS_PREFIX,
+    tags=["anonymous-suggestions"],
 )
 router.include_router(remote_sync.router, prefix="/projects", tags=["Sync from Remote"])
 router.include_router(notifications.router, prefix="/notifications", tags=["Notifications"])

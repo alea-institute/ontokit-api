@@ -5,6 +5,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
 from ontokit.schemas.trust import TrustTier
 
 
@@ -22,7 +23,11 @@ class SuggestionSessionResponse(BaseModel):
 class SuggestionSaveRequest(BaseModel):
     """Request body for saving content to a suggestion session."""
 
-    content: str = Field(..., description="Full Turtle source content")
+    content: str = Field(
+        ...,
+        max_length=MAX_TURTLE_PAYLOAD_BYTES,
+        description="Full Turtle source content",
+    )
     entity_iri: str = Field(..., description="IRI of the entity being modified")
     entity_label: str = Field(..., description="Human-readable label of the entity")
     mints_entity: bool = Field(
@@ -102,7 +107,7 @@ class SuggestionBeaconRequest(BaseModel):
     """Request body for beacon save (sendBeacon flush)."""
 
     session_id: str
-    content: str
+    content: str = Field(..., max_length=MAX_TURTLE_PAYLOAD_BYTES)
 
 
 # --- Review request schemas ---

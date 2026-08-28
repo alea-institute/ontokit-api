@@ -17,11 +17,13 @@ from sqlalchemy import text
 
 from ontokit import __version__
 from ontokit.api.routes import router as api_router
+from ontokit.core.api_paths import API_V1_PREFIX
 from ontokit.core.config import settings
 from ontokit.core.database import engine
 from ontokit.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from ontokit.core.middleware import (
     AccessLogMiddleware,
+    AnonymousSuggestionBodyLimitMiddleware,
     RequestIDMiddleware,
     SecurityHeadersMiddleware,
 )
@@ -348,6 +350,9 @@ app.state.limiter = limiter
 
 # --- Middleware (applied in reverse order — last added runs first) ----------
 
+# Bound anonymous full-document saves before FastAPI parses their JSON bodies.
+app.add_middleware(AnonymousSuggestionBodyLimitMiddleware)
+
 # CORS (outermost — must run before anything else touches the response)
 app.add_middleware(
     CORSMiddleware,
@@ -433,7 +438,7 @@ async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSON
 
 # --- Routers ---------------------------------------------------------------
 
-app.include_router(api_router, prefix="/api/v1")
+app.include_router(api_router, prefix=API_V1_PREFIX)
 
 
 @app.get("/health")

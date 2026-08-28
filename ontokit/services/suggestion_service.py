@@ -20,6 +20,10 @@ from sqlalchemy.orm import selectinload
 from ontokit.core.anonymous_token import create_anonymous_token
 from ontokit.core.auth import ANONYMOUS_USER, CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
+from ontokit.core.limits import (
+    MAX_ANONYMOUS_SESSION_BYTES,
+    MAX_ANONYMOUS_SESSION_COMMITS,
+)
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.embedding import EmbeddingJob
 from ontokit.models.project import Project, ProjectMember
@@ -131,6 +135,27 @@ class SuggestionService:
         self.commit_identity = CommitIdentityService(db)
 
     # --- Helpers ---
+
+    @staticmethod
+    def _check_anonymous_write_budget(
+        session: SuggestionSession,
+        content: bytes,
+    ) -> int:
+        """Return the UTF-8 write size or refuse an exhausted session budget."""
+        if session.changes_count >= MAX_ANONYMOUS_SESSION_COMMITS:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Anonymous session commit limit reached",
+            )
+
+        content_bytes = len(content)
+        recorded_bytes = session.anonymous_content_bytes or 0
+        if recorded_bytes + content_bytes > MAX_ANONYMOUS_SESSION_BYTES:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail="Anonymous session content limit reached",
+            )
+        return content_bytes
 
     async def _get_project(self, project_id: UUID) -> Project:
         """Get a project by ID with members loaded, or raise 404."""
@@ -1783,6 +1808,18 @@ class SuggestionService:
         self, project_id: UUID, session: SuggestionSession, data: SuggestionBeaconRequest
     ) -> None:
         """Commit a beacon payload to the session branch (fire-and-forget)."""
+        content = data.content.encode("utf-8")
+        if session.is_anonymous:
+            try:
+                self._check_anonymous_write_budget(session, content)
+            except HTTPException as exc:
+                logger.info(
+                    "Beacon save refused for anonymous session %s: %s",
+                    session.session_id,
+                    exc.detail,
+                )
+                return
+
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
         actor = None
@@ -1804,6 +1841,19 @@ class SuggestionService:
             await self.db.refresh(session)
             if session.status != SuggestionSessionStatus.ACTIVE.value:
                 return
+            anonymous_write_bytes: int | None = None
+            if session.is_anonymous:
+                try:
+                    anonymous_write_bytes = self._check_anonymous_write_budget(
+                        session, content
+                    )
+                except HTTPException as exc:
+                    logger.info(
+                        "Beacon save refused for anonymous session %s: %s",
+                        session.session_id,
+                        exc.detail,
+                    )
+                    return
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
@@ -1812,7 +1862,7 @@ class SuggestionService:
                 self.git_service.commit_to_branch(  # type: ignore[attr-defined]
                     project_id=project_id,
                     branch_name=session.branch,
-                    ontology_content=data.content.encode("utf-8"),
+                    ontology_content=content,
                     filename=filename,
                     message="Auto-save (beacon)",
                     author_name=author_name,
@@ -1823,6 +1873,8 @@ class SuggestionService:
                 return  # Beacon is fire-and-forget
 
             session.changes_count += 1
+            if anonymous_write_bytes is not None:
+                session.anonymous_content_bytes += anonymous_write_bytes
             session.last_activity = datetime.now(UTC)
             await self.db.commit()
 
@@ -1951,6 +2003,9 @@ class SuggestionService:
                 detail=f"Session is {session.status}, cannot save",
             )
 
+        content = data.content.encode("utf-8")
+        self._check_anonymous_write_budget(session, content)
+
         project = await self._get_project(project_id)
         filename = self._get_git_ontology_path(project)
 
@@ -1970,6 +2025,7 @@ class SuggestionService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Session is {session.status}, cannot save",
                 )
+            content_bytes = self._check_anonymous_write_budget(session, content)
             current_content = self.git_service.get_file_from_branch(
                 project_id, session.branch, filename
             )
@@ -1979,7 +2035,7 @@ class SuggestionService:
                 commit_info = self.git_service.commit_to_branch(  # type: ignore[attr-defined]
                     project_id=project_id,
                     branch_name=session.branch,
-                    ontology_content=data.content.encode("utf-8"),
+                    ontology_content=content,
                     filename=filename,
                     message=commit_message,
                     author_name=author_name,
@@ -1993,6 +2049,7 @@ class SuggestionService:
                 ) from e
 
             session.changes_count += 1
+            session.anonymous_content_bytes += content_bytes
             self._update_entities_modified(session, data.entity_label)
             session.last_activity = datetime.now(UTC)
             try:

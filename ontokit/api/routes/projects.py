@@ -30,6 +30,7 @@ from ontokit.core.config import settings
 from ontokit.core.constants import ONTOLOGY_INDEX_UPDATES_CHANNEL
 from ontokit.core.database import get_db
 from ontokit.core.encryption import decrypt_token
+from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.branch_metadata import BranchMetadata
 from ontokit.models.pull_request import GitHubIntegration, PRStatus, PullRequest
@@ -77,8 +78,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Maximum file size for import (50 MB)
-MAX_IMPORT_FILE_SIZE = 50 * 1024 * 1024
+# Imports and full-document editor saves share one Turtle size contract.
+MAX_IMPORT_FILE_SIZE = MAX_TURTLE_PAYLOAD_BYTES
 
 
 def get_service(db: Annotated[AsyncSession, Depends(get_db)]) -> ProjectService:

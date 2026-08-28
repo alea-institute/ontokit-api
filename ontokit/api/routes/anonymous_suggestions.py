@@ -12,6 +12,7 @@ from fastapi.responses import Response
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.anonymous_token import verify_anonymous_token
+from ontokit.core.api_paths import ANONYMOUS_BEACON_PATH, ANONYMOUS_SAVE_PATH
 from ontokit.core.config import settings
 from ontokit.core.database import get_db
 from ontokit.schemas.anonymous_suggestion import (
@@ -82,7 +83,7 @@ async def create_anonymous_session(
 
 
 @router.put(
-    "/{project_id}/suggestions/anonymous/sessions/{session_id}/save",
+    ANONYMOUS_SAVE_PATH,
     response_model=SuggestionSaveResponse,
 )
 async def save_anonymous_session(
@@ -148,7 +149,7 @@ async def discard_anonymous_session(
 
 
 @router.post(
-    "/{project_id}/suggestions/anonymous/beacon",
+    ANONYMOUS_BEACON_PATH,
     status_code=status.HTTP_204_NO_CONTENT,
 )
 async def anonymous_beacon_save(

@@ -59,6 +59,9 @@ class SuggestionSession(Base):
     submitter_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     submitter_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
     client_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    anonymous_content_bytes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
 
     # Trust-ladder state. LLM-authored suggestions are never scheduled for
     # automatic acceptance, irrespective of the submitter's trust tier.

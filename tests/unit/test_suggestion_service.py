@@ -106,6 +106,8 @@ def _make_session(
     pr_number: int | None = None,
     pr_id: uuid.UUID | None = None,
     last_activity: datetime | None = None,
+    is_anonymous: bool = False,
+    anonymous_content_bytes: int = 0,
 ) -> MagicMock:
     session = MagicMock(spec=SuggestionSession)
     session.id = uuid.uuid4()
@@ -129,7 +131,8 @@ def _make_session(
     session.revision = 1
     session.summary = None
     # Anonymous-suggestion columns (PR-7): authenticated session defaults
-    session.is_anonymous = False
+    session.is_anonymous = is_anonymous
+    session.anonymous_content_bytes = anonymous_content_bytes
     session.submitter_name = None
     session.submitter_email = None
     session.client_ip = None
@@ -1969,6 +1972,136 @@ class TestBeaconSave:
 
         # changes_count should NOT have been incremented
         assert session.changes_count == 1
+
+
+# ---------------------------------------------------------------------------
+# anonymous write budgets
+# ---------------------------------------------------------------------------
+
+
+class TestAnonymousWriteBudgets:
+    @pytest.mark.asyncio
+    async def test_beacon_silently_refuses_an_exhausted_anonymous_session(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = _make_session(is_anonymous=True, changes_count=2)
+        project = _make_project()
+        service._get_project = AsyncMock(return_value=project)  # type: ignore[method-assign]
+        service.commit_identity.resolve = AsyncMock(return_value=("Anonymous", "anon@example"))
+        monkeypatch.setattr(
+            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_COMMITS", 2
+        )
+
+        from ontokit.schemas.suggestion import SuggestionBeaconRequest
+
+        await service._beacon_flush(
+            PROJECT_ID,
+            session,
+            SuggestionBeaconRequest(
+                session_id=session.session_id,
+                content="@prefix : <http://example.org/> .",
+            ),
+        )
+
+        mock_git.commit_to_branch.assert_not_called()
+        mock_db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_save_rejects_the_commit_limit_before_git(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = _make_session(is_anonymous=True, changes_count=2)
+        project = _make_project()
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [session_result, project_result]
+        monkeypatch.setattr(
+            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_COMMITS", 2
+        )
+
+        from ontokit.schemas.suggestion import SuggestionSaveRequest
+
+        data = SuggestionSaveRequest(
+            content="@prefix : <http://example.org/> .",
+            entity_iri="http://example.org/Foo",
+            entity_label="Foo",
+        )
+        with pytest.raises(HTTPException) as exc:
+            await service.save_anonymous(
+                PROJECT_ID, session.session_id, data, session.session_id
+            )
+
+        assert exc.value.status_code == 429
+        mock_git.commit_to_branch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_repeated_saves_account_for_committed_utf8_bytes(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = _make_session(is_anonymous=True)
+        project = _make_project()
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [
+            session_result,
+            project_result,
+            session_result,
+            project_result,
+            session_result,
+            project_result,
+        ]
+        commit = MagicMock(hash="abc123")
+        mock_git.commit_to_branch.return_value = commit
+        from ontokit.schemas.suggestion import SuggestionSaveRequest
+
+        first_content = '@prefix : <http://example.org/> .\n:s :p "éé" .'
+        second_content = '@prefix : <http://example.org/> .\n:s :p "ééé" .'
+        first_size = len(first_content.encode("utf-8"))
+        second_size = len(second_content.encode("utf-8"))
+        monkeypatch.setattr(
+            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_BYTES",
+            first_size + second_size - 1,
+        )
+
+        first = SuggestionSaveRequest(
+            content=first_content,
+            entity_iri="http://example.org/Foo",
+            entity_label="Foo",
+        )
+        second = SuggestionSaveRequest(
+            content=second_content,
+            entity_iri="http://example.org/Foo",
+            entity_label="Foo",
+        )
+
+        await service.save_anonymous(
+            PROJECT_ID, session.session_id, first, session.session_id
+        )
+        with pytest.raises(HTTPException) as exc:
+            await service.save_anonymous(
+                PROJECT_ID, session.session_id, second, session.session_id
+            )
+
+        assert exc.value.status_code == 413
+        assert session.anonymous_content_bytes == first_size
+        assert session.changes_count == 1
+        assert mock_git.commit_to_branch.call_count == 1
 
 
 # ---------------------------------------------------------------------------

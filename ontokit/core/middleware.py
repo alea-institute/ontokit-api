@@ -7,9 +7,115 @@ from typing import Any
 
 from starlette.middleware.base import BaseHTTPMiddleware, RequestResponseEndpoint
 from starlette.requests import Request
-from starlette.responses import Response
+from starlette.responses import JSONResponse, Response
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
+
+from ontokit.core.api_paths import (
+    ANONYMOUS_BEACON_PATH_PATTERN,
+    ANONYMOUS_SAVE_PATH_PATTERN,
+)
+from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
 
 logger = logging.getLogger(__name__)
+
+class AnonymousSuggestionBodyLimitMiddleware:
+    """Reject oversized anonymous save bodies before request parsing.
+
+    ``Content-Length`` provides an early refusal for honest clients. The
+    bounded pre-read is authoritative for chunked, missing, or spoofed lengths;
+    the downstream application is not invoked until the complete body is known
+    to fit.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        max_body_bytes: int = MAX_TURTLE_PAYLOAD_BYTES,
+    ) -> None:
+        self.app = app
+        self.max_body_bytes = max_body_bytes
+
+    @staticmethod
+    def _is_limited_request(scope: Scope) -> bool:
+        if scope["type"] != "http":
+            return False
+        method = scope.get("method", "")
+        path = scope.get("path", "")
+        return bool(
+            (method == "PUT" and ANONYMOUS_SAVE_PATH_PATTERN.fullmatch(path))
+            or (method == "POST" and ANONYMOUS_BEACON_PATH_PATTERN.fullmatch(path))
+        )
+
+    @staticmethod
+    def _declared_length(scope: Scope) -> int | None:
+        values = [
+            value
+            for name, value in scope.get("headers", [])
+            if name.lower() == b"content-length"
+        ]
+        if not values:
+            return None
+        try:
+            lengths = {int(value) for value in values}
+        except ValueError:
+            return -1
+        if len(lengths) != 1:
+            return -1
+        return lengths.pop()
+
+    @staticmethod
+    async def _respond(
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        status_code: int,
+        detail: str,
+    ) -> None:
+        response = JSONResponse(status_code=status_code, content={"detail": detail})
+        await response(scope, receive, send)
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if not self._is_limited_request(scope):
+            await self.app(scope, receive, send)
+            return
+
+        declared = self._declared_length(scope)
+        if declared is not None and declared < 0:
+            await self._respond(scope, receive, send, 400, "Invalid Content-Length")
+            return
+        if declared is not None and declared > self.max_body_bytes:
+            await self._respond(scope, receive, send, 413, "Request body too large")
+            return
+
+        messages: list[Message] = []
+        total = 0
+        while True:
+            message = await receive()
+            messages.append(message)
+            if message["type"] == "http.request":
+                total += len(message.get("body", b""))
+                if total > self.max_body_bytes:
+                    await self._respond(
+                        scope, receive, send, 413, "Request body too large"
+                    )
+                    return
+                if not message.get("more_body", False):
+                    break
+            elif message["type"] == "http.disconnect":
+                break
+
+        index = 0
+
+        async def replay() -> Message:
+            nonlocal index
+            if index < len(messages):
+                message = messages[index]
+                index += 1
+                return message
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, replay, send)
 
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
