@@ -164,7 +164,10 @@ async def test_entity_job_identity_is_scoped_to_project_and_branch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_entity_job_uses_und_for_provider_but_none_for_rdf_match() -> None:
+@pytest.mark.parametrize("first_release", [1, 0])
+async def test_entity_job_uses_und_for_provider_but_none_for_rdf_match(
+    first_release: int,
+) -> None:
     project_id = uuid4()
     config = _config(project_id=project_id, language_tags=["fr"], primary_model="model")
     db = AsyncMock()
@@ -181,7 +184,7 @@ async def test_entity_job_uses_und_for_provider_but_none_for_rdf_match() -> None
     service.translate = AsyncMock(return_value={})
     service.apply_results = AsyncMock(return_value=SimpleNamespace(commit=None))
     redis = AsyncMock()
-    redis.sadd.return_value = 1
+    redis.sadd.return_value = first_release
 
     with (
         patch("ontokit.services.translation_jobs.get_git_service", return_value=git),
@@ -202,10 +205,14 @@ async def test_entity_job_uses_und_for_provider_but_none_for_rdf_match() -> None
 
     service.translate.assert_awaited_once_with("An animal", "und", ["fr"])
     assert service.apply_results.await_args.kwargs["source_language"] is None
-    redis.decrby.assert_awaited_once()
-    redis.expire.assert_awaited_once_with(
-        f"translation:released:{project_id}", RELEASE_RECEIPT_TTL_SECONDS
-    )
+    if first_release:
+        redis.decrby.assert_awaited_once()
+        redis.expire.assert_awaited_once_with(
+            f"translation:released:{project_id}", RELEASE_RECEIPT_TTL_SECONDS
+        )
+    else:
+        redis.decrby.assert_not_awaited()
+        redis.expire.assert_not_awaited()
 
 
 @pytest.mark.asyncio

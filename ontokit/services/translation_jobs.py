@@ -374,8 +374,8 @@ async def run_translation_entity_job(
             release_key = f"translation:released:{project_uuid}"
             if arq_job_id:
                 first_release = await ctx["redis"].sadd(release_key, arq_job_id)
-                await ctx["redis"].expire(release_key, RELEASE_RECEIPT_TTL_SECONDS)
                 if first_release:
+                    await ctx["redis"].expire(release_key, RELEASE_RECEIPT_TTL_SECONDS)
                     await ctx["redis"].decrby(_pending_key(project_uuid), 1)
 
 
