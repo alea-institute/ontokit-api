@@ -67,21 +67,28 @@ class TranslationReviewService:
         author_name: str,
         author_email: str,
     ) -> CommitInfo:
-        self.authorize(project_id, member, reviewer_languages, record)
-        if record.proposed_value is None:
-            raise ValueError("translation record has no proposed literal")
-        literal = Literal(record.proposed_value, lang=record.language)
-        commit = await self._commit_graph_change(
-            project_id=project_id,
-            branch=branch,
-            filename=filename,
-            message=f"Confirm {record.language} translation",
-            author_name=author_name,
-            author_email=author_email,
-            mutate=lambda graph: self._confirm_graph(graph, record, literal),
-        )
-        record.confirm(member.id)
-        await self.db.commit()
+        try:
+            async with branch_write_lock(self.db, project_id, branch):
+                await self.db.refresh(record, with_for_update=True)
+                self.authorize(project_id, member, reviewer_languages, record)
+                if record.proposed_value is None:
+                    raise ValueError("translation record has no proposed literal")
+                literal = Literal(record.proposed_value, lang=record.language)
+                record.confirm(member.id)
+                await self.db.flush()
+                commit = self._commit_graph_change_locked(
+                    project_id=project_id,
+                    branch=branch,
+                    filename=filename,
+                    message=f"Confirm {record.language} translation",
+                    author_name=author_name,
+                    author_email=author_email,
+                    mutate=lambda graph: self._confirm_graph(graph, record, literal),
+                )
+                await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
         assert commit is not None
         await self._enqueue(project_id, branch, commit.hash)
         return commit
@@ -98,24 +105,31 @@ class TranslationReviewService:
         author_name: str,
         author_email: str,
     ) -> CommitInfo | None:
-        self.authorize(project_id, member, reviewer_languages, record)
-        if record.state != "provisional":
-            raise ValueError("only provisional translation records can be rejected")
         commit: CommitInfo | None = None
-        if record.proposed_value is not None:
-            literal = Literal(record.proposed_value, lang=record.language)
-            commit = await self._commit_graph_change(
-                project_id=project_id,
-                branch=branch,
-                filename=filename,
-                message=f"Reject {record.language} translation",
-                author_name=author_name,
-                author_email=author_email,
-                mutate=lambda target: self._reject_graph(target, record, literal),
-                commit_if_unchanged=False,
-            )
-        record.state = "rejected"
-        await self.db.commit()
+        try:
+            async with branch_write_lock(self.db, project_id, branch):
+                await self.db.refresh(record, with_for_update=True)
+                self.authorize(project_id, member, reviewer_languages, record)
+                if record.state != "provisional":
+                    raise ValueError("only provisional translation records can be rejected")
+                record.state = "rejected"
+                await self.db.flush()
+                if record.proposed_value is not None:
+                    literal = Literal(record.proposed_value, lang=record.language)
+                    commit = self._commit_graph_change_locked(
+                        project_id=project_id,
+                        branch=branch,
+                        filename=filename,
+                        message=f"Reject {record.language} translation",
+                        author_name=author_name,
+                        author_email=author_email,
+                        mutate=lambda target: self._reject_graph(target, record, literal),
+                        commit_if_unchanged=False,
+                    )
+                await self.db.commit()
+        except Exception:
+            await self.db.rollback()
+            raise
         if commit is not None:
             await self._enqueue(project_id, branch, commit.hash)
         return commit
@@ -162,7 +176,7 @@ class TranslationReviewService:
         remove_annotation(graph, subject, predicate, literal)
         graph.remove((subject, predicate, literal))
 
-    async def _commit_graph_change(
+    def _commit_graph_change_locked(
         self,
         *,
         project_id: uuid.UUID,
@@ -174,26 +188,25 @@ class TranslationReviewService:
         mutate: Callable[[Graph], None],
         commit_if_unchanged: bool = True,
     ) -> CommitInfo | None:
-        async with branch_write_lock(self.db, project_id, branch):
-            content = self.git.get_file_from_branch(project_id, branch, filename)
-            graph = Graph().parse(data=content, format="turtle")
-            mutate(graph)
-            if not commit_if_unchanged and graph.isomorphic(
-                Graph().parse(data=content, format="turtle")
-            ):
-                return None
-            updated = graph.serialize(format="turtle").encode()
-            return self.git.commit_changes(
-                project_id=project_id,
-                ontology_content=updated,
-                filename=filename,
-                message=message,
-                author_name=author_name,
-                author_email=author_email,
-                branch_name=branch,
-                committer_name=ONTOKIT_COMMITTER_NAME,
-                committer_email=ONTOKIT_COMMITTER_EMAIL,
-            )
+        content = self.git.get_file_from_branch(project_id, branch, filename)
+        graph = Graph().parse(data=content, format="turtle")
+        mutate(graph)
+        if not commit_if_unchanged and graph.isomorphic(
+            Graph().parse(data=content, format="turtle")
+        ):
+            return None
+        updated = graph.serialize(format="turtle").encode()
+        return self.git.commit_changes(
+            project_id=project_id,
+            ontology_content=updated,
+            filename=filename,
+            message=message,
+            author_name=author_name,
+            author_email=author_email,
+            branch_name=branch,
+            committer_name=ONTOKIT_COMMITTER_NAME,
+            committer_email=ONTOKIT_COMMITTER_EMAIL,
+        )
 
     async def _enqueue(self, project_id: uuid.UUID, branch: str, commit_hash: str) -> None:
         try:

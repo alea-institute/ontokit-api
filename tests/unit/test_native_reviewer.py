@@ -105,6 +105,53 @@ async def test_tagged_reviewer_confirms_record_with_human_authored_commit(
 
 
 @pytest.mark.asyncio
+async def test_confirmation_locks_and_flushes_state_before_git(
+    bare_git_repo: BareOntologyRepository,
+) -> None:
+    project_id = uuid4()
+    member = ProjectMember(id=uuid4(), project_id=project_id, user_id="reviewer", role="viewer")
+    record = _record(project_id)
+    service, db = _service(bare_git_repo)
+    events: list[str] = []
+
+    async def refresh(*_args: object, **kwargs: object) -> None:
+        assert kwargs["with_for_update"] is True
+        events.append("lock")
+
+    async def flush() -> None:
+        assert record.state == "verified"
+        events.append("flush")
+
+    original_commit = service.git.commit_changes
+
+    def commit_changes(**kwargs: object) -> object:
+        assert record.state == "verified"
+        events.append("git")
+        return original_commit(**kwargs)  # type: ignore[arg-type]
+
+    async def commit() -> None:
+        events.append("commit")
+
+    db.refresh.side_effect = refresh
+    db.flush.side_effect = flush
+    db.commit.side_effect = commit
+    service.git.commit_changes = Mock(side_effect=commit_changes)  # type: ignore[method-assign]
+
+    await service.confirm_loaded(
+        project_id=project_id,
+        branch="main",
+        filename="ontology.ttl",
+        member=member,
+        reviewer_languages={"sw"},
+        record=record,
+        author_name="Asha Reviewer",
+        author_email="asha@example.test",
+    )
+
+    assert events == ["lock", "flush", "git", "commit"]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("role", ["owner", "admin", "editor", "suggester", "viewer"])
 @pytest.mark.parametrize("tagged", [False, True])
 async def test_confirmation_authorization_matrix(
