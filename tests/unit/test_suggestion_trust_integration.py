@@ -98,6 +98,7 @@ def _session(
     session.branch = f"suggest/x/{session_id}"
     session.status = status
     session.changes_count = changes_count
+    session.anonymous_content_bytes = 0
     session.entities_modified = None
     session.pr_number = pr_number
     session.pr_id = None
@@ -447,7 +448,7 @@ class TestMintingGate:
             return_value=(
                 b"@prefix : <http://x#> .\n"
                 b"@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
-                b":A a owl:Class ; :label \"old\" ."
+                b':A a owl:Class ; :label "old" .'
             )
         )
 
@@ -619,15 +620,14 @@ class TestUntrustedSubmissionLimiter:
         self, service: SuggestionService
     ) -> None:
         project = _project([_member("contributor-1")])
-        with patch(
-            "ontokit.services.suggestion_service.check_and_consume",
-            new=AsyncMock(
-                return_value=TrustLimitDecision(TrustLimitStatus.UNAVAILABLE, 0)
+        with (
+            patch(
+                "ontokit.services.suggestion_service.check_and_consume",
+                new=AsyncMock(return_value=TrustLimitDecision(TrustLimitStatus.UNAVAILABLE, 0)),
             ),
-        ), pytest.raises(HTTPException) as exc:
-            await service._consume_untrusted_submission(
-                project, _user("contributor-1"), None
-            )
+            pytest.raises(HTTPException) as exc,
+        ):
+            await service._consume_untrusted_submission(project, _user("contributor-1"), None)
         assert exc.value.status_code == 503
         assert exc.value.detail["reason"] == "submission_limiter_unavailable"
 

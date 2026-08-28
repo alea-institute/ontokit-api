@@ -19,5 +19,6 @@ def test_production_image_is_built_before_any_tag_publication() -> None:
     assert image_build["with"]["file"] == "Dockerfile.prod"
     assert image_build["with"]["push"] is False
 
-    for publisher in ("publish_pypi", "publish_github", "publish_docker"):
-        assert "docker_preflight" in jobs[publisher]["needs"]
+    assert "docker_preflight" in jobs["publish_docker"]["needs"]
+    for publisher in ("publish_pypi", "publish_github"):
+        assert "publish_docker" in jobs[publisher]["needs"]

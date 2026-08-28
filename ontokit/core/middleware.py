@@ -14,9 +14,10 @@ from ontokit.core.api_paths import (
     ANONYMOUS_BEACON_PATH_PATTERN,
     ANONYMOUS_SAVE_PATH_PATTERN,
 )
-from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
+from ontokit.core.limits import MAX_ANONYMOUS_REQUEST_BYTES
 
 logger = logging.getLogger(__name__)
+
 
 class AnonymousSuggestionBodyLimitMiddleware:
     """Reject oversized anonymous save bodies before request parsing.
@@ -31,7 +32,7 @@ class AnonymousSuggestionBodyLimitMiddleware:
         self,
         app: ASGIApp,
         *,
-        max_body_bytes: int = MAX_TURTLE_PAYLOAD_BYTES,
+        max_body_bytes: int = MAX_ANONYMOUS_REQUEST_BYTES,
     ) -> None:
         self.app = app
         self.max_body_bytes = max_body_bytes
@@ -50,9 +51,7 @@ class AnonymousSuggestionBodyLimitMiddleware:
     @staticmethod
     def _declared_length(scope: Scope) -> int | None:
         values = [
-            value
-            for name, value in scope.get("headers", [])
-            if name.lower() == b"content-length"
+            value for name, value in scope.get("headers", []) if name.lower() == b"content-length"
         ]
         if not values:
             return None
@@ -88,31 +87,39 @@ class AnonymousSuggestionBodyLimitMiddleware:
             await self._respond(scope, receive, send, 413, "Request body too large")
             return
 
-        messages: list[Message] = []
+        body = bytearray()
         total = 0
+        disconnected = False
         while True:
             message = await receive()
-            messages.append(message)
             if message["type"] == "http.request":
-                total += len(message.get("body", b""))
+                chunk = message.get("body", b"")
+                total += len(chunk)
                 if total > self.max_body_bytes:
-                    await self._respond(
-                        scope, receive, send, 413, "Request body too large"
-                    )
+                    await self._respond(scope, receive, send, 413, "Request body too large")
                     return
+                body.extend(chunk)
                 if not message.get("more_body", False):
                     break
             elif message["type"] == "http.disconnect":
+                disconnected = True
                 break
 
-        index = 0
+        replayed_body = False
 
         async def replay() -> Message:
-            nonlocal index
-            if index < len(messages):
-                message = messages[index]
-                index += 1
-                return message
+            nonlocal replayed_body
+            if not replayed_body and body:
+                replayed_body = True
+                return {
+                    "type": "http.request",
+                    "body": bytes(body),
+                    "more_body": disconnected,
+                }
+            if disconnected:
+                return {"type": "http.disconnect"}
+            if not replayed_body:
+                replayed_body = True
             return {"type": "http.request", "body": b"", "more_body": False}
 
         await self.app(scope, replay, send)

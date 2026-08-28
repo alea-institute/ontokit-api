@@ -1845,9 +1845,7 @@ class SuggestionService:
             anonymous_write_bytes: int | None = None
             if session.is_anonymous:
                 try:
-                    anonymous_write_bytes = self._check_anonymous_write_budget(
-                        session, content
-                    )
+                    anonymous_write_bytes = self._check_anonymous_write_budget(session, content)
                 except HTTPException as exc:
                     logger.info(
                         "Beacon save refused for anonymous session %s: %s",

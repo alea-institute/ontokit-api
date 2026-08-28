@@ -539,6 +539,25 @@ class BareOntologyRepository:
         commit = self._resolve_ref(ref)
         return str(commit.id)
 
+    def restore_branch_head(
+        self,
+        name: str,
+        *,
+        expected_head: str,
+        target_head: str,
+    ) -> bool:
+        """Move a branch back only when it still points at the failed write."""
+        branch_ref = f"refs/heads/{name}"
+        if branch_ref not in self.repo.references:
+            return False
+        reference = self.repo.references[branch_ref]
+        current = reference.peel(pygit2.Commit)
+        if str(current.id) != expected_head:
+            return False
+        target = self._resolve_ref(target_head)
+        reference.set_target(target.id)
+        return True
+
     def list_branches(self) -> list[BranchInfo]:
         """List all branches with their metadata."""
         branches = []
@@ -1151,6 +1170,21 @@ class BareGitRepositoryService:
         """
         repo = self.get_repository(project_id)
         return repo.create_branch(name, from_ref)
+
+    def restore_branch_head(
+        self,
+        project_id: UUID,
+        name: str,
+        *,
+        expected_head: str,
+        target_head: str,
+    ) -> bool:
+        """Compensate a failed cross-store write without overwriting newer work."""
+        return self.get_repository(project_id).restore_branch_head(
+            name,
+            expected_head=expected_head,
+            target_head=target_head,
+        )
 
     def delete_branch(self, project_id: UUID, name: str, force: bool = False) -> bool:
         """

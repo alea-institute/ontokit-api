@@ -38,6 +38,7 @@ from ontokit.services.normalization_service import NormalizationService
 from ontokit.services.ontology import get_ontology_service
 from ontokit.services.storage import get_storage_service
 from ontokit.services.translation_jobs import (
+    TRANSLATION_ENTITY_MAX_TRIES,
     run_label_diff_job,
     run_translation_backfill_job,
     run_translation_entity_job,
@@ -1511,7 +1512,7 @@ class WorkerSettings:
         run_batch_entity_embed_task,
         run_translation_label_diff_task,
         run_translation_backfill_task,
-        run_translation_entity_task,
+        func(run_translation_entity_task, max_tries=TRANSLATION_ENTITY_MAX_TRIES),
         run_remote_check_task,
         # KTD14: bounded under both the 300s worker default and the 5-minute
         # cadence, so a wedged sweep cannot overlap the next one.

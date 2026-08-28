@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from ontokit.core.api_paths import _compile_route_path
-from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
+from ontokit.core.limits import MAX_ANONYMOUS_REQUEST_BYTES, MAX_TURTLE_PAYLOAD_BYTES
 from ontokit.core.middleware import AnonymousSuggestionBodyLimitMiddleware
 from ontokit.models.suggestion_session import SuggestionSession
 from ontokit.schemas.suggestion import SuggestionBeaconRequest, SuggestionSaveRequest
@@ -41,8 +41,8 @@ def _limited_client(limit: int, touched: list[str]) -> TestClient:
     ("headers", "body_factory"),
     [
         ({"content-length": "1000"}, lambda: b"{}"),
-        ({"content-length": "2"}, lambda: b'x' * 33),
-        ({"transfer-encoding": "chunked"}, lambda: b'x' * 33),
+        ({"content-length": "2"}, lambda: b"x" * 33),
+        ({"transfer-encoding": "chunked"}, lambda: b"x" * 33),
     ],
     ids=["declared-too-large", "spoofed-too-small", "missing-content-length"],
 )
@@ -76,6 +76,30 @@ def test_anonymous_save_bodies_at_the_limit_reach_the_route(
 
     assert response.status_code == 200
     assert touched == [path]
+
+
+def test_invalid_content_length_is_rejected_before_parsing() -> None:
+    touched: list[str] = []
+    client = _limited_client(32, touched)
+
+    response = client.put(
+        SAVE_PATH,
+        content=b"{}",
+        headers={"content-length": "not-a-number"},
+    )
+
+    assert response.status_code == 400
+    assert touched == []
+
+
+def test_maximum_ascii_turtle_document_fits_in_json_request_budget() -> None:
+    request = SuggestionSaveRequest(
+        content="x" * MAX_TURTLE_PAYLOAD_BYTES,
+        entity_iri="https://example.test/entity",
+        entity_label="Entity",
+    )
+
+    assert len(request.model_dump_json().encode()) <= MAX_ANONYMOUS_REQUEST_BYTES
 
 
 @pytest.mark.parametrize("schema", [SuggestionSaveRequest, SuggestionBeaconRequest])

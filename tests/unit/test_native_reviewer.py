@@ -152,6 +152,34 @@ async def test_confirmation_locks_and_flushes_state_before_git(
 
 
 @pytest.mark.asyncio
+async def test_database_commit_failure_restores_translation_branch(
+    bare_git_repo: BareOntologyRepository,
+) -> None:
+    project_id = uuid4()
+    member = ProjectMember(id=uuid4(), project_id=project_id, user_id="reviewer", role="viewer")
+    record = _record(project_id)
+    service, db = _service(bare_git_repo)
+    original_head = bare_git_repo.get_branch_commit_hash("main")
+    db.commit.side_effect = RuntimeError("database commit failed")
+
+    with pytest.raises(RuntimeError, match="database commit failed"):
+        await service.confirm_loaded(
+            project_id=project_id,
+            branch="main",
+            filename="ontology.ttl",
+            member=member,
+            reviewer_languages={"sw"},
+            record=record,
+            author_name="Asha Reviewer",
+            author_email="asha@example.test",
+        )
+
+    assert bare_git_repo.get_branch_commit_hash("main") == original_head
+    db.rollback.assert_awaited_once()
+    service.index_enqueuer.assert_not_awaited()  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("role", ["owner", "admin", "editor", "suggester", "viewer"])
 @pytest.mark.parametrize("tagged", [False, True])
 async def test_confirmation_authorization_matrix(

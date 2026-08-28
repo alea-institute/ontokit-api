@@ -83,9 +83,7 @@ class TranslationCoverageService:
         ]
 
     async def entity_state(self, project_id: UUID, entity_iri: str, branch: str) -> dict[str, Any]:
-        languages, labels, records, graph = await self._load_entity(
-            project_id, entity_iri, branch
-        )
+        languages, labels, records, graph = await self._load_entity(project_id, entity_iri, branch)
         candidates = {
             (entity, predicate, language)
             for entity, predicate in self._source_slots(labels, records)

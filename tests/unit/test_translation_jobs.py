@@ -19,6 +19,7 @@ from ontokit.services.llm.rate_limiter import RateLimitReservation
 from ontokit.services.translation_jobs import (
     MAX_PENDING_TRANSLATIONS_PER_PROJECT,
     RELEASE_RECEIPT_TTL_SECONDS,
+    TRANSLATION_ENTITY_MAX_TRIES,
     TranslationTask,
     _provider_call_units,
     discover_translation_tasks,
@@ -184,7 +185,7 @@ async def test_entity_job_uses_und_for_provider_but_none_for_rdf_match(
     service.translate = AsyncMock(return_value={})
     service.apply_results = AsyncMock(return_value=SimpleNamespace(commit=None))
     redis = AsyncMock()
-    redis.sadd.return_value = first_release
+    redis.set.return_value = first_release
 
     with (
         patch("ontokit.services.translation_jobs.get_git_service", return_value=git),
@@ -207,12 +208,61 @@ async def test_entity_job_uses_und_for_provider_but_none_for_rdf_match(
     assert service.apply_results.await_args.kwargs["source_language"] is None
     if first_release:
         redis.decrby.assert_awaited_once()
-        redis.expire.assert_awaited_once_with(
-            f"translation:released:{project_id}", RELEASE_RECEIPT_TTL_SECONDS
+        redis.set.assert_awaited_once_with(
+            f"translation:released:{project_id}:job-1",
+            "1",
+            ex=RELEASE_RECEIPT_TTL_SECONDS,
+            nx=True,
         )
     else:
         redis.decrby.assert_not_awaited()
-        redis.expire.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_entity_job_holds_slot_until_terminal_retry() -> None:
+    project_id = uuid4()
+    db = AsyncMock()
+    db.scalar.side_effect = RuntimeError("provider unavailable")
+    redis = AsyncMock()
+
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await run_translation_entity_job(
+            {"db": db, "redis": redis, "job_id": "job-1", "job_try": 1},
+            str(project_id),
+            "main",
+            str(EX.cat),
+            str(SKOS.definition),
+            "An animal",
+            "en",
+            "fr",
+            "actor-1",
+            "fast",
+        )
+
+    redis.set.assert_not_awaited()
+    redis.decrby.assert_not_awaited()
+
+    redis.set.return_value = True
+    with pytest.raises(RuntimeError, match="provider unavailable"):
+        await run_translation_entity_job(
+            {
+                "db": db,
+                "redis": redis,
+                "job_id": "job-1",
+                "job_try": TRANSLATION_ENTITY_MAX_TRIES,
+            },
+            str(project_id),
+            "main",
+            str(EX.cat),
+            str(SKOS.definition),
+            "An animal",
+            "en",
+            "fr",
+            "actor-1",
+            "fast",
+        )
+
+    redis.decrby.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -258,10 +308,19 @@ async def test_label_diff_enqueue_is_deterministic_and_carries_actor_role() -> N
 def test_translation_jobs_are_registered_with_arq_worker() -> None:
     from ontokit.worker import WorkerSettings
 
-    names = {getattr(function, "__name__", "") for function in WorkerSettings.functions}
+    names = {
+        getattr(function, "name", getattr(function, "__name__", ""))
+        for function in WorkerSettings.functions
+    }
     assert "run_translation_label_diff_task" in names
     assert "run_translation_entity_task" in names
     assert "run_translation_backfill_task" in names
+    entity_function = next(
+        function
+        for function in WorkerSettings.functions
+        if getattr(function, "name", "") == "run_translation_entity_task"
+    )
+    assert entity_function.max_tries == TRANSLATION_ENTITY_MAX_TRIES
 
 
 @pytest.mark.asyncio
@@ -301,9 +360,7 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
         await translate_entity_field(project_id, request, db, user)
     assert limited.value.status_code == 429
 
-    reserve_units = AsyncMock(
-        return_value=RateLimitReservation(accepted=True, acquired=True)
-    )
+    reserve_units = AsyncMock(return_value=RateLimitReservation(accepted=True, acquired=True))
     with (
         patch("ontokit.api.routes.translation._require_member", AsyncMock(return_value="editor")),
         patch(
@@ -321,9 +378,7 @@ async def test_on_demand_endpoint_is_role_gated_rate_limited_and_enqueues() -> N
 
     redis = AsyncMock()
     redis.incrby.return_value = 1
-    reserve_units = AsyncMock(
-        return_value=RateLimitReservation(accepted=True, acquired=True)
-    )
+    reserve_units = AsyncMock(return_value=RateLimitReservation(accepted=True, acquired=True))
     with (
         patch("ontokit.api.routes.translation._require_member", AsyncMock(return_value="editor")),
         patch(
@@ -371,7 +426,7 @@ async def test_on_demand_duplicate_and_enqueue_failure_reuse_idempotent_reservat
     redis.incrby.return_value = 1
     reserve_units = AsyncMock(
         side_effect=[
-            RateLimitReservation(accepted=True, acquired=False),
+            RateLimitReservation(accepted=True, acquired=True),
             RateLimitReservation(accepted=True, acquired=True),
         ]
     )
@@ -396,7 +451,14 @@ async def test_on_demand_duplicate_and_enqueue_failure_reuse_idempotent_reservat
 
     assert duplicate.job_id.startswith("translation-entity:")
     redis.decrby.assert_awaited_once()
-    release_units.assert_not_awaited()
+    release_units.assert_awaited_once_with(
+        redis,
+        str(project_id),
+        "actor-1",
+        "editor",
+        2,
+        reservation_id=duplicate.job_id,
+    )
 
     pool.enqueue_job.side_effect = ConnectionError("queue down")
     with (
@@ -419,7 +481,8 @@ async def test_on_demand_duplicate_and_enqueue_failure_reuse_idempotent_reservat
     assert redis.decrby.await_count == 2
     reservation_ids = [call.kwargs["reservation_id"] for call in reserve_units.await_args_list]
     assert reservation_ids == [duplicate.job_id, duplicate.job_id]
-    release_units.assert_awaited_once_with(
+    assert release_units.await_count == 2
+    release_units.assert_awaited_with(
         redis,
         str(project_id),
         "actor-1",

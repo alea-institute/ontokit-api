@@ -45,6 +45,7 @@ MAX_PENDING_TRANSLATIONS_PER_PROJECT = 100
 # one-hour result retention so a later legitimate reuse of the deterministic
 # job ID starts after its old exactly-once receipt has expired.
 RELEASE_RECEIPT_TTL_SECONDS = 45 * 60
+TRANSLATION_ENTITY_MAX_TRIES = 5
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,6 +56,14 @@ class TranslationTask:
     source_language: str | None
     target_language: str | None
     mode: str
+
+
+@dataclass(frozen=True, slots=True)
+class TranslationEnqueueResult:
+    """Queue identities plus which reservations created new work."""
+
+    job_ids: list[str]
+    newly_queued_job_ids: list[str]
 
 
 class TranslationEnqueueError(RuntimeError):
@@ -154,16 +163,17 @@ async def enqueue_translation_tasks(
     tasks: list[TranslationTask],
     *,
     commit_hash: str | None = None,
-) -> list[str]:
+) -> TranslationEnqueueResult:
     """Atomically reserve bounded project fan-out before any paid work is queued."""
     if not tasks:
-        return []
+        return TranslationEnqueueResult([], [])
     reserved = len(tasks)
     pending = int(await redis.incrby(_pending_key(project_id), reserved))
     if pending > MAX_PENDING_TRANSLATIONS_PER_PROJECT:
         await redis.decrby(_pending_key(project_id), reserved)
         raise TranslationEnqueueError("project translation fan-out cap reached")
     job_ids: list[str] = []
+    newly_queued_job_ids: list[str] = []
     newly_queued = 0
     owned_slots = reserved
     try:
@@ -193,7 +203,9 @@ async def enqueue_translation_tasks(
                 job_ids.append(requested_job_id)
             else:
                 newly_queued += 1
-                job_ids.append(str(job.job_id))
+                queued_job_id = str(job.job_id)
+                newly_queued_job_ids.append(queued_job_id)
+                job_ids.append(queued_job_id)
     except Exception as exc:
         unqueued_slots = owned_slots - newly_queued
         if unqueued_slots:
@@ -202,7 +214,7 @@ async def enqueue_translation_tasks(
             "translation queue failed to accept the batch",
             queue_unavailable=True,
         ) from exc
-    return job_ids
+    return TranslationEnqueueResult(job_ids, newly_queued_job_ids)
 
 
 async def enqueue_label_diff_after_commit(
@@ -300,10 +312,13 @@ async def run_label_diff_job(
             reservation_id=reservation_id,
         ):
             return {"queued": 0, "job_ids": [], "rate_limited": True}
-    job_ids = await enqueue_translation_tasks(
+    enqueue_result = await enqueue_translation_tasks(
         redis, redis, project_uuid, branch, actor_id, tasks, commit_hash=commit_hash
     )
-    return {"queued": len(job_ids), "job_ids": job_ids}
+    return {
+        "queued": len(enqueue_result.newly_queued_job_ids),
+        "job_ids": enqueue_result.job_ids,
+    }
 
 
 async def run_translation_entity_job(
@@ -322,6 +337,7 @@ async def run_translation_entity_job(
 ) -> dict[str, Any]:
     db: AsyncSession = ctx["db"]
     project_uuid = UUID(project_id)
+    completed = False
     try:
         config = await db.scalar(
             select(ProjectTranslationConfig).where(
@@ -367,15 +383,21 @@ async def run_translation_entity_job(
             results=results,
             model_version=config.primary_model or "unknown",
         )
+        completed = True
         return {"mode": mode, "commit_hash": outcome.commit.hash if outcome.commit else None}
     finally:
-        if release_slot:
+        attempt = int(ctx.get("job_try", TRANSLATION_ENTITY_MAX_TRIES))
+        if release_slot and (completed or attempt >= TRANSLATION_ENTITY_MAX_TRIES):
             arq_job_id = str(ctx.get("job_id", ""))
-            release_key = f"translation:released:{project_uuid}"
+            release_key = f"translation:released:{project_uuid}:{arq_job_id}"
             if arq_job_id:
-                first_release = await ctx["redis"].sadd(release_key, arq_job_id)
+                first_release = await ctx["redis"].set(
+                    release_key,
+                    "1",
+                    ex=RELEASE_RECEIPT_TTL_SECONDS,
+                    nx=True,
+                )
                 if first_release:
-                    await ctx["redis"].expire(release_key, RELEASE_RECEIPT_TTL_SECONDS)
                     await ctx["redis"].decrby(_pending_key(project_uuid), 1)
 
 
@@ -460,6 +482,8 @@ async def run_translation_backfill_job(
 __all__ = [
     "MAX_PENDING_TRANSLATIONS_PER_PROJECT",
     "RELEASE_RECEIPT_TTL_SECONDS",
+    "TRANSLATION_ENTITY_MAX_TRIES",
+    "TranslationEnqueueResult",
     "TranslationTask",
     "TranslationEnqueueError",
     "discover_translation_tasks",

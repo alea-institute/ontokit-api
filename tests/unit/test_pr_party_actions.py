@@ -40,6 +40,7 @@ from ontokit.api.routes.pr_party import (
     get_queue_reader,
 )
 from ontokit.api.routes.pr_party_settings import get_credential_service
+from ontokit.core.config import settings
 from ontokit.main import app
 from ontokit.models.pr_party import (
     PRPartyAction,
@@ -71,7 +72,12 @@ from ontokit.services.pr_party_github import (
     TokenExpiredError,
     actuation_client,
 )
-from ontokit.services.pr_party_rate_limiter import LimiterOutcome, action_key, check_and_consume
+from ontokit.services.pr_party_rate_limiter import (
+    LimiterOutcome,
+    action_key,
+    check_and_consume,
+    reserve_action_budget,
+)
 
 BASE = "/api/v1/pr-party"
 USER_ID = "test-user-id"
@@ -411,6 +417,28 @@ class _FakeRedis:
         self.start = start
         self.error = error
         self.expired: list[str] = []
+        self.receipts: set[str] = set()
+
+    async def eval(
+        self,
+        script: str,  # noqa: ARG002
+        numkeys: int,  # noqa: ARG002
+        *keys_and_args: object,
+    ) -> int:
+        if self.error is not None:
+            raise self.error
+        key, receipt_key, limit, _ttl, receipt_enabled = keys_and_args
+        assert isinstance(key, str)
+        assert isinstance(receipt_key, str)
+        if bool(receipt_enabled) and receipt_key in self.receipts:
+            return 1
+        current = self.counts.get(key, self.start)
+        if current >= int(limit):
+            return 0
+        self.counts[key] = current + 1
+        if bool(receipt_enabled):
+            self.receipts.add(receipt_key)
+        return 2
 
     async def incr(self, name: str) -> int:
         if self.error is not None:
@@ -472,8 +500,8 @@ def wired(authed_client: tuple[TestClient, AsyncMock]) -> Any:
         )
         reader = _FakeReader(prs, store.rows)
 
-        probe_app.dependency_overrides[get_credential_service] = lambda: _FakeCredentialServiceForAuth(
-            reviewer
+        probe_app.dependency_overrides[get_credential_service] = lambda: (
+            _FakeCredentialServiceForAuth(reviewer)
         )
         probe_app.dependency_overrides[get_queue_reader] = lambda: reader
         probe_app.dependency_overrides[get_action_service] = lambda: service
@@ -1499,6 +1527,24 @@ class TestRateLimiting:
         assert client.get(f"{BASE}/queue").status_code == 200
         assert client.get(f"{BASE}/cards/{pr.id}").status_code == 200
 
+    def test_final_budget_unit_still_allows_same_action_replay(self, wired: Any) -> None:
+        client, install = wired
+        reviewer = _reviewer()
+        pr = _pr()
+        redis = _FakeRedis(start=settings.pr_party_daily_action_limit - 1)
+        fakes = install(reviewer, prs=[pr], redis=redis)
+
+        first = _post(client, pr)
+        replay = _post(client, pr)
+
+        assert first.status_code == 200
+        assert replay.status_code == 200
+        assert replay.json()["replayed"] is True
+        assert len(fakes["github"].review_calls) == 1
+        assert redis.counts[action_key(reviewer.zitadel_user_id)] == (
+            settings.pr_party_daily_action_limit
+        )
+
 
 class TestLimiterUnit:
     @pytest.mark.asyncio
@@ -1523,6 +1569,34 @@ class TestLimiterUnit:
         redis = _FakeRedis(start=5)
         outcome, _ = await check_and_consume(redis, "user-1", limit=5)
         assert outcome is LimiterOutcome.OVER_LIMIT
+
+    @pytest.mark.asyncio
+    async def test_reservation_receipt_replays_at_the_limit_without_incrementing(self) -> None:
+        redis = _FakeRedis(start=4)
+
+        acquired = await reserve_action_budget(
+            redis,
+            "user-1",
+            limit=5,
+            reservation_id="card:head:review:key",
+        )
+        replay = await reserve_action_budget(
+            redis,
+            "user-1",
+            limit=5,
+            reservation_id="card:head:review:key",
+        )
+        refused = await reserve_action_budget(
+            redis,
+            "user-1",
+            limit=5,
+            reservation_id="card:head:review:another-key",
+        )
+
+        assert acquired.outcome is LimiterOutcome.ALLOWED and acquired.acquired
+        assert replay.outcome is LimiterOutcome.ALLOWED and not replay.acquired
+        assert refused.outcome is LimiterOutcome.OVER_LIMIT
+        assert redis.counts[action_key("user-1")] == 5
 
 
 # ---------------------------------------------------------------------------

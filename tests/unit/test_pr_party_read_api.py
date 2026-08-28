@@ -27,9 +27,11 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.api.routes import include_pr_party_routes
 from ontokit.api.routes.pr_party import PRPartyQueueReader, get_queue_reader
 from ontokit.api.routes.pr_party_settings import get_credential_service
 from ontokit.main import app
@@ -192,10 +194,26 @@ class _FakeReader:
         return [a for a in self.actions if a.pr_id in wanted]
 
 
+def _configured_app() -> FastAPI:
+    target = APIRouter()
+    mounted = include_pr_party_routes(
+        target,
+        auth_mode="required",
+        reviewers="zit-1:octocat",
+    )
+    assert mounted is True
+    probe = FastAPI()
+    probe.include_router(target, prefix="/api/v1")
+    return probe
+
+
 @pytest.fixture
 def wired(authed_client: tuple[TestClient, Any]) -> Any:
     """(client, install) — ``install(reviewer, prs, actions)`` binds the fakes."""
-    client, _db = authed_client
+    _global_client, _db = authed_client
+    probe = _configured_app()
+    probe.dependency_overrides.update(app.dependency_overrides)
+    client = TestClient(probe, raise_server_exceptions=False)
 
     def install(
         reviewer: PRPartyReviewer | None,
@@ -203,8 +221,10 @@ def wired(authed_client: tuple[TestClient, Any]) -> Any:
         actions: list[PRPartyAction] | None = None,
     ) -> _FakeReader:
         reader = _FakeReader(prs, actions)
-        app.dependency_overrides[get_credential_service] = lambda: _FakeCredentialService(reviewer)
-        app.dependency_overrides[get_queue_reader] = lambda: reader
+        probe.dependency_overrides[get_credential_service] = lambda: _FakeCredentialService(
+            reviewer
+        )
+        probe.dependency_overrides[get_queue_reader] = lambda: reader
         return reader
 
     return client, install
@@ -226,8 +246,7 @@ def _only_card(client: TestClient) -> dict[str, Any]:
 
 class TestAccessControl:
     def test_unauthenticated_is_401(self) -> None:
-        app.dependency_overrides.clear()
-        client = TestClient(app, raise_server_exceptions=False)
+        client = TestClient(_configured_app(), raise_server_exceptions=False)
 
         assert client.get(f"{BASE}/queue").status_code == 401
         assert client.get(f"{BASE}/cards/{uuid.uuid4()}").status_code == 401
@@ -275,8 +294,8 @@ class TestAccessControl:
         assert queue.headers["cache-control"] == "no-store"
         assert card.headers["cache-control"] == "no-store"
 
-    def test_routes_are_mounted_in_the_live_app(self) -> None:
-        paths = app.openapi()["paths"]
+    def test_routes_are_mounted_when_pr_party_is_configured(self) -> None:
+        paths = _configured_app().openapi()["paths"]
 
         assert f"{BASE}/queue" in paths
         assert f"{BASE}/cards/{{card_id}}" in paths

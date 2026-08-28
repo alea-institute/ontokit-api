@@ -27,18 +27,17 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
-    op.create_index(
-        "ix_suggestion_sessions_stale_anonymous",
-        "suggestion_sessions",
-        ["last_activity", "id"],
-        unique=False,
-        postgresql_where=sa.text("status = 'active' AND is_anonymous IS true"),
+    # Prior saves were not metered, so their exact cumulative byte count cannot
+    # be reconstructed reliably. Conservatively exhaust active legacy sessions;
+    # newly-created sessions receive the column's zero default.
+    op.execute(
+        sa.text(
+            "UPDATE suggestion_sessions "
+            "SET anonymous_content_bytes = 262144000 "
+            "WHERE is_anonymous IS true AND status = 'active'"
+        )
     )
 
 
 def downgrade() -> None:
-    op.drop_index(
-        "ix_suggestion_sessions_stale_anonymous",
-        table_name="suggestion_sessions",
-    )
     op.drop_column("suggestion_sessions", "anonymous_content_bytes")

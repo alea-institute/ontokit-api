@@ -31,6 +31,10 @@ class TranslationReviewConflict(RuntimeError):
     """The branch no longer contains the record's exact reviewable source/target state."""
 
 
+class TranslationReviewConsistencyError(RuntimeError):
+    """A failed database commit could not be safely compensated in Git."""
+
+
 class TranslationReviewService:
     def __init__(
         self,
@@ -67,6 +71,7 @@ class TranslationReviewService:
         author_name: str,
         author_email: str,
     ) -> CommitInfo:
+        commit: CommitInfo | None = None
         try:
             async with branch_write_lock(self.db, project_id, branch):
                 await self.db.refresh(record, with_for_update=True)
@@ -76,6 +81,7 @@ class TranslationReviewService:
                 literal = Literal(record.proposed_value, lang=record.language)
                 record.confirm(member.id)
                 await self.db.flush()
+                previous_head = self.git.get_repository(project_id).get_branch_commit_hash(branch)
                 commit = self._commit_graph_change_locked(
                     project_id=project_id,
                     branch=branch,
@@ -85,7 +91,12 @@ class TranslationReviewService:
                     author_email=author_email,
                     mutate=lambda graph: self._confirm_graph(graph, record, literal),
                 )
-                await self.db.commit()
+                await self._commit_db_or_restore(
+                    project_id=project_id,
+                    branch=branch,
+                    previous_head=previous_head,
+                    commit=commit,
+                )
         except Exception:
             await self.db.rollback()
             raise
@@ -114,6 +125,7 @@ class TranslationReviewService:
                     raise ValueError("only provisional translation records can be rejected")
                 record.state = "rejected"
                 await self.db.flush()
+                previous_head = self.git.get_repository(project_id).get_branch_commit_hash(branch)
                 if record.proposed_value is not None:
                     literal = Literal(record.proposed_value, lang=record.language)
                     commit = self._commit_graph_change_locked(
@@ -126,7 +138,12 @@ class TranslationReviewService:
                         mutate=lambda target: self._reject_graph(target, record, literal),
                         commit_if_unchanged=False,
                     )
-                await self.db.commit()
+                await self._commit_db_or_restore(
+                    project_id=project_id,
+                    branch=branch,
+                    previous_head=previous_head,
+                    commit=commit,
+                )
         except Exception:
             await self.db.rollback()
             raise
@@ -208,6 +225,36 @@ class TranslationReviewService:
             committer_email=ONTOKIT_COMMITTER_EMAIL,
         )
 
+    async def _commit_db_or_restore(
+        self,
+        *,
+        project_id: uuid.UUID,
+        branch: str,
+        previous_head: str,
+        commit: CommitInfo | None,
+    ) -> None:
+        try:
+            await self.db.commit()
+        except Exception as exc:
+            if commit is not None:
+                try:
+                    restored = self.git.restore_branch_head(
+                        project_id,
+                        branch,
+                        expected_head=commit.hash,
+                        target_head=previous_head,
+                    )
+                except Exception as restore_exc:
+                    raise TranslationReviewConsistencyError(
+                        "database commit failed and Git compensation raised"
+                    ) from restore_exc
+                if not restored:
+                    raise TranslationReviewConsistencyError(
+                        "database commit failed and the Git branch no longer matched "
+                        "the compensating write"
+                    ) from exc
+            raise
+
     async def _enqueue(self, project_id: uuid.UUID, branch: str, commit_hash: str) -> None:
         try:
             await self.index_enqueuer(project_id=project_id, branch=branch, commit_hash=commit_hash)
@@ -215,4 +262,8 @@ class TranslationReviewService:
             logger.warning("Failed to queue native-review ontology re-index", exc_info=True)
 
 
-__all__ = ["TranslationReviewConflict", "TranslationReviewService"]
+__all__ = [
+    "TranslationReviewConflict",
+    "TranslationReviewConsistencyError",
+    "TranslationReviewService",
+]

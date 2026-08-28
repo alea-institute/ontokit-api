@@ -609,7 +609,10 @@ async def _load_card(reader: PRPartyQueueReader, card_id: uuid.UUID) -> PRPartyP
 
 
 async def _consume_action_budget(
-    redis: ActionLimiterRedis | None, reviewer_id: str
+    redis: ActionLimiterRedis | None,
+    reviewer_id: str,
+    *,
+    reservation_id: str | None = None,
 ) -> ActionBudgetReservation:
     """Runaway-loop protection, failing closed (R10).
 
@@ -618,7 +621,11 @@ async def _consume_action_budget(
     outage. Reads are untouched: the dashboard keeps rendering through a Redis
     failure, and only the buttons stop working.
     """
-    reservation = await reserve_action_budget(redis, reviewer_id)
+    reservation = await reserve_action_budget(
+        redis,
+        reviewer_id,
+        reservation_id=reservation_id,
+    )
     if reservation.outcome is LimiterOutcome.UNAVAILABLE:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -786,7 +793,13 @@ async def create_action(
     """
     _no_store(response)
 
-    reservation = await _consume_action_budget(redis, reviewer.zitadel_user_id)
+    reservation = await _consume_action_budget(
+        redis,
+        reviewer.zitadel_user_id,
+        reservation_id=(
+            f"{card_id}:{request.head_sha}:{request.action_kind.value}:{request.idempotency_key}"
+        ),
+    )
 
     pr = await _load_card(reader, card_id)
     _check_lifecycle(pr)

@@ -118,7 +118,7 @@ jobs:
 
   publish_pypi:
     if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/ontokit-')
-    needs: [lint, test, build, docker_preflight]
+    needs: [lint, test, build, publish_docker]
     runs-on: ubuntu-latest
     permissions:
       id-token: write
@@ -133,7 +133,7 @@ jobs:
 
   publish_github:
     if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/ontokit-')
-    needs: [lint, test, build, docker_preflight]
+    needs: [lint, test, build, publish_docker]
     runs-on: ubuntu-latest
     permissions:
       contents: write

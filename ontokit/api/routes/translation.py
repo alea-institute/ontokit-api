@@ -472,7 +472,7 @@ async def translate_entity_field(
             detail=f"Daily LLM call limit cannot cover {call_units} provider calls",
         )
     try:
-        job_ids = await enqueue_translation_tasks(
+        enqueue_result = await enqueue_translation_tasks(
             pool, redis, project_id, data.branch, user.id, [task]
         )
     except TranslationEnqueueError as exc:
@@ -493,7 +493,16 @@ async def translate_entity_field(
             ),
             detail=str(exc),
         ) from exc
-    return TranslationJobAccepted(job_id=job_ids[0])
+    if reservation.acquired and not enqueue_result.newly_queued_job_ids:
+        await release_rate_limit_units(
+            redis,
+            str(project_id),
+            user.id,
+            role,
+            call_units,
+            reservation_id=reservation_id,
+        )
+    return TranslationJobAccepted(job_id=enqueue_result.job_ids[0])
 
 
 @router.get("/{project_id}/translation/reviewers", response_model=list[ReviewerEntry])

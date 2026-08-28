@@ -127,6 +127,43 @@ async def test_reservation_reports_whether_this_attempt_acquired_units():
 
 
 @pytest.mark.asyncio
+async def test_reservation_eval_failure_fails_open_and_release_stays_unreleased(caplog):
+    import logging
+
+    from ontokit.services.llm.rate_limiter import FAIL_OPEN_EVENT
+
+    redis = _redis()
+    redis.eval = AsyncMock(side_effect=ConnectionError("redis down"))
+
+    with caplog.at_level(logging.WARNING, logger="ontokit.services.llm.rate_limiter"):
+        reserved = await reserve_rate_limit_units(
+            redis,
+            "p",
+            "u",
+            "editor",
+            4,
+            reservation_id="commit-1",
+        )
+        released = await release_rate_limit_units(
+            redis,
+            "p",
+            "u",
+            "editor",
+            4,
+            reservation_id="commit-1",
+        )
+
+    assert reserved == RateLimitReservation(accepted=True, acquired=False)
+    assert released is False
+    operations = [
+        record.operation
+        for record in caplog.records
+        if getattr(record, "event", None) == FAIL_OPEN_EVENT
+    ]
+    assert operations == ["reserve_rate_limit_units", "release_rate_limit_units"]
+
+
+@pytest.mark.asyncio
 async def test_multi_unit_reservation_rejects_invalid_units_without_redis():
     redis = _redis()
     with pytest.raises(ValueError, match="positive"):
@@ -139,9 +176,7 @@ async def test_multi_unit_reservation_release_is_atomic_and_idempotent():
     redis = _redis()
     redis.eval = AsyncMock(side_effect=[1, 0])
 
-    assert await release_rate_limit_units(
-        redis, "p", "u", "editor", 4, reservation_id="commit-1"
-    )
+    assert await release_rate_limit_units(redis, "p", "u", "editor", 4, reservation_id="commit-1")
     assert not await release_rate_limit_units(
         redis, "p", "u", "editor", 4, reservation_id="commit-1"
     )

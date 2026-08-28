@@ -70,6 +70,10 @@ class ActionLimiterRedis(Protocol):
 
     async def expire(self, name: str, time: int) -> bool: ...
 
+    async def get(self, name: str) -> bytes | None: ...
+
+    async def eval(self, script: str, numkeys: int, *keys_and_args: object) -> int: ...
+
 
 class LimiterOutcome(StrEnum):
     """Why a write was or was not permitted.
@@ -115,11 +119,33 @@ def _alert_unavailable(user_id: str, error: BaseException) -> None:
     )
 
 
+_RESERVE_ACTION_SCRIPT = """
+local receipt_enabled = ARGV[3] == '1'
+if receipt_enabled and redis.call('EXISTS', KEYS[2]) == 1 then
+  return 1
+end
+local current = tonumber(redis.call('GET', KEYS[1]) or '0')
+local limit = tonumber(ARGV[1])
+if current >= limit then
+  return 0
+end
+redis.call('INCR', KEYS[1])
+if redis.call('TTL', KEYS[1]) < 0 then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+end
+if receipt_enabled then
+  redis.call('SET', KEYS[2], '1', 'EX', tonumber(ARGV[2]))
+end
+return 2
+"""
+
+
 async def reserve_action_budget(
     redis: ActionLimiterRedis | None,
     user_id: str,
     *,
     limit: int | None = None,
+    reservation_id: str | None = None,
 ) -> ActionBudgetReservation:
     """Reserve one write from today's budget.
 
@@ -137,24 +163,55 @@ async def reserve_action_budget(
         return ActionBudgetReservation(LimiterOutcome.UNAVAILABLE, 0, user_id)
 
     key = action_key(user_id)
+    if reservation_id is None:
+        try:
+            used = await redis.incr(key)
+            if used == 1:
+                await redis.expire(key, _KEY_TTL_SECONDS)
+        except _REDIS_INFRA_ERRORS as e:
+            _alert_unavailable(user_id, e)
+            return ActionBudgetReservation(LimiterOutcome.UNAVAILABLE, 0, user_id)
+        if used > daily_limit:
+            return ActionBudgetReservation(
+                LimiterOutcome.OVER_LIMIT,
+                0,
+                user_id,
+                key=key,
+                acquired=True,
+            )
+        return ActionBudgetReservation(
+            LimiterOutcome.ALLOWED,
+            daily_limit - used,
+            user_id,
+            key=key,
+            acquired=True,
+        )
+
+    receipt_key = f"{key}:reservation:{reservation_id or 'none'}"
     try:
-        used = await redis.incr(key)
-        if used == 1:
-            await redis.expire(key, _KEY_TTL_SECONDS)
+        result = await redis.eval(
+            _RESERVE_ACTION_SCRIPT,
+            2,
+            key,
+            receipt_key,
+            daily_limit,
+            _KEY_TTL_SECONDS,
+            1 if reservation_id else 0,
+        )
+        used_raw = await redis.get(key)
     except _REDIS_INFRA_ERRORS as e:
         _alert_unavailable(user_id, e)
         return ActionBudgetReservation(LimiterOutcome.UNAVAILABLE, 0, user_id)
 
-    if used > daily_limit:
-        return ActionBudgetReservation(
-            LimiterOutcome.OVER_LIMIT, 0, user_id, key=key, acquired=True
-        )
+    if result == 0:
+        return ActionBudgetReservation(LimiterOutcome.OVER_LIMIT, 0, user_id, key=key)
+    used = int(used_raw or 0)
     return ActionBudgetReservation(
         LimiterOutcome.ALLOWED,
         daily_limit - used,
         user_id,
         key=key,
-        acquired=True,
+        acquired=result == 2,
     )
 
 
