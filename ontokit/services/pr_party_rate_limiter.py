@@ -26,6 +26,7 @@ So the limiter reports three distinct outcomes and lets each route choose.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Protocol
@@ -39,9 +40,12 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "UNAVAILABLE_EVENT",
     "ActionLimiterRedis",
+    "ActionBudgetReservation",
     "LimiterOutcome",
     "action_key",
     "check_and_consume",
+    "refund_action_budget",
+    "reserve_action_budget",
 ]
 
 # Infrastructure failures only — a mis-wired client raising TypeError must
@@ -62,6 +66,8 @@ class ActionLimiterRedis(Protocol):
 
     async def incr(self, name: str) -> int: ...
 
+    async def decr(self, name: str) -> int: ...
+
     async def expire(self, name: str, time: int) -> bool: ...
 
 
@@ -76,6 +82,17 @@ class LimiterOutcome(StrEnum):
     ALLOWED = "allowed"
     OVER_LIMIT = "over_limit"
     UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True, slots=True)
+class ActionBudgetReservation:
+    """One exact counter acquisition, including the UTC-day key it used."""
+
+    outcome: LimiterOutcome
+    remaining: int
+    user_id: str
+    key: str | None = None
+    acquired: bool = False
 
 
 def action_key(user_id: str, today: str | None = None) -> str:
@@ -98,25 +115,26 @@ def _alert_unavailable(user_id: str, error: BaseException) -> None:
     )
 
 
-async def check_and_consume(
+async def reserve_action_budget(
     redis: ActionLimiterRedis | None,
     user_id: str,
     *,
     limit: int | None = None,
-) -> tuple[LimiterOutcome, int]:
-    """Consume one write from today's budget.
+) -> ActionBudgetReservation:
+    """Reserve one write from today's budget.
 
-    Returns ``(outcome, remaining)``, where ``remaining`` is the count left
-    AFTER this write and is 0 unless the outcome is
+    The returned key makes a replay refund the exact UTC-day reservation even
+    if the request crosses midnight. ``remaining`` is the count left after
+    this write and is 0 unless the outcome is
     :attr:`LimiterOutcome.ALLOWED`.
     """
     daily_limit = settings.pr_party_daily_action_limit if limit is None else limit
     if daily_limit <= 0:
-        return (LimiterOutcome.OVER_LIMIT, 0)
+        return ActionBudgetReservation(LimiterOutcome.OVER_LIMIT, 0, user_id)
 
     if redis is None:
         _alert_unavailable(user_id, RuntimeError("no redis client configured"))
-        return (LimiterOutcome.UNAVAILABLE, 0)
+        return ActionBudgetReservation(LimiterOutcome.UNAVAILABLE, 0, user_id)
 
     key = action_key(user_id)
     try:
@@ -125,8 +143,57 @@ async def check_and_consume(
             await redis.expire(key, _KEY_TTL_SECONDS)
     except _REDIS_INFRA_ERRORS as e:
         _alert_unavailable(user_id, e)
-        return (LimiterOutcome.UNAVAILABLE, 0)
+        return ActionBudgetReservation(LimiterOutcome.UNAVAILABLE, 0, user_id)
 
     if used > daily_limit:
-        return (LimiterOutcome.OVER_LIMIT, 0)
-    return (LimiterOutcome.ALLOWED, daily_limit - used)
+        return ActionBudgetReservation(
+            LimiterOutcome.OVER_LIMIT, 0, user_id, key=key, acquired=True
+        )
+    return ActionBudgetReservation(
+        LimiterOutcome.ALLOWED,
+        daily_limit - used,
+        user_id,
+        key=key,
+        acquired=True,
+    )
+
+
+async def refund_action_budget(
+    redis: ActionLimiterRedis | None,
+    reservation: ActionBudgetReservation,
+) -> bool:
+    """Refund an allowed reservation after a proven no-actuation replay."""
+    if (
+        redis is None
+        or not reservation.acquired
+        or reservation.outcome is not LimiterOutcome.ALLOWED
+        or reservation.key is None
+    ):
+        return False
+    try:
+        remaining = await redis.decr(reservation.key)
+    except _REDIS_INFRA_ERRORS as e:
+        _alert_unavailable(reservation.user_id, e)
+        return False
+    if remaining < 0:
+        # A reservation is refunded at most once by the route. Restore zero if
+        # external key deletion or a future caller violates that invariant.
+        await redis.incr(reservation.key)
+        logger.error(
+            "PR Party action budget refund underflow — user=%s key=%s",
+            reservation.user_id,
+            reservation.key,
+        )
+        return False
+    return True
+
+
+async def check_and_consume(
+    redis: ActionLimiterRedis | None,
+    user_id: str,
+    *,
+    limit: int | None = None,
+) -> tuple[LimiterOutcome, int]:
+    """Compatibility wrapper for call sites that never refund a reservation."""
+    reservation = await reserve_action_budget(redis, user_id, limit=limit)
+    return (reservation.outcome, reservation.remaining)

@@ -105,9 +105,11 @@ from ontokit.services.pr_party_intake import (
 )
 from ontokit.services.pr_party_qa import PRPartyQAService, QARefused, QAResult
 from ontokit.services.pr_party_rate_limiter import (
+    ActionBudgetReservation,
     ActionLimiterRedis,
     LimiterOutcome,
-    check_and_consume,
+    refund_action_budget,
+    reserve_action_budget,
 )
 
 __all__ = [
@@ -606,7 +608,9 @@ async def _load_card(reader: PRPartyQueueReader, card_id: uuid.UUID) -> PRPartyP
     return pr
 
 
-async def _consume_action_budget(redis: ActionLimiterRedis | None, reviewer_id: str) -> None:
+async def _consume_action_budget(
+    redis: ActionLimiterRedis | None, reviewer_id: str
+) -> ActionBudgetReservation:
     """Runaway-loop protection, failing closed (R10).
 
     Actuation is the one PR Party surface that changes something irreversible
@@ -614,8 +618,8 @@ async def _consume_action_budget(redis: ActionLimiterRedis | None, reviewer_id: 
     outage. Reads are untouched: the dashboard keeps rendering through a Redis
     failure, and only the buttons stop working.
     """
-    outcome, _ = await check_and_consume(redis, reviewer_id)
-    if outcome is LimiterOutcome.UNAVAILABLE:
+    reservation = await reserve_action_budget(redis, reviewer_id)
+    if reservation.outcome is LimiterOutcome.UNAVAILABLE:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=_refusal(
@@ -623,11 +627,12 @@ async def _consume_action_budget(redis: ActionLimiterRedis | None, reviewer_id: 
                 "to GitHub — try again in a moment."
             ),
         )
-    if outcome is LimiterOutcome.OVER_LIMIT:
+    if reservation.outcome is LimiterOutcome.OVER_LIMIT:
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=_refusal("You have hit today's PR Party action limit."),
         )
+    return reservation
 
 
 def _check_lifecycle(pr: PRPartyPR) -> None:
@@ -781,7 +786,7 @@ async def create_action(
     """
     _no_store(response)
 
-    await _consume_action_budget(redis, reviewer.zitadel_user_id)
+    reservation = await _consume_action_budget(redis, reviewer.zitadel_user_id)
 
     pr = await _load_card(reader, card_id)
     _check_lifecycle(pr)
@@ -813,6 +818,9 @@ async def create_action(
                 "and refresh before trying again."
             ),
         ) from e
+
+    if result.replayed:
+        await refund_action_budget(redis, reservation)
 
     return PRPartyActionResponse(
         action=_receipt(result),

@@ -29,9 +29,11 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from fastapi import APIRouter, FastAPI
 from fastapi.testclient import TestClient
 from redis.exceptions import ConnectionError as RedisConnectionError
 
+from ontokit.api.routes import include_pr_party_routes
 from ontokit.api.routes.pr_party import (
     get_action_service,
     get_actions_redis,
@@ -416,6 +418,12 @@ class _FakeRedis:
         self.counts[name] = self.counts.get(name, self.start) + 1
         return self.counts[name]
 
+    async def decr(self, name: str) -> int:
+        if self.error is not None:
+            raise self.error
+        self.counts[name] = self.counts.get(name, self.start) - 1
+        return self.counts[name]
+
     async def expire(self, name: str, time: int) -> bool:  # noqa: ARG002
         self.expired.append(name)
         return True
@@ -435,7 +443,13 @@ class _FakeRedis:
 @pytest.fixture
 def wired(authed_client: tuple[TestClient, AsyncMock]) -> Any:
     """(client, install) — ``install(...)`` binds every fake in one call."""
-    client, _db = authed_client
+    _global_client, _db = authed_client
+    target = APIRouter()
+    include_pr_party_routes(target, auth_mode="required", reviewers="zit-1:octocat")
+    probe_app = FastAPI()
+    probe_app.include_router(target, prefix="/api/v1")
+    probe_app.dependency_overrides.update(app.dependency_overrides)
+    client = TestClient(probe_app, raise_server_exceptions=False)
 
     def install(
         reviewer: PRPartyReviewer | None,
@@ -458,12 +472,12 @@ def wired(authed_client: tuple[TestClient, AsyncMock]) -> Any:
         )
         reader = _FakeReader(prs, store.rows)
 
-        app.dependency_overrides[get_credential_service] = lambda: _FakeCredentialServiceForAuth(
+        probe_app.dependency_overrides[get_credential_service] = lambda: _FakeCredentialServiceForAuth(
             reviewer
         )
-        app.dependency_overrides[get_queue_reader] = lambda: reader
-        app.dependency_overrides[get_action_service] = lambda: service
-        app.dependency_overrides[get_actions_redis] = lambda: redis
+        probe_app.dependency_overrides[get_queue_reader] = lambda: reader
+        probe_app.dependency_overrides[get_action_service] = lambda: service
+        probe_app.dependency_overrides[get_actions_redis] = lambda: redis
         return {
             "store": store,
             "github": github,
@@ -472,7 +486,10 @@ def wired(authed_client: tuple[TestClient, AsyncMock]) -> Any:
             "reader": reader,
         }
 
-    return client, install
+    try:
+        yield client, install
+    finally:
+        probe_app.dependency_overrides.clear()
 
 
 def _gh_review(
@@ -774,6 +791,7 @@ class TestIdempotency:
         assert second.json()["action"]["github_review_id"] == 9_000_000_001
         assert len(fakes["github"].review_calls) == 1
         assert len(fakes["store"].rows) == 1
+        assert sum(fakes["redis"].counts.values()) == 1
 
     def test_different_key_at_the_same_head_is_409(self, wired: Any) -> None:
         client, install = wired
