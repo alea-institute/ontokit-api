@@ -645,6 +645,61 @@ async def test_non_review_kinds_are_left_to_reclaim() -> None:
 
 
 @pytest.mark.asyncio
+async def test_later_unsettled_failure_does_not_erase_an_earlier_repair() -> None:
+    first_reviewer = _reviewer(login="one", node_id="N1")
+    second_reviewer = _reviewer(login="two", node_id="N2")
+    first_pr, second_pr = _pr(), _pr()
+    second_pr.pr_number = 43
+    first = _action(
+        first_reviewer,
+        first_pr,
+        status=PRPartyActionStatus.PENDING,
+        age_minutes=90,
+    )
+    second = _action(
+        second_reviewer,
+        second_pr,
+        status=PRPartyActionStatus.PENDING,
+        age_minutes=90,
+    )
+
+    class FailingSecondClient(_FakeClient):
+        async def get_pr_reviews(
+            self, owner: str, repo: str, number: int
+        ) -> list[PRPartyReview]:
+            if number == 43:
+                raise GitHubAPIError("boom", status_code=503)
+            return await super().get_pr_reviews(owner, repo, number)
+
+    @dataclass
+    class RollbackErasesStore(_FakeStore):
+        rollbacks: int = 0
+
+        async def rollback(self) -> None:
+            self.rollbacks += 1
+            first.status = PRPartyActionStatus.PENDING
+            first.github_review_id = None
+
+    store = RollbackErasesStore(
+        unsettled=[
+            ActionContext(action=first, pr=first_pr, reviewer=first_reviewer),
+            ActionContext(action=second, pr=second_pr, reviewer=second_reviewer),
+        ]
+    )
+    client = FailingSecondClient(
+        reviews={(first_pr.repo_full_name, first_pr.pr_number): [_review(node_id="N1")]}
+    )
+
+    result = await _run(store, client)
+
+    assert first.status == PRPartyActionStatus.SUCCEEDED
+    assert first.github_review_id == 9001
+    assert result.backfilled == 1
+    assert result.errors == 1
+    assert store.rollbacks == 0
+
+
+@pytest.mark.asyncio
 async def test_result_serializes_every_counter() -> None:
     payload = ReconcileResult(backfilled=1, confirmed=2, nagging=3).as_dict()
     assert payload["backfilled"] == 1

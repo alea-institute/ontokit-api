@@ -223,8 +223,6 @@ class ReconcileStore(Protocol):
 
     async def save(self) -> None: ...
 
-    async def rollback(self) -> None: ...
-
 
 # ---------------------------------------------------------------------------
 # Pure helpers
@@ -456,9 +454,6 @@ class PRPartyReconcileStore:
     async def save(self) -> None:
         await self._db.commit()
 
-    async def rollback(self) -> None:
-        await self._db.rollback()
-
 
 # ---------------------------------------------------------------------------
 # The pass
@@ -537,8 +532,7 @@ async def _reconcile_unsettled(
                 reclaim_minutes=reclaim_minutes,
                 sweep_minutes=sweep_minutes,
             )
-        except Exception as exc:  # noqa: BLE001 — rollback restores the shared session
-            await store.rollback()
+        except Exception as exc:  # noqa: BLE001 — one failed GitHub read must not abort the pass
             result.errors += 1
             logger.exception(
                 "PR Party reconcile failed for action %s on %s#%s: %s",
@@ -637,8 +631,7 @@ async def _detect_dismissals(
                 ctx.pr.repo_full_name,
                 ctx.pr.pr_number,
             )
-        except Exception as exc:  # noqa: BLE001 — rollback restores the shared session
-            await store.rollback()
+        except Exception as exc:  # noqa: BLE001 — one failed GitHub read must not abort the pass
             result.errors += 1
             logger.exception(
                 "PR Party dismissal check failed for %s#%s: %s",
