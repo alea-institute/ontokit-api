@@ -27,7 +27,18 @@ def upgrade() -> None:
             nullable=False,
         ),
     )
+    op.create_index(
+        "ix_suggestion_sessions_stale_anonymous",
+        "suggestion_sessions",
+        ["last_activity", "id"],
+        unique=False,
+        postgresql_where=sa.text("status = 'active' AND is_anonymous IS true"),
+    )
 
 
 def downgrade() -> None:
+    op.drop_index(
+        "ix_suggestion_sessions_stale_anonymous",
+        table_name="suggestion_sessions",
+    )
     op.drop_column("suggestion_sessions", "anonymous_content_bytes")

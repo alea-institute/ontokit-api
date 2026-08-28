@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
+from ontokit.core.api_paths import _compile_route_path
 from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
 from ontokit.core.middleware import AnonymousSuggestionBodyLimitMiddleware
 from ontokit.models.suggestion_session import SuggestionSession
@@ -90,3 +91,22 @@ def test_anonymous_byte_counter_is_non_null_and_zero_defaulted() -> None:
     assert column.nullable is False
     assert column.server_default is not None
     assert str(column.server_default.arg) == "0"
+
+
+def test_route_pattern_derives_every_placeholder_from_its_template() -> None:
+    pattern = _compile_route_path("/{project_id}/suggestions/{future_id}/save")
+
+    assert pattern.fullmatch("/api/v1/projects/p/suggestions/f/save")
+
+
+def test_stale_anonymous_reaper_has_a_matching_partial_index() -> None:
+    index = next(
+        item
+        for item in SuggestionSession.__table__.indexes
+        if item.name == "ix_suggestion_sessions_stale_anonymous"
+    )
+
+    assert tuple(column.name for column in index.columns) == ("last_activity", "id")
+    assert str(index.dialect_options["postgresql"]["where"]) == (
+        "status = 'active' AND is_anonymous IS true"
+    )
