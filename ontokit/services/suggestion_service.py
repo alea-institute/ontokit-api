@@ -100,6 +100,7 @@ class _PendingSuggestionPullRequest:
 
 AUTO_ACCEPT_BATCH_SIZE = 100
 AUTO_ACCEPT_LEASE = timedelta(minutes=15)
+ANONYMOUS_REAPER_BATCH_SIZE = 100
 MAX_NEW_ENTITIES_PER_SUBMISSION = 25
 
 _ENTITY_DECLARATION_TYPES = frozenset(
@@ -2397,11 +2398,14 @@ class SuggestionService:
         cutoff = datetime.now(UTC) - timedelta(hours=ttl_hours)
 
         result = await self.db.execute(
-            select(SuggestionSession).where(
+            select(SuggestionSession)
+            .where(
                 SuggestionSession.status == SuggestionSessionStatus.ACTIVE.value,
                 SuggestionSession.is_anonymous.is_(True),
                 SuggestionSession.last_activity < cutoff,
             )
+            .order_by(SuggestionSession.last_activity, SuggestionSession.id)
+            .limit(ANONYMOUS_REAPER_BATCH_SIZE)
         )
         stale = result.scalars().all()
 

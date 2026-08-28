@@ -214,7 +214,10 @@ async def test_beacon_save_anonymous_rejects_authenticated_session() -> None:
 @pytest.mark.asyncio
 async def test_reap_deletes_branch_and_discards() -> None:
     """The anonymous reaper must delete the git branch (orphaned-branch leak fix)."""
-    from ontokit.services.suggestion_service import SuggestionService
+    from ontokit.services.suggestion_service import (
+        ANONYMOUS_REAPER_BATCH_SIZE,
+        SuggestionService,
+    )
 
     service = SuggestionService.__new__(SuggestionService)
     stale = MagicMock()
@@ -238,6 +241,9 @@ async def test_reap_deletes_branch_and_discards() -> None:
     count = await service.reap_stale_anonymous_sessions()
 
     assert count == 1
+    stale_query = db.execute.await_args_list[0].args[0]
+    assert stale_query._limit_clause.value == ANONYMOUS_REAPER_BATCH_SIZE
+    assert len(stale_query._order_by_clauses) == 2
     service.git_service.delete_branch.assert_called_once_with(
         stale.project_id, stale.branch, force=True
     )
