@@ -8,6 +8,7 @@ from typing import Literal as TypeLiteral
 from uuid import UUID
 
 from rdflib import Graph, Literal, URIRef
+from rdflib.namespace import OWL
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -82,7 +83,9 @@ class TranslationCoverageService:
         ]
 
     async def entity_state(self, project_id: UUID, entity_iri: str, branch: str) -> dict[str, Any]:
-        languages, labels, records, graph = await self._load(project_id, branch)
+        languages, labels, records, graph = await self._load_entity(
+            project_id, entity_iri, branch
+        )
         candidates = {
             (entity, predicate, language)
             for entity, predicate in self._source_slots(labels, records)
@@ -127,12 +130,7 @@ class TranslationCoverageService:
     ) -> tuple[list[str], list[LabelValue], list[TranslationRecord], Graph]:
         if self._db is None or self._git is None:
             raise RuntimeError("coverage service I/O dependencies are not configured")
-        config_result = await self._db.execute(
-            select(ProjectTranslationConfig).where(
-                ProjectTranslationConfig.project_id == project_id
-            )
-        )
-        config = config_result.scalar_one_or_none()
+        languages = await self._load_languages(project_id)
         label_result = await self._db.execute(
             select(
                 IndexedEntity.iri, IndexedLabel.property_iri, IndexedLabel.lang, IndexedLabel.value
@@ -145,6 +143,52 @@ class TranslationCoverageService:
             select(TranslationRecord).where(TranslationRecord.project_id == project_id)
         )
         records = list(record_result.scalars().all())
+        graph = self._load_branch_graph(project_id, branch)
+        return languages, labels, records, graph
+
+    async def _load_entity(
+        self, project_id: UUID, entity_iri: str, branch: str
+    ) -> tuple[list[str], list[LabelValue], list[TranslationRecord], Graph]:
+        """Load only rows and provenance needed for one entity detail response."""
+        if self._db is None or self._git is None:
+            raise RuntimeError("coverage service I/O dependencies are not configured")
+        languages = await self._load_languages(project_id)
+        label_result = await self._db.execute(
+            select(
+                IndexedEntity.iri, IndexedLabel.property_iri, IndexedLabel.lang, IndexedLabel.value
+            )
+            .join(IndexedLabel, IndexedLabel.entity_id == IndexedEntity.id)
+            .where(
+                IndexedEntity.project_id == project_id,
+                IndexedEntity.branch == branch,
+                IndexedEntity.iri == entity_iri,
+            )
+        )
+        labels = [LabelValue(*row) for row in label_result.all()]
+        record_result = await self._db.execute(
+            select(TranslationRecord).where(
+                TranslationRecord.project_id == project_id,
+                TranslationRecord.entity_iri == entity_iri,
+            )
+        )
+        records = list(record_result.scalars().all())
+        graph = self._entity_subgraph(self._load_branch_graph(project_id, branch), entity_iri)
+        return languages, labels, records, graph
+
+    async def _load_languages(self, project_id: UUID) -> list[str]:
+        if self._db is None:
+            raise RuntimeError("coverage service I/O dependencies are not configured")
+        config_result = await self._db.execute(
+            select(ProjectTranslationConfig).where(
+                ProjectTranslationConfig.project_id == project_id
+            )
+        )
+        config = config_result.scalar_one_or_none()
+        return list(config.language_tags if config else [])
+
+    def _load_branch_graph(self, project_id: UUID, branch: str) -> Graph:
+        if self._git is None:
+            raise RuntimeError("coverage service I/O dependencies are not configured")
         repository = self._git.get_repository(project_id)
         candidates = [
             path
@@ -152,10 +196,23 @@ class TranslationCoverageService:
             if path.casefold().endswith((".ttl", ".owl", ".rdf"))
         ]
         filename = "ontology.ttl" if "ontology.ttl" in candidates else candidates[0]
-        graph = Graph().parse(
+        return Graph().parse(
             data=self._git.get_file_from_branch(project_id, branch, filename), format="turtle"
         )
-        return list(config.language_tags if config else []), labels, records, graph
+
+    @staticmethod
+    def _entity_subgraph(graph: Graph, entity_iri: str) -> Graph:
+        """Release the full branch graph after retaining one entity's provenance."""
+        entity = URIRef(entity_iri)
+        scoped = Graph()
+        for prefix, namespace in graph.namespaces():
+            scoped.bind(prefix, namespace)
+        for triple in graph.triples((entity, None, None)):
+            scoped.add(triple)
+        for axiom in graph.subjects(OWL.annotatedSource, entity):
+            for triple in graph.triples((axiom, None, None)):
+                scoped.add(triple)
+        return scoped
 
     async def _pending_scopes(
         self,

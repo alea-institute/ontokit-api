@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -208,6 +209,44 @@ def test_entity_state_and_provisional_queue_return_required_values() -> None:
     queue = service.provisional_from_data("fr", _labels(), [provisional])
     assert queue[0]["source_value"] == "One"
     assert queue[0]["proposed_value"] == "Un"
+
+
+@pytest.mark.asyncio
+async def test_entity_state_load_is_scoped_to_the_requested_entity() -> None:
+    record = _record(str(EX.one), "es", "One", "Uno")
+    graph = Graph()
+    _annotate(graph, record, "Uno")
+    graph.add((EX.two, SKOS.prefLabel, Literal("Two", lang="en")))
+
+    config_result = Mock()
+    config_result.scalar_one_or_none.return_value = SimpleNamespace(language_tags=["es"])
+    label_result = Mock()
+    label_result.all.return_value = [
+        (str(EX.one), str(SKOS.prefLabel), "en", "One"),
+        (str(EX.one), str(SKOS.prefLabel), "es", "Uno"),
+    ]
+    record_result = Mock()
+    record_result.scalars.return_value.all.return_value = [record]
+    job_result = Mock()
+    job_result.scalars.return_value.all.return_value = []
+    db = AsyncMock()
+    db.execute.side_effect = [config_result, label_result, record_result, job_result]
+
+    repository = Mock()
+    repository.list_files.return_value = ["ontology.ttl"]
+    git = Mock()
+    git.get_repository.return_value = repository
+    git.get_file_from_branch.return_value = graph.serialize(format="turtle").encode()
+
+    result = await TranslationCoverageService(db, git).entity_state(
+        PROJECT_ID, str(EX.one), "main"
+    )
+
+    assert result["items"][0]["state"] == "verified"
+    label_query = str(db.execute.await_args_list[1].args[0])
+    record_query = str(db.execute.await_args_list[2].args[0])
+    assert "indexed_entities.iri =" in label_query
+    assert "translation_records.entity_iri =" in record_query
 
 
 @pytest.mark.asyncio
