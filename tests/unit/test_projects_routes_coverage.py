@@ -23,6 +23,7 @@ from ontokit.schemas.project import ProjectListResponse, ProjectResponse
 from ontokit.services.project_service import ProjectService
 
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+BASE_REVISION = "a" * 40
 
 VALID_TURTLE = """\
 @prefix : <http://example.org/ontology#> .
@@ -589,6 +590,88 @@ class TestDeleteBranch:
 
 
 class TestSaveSourceContentSuccess:
+    def test_save_source_requires_base_revision(
+        self,
+        authed_client: tuple[TestClient, AsyncMock],
+        mock_project_service: AsyncMock,
+    ) -> None:
+        """Whole-document saves cannot proceed without an immutable read revision."""
+        client, _db = authed_client
+
+        response = client.put(
+            f"/api/v1/projects/{PROJECT_ID}/source",
+            json={"content": VALID_TURTLE, "commit_message": "Update ontology"},
+        )
+
+        assert response.status_code == 422
+        mock_project_service.get.assert_not_awaited()
+
+    @patch(
+        "ontokit.services.translation_jobs.enqueue_label_diff_after_commit",
+        new_callable=AsyncMock,
+    )
+    @patch("ontokit.api.routes.projects.get_arq_pool", new_callable=AsyncMock)
+    @patch(
+        "ontokit.services.embedding_service.EmbeddingService.get_config",
+        new_callable=AsyncMock,
+    )
+    @patch(
+        "ontokit.services.change_event_service.ChangeEventService.record_events_from_diff",
+        new_callable=AsyncMock,
+    )
+    def test_stale_base_revision_returns_typed_conflict_without_side_effects(
+        self,
+        mock_record_events: AsyncMock,
+        mock_get_embed_config: AsyncMock,
+        mock_get_arq_pool: AsyncMock,
+        mock_enqueue_label_diff: AsyncMock,
+        authed_client: tuple[TestClient, AsyncMock],
+        mock_project_service: AsyncMock,
+        mock_storage_service: MagicMock,
+        mock_ontology_service: MagicMock,
+        mock_git_service: MagicMock,
+    ) -> None:
+        """A stale document is rejected before storage, Git, ontology, event, or job work."""
+        client, _db = authed_client
+        current_revision = "b" * 40
+        mock_project_service.get = AsyncMock(
+            return_value=_project_response(
+                user_role="editor",
+                source_file_path="ontology.ttl",
+            )
+        )
+        mock_git_service.repository_exists.return_value = True
+        mock_git_service.get_default_branch.return_value = "main"
+        mock_git_service.get_repository.return_value.get_branch_commit_hash.return_value = (
+            current_revision
+        )
+
+        response = client.put(
+            f"/api/v1/projects/{PROJECT_ID}/source",
+            json={
+                "content": VALID_TURTLE,
+                "commit_message": "Stale update",
+                "base_revision": BASE_REVISION,
+            },
+        )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == {
+            "code": "SOURCE_REVISION_CONFLICT",
+            "message": "The ontology source changed after it was loaded; reload before saving.",
+            "base_revision": BASE_REVISION,
+            "current_revision": current_revision,
+            "branch": "main",
+        }
+        mock_storage_service.upload_file.assert_not_awaited()
+        mock_git_service.commit_changes.assert_not_called()
+        mock_ontology_service.load_from_git.assert_not_awaited()
+        mock_ontology_service._get_graph.assert_not_awaited()
+        mock_record_events.assert_not_awaited()
+        mock_get_embed_config.assert_not_awaited()
+        mock_get_arq_pool.assert_not_awaited()
+        mock_enqueue_label_diff.assert_not_awaited()
+
     @patch("ontokit.api.routes.projects.get_arq_pool", new_callable=AsyncMock)
     def test_save_source_success(
         self,
@@ -612,6 +695,9 @@ class TestSaveSourceContentSuccess:
 
         mock_git_service.repository_exists.return_value = True
         mock_git_service.get_default_branch.return_value = "main"
+        mock_git_service.get_repository.return_value.get_branch_commit_hash.return_value = (
+            BASE_REVISION
+        )
 
         commit_info = MagicMock()
         commit_info.hash = "deadbeef"
@@ -625,7 +711,11 @@ class TestSaveSourceContentSuccess:
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/source",
-            json={"content": VALID_TURTLE, "commit_message": "Update ontology"},
+            json={
+                "content": VALID_TURTLE,
+                "commit_message": "Update ontology",
+                "base_revision": BASE_REVISION,
+            },
         )
         assert response.status_code == 200
         data = response.json()
@@ -654,6 +744,9 @@ class TestSaveSourceContentSuccess:
         )
 
         mock_git_service.repository_exists.return_value = True
+        mock_git_service.get_repository.return_value.get_branch_commit_hash.return_value = (
+            BASE_REVISION
+        )
 
         commit_info = MagicMock()
         commit_info.hash = "cafebabe"
@@ -664,7 +757,11 @@ class TestSaveSourceContentSuccess:
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/source?branch=feature-x",
-            json={"content": VALID_TURTLE, "commit_message": "Branch save"},
+            json={
+                "content": VALID_TURTLE,
+                "commit_message": "Branch save",
+                "base_revision": BASE_REVISION,
+            },
         )
         assert response.status_code == 200
         assert response.json()["branch"] == "feature-x"
@@ -692,7 +789,11 @@ class TestSaveSourceContentSuccess:
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/source",
-            json={"content": VALID_TURTLE, "commit_message": "Save"},
+            json={
+                "content": VALID_TURTLE,
+                "commit_message": "Save",
+                "base_revision": BASE_REVISION,
+            },
         )
         assert response.status_code == 404
 
@@ -717,11 +818,18 @@ class TestSaveSourceContentSuccess:
         )
         mock_git_service.repository_exists.return_value = True
         mock_git_service.get_default_branch.return_value = "main"
+        mock_git_service.get_repository.return_value.get_branch_commit_hash.return_value = (
+            BASE_REVISION
+        )
         mock_git_service.commit_changes.side_effect = RuntimeError("disk full")
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/source",
-            json={"content": VALID_TURTLE, "commit_message": "Save"},
+            json={
+                "content": VALID_TURTLE,
+                "commit_message": "Save",
+                "base_revision": BASE_REVISION,
+            },
         )
         assert response.status_code == 500
         assert "Failed to commit" in response.json()["detail"]
@@ -749,11 +857,18 @@ class TestSaveSourceContentSuccess:
         )
         mock_git_service.repository_exists.return_value = True
         mock_git_service.get_default_branch.return_value = "main"
+        mock_git_service.get_repository.return_value.get_branch_commit_hash.return_value = (
+            BASE_REVISION
+        )
         mock_storage_service.upload_file = AsyncMock(side_effect=StorageError("bucket gone"))
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/source",
-            json={"content": VALID_TURTLE, "commit_message": "Save"},
+            json={
+                "content": VALID_TURTLE,
+                "commit_message": "Save",
+                "base_revision": BASE_REVISION,
+            },
         )
         assert response.status_code == 503
 
@@ -2053,7 +2168,9 @@ class TestRevisionEndpoints:
             return_value=_project_response(git_ontology_path="sub/ontology.ttl")
         )
         mock_git_service.repository_exists.return_value = True
-        mock_git_service.get_file_at_version.return_value = "@prefix : <#> ."
+        repository = mock_git_service.get_repository.return_value
+        repository.get_branch_commit_hash.return_value = "c" * 40
+        repository.get_file_at_version.return_value = "@prefix : <#> ."
 
         response = client.get(
             f"/api/v1/projects/{PROJECT_ID}/revisions/file",
@@ -2062,8 +2179,12 @@ class TestRevisionEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["content"] == "@prefix : <#> ."
+        assert data["version"] == "abc123"
+        assert data["revision"] == "c" * 40
         # Verify git_ontology_path mapping (line 823-824)
         assert data["filename"] == "sub/ontology.ttl"
+        repository.get_file_at_version.assert_called_once_with("sub/ontology.ttl", "c" * 40)
+        mock_git_service.get_file_at_version.assert_not_called()
 
     def test_get_file_at_revision_error(
         self,
@@ -2076,13 +2197,16 @@ class TestRevisionEndpoints:
 
         mock_project_service.get = AsyncMock(return_value=_project_response())
         mock_git_service.repository_exists.return_value = True
-        mock_git_service.get_file_at_version.side_effect = RuntimeError("bad ref")
+        repository = mock_git_service.get_repository.return_value
+        repository.get_branch_commit_hash.return_value = "d" * 40
+        repository.get_file_at_version.side_effect = RuntimeError("bad ref")
 
         response = client.get(
             f"/api/v1/projects/{PROJECT_ID}/revisions/file",
             params={"version": "badref"},
         )
         assert response.status_code == 404
+        repository.get_file_at_version.assert_called_once_with("ontology.ttl", "d" * 40)
 
     def test_get_revision_diff_success(
         self,

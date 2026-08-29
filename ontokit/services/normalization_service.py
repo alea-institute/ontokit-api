@@ -13,6 +13,7 @@ from ontokit.core.auth import CurrentUser
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.normalization import NormalizationRun
 from ontokit.models.project import Project
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.ontology_extractor import OntologyMetadataExtractor
 from ontokit.services.storage import StorageError, StorageService
 
@@ -199,6 +200,42 @@ class NormalizationService:
         if not project.source_file_path:
             raise ValueError("Project has no ontology file")
 
+        if not dry_run and self.git_service.repository_exists(project.id):
+            branch = self.git_service.get_default_branch(project.id)
+            async with branch_write_lock(self.db, project.id, branch):
+                expected_head = self.git_service.get_repository(project.id).get_branch_commit_hash(
+                    branch
+                )
+                return await self._run_normalization(
+                    project,
+                    user=user,
+                    trigger_type=trigger_type,
+                    dry_run=False,
+                    branch=branch,
+                    expected_head=expected_head,
+                )
+
+        return await self._run_normalization(
+            project,
+            user=user,
+            trigger_type=trigger_type,
+            dry_run=dry_run,
+        )
+
+    async def _run_normalization(
+        self,
+        project: Project,
+        *,
+        user: CurrentUser | None,
+        trigger_type: str,
+        dry_run: bool,
+        branch: str | None = None,
+        expected_head: str | None = None,
+    ) -> tuple[NormalizationRun, str | None, str | None]:
+        """Normalize after any required branch writer lock has been acquired."""
+        if not project.source_file_path:
+            raise ValueError("Project has no ontology file")
+
         # Download current content
         object_name = self._get_object_name(project.source_file_path)
         content = await self.storage.download_file(object_name)
@@ -231,6 +268,8 @@ class NormalizationService:
                     message=commit_message,
                     author_name=user.name if user else "OntoKit System",
                     author_email=user.email if user else "system@ontokit.dev",
+                    branch_name=branch,
+                    expected_head=expected_head,
                 )
                 commit_hash = commit_info.hash
 

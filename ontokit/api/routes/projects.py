@@ -31,7 +31,7 @@ from ontokit.core.constants import ONTOLOGY_INDEX_UPDATES_CHANNEL
 from ontokit.core.database import get_db
 from ontokit.core.encryption import decrypt_token
 from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
-from ontokit.git import GitRepositoryService, get_git_service
+from ontokit.git import BranchHeadMismatchError, GitRepositoryService, get_git_service
 from ontokit.models.branch_metadata import BranchMetadata
 from ontokit.models.pull_request import GitHubIntegration, PRStatus, PullRequest
 from ontokit.models.user_github_token import UserGitHubToken
@@ -56,6 +56,9 @@ from ontokit.schemas.project import (
     RevisionHistoryResponse,
     SourceContentSave,
     SourceContentSaveResponse,
+    SourceRevisionConflictDetail,
+    SourceRevisionConflictResponse,
+    SourceSaveConsistencyFailureDetail,
     TransferOwnership,
 )
 from ontokit.schemas.pull_request import (
@@ -871,7 +874,11 @@ async def get_file_at_revision(
         filename = project.git_ontology_path
 
     try:
-        content = git.get_file_at_version(project_id, filename, version)
+        # Resolve symbolic refs first, then read by immutable identity so the
+        # returned content and revision cannot describe different branch heads.
+        repository = git.get_repository(project_id)
+        revision = repository.get_branch_commit_hash(version)
+        content = repository.get_file_at_version(filename, revision)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -881,6 +888,7 @@ async def get_file_at_revision(
     return RevisionFileResponse(
         project_id=project_id,
         version=version,
+        revision=revision,
         filename=filename,
         content=content,
     )
@@ -1285,7 +1293,16 @@ async def delete_branch(
 # Source content endpoints
 
 
-@router.put("/{project_id}/source", response_model=SourceContentSaveResponse)
+@router.put(
+    "/{project_id}/source",
+    response_model=SourceContentSaveResponse,
+    responses={
+        status.HTTP_409_CONFLICT: {
+            "model": SourceRevisionConflictResponse,
+            "description": "The supplied base revision is stale.",
+        }
+    },
+)
 async def save_source_content(
     project_id: UUID,
     data: SourceContentSave,
@@ -1350,16 +1367,33 @@ async def save_source_content(
     # Convert content to bytes
     content_bytes = data.content.encode("utf-8")
 
-    # Save to storage
-    try:
-        await storage.upload_file(project.source_file_path, content_bytes, "text/turtle")
-    except StorageError as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to save to storage: {e}",
-        ) from e
-
     async with branch_write_lock(db, project_id, current_branch):
+        try:
+            repository = git.get_repository(project_id)
+            current_revision = repository.get_branch_commit_hash(current_branch)
+            previous_content = repository.get_file_at_version(filename, current_revision).encode(
+                "utf-8"
+            )
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Could not resolve source branch '{current_branch}': {e}",
+            ) from e
+
+        if current_revision != data.base_revision:
+            detail = SourceRevisionConflictDetail(
+                message=("The ontology source changed after it was loaded; reload before saving."),
+                base_revision=data.base_revision,
+                current_revision=current_revision,
+                branch=current_branch,
+            )
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=detail.model_dump(),
+            )
+
         # Capture old graph for change event diffing (before the commit).
         old_graph = None
         was_loaded = ontology.is_loaded(project_id, current_branch)
@@ -1379,11 +1413,77 @@ async def save_source_content(
                 author_name=user.name,
                 author_email=user.email,
                 branch_name=current_branch,
+                expected_head=current_revision,
             )
+        except BranchHeadMismatchError as e:
+            if not was_loaded:
+                ontology.unload(project_id, current_branch)
+            await db.rollback()
+            latest_revision = e.actual_head or repository.get_branch_commit_hash(current_branch)
+            detail = SourceRevisionConflictDetail(
+                message=("The ontology source changed after it was loaded; reload before saving."),
+                base_revision=data.base_revision,
+                current_revision=latest_revision,
+                branch=current_branch,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=detail.model_dump(),
+            ) from e
         except Exception as e:
+            logger.exception(
+                "Git source commit failed for project %s branch %s",
+                project_id,
+                current_branch,
+            )
+            if not was_loaded:
+                ontology.unload(project_id, current_branch)
+            await db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to commit changes: {e}",
+            ) from e
+
+        # Git is authoritative. Update the object-storage mirror only after the
+        # branch ref has passed its atomic expected-head precondition.
+        try:
+            await storage.upload_file(project.source_file_path, content_bytes, "text/turtle")
+        except StorageError as e:
+            try:
+                git_restored = git.restore_branch_head(
+                    project_id,
+                    current_branch,
+                    expected_head=commit_info.hash,
+                    target_head=current_revision,
+                )
+            except Exception:
+                logger.critical(
+                    "Git compensation raised after object-storage failure for project %s branch %s",
+                    project_id,
+                    current_branch,
+                    exc_info=True,
+                )
+                git_restored = False
+            ontology.unload(project_id, current_branch)
+            await db.rollback()
+            if not git_restored:
+                consistency_detail = SourceSaveConsistencyFailureDetail(
+                    message=(
+                        "The Git write succeeded, object storage failed, and the branch could not "
+                        "be restored; operator reconciliation is required."
+                    ),
+                    commit_hash=commit_info.hash,
+                    branch=current_branch,
+                    git_restored=False,
+                    storage_restored=True,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=consistency_detail.model_dump(),
+                ) from e
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Failed to save to storage: {e}",
             ) from e
 
         try:
@@ -1406,6 +1506,89 @@ async def save_source_content(
             )
         except Exception:
             logger.warning("Failed to record change events", exc_info=True)
+
+        # Release the transaction-scoped advisory lock before another writer
+        # can enter this process-local critical section.
+        try:
+            await db.commit()
+        except Exception as e:
+            logger.exception(
+                "Source save database finalization failed for project %s branch %s commit %s; "
+                "starting compensation",
+                project_id,
+                current_branch,
+                commit_info.hash,
+            )
+            git_restored = False
+            storage_restored = False
+            try:
+                git_restored = git.restore_branch_head(
+                    project_id,
+                    current_branch,
+                    expected_head=commit_info.hash,
+                    target_head=current_revision,
+                )
+            except Exception:
+                logger.critical(
+                    "Git compensation raised for project %s branch %s after database failure",
+                    project_id,
+                    current_branch,
+                    exc_info=True,
+                )
+            # Only restore the storage mirror after the guarded ref move
+            # succeeds. If the ref has advanced unexpectedly, writing the old
+            # bytes could overwrite the mirror for a newer branch head.
+            if git_restored:
+                try:
+                    await storage.upload_file(
+                        project.source_file_path,
+                        previous_content,
+                        "text/turtle",
+                    )
+                    storage_restored = True
+                except Exception:
+                    logger.critical(
+                        "Storage compensation raised for project %s branch %s "
+                        "after database failure",
+                        project_id,
+                        current_branch,
+                        exc_info=True,
+                    )
+
+            # Never retain a cache of the now-compensated commit. A later read
+            # reloads from the branch head that actually survived.
+            ontology.unload(project_id, current_branch)
+            await db.rollback()
+
+            if not git_restored or not storage_restored:
+                logger.critical(
+                    "Source save compensation incomplete for project %s branch %s "
+                    "commit %s (git_restored=%s, storage_restored=%s)",
+                    project_id,
+                    current_branch,
+                    commit_info.hash,
+                    git_restored,
+                    storage_restored,
+                )
+                consistency_detail = SourceSaveConsistencyFailureDetail(
+                    message=(
+                        "The save transaction failed and compensation was incomplete; "
+                        "operator reconciliation is required."
+                    ),
+                    commit_hash=commit_info.hash,
+                    branch=current_branch,
+                    git_restored=git_restored,
+                    storage_restored=storage_restored,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=consistency_detail.model_dump(),
+                ) from e
+
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="The save transaction could not be finalized; changes were rolled back.",
+            ) from e
 
     # Auto-embed changed entities if configured
     if change_events:
