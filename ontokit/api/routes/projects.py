@@ -1467,7 +1467,7 @@ async def save_source_content(
             ontology.unload(project_id, current_branch)
             await db.rollback()
             if not git_restored:
-                detail = SourceSaveConsistencyFailureDetail(
+                consistency_detail = SourceSaveConsistencyFailureDetail(
                     message=(
                         "The Git write succeeded, object storage failed, and the branch could not "
                         "be restored; operator reconciliation is required."
@@ -1479,7 +1479,7 @@ async def save_source_content(
                 )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=detail.model_dump(),
+                    detail=consistency_detail.model_dump(),
                 ) from e
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -1570,7 +1570,7 @@ async def save_source_content(
                     git_restored,
                     storage_restored,
                 )
-                detail = SourceSaveConsistencyFailureDetail(
+                consistency_detail = SourceSaveConsistencyFailureDetail(
                     message=(
                         "The save transaction failed and compensation was incomplete; "
                         "operator reconciliation is required."
@@ -1582,7 +1582,7 @@ async def save_source_content(
                 )
                 raise HTTPException(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                    detail=detail.model_dump(),
+                    detail=consistency_detail.model_dump(),
                 ) from e
 
             raise HTTPException(
