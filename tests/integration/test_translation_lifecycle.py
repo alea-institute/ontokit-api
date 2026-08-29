@@ -335,11 +335,12 @@ async def test_provisional_gate_requires_tagged_confirmation_and_human_authors_c
             select(TranslationRecord).where(TranslationRecord.project_id == project_id)
         )
         assert record is not None and record.state == "provisional"
+        record_id = record.id
         assert git.get_repository(project_id).get_branch_commit_hash("main") == before
         with pytest.raises(HTTPException) as forbidden:
             await translation.confirm_translation_record(
                 project_id,
-                record.id,
+                record_id,
                 TranslationReviewRequest(branch="main"),
                 real_db_session,
                 admin,
@@ -348,7 +349,7 @@ async def test_provisional_gate_requires_tagged_confirmation_and_human_authors_c
         assert forbidden.value.status_code == 403
         confirmed = await translation.confirm_translation_record(
             project_id,
-            record.id,
+            record_id,
             TranslationReviewRequest(branch="main"),
             real_db_session,
             reviewer,
