@@ -2,24 +2,52 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 
+import pytest
 from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from ontokit.models.demo_generation import DemoGeneration, DemoGenerationStatus
 from ontokit.models.ontology_index import IndexingStatus, OntologyIndexStatus
-from ontokit.models.project import Project
+from ontokit.models.project import Project, ProjectMember
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.services.demo_project_provisioning import (
     DEMO_DEFAULT_BRANCH,
+    DemoProvisioningRefused,
     ProvisionedDemo,
     build_demo_generation_key,
+    demo_generation_attempt_lease,
     ensure_demo_projects,
     fail_demo_generation,
     finalize_demo_publication,
     record_demo_preparation,
 )
+
+
+async def test_database_attempt_lease_excludes_a_second_host_session(
+    real_db_session: AsyncSession,
+) -> None:
+    """Use two physical PostgreSQL sessions to prove cross-host exclusion."""
+    assert real_db_session.bind is not None
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        pytest.skip("DATABASE_URL not set")
+    engine = create_async_engine(database_url, echo=False)
+    try:
+        async with engine.connect() as first, engine.connect() as second:
+            async with demo_generation_attempt_lease(first):
+                with pytest.raises(DemoProvisioningRefused, match="holds the database lease"):
+                    async with demo_generation_attempt_lease(second):
+                        pytest.fail("second database session acquired the global demo lease")
+
+            # Release is precise: the refused session can acquire immediately
+            # after the first attempt leaves its context.
+            async with demo_generation_attempt_lease(second):
+                pass
+    finally:
+        await engine.dispose()
 
 
 def _commits(first: str, second: str) -> dict[str, str]:
@@ -104,6 +132,13 @@ async def test_reader_observes_complete_old_or_new_generation_across_retry(
         await finalize_demo_publication(real_db_session, old)
         old_ids = {item.project_id for item in old}
         assert await _public_demo_ids(real_db_session) == old_ids
+        old_members = await real_db_session.execute(
+            select(ProjectMember).where(ProjectMember.project_id.in_(old_ids))
+        )
+        assert {
+            (member.project_id, member.user_id, member.role)
+            for member in old_members.scalars().all()
+        } == {(item.project_id, "demo-test-owner", "owner") for item in old}
 
         new_commits = _commits("c", "d")
         new_key = build_demo_generation_key(new_commits)

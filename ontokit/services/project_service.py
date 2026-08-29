@@ -41,6 +41,10 @@ from ontokit.services.ontology_extractor import (
     OntologyParseError,
     UnsupportedFormatError,
 )
+from ontokit.services.project_access_policy import (
+    require_user_managed_project,
+    require_visible_project,
+)
 from ontokit.services.storage import StorageError, StorageService
 
 logger = logging.getLogger(__name__)
@@ -586,6 +590,7 @@ class ProjectService:
             storage: Optional storage service for syncing metadata to RDF
         """
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
         user_role = self._get_user_role(project, user)
 
         if user_role not in ("owner", "admin") and not user.is_superadmin:
@@ -745,6 +750,7 @@ class ProjectService:
     async def delete(self, project_id: UUID, user: CurrentUser) -> None:
         """Delete a project (owner or superadmin only)."""
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
 
         if project.owner_id != user.id and not user.is_superadmin:
             raise HTTPException(
@@ -776,6 +782,7 @@ class ProjectService:
 
     async def set_branch_preference(self, project_id: UUID, user_id: str, branch: str) -> None:
         """Save user's preferred branch for a project."""
+        await self._get_project(project_id)
         result = await self.db.execute(
             select(ProjectMember).where(
                 ProjectMember.project_id == project_id,
@@ -838,6 +845,7 @@ class ProjectService:
     ) -> MemberResponse:
         """Add a member to a project."""
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
         user_role = self._get_user_role(project, user)
 
         if user_role not in ("owner", "admin") and not user.is_superadmin:
@@ -900,6 +908,7 @@ class ProjectService:
     ) -> MemberResponse:
         """Update a member's role."""
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
         user_role = self._get_user_role(project, user)
 
         if user_role not in ("owner", "admin") and not user.is_superadmin:
@@ -966,6 +975,7 @@ class ProjectService:
     async def remove_member(self, project_id: UUID, member_user_id: str, user: CurrentUser) -> None:
         """Remove a member from a project."""
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
         user_role = self._get_user_role(project, user)
 
         # Users can remove themselves
@@ -1033,6 +1043,7 @@ class ProjectService:
             HTTPException: If validation fails or user lacks permission
         """
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
 
         # Only the current owner or a superadmin can transfer ownership
         if project.owner_id != user.id and not user.is_superadmin:
@@ -1133,6 +1144,7 @@ class ProjectService:
                 detail="Project not found",
             )
 
+        require_visible_project(project)
         return project
 
     def _can_view(self, project: Project, user: CurrentUser | None) -> bool:

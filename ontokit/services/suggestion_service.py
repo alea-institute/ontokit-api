@@ -60,6 +60,7 @@ from ontokit.schemas.trust import TrustTier
 from ontokit.services.branch_lock import branch_write_lock, pull_request_write_locks
 from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.notification_service import NotificationService
+from ontokit.services.project_access_policy import require_visible_project
 from ontokit.services.pull_request_service import PullRequestService, get_pull_request_service
 from ontokit.services.rdf_utils import get_entity_type
 from ontokit.services.trust_rate_limiter import (
@@ -169,6 +170,7 @@ class SuggestionService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Project not found",
             )
+        require_visible_project(project)
         return project
 
     async def _get_project_record(self, project_id: UUID) -> Project:
@@ -180,6 +182,7 @@ class SuggestionService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Project not found",
             )
+        require_visible_project(project)
         return project
 
     def _get_user_role(self, project: Project, user: CurrentUser) -> str | None:
@@ -422,9 +425,12 @@ class SuggestionService:
     async def _get_session(self, project_id: UUID, session_id: str) -> SuggestionSession:
         """Get a suggestion session or raise 404."""
         result = await self.db.execute(
-            select(SuggestionSession).where(
+            select(SuggestionSession)
+            .join(Project, Project.id == SuggestionSession.project_id)
+            .where(
                 SuggestionSession.project_id == project_id,
                 SuggestionSession.session_id == session_id,
+                or_(Project.is_demo.is_(False), Project.is_public.is_(True)),
             )
         )
         session = result.scalar_one_or_none()
@@ -1211,6 +1217,7 @@ class SuggestionService:
                     detail="Project not found",
                 )
             project, member = loaded
+            require_visible_project(project)
             tier = self.trust.resolve_tier_for_member(user, member)
 
         is_superadmin = bool(user is not None and user.is_superadmin)
@@ -1347,9 +1354,11 @@ class SuggestionService:
         """List suggestion sessions for the current user in a project."""
         result = await self.db.execute(
             select(SuggestionSession)
+            .join(Project, Project.id == SuggestionSession.project_id)
             .where(
                 SuggestionSession.project_id == project_id,
                 SuggestionSession.user_id == user.id,
+                or_(Project.is_demo.is_(False), Project.is_public.is_(True)),
             )
             .order_by(SuggestionSession.last_activity.desc())
         )

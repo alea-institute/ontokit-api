@@ -51,6 +51,12 @@ from ontokit.services.commit_identity import CommitIdentityService
 from ontokit.services.language_palette import LANGUAGE_PALETTE
 from ontokit.services.llm import release_rate_limit_units, reserve_rate_limit_units
 from ontokit.services.llm.crypto import encrypt_secret
+from ontokit.services.project_access_policy import (
+    load_visible_project,
+    require_user_managed_project,
+    require_visible_project,
+    visible_project_clause,
+)
 from ontokit.services.translation_backfill import preview_backfill_cost, select_backfill_literals
 from ontokit.services.translation_coverage import TranslationCoverageService
 from ontokit.services.translation_jobs import (
@@ -77,8 +83,12 @@ async def _get_member_role(db: AsyncSession, project_id: UUID, user_id: str) -> 
 
 async def _get_member(db: AsyncSession, project_id: UUID, user_id: str) -> ProjectMember | None:
     result = await db.execute(
-        select(ProjectMember).where(
-            ProjectMember.project_id == project_id, ProjectMember.user_id == user_id
+        select(ProjectMember)
+        .join(Project, Project.id == ProjectMember.project_id)
+        .where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.user_id == user_id,
+            visible_project_clause(),
         )
     )
     return result.scalar_one_or_none()
@@ -102,6 +112,7 @@ async def _review_context(
     project = project_result.scalar_one_or_none()
     if project is None:
         raise HTTPException(status_code=404, detail="Project not found")
+    require_visible_project(project)
     member = await _get_member(db, project_id, str(user.id))
     if member is None:
         raise HTTPException(status_code=403, detail="Not a project member")
@@ -125,8 +136,14 @@ async def _require_member(
     db: AsyncSession, project_id: UUID, user_id: str, is_superadmin: bool
 ) -> str:
     role = await _get_member_role(db, project_id, user_id)
-    if role is None and not is_superadmin:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not a project member")
+    if role is None:
+        if is_superadmin:
+            await load_visible_project(db, project_id)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not a project member",
+            )
     return role if role is not None else "admin"
 
 
@@ -146,6 +163,7 @@ async def _require_project_view(db: AsyncSession, project_id: UUID, user: object
     project = result.scalar_one_or_none()
     if project is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Project not found")
+    require_visible_project(project)
     if project.is_public:
         return
     user_id = getattr(user, "id", None)
@@ -383,6 +401,7 @@ async def update_translation_config(
     user: RequiredUser,
 ) -> TranslationConfigResponse:
     await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
+    require_user_managed_project(await load_visible_project(db, project_id))
     config = await _get_config(db, project_id)
     if config is None:
         config = ProjectTranslationConfig(
@@ -537,6 +556,7 @@ async def update_translation_reviewer(
     user: RequiredUser,
 ) -> ReviewerEntry:
     await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
+    require_user_managed_project(await load_visible_project(db, project_id))
     result = await db.execute(
         select(ProjectMember).where(
             ProjectMember.id == member_id, ProjectMember.project_id == project_id
@@ -563,6 +583,7 @@ async def get_my_reviewer_languages(
     db: Annotated[AsyncSession, Depends(get_db)],
     user: RequiredUser,
 ) -> ReviewerLanguagesResponse:
+    await load_visible_project(db, project_id)
     member = await _get_member(db, project_id, user.id)
     if member is None:
         if user.is_superadmin:

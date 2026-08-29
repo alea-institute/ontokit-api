@@ -34,7 +34,14 @@ def _make_project(*, is_public: bool = True) -> MagicMock:
     project.id = PROJECT_ID
     project.name = "Test Project"
     project.is_public = is_public
+    project.is_demo = False
     return project
+
+
+def _scalar_result(value: object | None) -> MagicMock:
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = value
+    return result
 
 
 def _make_join_request(
@@ -207,7 +214,12 @@ class TestListRequests:
         mock_count_result = MagicMock()
         mock_count_result.scalar.return_value = 1
 
-        mock_db.execute.side_effect = [mock_role_result, mock_list_result, mock_count_result]
+        mock_db.execute.side_effect = [
+            _scalar_result(_make_project()),
+            mock_role_result,
+            mock_list_result,
+            mock_count_result,
+        ]
 
         admin = _make_user(user_id=ADMIN_ID)
         result = await service.list_requests(PROJECT_ID, admin)
@@ -220,7 +232,7 @@ class TestListRequests:
         """A non-admin user cannot list join requests."""
         mock_role_result = MagicMock()
         mock_role_result.scalar_one_or_none.return_value = "editor"
-        mock_db.execute.return_value = mock_role_result
+        mock_db.execute.side_effect = [_scalar_result(_make_project()), mock_role_result]
 
         editor = _make_user(user_id="editor-id")
 
@@ -253,7 +265,12 @@ class TestApproveRequest:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [mock_role_result, mock_jr_result, mock_project_result]
+        mock_db.execute.side_effect = [
+            _scalar_result(_make_project()),
+            mock_role_result,
+            mock_jr_result,
+            mock_project_result,
+        ]
 
         admin = _make_user(user_id=ADMIN_ID)
         action = JoinRequestAction(response_message="Welcome!")
@@ -278,7 +295,11 @@ class TestApproveRequest:
         mock_jr_result = MagicMock()
         mock_jr_result.scalar_one_or_none.return_value = jr
 
-        mock_db.execute.side_effect = [mock_role_result, mock_jr_result]
+        mock_db.execute.side_effect = [
+            _scalar_result(_make_project()),
+            mock_role_result,
+            mock_jr_result,
+        ]
 
         admin = _make_user(user_id=ADMIN_ID)
         action = JoinRequestAction()
@@ -305,7 +326,12 @@ class TestDeclineRequest:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [mock_role_result, mock_jr_result, mock_project_result]
+        mock_db.execute.side_effect = [
+            _scalar_result(_make_project()),
+            mock_role_result,
+            mock_jr_result,
+            mock_project_result,
+        ]
 
         owner = _make_user(user_id=OWNER_ID)
         action = JoinRequestAction(response_message="Sorry, not at this time.")
@@ -328,7 +354,11 @@ class TestDeclineRequest:
         mock_jr_result = MagicMock()
         mock_jr_result.scalar_one_or_none.return_value = None
 
-        mock_db.execute.side_effect = [mock_role_result, mock_jr_result]
+        mock_db.execute.side_effect = [
+            _scalar_result(_make_project()),
+            mock_role_result,
+            mock_jr_result,
+        ]
 
         admin = _make_user(user_id=ADMIN_ID)
         action = JoinRequestAction()
@@ -352,7 +382,7 @@ class TestWithdrawRequest:
         jr = _make_join_request(status=JoinRequestStatus.PENDING, user_id=REQUESTER_ID)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = jr
-        mock_db.execute.return_value = mock_result
+        mock_db.execute.side_effect = [_scalar_result(_make_project()), mock_result]
 
         user = _make_user(user_id=REQUESTER_ID)
         await service.withdraw_request(PROJECT_ID, REQUEST_ID, user)
@@ -368,7 +398,7 @@ class TestWithdrawRequest:
         jr = _make_join_request(status=JoinRequestStatus.PENDING, user_id=REQUESTER_ID)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = jr
-        mock_db.execute.return_value = mock_result
+        mock_db.execute.side_effect = [_scalar_result(_make_project()), mock_result]
 
         other_user = _make_user(user_id="other-user-id")
 
@@ -391,7 +421,7 @@ class TestGetMyRequest:
         jr = _make_join_request(status=JoinRequestStatus.PENDING)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = jr
-        mock_db.execute.return_value = mock_result
+        mock_db.execute.side_effect = [_scalar_result(_make_project()), mock_result]
 
         user = _make_user(user_id=REQUESTER_ID)
         result = await service.get_my_request(PROJECT_ID, user)
@@ -405,7 +435,11 @@ class TestGetMyRequest:
         """Returns has_pending_request=False when no request exists."""
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
-        mock_db.execute.return_value = mock_result
+        mock_db.execute.side_effect = [
+            _scalar_result(_make_project()),
+            mock_result,
+            mock_result,
+        ]
 
         user = _make_user(user_id=REQUESTER_ID)
         result = await service.get_my_request(PROJECT_ID, user)
@@ -524,7 +558,7 @@ class TestWithdrawRequestEdgeCases:
         """Withdrawing a non-existent request raises 404."""
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
-        mock_db.execute.return_value = mock_result
+        mock_db.execute.side_effect = [_scalar_result(_make_project()), mock_result]
 
         user = _make_user(user_id=REQUESTER_ID)
         with pytest.raises(HTTPException) as exc_info:
@@ -539,7 +573,7 @@ class TestWithdrawRequestEdgeCases:
         jr = _make_join_request(status=JoinRequestStatus.APPROVED, user_id=REQUESTER_ID)
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = jr
-        mock_db.execute.return_value = mock_result
+        mock_db.execute.side_effect = [_scalar_result(_make_project()), mock_result]
 
         user = _make_user(user_id=REQUESTER_ID)
         with pytest.raises(HTTPException) as exc_info:
@@ -569,7 +603,11 @@ class TestGetMyRequestAdditional:
         mock_recent_result = MagicMock()
         mock_recent_result.scalar_one_or_none.return_value = declined_jr
 
-        mock_db.execute.side_effect = [mock_pending_result, mock_recent_result]
+        mock_db.execute.side_effect = [
+            _scalar_result(_make_project()),
+            mock_pending_result,
+            mock_recent_result,
+        ]
 
         user = _make_user(user_id=REQUESTER_ID)
         result = await service.get_my_request(PROJECT_ID, user)

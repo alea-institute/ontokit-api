@@ -18,7 +18,7 @@ from typing import NoReturn
 
 from rdflib import Graph
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import selectinload
 
 from ontokit.core.config import settings
@@ -29,6 +29,7 @@ from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.services.demo_project_provisioning import (
     DEMO_DEFAULT_BRANCH,
     build_demo_generation_key,
+    demo_generation_attempt_lease,
     ensure_demo_projects,
     fail_demo_generation,
     finalize_demo_publication,
@@ -169,11 +170,14 @@ async def resync(manifest: Path, token_file: Path | None, generation_key: str) -
     validate_manifest(manifest)
     token = read_demo_token(token_file)
     engine = create_async_engine(str(settings.database_url))
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
     git_service = BareGitRepositoryService()
 
     try:
-        async with sessions() as db:
+        async with (
+            engine.connect() as connection,
+            demo_generation_attempt_lease(connection),
+            AsyncSession(bind=connection, expire_on_commit=False) as db,
+        ):
             provisioned = await ensure_demo_projects(db, generation_key)
             if all(item.already_active for item in provisioned):
                 print(f"demo_generation={generation_key} status=already_active")

@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
-from collections.abc import Mapping, Sequence
+import uuid
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ontokit.core.demo_targets import (
@@ -19,7 +22,7 @@ from ontokit.core.demo_targets import (
 from ontokit.core.demo_targets import build_demo_generation_key as _build_demo_generation_key
 from ontokit.models.demo_generation import DemoGeneration, DemoGenerationStatus
 from ontokit.models.ontology_index import IndexingStatus, OntologyIndexStatus
-from ontokit.models.project import Project
+from ontokit.models.project import Project, ProjectMember
 from ontokit.models.pull_request import GitHubIntegration
 
 
@@ -28,6 +31,11 @@ class DemoProvisioningRefused(RuntimeError):
 
 
 DEMO_DEFAULT_BRANCH = "main"
+# A fixed two-key PostgreSQL advisory-lock identity serializes demo generation
+# preparation across application hosts. Session-level locking is intentional:
+# repository cloning and indexing span several database transactions.
+_DEMO_ATTEMPT_LOCK_NAMESPACE = 0x4F4E544F
+_DEMO_ATTEMPT_LOCK_RESOURCE = 1
 _COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 _GENERATION_KEY_RE = re.compile(r"[0-9a-f]{64}")
 _FAILURE_REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
@@ -37,10 +45,60 @@ _FAILURE_REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 class ProvisionedDemo:
     project_id: UUID
     generation_id: UUID
+    attempt_token: UUID
     source_repository: str
     destination_repository: str
     created: bool
     already_active: bool
+
+
+@asynccontextmanager
+async def demo_generation_attempt_lease(
+    connection: AsyncConnection,
+) -> AsyncIterator[None]:
+    """Hold the cross-host demo preparation lease on one physical DB session."""
+    if connection.dialect.name != "postgresql":
+        raise DemoProvisioningRefused(
+            "demo generation attempt leasing requires PostgreSQL advisory locks"
+        )
+
+    acquired_result = await connection.execute(
+        text("SELECT pg_try_advisory_lock(:namespace, :resource)"),
+        {
+            "namespace": _DEMO_ATTEMPT_LOCK_NAMESPACE,
+            "resource": _DEMO_ATTEMPT_LOCK_RESOURCE,
+        },
+    )
+    acquired = bool(acquired_result.scalar_one())
+    # End the implicit transaction without releasing the session-level lock.
+    await connection.commit()
+    if not acquired:
+        raise DemoProvisioningRefused("another demo generation attempt holds the database lease")
+
+    async def release() -> None:
+        released_result = await connection.execute(
+            text("SELECT pg_advisory_unlock(:namespace, :resource)"),
+            {
+                "namespace": _DEMO_ATTEMPT_LOCK_NAMESPACE,
+                "resource": _DEMO_ATTEMPT_LOCK_RESOURCE,
+            },
+        )
+        released = bool(released_result.scalar_one())
+        await connection.commit()
+        if not released:
+            raise RuntimeError("demo generation database lease was lost before release")
+
+    try:
+        yield
+    finally:
+        # Do not leave a session-level lock stranded in the connection pool if
+        # the resync task is cancelled during cleanup.
+        release_task = asyncio.create_task(release())
+        try:
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            await release_task
+            raise
 
 
 def build_demo_generation_key(commits: Mapping[str, str]) -> str:
@@ -107,6 +165,7 @@ async def ensure_demo_projects(
             generation_key=generation_key,
             status=DemoGenerationStatus.PREPARING.value,
             attempt_count=1,
+            attempt_token=uuid.uuid4(),
             failure_count=0,
         )
         db.add(generation)
@@ -116,6 +175,12 @@ async def ensure_demo_projects(
     elif generation.status == DemoGenerationStatus.FAILED.value:
         generation.status = DemoGenerationStatus.PREPARING.value
         generation.attempt_count += 1
+        generation.attempt_token = uuid.uuid4()
+    elif generation.status == DemoGenerationStatus.PREPARING.value:
+        # A new caller fences any abandoned or lock-bypassing attempt. The
+        # advisory lease prevents this during the normal cross-host workflow.
+        generation.attempt_count += 1
+        generation.attempt_token = uuid.uuid4()
     elif generation.status not in {
         DemoGenerationStatus.PREPARING.value,
         DemoGenerationStatus.ACTIVE.value,
@@ -151,6 +216,17 @@ async def ensure_demo_projects(
             )
             db.add(candidate)
             await db.flush()
+            # Preserve the normal provisioning contract: the source owner is
+            # represented by both ``owner_id`` and an owner membership. The
+            # shared visibility policy keeps this retained membership from
+            # exposing preparing, failed, or retired generations.
+            db.add(
+                ProjectMember(
+                    project_id=candidate.id,
+                    user_id=candidate.owner_id,
+                    role="owner",
+                )
+            )
             integration = GitHubIntegration(
                 project_id=candidate.id,
                 repo_owner=destination_target[0],
@@ -188,6 +264,7 @@ async def ensure_demo_projects(
             ProvisionedDemo(
                 project_id=candidate.id,
                 generation_id=generation.id,
+                attempt_token=generation.attempt_token,
                 source_repository="/".join(source_target),
                 destination_repository="/".join(destination_target),
                 created=created,
@@ -212,11 +289,18 @@ async def record_demo_preparation(
         select(Project).where(Project.id == item.project_id).with_for_update()
     )
     project = project_result.scalar_one_or_none()
+    generation_result = await db.execute(
+        select(DemoGeneration).where(DemoGeneration.id == item.generation_id).with_for_update()
+    )
+    generation = generation_result.scalar_one_or_none()
     if (
         project is None
         or not project.is_demo
         or project.demo_generation_id != item.generation_id
         or project.is_public
+        or generation is None
+        or generation.status != DemoGenerationStatus.PREPARING.value
+        or generation.attempt_token != item.attempt_token
     ):
         raise DemoProvisioningRefused("prepared project left its hidden generation contract")
     status_result = await db.execute(
@@ -242,27 +326,36 @@ async def fail_demo_generation(
     db: AsyncSession,
     provisioned: Sequence[ProvisionedDemo],
     reason: str,
-) -> None:
-    """Record a safe failure receipt without changing the active generation."""
+) -> bool:
+    """Record a safe failure receipt; return false for a superseded attempt."""
     generation_ids = {item.generation_id for item in provisioned}
-    if len(generation_ids) != 1:
+    attempt_tokens = {item.attempt_token for item in provisioned}
+    if len(generation_ids) != 1 or len(attempt_tokens) != 1:
         raise DemoProvisioningRefused("failure receipt requires exactly one generation")
     if _FAILURE_REASON_RE.fullmatch(reason) is None:
         raise DemoProvisioningRefused("failure receipt reason must be an allowlisted safe label")
     generation_id = next(iter(generation_ids))
+    attempt_token = next(iter(attempt_tokens))
     result = await db.execute(
         select(DemoGeneration).where(DemoGeneration.id == generation_id).with_for_update()
     )
     generation = result.scalar_one_or_none()
     if generation is None:
         raise DemoProvisioningRefused("failed demo generation disappeared")
+    if generation.attempt_token != attempt_token:
+        await db.rollback()
+        return False
     if generation.status == DemoGenerationStatus.ACTIVE.value:
         raise DemoProvisioningRefused("an active demo generation cannot be marked failed")
+    if generation.status != DemoGenerationStatus.PREPARING.value:
+        await db.rollback()
+        return False
     generation.status = DemoGenerationStatus.FAILED.value
     generation.failure_count += 1
     generation.last_failure_reason = reason
     generation.last_failed_at = datetime.now(UTC)
     await db.commit()
+    return True
 
 
 async def finalize_demo_publication(
@@ -277,15 +370,18 @@ async def finalize_demo_publication(
     observed_pairs = {(item.source_repository, item.destination_repository) for item in provisioned}
     project_ids = {item.project_id for item in provisioned}
     generation_ids = {item.generation_id for item in provisioned}
+    attempt_tokens = {item.attempt_token for item in provisioned}
     if (
         observed_pairs != expected_pairs
         or len(project_ids) != len(expected_pairs)
         or len(generation_ids) != 1
+        or len(attempt_tokens) != 1
     ):
         raise DemoProvisioningRefused(
             "publication requires one complete approved demo generation exactly once"
         )
     generation_id = next(iter(generation_ids))
+    attempt_token = next(iter(attempt_tokens))
 
     project_result = await db.execute(
         select(Project)
@@ -313,6 +409,8 @@ async def finalize_demo_publication(
     generation = generation_result.scalar_one_or_none()
     if generation is None:
         raise DemoProvisioningRefused("publication generation disappeared during preparation")
+    if generation.attempt_token != attempt_token:
+        raise DemoProvisioningRefused("demo generation attempt was superseded before publication")
     if generation.status == DemoGenerationStatus.ACTIVE.value:
         if all(project.is_public for project in projects.values()):
             await db.rollback()

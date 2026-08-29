@@ -23,6 +23,7 @@ from ontokit.schemas.join_request import (
     ProjectPendingCount,
 )
 from ontokit.services.notification_service import NotificationService
+from ontokit.services.project_access_policy import require_visible_project
 from ontokit.services.user_service import UserService, get_user_service
 
 logger = logging.getLogger(__name__)
@@ -48,6 +49,7 @@ class JoinRequestService:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Project not found",
             )
+        require_visible_project(project)
         return project
 
     async def _get_user_role(self, project_id: UUID, user_id: str) -> str | None:
@@ -62,6 +64,7 @@ class JoinRequestService:
 
     async def _check_admin_access(self, project_id: UUID, user: CurrentUser) -> None:
         """Check that the user is an owner or admin of the project."""
+        await self._get_project(project_id)
         if user.is_superadmin:
             return
         role = await self._get_user_role(project_id, user.id)
@@ -343,6 +346,7 @@ class JoinRequestService:
         user: CurrentUser,
     ) -> None:
         """Withdraw a pending join request (requester only)."""
+        await self._get_project(project_id)
         result = await self.db.execute(
             select(JoinRequest).where(
                 JoinRequest.id == request_id,
@@ -378,6 +382,7 @@ class JoinRequestService:
         user: CurrentUser,
     ) -> MyJoinRequestResponse:
         """Get the current user's join request status for a project."""
+        await self._get_project(project_id)
         # First check for a pending request
         result = await self.db.execute(
             select(JoinRequest).where(

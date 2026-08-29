@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from ontokit.api.routes.translation import get_translation_config, update_translation_config
 from ontokit.core.auth import CurrentUser
 from ontokit.main import app
+from ontokit.models.project import Project
 from ontokit.models.translation import ProjectTranslationConfig
 from ontokit.schemas.translation import TranslationConfigUpdate
 from ontokit.services.language_palette import LANGUAGE_PALETTE
@@ -23,6 +24,16 @@ def _result(value: object) -> Mock:
     result = Mock()
     result.scalar_one_or_none.return_value = value
     return result
+
+
+def _project() -> Project:
+    return Project(
+        id=PROJECT_ID,
+        name="Translation project",
+        owner_id="admin",
+        is_public=False,
+        is_demo=False,
+    )
 
 
 @pytest.mark.asyncio
@@ -45,7 +56,11 @@ async def test_non_admin_cannot_update_translation_config(mock_db_session: Async
 async def test_admin_update_persists_and_never_echoes_key(
     mock_db_session: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    mock_db_session.execute.side_effect = [_result(Mock(role="admin")), _result(None)]
+    mock_db_session.execute.side_effect = [
+        _result(Mock(role="admin")),
+        _result(_project()),
+        _result(None),
+    ]
     monkeypatch.setattr(
         "ontokit.api.routes.translation.encrypt_secret",
         lambda plaintext: f"encrypted:{plaintext}",
@@ -117,7 +132,11 @@ async def test_admin_can_clear_primary_translation_provider_and_model(
         primary_provider="openai",
         primary_model="gpt-5.1",
     )
-    mock_db_session.execute.side_effect = [_result(Mock(role="admin")), _result(config)]
+    mock_db_session.execute.side_effect = [
+        _result(Mock(role="admin")),
+        _result(_project()),
+        _result(config),
+    ]
 
     response = await update_translation_config(
         PROJECT_ID,
@@ -149,7 +168,11 @@ async def test_admin_can_clear_verifier_provider_and_model(
         verifier_provider="anthropic",
         verifier_model="claude-sonnet-4-5",
     )
-    mock_db_session.execute.side_effect = [_result(Mock(role="admin")), _result(config)]
+    mock_db_session.execute.side_effect = [
+        _result(Mock(role="admin")),
+        _result(_project()),
+        _result(config),
+    ]
 
     response = await update_translation_config(
         PROJECT_ID,

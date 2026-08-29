@@ -9,7 +9,7 @@ from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import delete as sa_delete
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -72,6 +72,10 @@ from ontokit.services.branch_lock import (
 from ontokit.services.github_service import GitHubPR, GitHubService, get_github_service
 from ontokit.services.mirror_credential import resolve_mirror_credential
 from ontokit.services.notification_service import NotificationService
+from ontokit.services.project_access_policy import (
+    require_user_managed_project,
+    require_visible_project,
+)
 from ontokit.services.pull_request_github_sync import (
     GitHubPRIntentState,
     GitHubPRSyncIntent,
@@ -1676,6 +1680,7 @@ class PullRequestService:
     ) -> GitHubIntegrationResponse:
         """Create GitHub integration for a project."""
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
 
         if project.owner_id != user.id:
             raise HTTPException(
@@ -1734,6 +1739,7 @@ class PullRequestService:
     ) -> GitHubIntegrationResponse:
         """Update GitHub integration settings."""
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
 
         if project.owner_id != user.id:
             raise HTTPException(
@@ -1809,6 +1815,7 @@ class PullRequestService:
         from ontokit.core.config import settings
 
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
         if project.owner_id != user.id:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
@@ -1921,6 +1928,7 @@ class PullRequestService:
     async def delete_github_integration(self, project_id: UUID, user: CurrentUser) -> None:
         """Delete GitHub integration for a project."""
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
 
         if project.owner_id != user.id:
             raise HTTPException(
@@ -1967,6 +1975,7 @@ class PullRequestService:
     ) -> PRSettingsResponse:
         """Update PR workflow settings for a project."""
         project = await self._get_project(project_id)
+        require_user_managed_project(project)
 
         if project.owner_id != user.id:
             raise HTTPException(
@@ -2138,7 +2147,10 @@ class PullRequestService:
                     func.count().label("open_count"),
                 )
                 .join(Project, PullRequest.project_id == Project.id)
-                .where(PullRequest.status == PRStatus.OPEN.value)
+                .where(
+                    PullRequest.status == PRStatus.OPEN.value,
+                    or_(Project.is_demo.is_(False), Project.is_public.is_(True)),
+                )
                 .group_by(PullRequest.project_id, Project.name)
             )
         else:
@@ -2155,7 +2167,10 @@ class PullRequestService:
                     & (ProjectMember.user_id == user.id)
                     & (ProjectMember.role.in_(["owner", "admin"])),
                 )
-                .where(PullRequest.status == PRStatus.OPEN.value)
+                .where(
+                    PullRequest.status == PRStatus.OPEN.value,
+                    or_(Project.is_demo.is_(False), Project.is_public.is_(True)),
+                )
                 .group_by(PullRequest.project_id, Project.name)
             )
 
@@ -2190,6 +2205,7 @@ class PullRequestService:
                 detail="Project not found",
             )
 
+        require_visible_project(project)
         return project
 
     async def _get_pr(self, project_id: UUID, pr_number: int) -> PullRequest:

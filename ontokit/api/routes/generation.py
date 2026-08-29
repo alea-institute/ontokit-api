@@ -53,6 +53,11 @@ from ontokit.services.llm import (
     get_provider,
 )
 from ontokit.services.llm.rate_limiter import FAIL_OPEN_EVENT
+from ontokit.services.project_access_policy import (
+    load_visible_project,
+    require_visible_project,
+    visible_project_clause,
+)
 from ontokit.services.suggestion_generation_service import SuggestionGenerationService
 from ontokit.services.validation_service import ValidationService, detect_project_namespace
 
@@ -87,18 +92,24 @@ async def _require_project_member(
 ) -> str:
     """Return the user's role, raising 403 if not a member."""
     result = await db.execute(
-        select(ProjectMember).where(
+        select(ProjectMember)
+        .join(Project, Project.id == ProjectMember.project_id)
+        .where(
             ProjectMember.project_id == project_id,
             ProjectMember.user_id == user_id,
+            visible_project_clause(),
         )
     )
     member = result.scalar_one_or_none()
     role = member.role if member else None
-    if role is None and not is_superadmin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not a member of this project",
-        )
+    if role is None:
+        if is_superadmin:
+            await load_visible_project(db, project_id)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not a member of this project",
+            )
     return role or "admin"
 
 
@@ -117,6 +128,7 @@ async def _load_project(db: AsyncSession, project_id: UUID) -> Project:
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Project not found",
         )
+    require_visible_project(project)
     return project
 
 

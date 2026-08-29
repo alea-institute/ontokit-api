@@ -234,7 +234,7 @@ class TestGet:
         with pytest.raises(HTTPException) as exc_info:
             await service.get(project.id, _make_user(user_id=OWNER_ID))
 
-        assert exc_info.value.status_code == 403
+        assert exc_info.value.status_code == 404
 
     @pytest.mark.asyncio
     async def test_get_private_project_denied_for_non_member(
@@ -348,6 +348,24 @@ class TestDelete:
         with pytest.raises(HTTPException) as exc_info:
             await service.delete(PROJECT_ID, admin)
         assert exc_info.value.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_delete_active_demo_denied_for_owner(
+        self, service: ProjectService, mock_db: AsyncMock
+    ) -> None:
+        """A source owner cannot delete one project from the active demo pair."""
+        project = _make_project(is_public=True)
+        project.is_demo = True
+        mock_result = MagicMock()
+        mock_result.scalar_one_or_none.return_value = project
+        mock_db.execute.return_value = mock_result
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.delete(PROJECT_ID, _make_user(user_id=OWNER_ID))
+
+        assert exc_info.value.status_code == 403
+        mock_db.delete.assert_not_awaited()
+        mock_db.commit.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1012,9 +1030,11 @@ class TestBranchPreference:
     ) -> None:
         """Setting branch preference updates the member row."""
         member = _make_member(OWNER_ID, "owner")
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = _make_project()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = member
-        mock_db.execute.return_value = mock_result
+        mock_db.execute.side_effect = [project_result, mock_result]
 
         await service.set_branch_preference(PROJECT_ID, OWNER_ID, "develop")
 
@@ -1026,9 +1046,11 @@ class TestBranchPreference:
         self, service: ProjectService, mock_db: AsyncMock
     ) -> None:
         """Setting branch preference for a non-member is a no-op."""
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = _make_project()
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
-        mock_db.execute.return_value = mock_result
+        mock_db.execute.side_effect = [project_result, mock_result]
 
         await service.set_branch_preference(PROJECT_ID, "ghost-user", "develop")
 

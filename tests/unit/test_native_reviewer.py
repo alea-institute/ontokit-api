@@ -16,7 +16,7 @@ from ontokit.api.routes import translation as routes
 from ontokit.core.auth import CurrentUser
 from ontokit.core.constants import ONTOKIT_COMMITTER_EMAIL, ONTOKIT_COMMITTER_NAME
 from ontokit.git.bare_repository import BareGitRepositoryService, BareOntologyRepository
-from ontokit.models.project import ProjectMember
+from ontokit.models.project import Project, ProjectMember
 from ontokit.models.translation import NativeReviewerLanguage, TranslationRecord, hash_literal_value
 from ontokit.schemas.translation import TranslationBulkConfirmRequest
 from ontokit.services.translation_annotations import (
@@ -304,14 +304,23 @@ async def test_nonmember_superadmin_reads_empty_reviewer_languages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     db = AsyncMock()
-    result = Mock()
-    result.scalar_one_or_none.return_value = None
-    db.execute.return_value = result
+    project_id = uuid4()
+    project_result = Mock()
+    project_result.scalar_one_or_none.return_value = Project(
+        id=project_id,
+        name="Translation project",
+        owner_id="root",
+        is_public=False,
+        is_demo=False,
+    )
+    member_result = Mock()
+    member_result.scalar_one_or_none.return_value = None
+    db.execute.side_effect = [project_result, member_result]
 
     user = CurrentUser(id="root")
     monkeypatch.setattr(type(user), "is_superadmin", property(lambda _self: True), raising=False)
 
-    response = await routes.get_my_reviewer_languages(uuid4(), db, user)
+    response = await routes.get_my_reviewer_languages(project_id, db, user)
 
     assert response.languages == []
 

@@ -19,6 +19,23 @@ down_revision: str | None = "g5h6i7j8k9l0"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+_LEGACY_DEMO_REPOSITORY_PAIRS = frozenset(
+    {
+        (
+            "alea-institute",
+            "folio",
+            "alea-institute",
+            "ontokit-demo-folio",
+        ),
+        (
+            "catholicos",
+            "ontology-semantic-canon",
+            "alea-institute",
+            "ontokit-demo-semantic-canon",
+        ),
+    }
+)
+
 
 def upgrade() -> None:
     op.create_table(
@@ -27,6 +44,7 @@ def upgrade() -> None:
         sa.Column("generation_key", sa.String(length=64), nullable=False),
         sa.Column("status", sa.String(length=20), server_default="preparing", nullable=False),
         sa.Column("attempt_count", sa.Integer(), server_default="1", nullable=False),
+        sa.Column("attempt_token", sa.Uuid(), nullable=False),
         sa.Column("failure_count", sa.Integer(), server_default="0", nullable=False),
         sa.Column("last_failure_reason", sa.Text(), nullable=True),
         sa.Column("last_failed_at", sa.DateTime(timezone=True), nullable=True),
@@ -61,30 +79,53 @@ def upgrade() -> None:
     )
 
     connection = op.get_bind()
-    demo_count, public_demo_count = connection.execute(
+    legacy_demos = connection.execute(
         sa.text(
             """
-            SELECT count(*), count(*) FILTER (WHERE is_public IS TRUE)
-            FROM projects
-            WHERE is_demo IS TRUE
+            SELECT
+                lower(trim(source_integration.repo_owner)),
+                lower(trim(source_integration.repo_name)),
+                lower(trim(demo_integration.repo_owner)),
+                lower(trim(demo_integration.repo_name)),
+                demo.is_public
+            FROM projects AS demo
+            LEFT JOIN projects AS source
+                ON source.id = demo.demo_source_project_id
+            LEFT JOIN github_integrations AS source_integration
+                ON source_integration.project_id = source.id
+            LEFT JOIN github_integrations AS demo_integration
+                ON demo_integration.project_id = demo.id
+            WHERE demo.is_demo IS TRUE
             """
         )
-    ).one()
-    if public_demo_count not in (0, demo_count):
+    ).all()
+    visibilities = {is_public for *_, is_public in legacy_demos}
+    if len(visibilities) > 1:
         raise RuntimeError(
             "Cannot migrate a partially published legacy demo set; restore complete visibility "
             "or unpublish the set before upgrading"
         )
+    observed_pairs = {tuple(row[:4]) for row in legacy_demos}
+    if legacy_demos and (
+        len(legacy_demos) != len(_LEGACY_DEMO_REPOSITORY_PAIRS)
+        or observed_pairs != _LEGACY_DEMO_REPOSITORY_PAIRS
+    ):
+        raise RuntimeError(
+            "Cannot migrate the legacy demo set unless it contains exactly the approved "
+            "source/destination repository pairs with correlated GitHub integrations"
+        )
+    demo_count = len(legacy_demos)
     if demo_count:
         generation_id = uuid.uuid4()
-        status = "active" if public_demo_count else "preparing"
+        status = "active" if visibilities == {True} else "preparing"
         connection.execute(
             sa.text(
                 """
                 INSERT INTO demo_generations
-                    (id, generation_key, status, attempt_count, failure_count, activated_at)
+                    (id, generation_key, status, attempt_count, attempt_token,
+                     failure_count, activated_at)
                 VALUES
-                    (:id, :key, :status, 1, 0,
+                    (:id, :key, :status, 1, :attempt_token, 0,
                      CASE WHEN :status = 'active' THEN CURRENT_TIMESTAMP ELSE NULL END)
                 """
             ),
@@ -92,6 +133,7 @@ def upgrade() -> None:
                 "id": generation_id,
                 "key": f"legacy-{generation_id.hex}"[:64],
                 "status": status,
+                "attempt_token": uuid.uuid4(),
             },
         )
         connection.execute(

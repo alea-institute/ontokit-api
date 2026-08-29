@@ -37,6 +37,10 @@ class DemoGeneration(Base):
     attempt_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default="1"
     )
+    attempt_token: Mapped[uuid.UUID] = mapped_column(
+        nullable=False,
+        default=uuid.uuid4,
+    )
     failure_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )

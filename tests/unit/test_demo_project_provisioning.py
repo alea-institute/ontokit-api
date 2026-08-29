@@ -4,19 +4,21 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Sequence
+from contextlib import AbstractAsyncContextManager
 from typing import Any
 
 import pytest
 
 from ontokit.models.demo_generation import DemoGeneration, DemoGenerationStatus
 from ontokit.models.ontology_index import IndexingStatus, OntologyIndexStatus
-from ontokit.models.project import Project
+from ontokit.models.project import Project, ProjectMember
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.services.demo_project_provisioning import (
     DEMO_DEFAULT_BRANCH,
     DemoProvisioningRefused,
     ProvisionedDemo,
     build_demo_generation_key,
+    demo_generation_attempt_lease,
     ensure_demo_projects,
     fail_demo_generation,
     finalize_demo_publication,
@@ -38,6 +40,10 @@ class _Result:
         assert len(self._rows) <= 1
         return self._rows[0] if self._rows else None
 
+    def scalar_one(self) -> Any:
+        assert len(self._rows) == 1
+        return self._rows[0]
+
 
 class _ProvisioningSession:
     """Deterministic AsyncSession double for generation lifecycle query order."""
@@ -46,6 +52,7 @@ class _ProvisioningSession:
         self.sources = list(sources)
         self.generations: list[DemoGeneration] = []
         self.projects: list[Project] = []
+        self.members: list[ProjectMember] = []
         self.integrations: list[GitHubIntegration] = []
         self.indexes: list[OntologyIndexStatus] = []
         self._results: list[_Result] = []
@@ -73,6 +80,9 @@ class _ProvisioningSession:
 
     def queue_record(self, item: ProvisionedDemo, commit_hash: str) -> None:
         project = next(project for project in self.projects if project.id == item.project_id)
+        generation = next(
+            generation for generation in self.generations if generation.id == item.generation_id
+        )
         status = OntologyIndexStatus(
             id=uuid.uuid4(),
             project_id=item.project_id,
@@ -81,7 +91,7 @@ class _ProvisioningSession:
             commit_hash=commit_hash,
         )
         self.indexes.append(status)
-        self._results = [_Result([project]), _Result([status])]
+        self._results = [_Result([project]), _Result([generation]), _Result([status])]
 
     def queue_failure(self, generation: DemoGeneration) -> None:
         self._results = [_Result([generation])]
@@ -123,6 +133,8 @@ class _ProvisioningSession:
             self.generations.append(value)
         elif isinstance(value, Project) and value.is_demo:
             self.projects.append(value)
+        elif isinstance(value, ProjectMember):
+            self.members.append(value)
         elif isinstance(value, GitHubIntegration):
             self.integrations.append(value)
 
@@ -205,6 +217,9 @@ async def test_failed_preparation_preserves_active_generation_and_retry_is_idemp
     await finalize_demo_publication(session, first)  # type: ignore[arg-type]
     assert first_generation.status == DemoGenerationStatus.ACTIVE.value
     assert all(project.is_public for project in first_projects)
+    assert {(member.project_id, member.user_id, member.role) for member in session.members} == {
+        (item.project_id, "demo-owner", "owner") for item in first
+    }
 
     second_commits = _commits("c", "d")
     second_key = build_demo_generation_key(second_commits)
@@ -238,6 +253,7 @@ async def test_failed_preparation_preserves_active_generation_and_retry_is_idemp
     assert not any(item.created or item.already_active for item in retry)
     assert second_generation.attempt_count == 2
     assert second_generation.failure_count == 1
+    assert len(session.members) == 4
 
     await _prepare(session, retry, second_commits)
     second_projects = session.generation_projects(second_generation)
@@ -263,3 +279,94 @@ async def test_failed_preparation_preserves_active_generation_and_retry_is_idemp
     session.queue_finalize(second_generation, second_projects, active=[], visible=[])
     await finalize_demo_publication(session, retry)  # type: ignore[arg-type]
     assert session.commit_count == commits_before
+
+
+async def test_superseded_attempt_cannot_fail_record_or_publish_newer_attempt() -> None:
+    session = _ProvisioningSession(
+        [
+            _source("alea-institute", "FOLIO", "develop", "FOLIO.owl"),
+            _source("CatholicOS", "ontology-semantic-canon", "release", "ontology.ttl"),
+        ]
+    )
+    commits = _commits("e", "f")
+    generation_key = build_demo_generation_key(commits)
+    session.queue_ensure(generation_key)
+    stale = await ensure_demo_projects(session, generation_key)  # type: ignore[arg-type]
+    generation = session.generation(generation_key)
+    assert generation is not None
+
+    session.queue_ensure(generation_key)
+    current = await ensure_demo_projects(session, generation_key)  # type: ignore[arg-type]
+    assert generation.attempt_count == 2
+    assert {item.attempt_token for item in stale} != {item.attempt_token for item in current}
+
+    session.queue_failure(generation)
+    assert not await fail_demo_generation(  # type: ignore[arg-type]
+        session,
+        stale,
+        "repository_or_index_preparation_failed",
+    )
+    assert generation.status == DemoGenerationStatus.PREPARING.value
+    assert generation.failure_count == 0
+
+    stale_item = stale[0]
+    session.queue_record(stale_item, commits[stale_item.destination_repository])
+    with pytest.raises(DemoProvisioningRefused, match="hidden generation contract"):
+        await record_demo_preparation(  # type: ignore[arg-type]
+            session,
+            stale_item,
+            commits[stale_item.destination_repository],
+        )
+
+    projects = session.generation_projects(generation)
+    session.queue_finalize(generation, projects, active=[], visible=[])
+    with pytest.raises(DemoProvisioningRefused, match="superseded"):
+        await finalize_demo_publication(session, stale)  # type: ignore[arg-type]
+
+    await _prepare(session, current, commits)
+    session.queue_finalize(generation, projects, active=[], visible=[])
+    await finalize_demo_publication(session, current)  # type: ignore[arg-type]
+    assert generation.status == DemoGenerationStatus.ACTIVE.value
+
+
+class _Dialect:
+    name = "postgresql"
+
+
+class _LeaseConnection:
+    dialect = _Dialect()
+
+    def __init__(self, acquisitions: list[bool]) -> None:
+        self._results = [_Result([value]) for value in acquisitions]
+        self.statements: list[str] = []
+        self.commit_count = 0
+
+    async def execute(self, statement: object, _parameters: object) -> _Result:
+        self.statements.append(str(statement))
+        return self._results.pop(0)
+
+    async def commit(self) -> None:
+        self.commit_count += 1
+
+
+async def test_database_attempt_lease_is_nonblocking_and_released() -> None:
+    connection = _LeaseConnection([True, True])
+
+    lease: AbstractAsyncContextManager[None] = demo_generation_attempt_lease(  # type: ignore[arg-type]
+        connection
+    )
+    async with lease:
+        assert connection.commit_count == 1
+
+    assert connection.commit_count == 2
+    assert "pg_try_advisory_lock" in connection.statements[0]
+    assert "pg_advisory_unlock" in connection.statements[1]
+
+
+async def test_database_attempt_lease_refuses_a_concurrent_holder() -> None:
+    connection = _LeaseConnection([False])
+
+    with pytest.raises(DemoProvisioningRefused, match="holds the database lease"):
+        async with demo_generation_attempt_lease(connection):  # type: ignore[arg-type]
+            pytest.fail("busy lease must not enter its protected workflow")
+    assert connection.commit_count == 1
