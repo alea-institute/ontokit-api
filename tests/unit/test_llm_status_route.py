@@ -43,6 +43,12 @@ def _member(role: str) -> Mock:
     return member
 
 
+def _user_managed_project() -> Mock:
+    project = Mock()
+    project.is_demo = False
+    return project
+
+
 def _llm_config(
     provider: str = "anthropic",
     api_key_encrypted: bytes | None = b"enc",
@@ -281,6 +287,7 @@ def test_member_flags_404_for_missing_target(authed_client: tuple[TestClient, As
     session.execute = AsyncMock(
         side_effect=[
             _scalar_one_or_none(_member("owner")),  # actor role
+            _scalar_one_or_none(_user_managed_project()),  # mutability policy
             _scalar_one_or_none(None),  # target not a member
         ]
     )
@@ -301,6 +308,7 @@ def test_member_flags_admin_toggles_flag(authed_client: tuple[TestClient, AsyncM
     session.execute = AsyncMock(
         side_effect=[
             _scalar_one_or_none(_member("admin")),
+            _scalar_one_or_none(_user_managed_project()),
             _scalar_one_or_none(target),
         ]
     )
