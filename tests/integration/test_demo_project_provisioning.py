@@ -1,20 +1,90 @@
-"""Real-PostgreSQL proof for idempotent demo project provisioning."""
+"""Real-PostgreSQL proof for generation-atomic demo publication."""
 
 from __future__ import annotations
 
-from sqlalchemy import delete, select
-from sqlalchemy.ext.asyncio import AsyncSession
+import os
+from collections.abc import Sequence
 
-from ontokit.models.project import Project
+import pytest
+from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from ontokit.models.demo_generation import DemoGeneration, DemoGenerationStatus
+from ontokit.models.ontology_index import IndexingStatus, OntologyIndexStatus
+from ontokit.models.project import Project, ProjectMember
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.services.demo_project_provisioning import (
     DEMO_DEFAULT_BRANCH,
+    DemoProvisioningRefused,
+    ProvisionedDemo,
+    build_demo_generation_key,
+    demo_generation_attempt_lease,
     ensure_demo_projects,
+    fail_demo_generation,
     finalize_demo_publication,
+    record_demo_preparation,
 )
 
 
-async def test_failed_first_activation_stays_private_until_retry_finishes(
+async def test_database_attempt_lease_excludes_a_second_host_session(
+    real_db_session: AsyncSession,
+) -> None:
+    """Use two physical PostgreSQL sessions to prove cross-host exclusion."""
+    assert real_db_session.bind is not None
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        pytest.skip("DATABASE_URL not set")
+    engine = create_async_engine(database_url, echo=False)
+    try:
+        async with engine.connect() as first, engine.connect() as second:
+            async with demo_generation_attempt_lease(first):
+                with pytest.raises(DemoProvisioningRefused, match="holds the database lease"):
+                    async with demo_generation_attempt_lease(second):
+                        pytest.fail("second database session acquired the global demo lease")
+
+            # Release is precise: the refused session can acquire immediately
+            # after the first attempt leaves its context.
+            async with demo_generation_attempt_lease(second):
+                pass
+    finally:
+        await engine.dispose()
+
+
+def _commits(first: str, second: str) -> dict[str, str]:
+    return {
+        "alea-institute/ontokit-demo-folio": first * 40,
+        "alea-institute/ontokit-demo-semantic-canon": second * 40,
+    }
+
+
+async def _prepare(
+    db: AsyncSession,
+    provisioned: Sequence[ProvisionedDemo],
+    commits: dict[str, str],
+) -> None:
+    for item in provisioned:
+        commit = commits[item.destination_repository]
+        db.add(
+            OntologyIndexStatus(
+                project_id=item.project_id,
+                branch=DEMO_DEFAULT_BRANCH,
+                status=IndexingStatus.READY.value,
+                commit_hash=commit,
+                entity_count=1,
+            )
+        )
+        await db.commit()
+        await record_demo_preparation(db, item, commit)
+
+
+async def _public_demo_ids(db: AsyncSession) -> set[object]:
+    result = await db.execute(
+        select(Project.id).where(Project.is_demo.is_(True), Project.is_public.is_(True))
+    )
+    return set(result.scalars().all())
+
+
+async def test_reader_observes_complete_old_or_new_generation_across_retry(
     real_db_session: AsyncSession,
 ) -> None:
     sources: list[Project] = []
@@ -32,6 +102,7 @@ async def test_failed_first_activation_stays_private_until_retry_finishes(
             name=name,
             owner_id="demo-test-owner",
             is_public=True,
+            is_demo=False,
             source_file_path=f"projects/source/{path}",
         )
         real_db_session.add(project)
@@ -41,8 +112,6 @@ async def test_failed_first_activation_stays_private_until_retry_finishes(
                 project_id=project.id,
                 repo_owner=owner,
                 repo_name=repo,
-                # The demo target must follow its immutable mirror contract,
-                # not an editable source-project branch preference.
                 default_branch=source_branch,
                 ontology_file_path=path,
                 turtle_file_path=path,
@@ -52,56 +121,77 @@ async def test_failed_first_activation_stays_private_until_retry_finishes(
         sources.append(project)
     await real_db_session.commit()
     source_ids = [item.id for item in sources]
+    generation_keys: list[str] = []
 
     try:
-        first = await ensure_demo_projects(real_db_session)
-        assert len(first) == 2
-        assert all(item.created for item in first)
-
-        result = await real_db_session.execute(
-            select(Project).where(Project.demo_source_project_id.in_(source_ids))
+        old_commits = _commits("a", "b")
+        old_key = build_demo_generation_key(old_commits)
+        generation_keys.append(old_key)
+        old = await ensure_demo_projects(real_db_session, old_key)
+        await _prepare(real_db_session, old, old_commits)
+        await finalize_demo_publication(real_db_session, old)
+        old_ids = {item.project_id for item in old}
+        assert await _public_demo_ids(real_db_session) == old_ids
+        old_members = await real_db_session.execute(
+            select(ProjectMember).where(ProjectMember.project_id.in_(old_ids))
         )
-        demos = list(result.scalars().all())
-        assert len(demos) == 2
-        assert all(project.is_demo and not project.is_public for project in demos)
-        assert all(project.source_file_path for project in demos)
-        integration_result = await real_db_session.execute(
-            select(GitHubIntegration).where(
-                GitHubIntegration.project_id.in_([project.id for project in demos])
-            )
+        assert {
+            (member.project_id, member.user_id, member.role)
+            for member in old_members.scalars().all()
+        } == {(item.project_id, "demo-test-owner", "owner") for item in old}
+
+        new_commits = _commits("c", "d")
+        new_key = build_demo_generation_key(new_commits)
+        generation_keys.append(new_key)
+        failed = await ensure_demo_projects(real_db_session, new_key)
+        new_ids = {item.project_id for item in failed}
+        assert old_ids.isdisjoint(new_ids)
+        await fail_demo_generation(
+            real_db_session,
+            failed,
+            "repository_or_index_preparation_failed",
         )
-        demo_integrations = list(integration_result.scalars().all())
-        assert len(demo_integrations) == 2
-        assert all(
-            integration.default_branch == DEMO_DEFAULT_BRANCH for integration in demo_integrations
+        assert await _public_demo_ids(real_db_session) == old_ids
+
+        retry = await ensure_demo_projects(real_db_session, new_key)
+        assert {item.project_id for item in retry} == new_ids
+        await _prepare(real_db_session, retry, new_commits)
+
+        bind = real_db_session.bind
+        assert bind is not None
+        readers = async_sessionmaker(bind, expire_on_commit=False)
+        async with readers() as reader:
+            # This statement runs while the replacement is fully prepared but
+            # hidden; the reader sees the complete old pair.
+            assert await _public_demo_ids(reader) == old_ids
+
+            await finalize_demo_publication(real_db_session, retry)
+
+            # Publication is one database commit. The next reader statement
+            # sees the complete new pair, never a one-old/one-new mixture.
+            assert await _public_demo_ids(reader) == new_ids
+
+        generations_result = await real_db_session.execute(
+            select(DemoGeneration).where(DemoGeneration.generation_key.in_([old_key, new_key]))
+        )
+        generations = {
+            generation.generation_key: generation
+            for generation in generations_result.scalars().all()
+        }
+        assert generations[old_key].status == DemoGenerationStatus.RETIRED.value
+        assert generations[new_key].status == DemoGenerationStatus.ACTIVE.value
+        assert generations[new_key].attempt_count == 2
+        assert generations[new_key].failure_count == 1
+        assert generations[new_key].last_failure_reason == (
+            "repository_or_index_preparation_failed"
         )
 
-        discoverable = await real_db_session.scalar(
-            select(Project.id).where(Project.is_demo.is_(True), Project.is_public.is_(True))
-        )
-        assert discoverable is None
-
-        # Simulate a failed first preparation: ensure committed the private
-        # identities, but the resync entrypoint never finalized publication.
-        retry = await ensure_demo_projects(real_db_session)
-        assert not any(item.created for item in retry)
-        assert {item.project_id for item in first} == {item.project_id for item in retry}
-        assert not any(project.is_public for project in demos)
-
-        await finalize_demo_publication(real_db_session, retry)
-        real_db_session.expire_all()
-        published_result = await real_db_session.execute(
-            select(Project).where(Project.demo_source_project_id.in_(source_ids))
-        )
-        published = list(published_result.scalars().all())
-        assert all(project.is_public for project in published)
-
-        # A later refresh starts from the already-published rows. If repository
-        # preparation then fails before finalization, they must stay public and
-        # continue serving the previously known-good repository/index pair.
-        refresh = await ensure_demo_projects(real_db_session)
-        assert not any(item.created for item in refresh)
-        assert all(project.is_public for project in published)
+        # A successful retry is idempotent and preserves generation identity.
+        active_retry = await ensure_demo_projects(real_db_session, new_key)
+        assert all(item.already_active for item in active_retry)
+        assert {item.project_id for item in active_retry} == new_ids
+        await finalize_demo_publication(real_db_session, active_retry)
+        assert await _public_demo_ids(real_db_session) == new_ids
     finally:
         await real_db_session.rollback()
         demo_result = await real_db_session.execute(
@@ -110,6 +200,15 @@ async def test_failed_first_activation_stays_private_until_retry_finishes(
         demo_ids = list(demo_result.scalars().all())
         if demo_ids:
             await real_db_session.execute(delete(Project).where(Project.id.in_(demo_ids)))
+            await real_db_session.commit()
+        generation_result = await real_db_session.execute(
+            select(DemoGeneration.id).where(DemoGeneration.generation_key.in_(generation_keys))
+        )
+        generation_ids = list(generation_result.scalars().all())
+        if generation_ids:
+            await real_db_session.execute(
+                delete(DemoGeneration).where(DemoGeneration.id.in_(generation_ids))
+            )
             await real_db_session.commit()
         await real_db_session.execute(delete(Project).where(Project.id.in_(source_ids)))
         await real_db_session.commit()

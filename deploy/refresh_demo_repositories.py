@@ -16,6 +16,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NoReturn
 
+from ontokit.core.demo_targets import build_demo_generation_key
+
 SOURCE_TOKEN_ENV = "GITHUB_DEMO_SOURCE_TOKEN"
 DESTINATION_TOKEN_ENV = "GITHUB_DEMO_MIRROR_TOKEN"
 # Large ontology mirrors should comfortably finish within this ceiling. The
@@ -173,7 +175,7 @@ def refresh_one(
     source_token: str,
     destination_token: str,
     refreshed_at: str,
-) -> None:
+) -> str:
     checkout = workspace / mirror.name
     run_command(
         [
@@ -233,7 +235,14 @@ def refresh_one(
         cwd=checkout,
         environment=git_environment(destination_token, askpass),
     )
-    print(f"refreshed={mirror.name} source_sha={source_sha}")
+    destination_sha = _run_subprocess(
+        ["git", "rev-parse", "HEAD"],
+        cwd=checkout,
+        environment=scrubbed_environment(),
+        capture_output=True,
+    ).stdout.strip()
+    print(f"refreshed={mirror.name} source_sha={source_sha} destination_sha={destination_sha}")
+    return destination_sha
 
 
 def scrubbed_environment() -> dict[str, str]:
@@ -270,8 +279,9 @@ def main() -> None:
             workspace = Path(temp_dir)
             askpass = workspace / "askpass.sh"
             write_askpass(askpass)
+            commits: dict[str, str] = {}
             for mirror in mirrors:
-                refresh_one(
+                commits[mirror.destination_repository] = refresh_one(
                     mirror,
                     workspace,
                     askpass,
@@ -279,11 +289,20 @@ def main() -> None:
                     destination_token,
                     refreshed_at,
                 )
+            try:
+                generation_key = build_demo_generation_key(commits)
+            except ValueError as exc:
+                refuse(str(exc))
             run_command(
-                [str(args.resync_executable), str(args.manifest)],
+                [
+                    str(args.resync_executable),
+                    str(args.manifest),
+                    "--generation-key",
+                    generation_key,
+                ],
                 environment=scrubbed_environment(),
             )
-    print("demo_refresh=passed mirrors=2 resync=passed")
+    print(f"demo_refresh=passed mirrors=2 generation={generation_key} resync=passed")
 
 
 if __name__ == "__main__":

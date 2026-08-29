@@ -1,16 +1,27 @@
-"""Idempotent database provisioning for the two public demo projects."""
+"""Generation-atomic database provisioning for the public demo projects."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+import asyncio
+import re
+import uuid
+from collections.abc import AsyncIterator, Mapping, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, select, text
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession
 from sqlalchemy.orm import selectinload
 
-from ontokit.core.demo_targets import DEMO_REPOSITORY_PAIRS, normalize_repository
+from ontokit.core.demo_targets import (
+    DEMO_REPOSITORY_PAIRS,
+    normalize_repository,
+)
+from ontokit.core.demo_targets import build_demo_generation_key as _build_demo_generation_key
+from ontokit.models.demo_generation import DemoGeneration, DemoGenerationStatus
+from ontokit.models.ontology_index import IndexingStatus, OntologyIndexStatus
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.pull_request import GitHubIntegration
 
@@ -20,114 +31,204 @@ class DemoProvisioningRefused(RuntimeError):
 
 
 DEMO_DEFAULT_BRANCH = "main"
+# A fixed two-key PostgreSQL advisory-lock identity serializes demo generation
+# preparation across application hosts. Session-level locking is intentional:
+# repository cloning and indexing span several database transactions.
+_DEMO_ATTEMPT_LOCK_NAMESPACE = 0x4F4E544F
+_DEMO_ATTEMPT_LOCK_RESOURCE = 1
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+_GENERATION_KEY_RE = re.compile(r"[0-9a-f]{64}")
+_FAILURE_REASON_RE = re.compile(r"[a-z][a-z0-9_]{0,63}")
 
 
 @dataclass(frozen=True)
 class ProvisionedDemo:
     project_id: UUID
+    generation_id: UUID
+    attempt_token: UUID
     source_repository: str
     destination_repository: str
     created: bool
+    already_active: bool
 
 
-async def _find_integration(db: AsyncSession, owner: str, repo: str) -> GitHubIntegration | None:
+@asynccontextmanager
+async def demo_generation_attempt_lease(
+    connection: AsyncConnection,
+) -> AsyncIterator[None]:
+    """Hold the cross-host demo preparation lease on one physical DB session."""
+    if connection.dialect.name != "postgresql":
+        raise DemoProvisioningRefused(
+            "demo generation attempt leasing requires PostgreSQL advisory locks"
+        )
+
+    acquired_result = await connection.execute(
+        text("SELECT pg_try_advisory_lock(:namespace, :resource)"),
+        {
+            "namespace": _DEMO_ATTEMPT_LOCK_NAMESPACE,
+            "resource": _DEMO_ATTEMPT_LOCK_RESOURCE,
+        },
+    )
+    acquired = bool(acquired_result.scalar_one())
+    # End the implicit transaction without releasing the session-level lock.
+    await connection.commit()
+    if not acquired:
+        raise DemoProvisioningRefused("another demo generation attempt holds the database lease")
+
+    async def release() -> None:
+        released_result = await connection.execute(
+            text("SELECT pg_advisory_unlock(:namespace, :resource)"),
+            {
+                "namespace": _DEMO_ATTEMPT_LOCK_NAMESPACE,
+                "resource": _DEMO_ATTEMPT_LOCK_RESOURCE,
+            },
+        )
+        released = bool(released_result.scalar_one())
+        await connection.commit()
+        if not released:
+            raise RuntimeError("demo generation database lease was lost before release")
+
+    try:
+        yield
+    finally:
+        # Do not leave a session-level lock stranded in the connection pool if
+        # the resync task is cancelled during cleanup.
+        release_task = asyncio.create_task(release())
+        try:
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            await release_task
+            raise
+
+
+def build_demo_generation_key(commits: Mapping[str, str]) -> str:
+    """Build a generation identity while preserving the service refusal contract."""
+    try:
+        return _build_demo_generation_key(commits)
+    except ValueError as exc:
+        raise DemoProvisioningRefused(str(exc)) from exc
+
+
+def _validate_generation_key(generation_key: str) -> str:
+    normalized = generation_key.lower()
+    if _GENERATION_KEY_RE.fullmatch(normalized) is None:
+        raise DemoProvisioningRefused("generation key must be a SHA-256 hexadecimal digest")
+    return normalized
+
+
+async def _find_source_integration(
+    db: AsyncSession, owner: str, repo: str
+) -> GitHubIntegration | None:
+    """Find and lock one live source, ignoring historical demo generations."""
     result = await db.execute(
         select(GitHubIntegration)
+        .join(Project, Project.id == GitHubIntegration.project_id)
         .options(selectinload(GitHubIntegration.project))
         .where(
             func.lower(GitHubIntegration.repo_owner) == owner,
             func.lower(GitHubIntegration.repo_name) == repo,
+            Project.is_demo.is_(False),
         )
+        .with_for_update(of=GitHubIntegration)
     )
     integrations = list(result.scalars().all())
     if len(integrations) > 1:
         raise DemoProvisioningRefused(
-            f"repository {owner}/{repo} is attached to more than one project"
+            f"live source repository {owner}/{repo} is attached to more than one project"
         )
     return integrations[0] if integrations else None
 
 
-async def ensure_demo_projects(db: AsyncSession) -> tuple[ProvisionedDemo, ...]:
-    """Ensure exactly one linked demo project exists for each approved pair.
-
-    This function changes database records only. Repository cloning and index
-    rebuild happen after the transaction succeeds, so a failed clone cannot
-    leave a half-written target identity.
-    """
-    provisioned: list[ProvisionedDemo] = []
-    for source_target, destination_target in DEMO_REPOSITORY_PAIRS.items():
-        source = await _find_integration(db, *source_target)
+async def ensure_demo_projects(
+    db: AsyncSession,
+    generation_key: str,
+) -> tuple[ProvisionedDemo, ...]:
+    """Create or resume a complete hidden generation for the approved pair."""
+    generation_key = _validate_generation_key(generation_key)
+    sources: dict[tuple[str, str], GitHubIntegration] = {}
+    for source_target in DEMO_REPOSITORY_PAIRS:
+        source = await _find_source_integration(db, *source_target)
         if source is None:
             raise DemoProvisioningRefused(
                 f"live source project {source_target[0]}/{source_target[1]} does not exist"
             )
-        if source.project.is_demo:
-            raise DemoProvisioningRefused(
-                f"configured live source {source_target[0]}/{source_target[1]} is itself a demo"
-            )
+        sources[source_target] = source
 
-        destination = await _find_integration(db, *destination_target)
-        linked_result = await db.execute(
+    generation_result = await db.execute(
+        select(DemoGeneration)
+        .where(DemoGeneration.generation_key == generation_key)
+        .with_for_update()
+    )
+    generation = generation_result.scalar_one_or_none()
+    if generation is None:
+        generation = DemoGeneration(
+            generation_key=generation_key,
+            status=DemoGenerationStatus.PREPARING.value,
+            attempt_count=1,
+            attempt_token=uuid.uuid4(),
+            failure_count=0,
+        )
+        db.add(generation)
+        await db.flush()
+    elif generation.status == DemoGenerationStatus.RETIRED.value:
+        raise DemoProvisioningRefused("a retired demo generation cannot be republished")
+    elif generation.status == DemoGenerationStatus.FAILED.value:
+        generation.status = DemoGenerationStatus.PREPARING.value
+        generation.attempt_count += 1
+        generation.attempt_token = uuid.uuid4()
+    elif generation.status == DemoGenerationStatus.PREPARING.value:
+        # A new caller fences any abandoned or lock-bypassing attempt. The
+        # advisory lease prevents this during the normal cross-host workflow.
+        generation.attempt_count += 1
+        generation.attempt_token = uuid.uuid4()
+    elif generation.status not in {
+        DemoGenerationStatus.PREPARING.value,
+        DemoGenerationStatus.ACTIVE.value,
+    }:
+        raise DemoProvisioningRefused("demo generation has an invalid lifecycle status")
+
+    provisioned: list[ProvisionedDemo] = []
+    for source_target, destination_target in DEMO_REPOSITORY_PAIRS.items():
+        source = sources[source_target]
+        candidate_result = await db.execute(
             select(Project)
             .options(selectinload(Project.github_integration))
-            .where(Project.demo_source_project_id == source.project_id)
+            .where(
+                Project.demo_source_project_id == source.project_id,
+                Project.demo_generation_id == generation.id,
+            )
         )
-        linked = linked_result.scalar_one_or_none()
-
-        if destination is not None:
-            if not destination.project.is_demo:
-                raise DemoProvisioningRefused(
-                    f"demo repository {destination_target[0]}/{destination_target[1]} "
-                    "is attached to a live project"
-                )
-            if destination.project.demo_source_project_id != source.project_id:
-                raise DemoProvisioningRefused(
-                    f"demo repository {destination_target[0]}/{destination_target[1]} "
-                    "is linked to the wrong live source"
-                )
-            if linked is not None and linked.id != destination.project_id:
-                raise DemoProvisioningRefused("source and destination resolve to different demos")
-            demo = destination.project
-            integration = destination
-            created = False
-        elif linked is not None:
-            if not linked.is_demo:
-                raise DemoProvisioningRefused("linked project is missing its demo identity")
-            if linked.github_integration is not None:
-                raise DemoProvisioningRefused("linked demo has an unexpected GitHub target")
-            demo = linked
-            integration = None
-            created = False
-        else:
-            demo = Project(
+        candidate = candidate_result.scalar_one_or_none()
+        created = candidate is None
+        if candidate is None:
+            candidate = Project(
                 name=f"{source.project.name} Demo",
                 description=(
                     f"Resettable OntoKit demo cloned from {source_target[0]}/{source_target[1]}."
                 ),
-                # Publish only after both repositories and commit-matched
-                # indexes have been prepared by the resync entrypoint.
                 is_public=False,
                 is_demo=True,
                 demo_source_project_id=source.project_id,
+                demo_generation_id=generation.id,
                 owner_id=source.project.owner_id,
                 ontology_iri=source.project.ontology_iri,
                 source_file_path=source.project.source_file_path,
             )
-            db.add(demo)
+            db.add(candidate)
             await db.flush()
+            # Preserve the normal provisioning contract: the source owner is
+            # represented by both ``owner_id`` and an owner membership. The
+            # shared visibility policy keeps this retained membership from
+            # exposing preparing, failed, or retired generations.
             db.add(
                 ProjectMember(
-                    project_id=demo.id,
-                    user_id=source.project.owner_id,
+                    project_id=candidate.id,
+                    user_id=candidate.owner_id,
                     role="owner",
                 )
             )
-            integration = None
-            created = True
-
-        if integration is None:
             integration = GitHubIntegration(
-                project_id=demo.id,
+                project_id=candidate.id,
                 repo_owner=destination_target[0],
                 repo_name=destination_target[1],
                 default_branch=DEMO_DEFAULT_BRANCH,
@@ -139,26 +240,35 @@ async def ensure_demo_projects(db: AsyncSession) -> tuple[ProvisionedDemo, ...]:
                 webhooks_enabled=False,
             )
             db.add(integration)
-            demo.github_integration = integration
-        elif (
-            integration.repo_owner.lower(),
-            integration.repo_name.lower(),
-        ) != destination_target:
-            raise DemoProvisioningRefused("linked demo target changed during provisioning")
-        elif integration.default_branch != DEMO_DEFAULT_BRANCH:
-            raise DemoProvisioningRefused(
-                f"linked demo target must use the immutable {DEMO_DEFAULT_BRANCH!r} branch"
-            )
+            candidate.github_integration = integration
+        else:
+            existing_integration = candidate.github_integration
+            if not candidate.is_demo or (
+                candidate.is_public and generation.status != DemoGenerationStatus.ACTIVE.value
+            ):
+                raise DemoProvisioningRefused(
+                    "preparing demo generation contains a visible or non-demo project"
+                )
+            if existing_integration is None:
+                raise DemoProvisioningRefused("candidate demo has no GitHub integration")
+            if normalize_repository(
+                existing_integration.repo_owner, existing_integration.repo_name
+            ) != (destination_target):
+                raise DemoProvisioningRefused("candidate demo target changed during preparation")
+            if existing_integration.default_branch != DEMO_DEFAULT_BRANCH:
+                raise DemoProvisioningRefused(
+                    f"candidate target must use the immutable {DEMO_DEFAULT_BRANCH!r} branch"
+                )
 
-        demo.is_demo = True
-        demo.demo_source_project_id = source.project_id
-        demo.source_file_path = source.project.source_file_path
         provisioned.append(
             ProvisionedDemo(
-                project_id=demo.id,
+                project_id=candidate.id,
+                generation_id=generation.id,
+                attempt_token=generation.attempt_token,
                 source_repository="/".join(source_target),
                 destination_repository="/".join(destination_target),
                 created=created,
+                already_active=generation.status == DemoGenerationStatus.ACTIVE.value,
             )
         )
 
@@ -166,78 +276,221 @@ async def ensure_demo_projects(db: AsyncSession) -> tuple[ProvisionedDemo, ...]:
     return tuple(provisioned)
 
 
+async def record_demo_preparation(
+    db: AsyncSession,
+    item: ProvisionedDemo,
+    commit_hash: str,
+) -> None:
+    """Correlate a hidden project's repository and verified index commit."""
+    commit_hash = commit_hash.lower()
+    if _COMMIT_RE.fullmatch(commit_hash) is None:
+        raise DemoProvisioningRefused("prepared demo requires a full hexadecimal commit hash")
+    project_result = await db.execute(
+        select(Project).where(Project.id == item.project_id).with_for_update()
+    )
+    project = project_result.scalar_one_or_none()
+    generation_result = await db.execute(
+        select(DemoGeneration).where(DemoGeneration.id == item.generation_id).with_for_update()
+    )
+    generation = generation_result.scalar_one_or_none()
+    if (
+        project is None
+        or not project.is_demo
+        or project.demo_generation_id != item.generation_id
+        or project.is_public
+        or generation is None
+        or generation.status != DemoGenerationStatus.PREPARING.value
+        or generation.attempt_token != item.attempt_token
+    ):
+        raise DemoProvisioningRefused("prepared project left its hidden generation contract")
+    status_result = await db.execute(
+        select(OntologyIndexStatus).where(
+            OntologyIndexStatus.project_id == item.project_id,
+            OntologyIndexStatus.branch == DEMO_DEFAULT_BRANCH,
+        )
+    )
+    status = status_result.scalar_one_or_none()
+    if (
+        status is None
+        or status.status != IndexingStatus.READY.value
+        or status.commit_hash != commit_hash
+    ):
+        raise DemoProvisioningRefused(
+            "prepared demo repository and ready index do not share one commit"
+        )
+    project.demo_commit_hash = commit_hash
+    await db.commit()
+
+
+async def fail_demo_generation(
+    db: AsyncSession,
+    provisioned: Sequence[ProvisionedDemo],
+    reason: str,
+) -> bool:
+    """Record a safe failure receipt; return false for a superseded attempt."""
+    generation_ids = {item.generation_id for item in provisioned}
+    attempt_tokens = {item.attempt_token for item in provisioned}
+    if len(generation_ids) != 1 or len(attempt_tokens) != 1:
+        raise DemoProvisioningRefused("failure receipt requires exactly one generation")
+    if _FAILURE_REASON_RE.fullmatch(reason) is None:
+        raise DemoProvisioningRefused("failure receipt reason must be an allowlisted safe label")
+    generation_id = next(iter(generation_ids))
+    attempt_token = next(iter(attempt_tokens))
+    result = await db.execute(
+        select(DemoGeneration).where(DemoGeneration.id == generation_id).with_for_update()
+    )
+    generation = result.scalar_one_or_none()
+    if generation is None:
+        raise DemoProvisioningRefused("failed demo generation disappeared")
+    if generation.attempt_token != attempt_token:
+        await db.rollback()
+        return False
+    if generation.status == DemoGenerationStatus.ACTIVE.value:
+        raise DemoProvisioningRefused("an active demo generation cannot be marked failed")
+    if generation.status != DemoGenerationStatus.PREPARING.value:
+        await db.rollback()
+        return False
+    generation.status = DemoGenerationStatus.FAILED.value
+    generation.failure_count += 1
+    generation.last_failure_reason = reason
+    generation.last_failed_at = datetime.now(UTC)
+    await db.commit()
+    return True
+
+
 async def finalize_demo_publication(
     db: AsyncSession,
     provisioned: Sequence[ProvisionedDemo],
 ) -> None:
-    """Publish the complete demo set in one transaction after preparation.
-
-    Callers must finish cloning and commit-matched indexing for every returned
-    ``ProvisionedDemo`` before invoking this function. Revalidating the
-    immutable database contract under row locks prevents a stale provisioning
-    result from publishing a target that changed while repositories were being
-    prepared.
-    """
+    """Atomically switch public visibility to one fully prepared generation."""
     expected_pairs = {
         ("/".join(source), "/".join(destination))
         for source, destination in DEMO_REPOSITORY_PAIRS.items()
     }
     observed_pairs = {(item.source_repository, item.destination_repository) for item in provisioned}
     project_ids = {item.project_id for item in provisioned}
-    if observed_pairs != expected_pairs or len(project_ids) != len(expected_pairs):
+    generation_ids = {item.generation_id for item in provisioned}
+    attempt_tokens = {item.attempt_token for item in provisioned}
+    if (
+        observed_pairs != expected_pairs
+        or len(project_ids) != len(expected_pairs)
+        or len(generation_ids) != 1
+        or len(attempt_tokens) != 1
+    ):
         raise DemoProvisioningRefused(
-            "publication requires every approved demo repository exactly once"
+            "publication requires one complete approved demo generation exactly once"
         )
+    generation_id = next(iter(generation_ids))
+    attempt_token = next(iter(attempt_tokens))
 
-    result = await db.execute(select(Project).where(Project.id.in_(project_ids)).with_for_update())
-    projects = {project.id: project for project in result.scalars().all()}
-    if set(projects) != project_ids:
-        raise DemoProvisioningRefused("publication target project disappeared during preparation")
-
-    source_ids = {
-        project.demo_source_project_id
-        for project in projects.values()
-        if project.demo_source_project_id is not None
-    }
-    integration_result = await db.execute(
-        select(GitHubIntegration)
-        .where(GitHubIntegration.project_id.in_(project_ids | source_ids))
+    project_result = await db.execute(
+        select(Project)
+        .options(selectinload(Project.github_integration))
+        .where(Project.id.in_(project_ids))
         .with_for_update()
     )
-    integrations = {
-        integration.project_id: integration for integration in integration_result.scalars().all()
+    projects = {project.id: project for project in project_result.scalars().all()}
+    if set(projects) != project_ids:
+        raise DemoProvisioningRefused("publication target disappeared during preparation")
+
+    source_ids = {project.demo_source_project_id for project in projects.values()}
+    if None in source_ids or len(source_ids) != len(expected_pairs):
+        raise DemoProvisioningRefused("publication target lost a unique live source")
+    locked_sources_result = await db.execute(
+        select(Project).where(Project.id.in_(source_ids)).order_by(Project.id).with_for_update()
+    )
+    locked_sources = {project.id: project for project in locked_sources_result.scalars().all()}
+    if set(locked_sources) != source_ids:
+        raise DemoProvisioningRefused("publication source disappeared during preparation")
+
+    generation_result = await db.execute(
+        select(DemoGeneration).where(DemoGeneration.id == generation_id).with_for_update()
+    )
+    generation = generation_result.scalar_one_or_none()
+    if generation is None:
+        raise DemoProvisioningRefused("publication generation disappeared during preparation")
+    if generation.attempt_token != attempt_token:
+        raise DemoProvisioningRefused("demo generation attempt was superseded before publication")
+    if generation.status == DemoGenerationStatus.ACTIVE.value:
+        if all(project.is_public for project in projects.values()):
+            await db.rollback()
+            return
+        raise DemoProvisioningRefused("active generation has inconsistent project visibility")
+    if generation.status != DemoGenerationStatus.PREPARING.value:
+        raise DemoProvisioningRefused("only a preparing generation can be published")
+
+    source_integrations_result = await db.execute(
+        select(GitHubIntegration).where(GitHubIntegration.project_id.in_(source_ids))
+    )
+    source_integrations = {
+        integration.project_id: integration
+        for integration in source_integrations_result.scalars().all()
     }
+    index_result = await db.execute(
+        select(OntologyIndexStatus).where(
+            OntologyIndexStatus.project_id.in_(project_ids),
+            OntologyIndexStatus.branch == DEMO_DEFAULT_BRANCH,
+        )
+    )
+    indexes = {status.project_id: status for status in index_result.scalars().all()}
 
     for item in provisioned:
         project = projects[item.project_id]
-        integration = integrations.get(project.id)
+        integration = project.github_integration
         source_target = tuple(item.source_repository.split("/", 1))
         destination_target = tuple(item.destination_repository.split("/", 1))
+        source_id = project.demo_source_project_id
+        source = source_integrations.get(source_id) if source_id is not None else None
+        index = indexes.get(project.id)
         if (
             len(source_target) != 2
             or len(destination_target) != 2
             or DEMO_REPOSITORY_PAIRS.get(source_target) != destination_target
-        ):
-            raise DemoProvisioningRefused("publication target left the immutable demo contract")
-        if not project.is_demo or project.demo_source_project_id is None:
-            raise DemoProvisioningRefused("publication target is missing its demo identity")
-        source = integrations.get(project.demo_source_project_id)
-        if (
-            source is None
+            or project.demo_generation_id != generation_id
+            or not project.is_demo
+            or project.is_public
+            or project.demo_commit_hash is None
+            or source is None
             or normalize_repository(source.repo_owner, source.repo_name) != source_target
-        ):
-            raise DemoProvisioningRefused("publication source changed during preparation")
-        if integration is None:
-            raise DemoProvisioningRefused("publication target has no GitHub integration")
-        if (
-            normalize_repository(integration.repo_owner, integration.repo_name)
+            or integration is None
+            or normalize_repository(integration.repo_owner, integration.repo_name)
             != destination_target
+            or integration.default_branch != DEMO_DEFAULT_BRANCH
+            or index is None
+            or index.status != IndexingStatus.READY.value
+            or index.commit_hash != project.demo_commit_hash
         ):
-            raise DemoProvisioningRefused("publication target changed during preparation")
-        if integration.default_branch != DEMO_DEFAULT_BRANCH:
             raise DemoProvisioningRefused(
-                f"publication target must use the immutable {DEMO_DEFAULT_BRANCH!r} branch"
+                "publication candidate failed repository/project/index correlation"
             )
+
+    now = datetime.now(UTC)
+    active_result = await db.execute(
+        select(DemoGeneration)
+        .where(DemoGeneration.status == DemoGenerationStatus.ACTIVE.value)
+        .with_for_update()
+    )
+    for active in active_result.scalars().all():
+        if active.id != generation_id:
+            active.status = DemoGenerationStatus.RETIRED.value
+            active.retired_at = now
+    # The partial unique index permits exactly one active row. Flush the old
+    # retirement inside this still-uncommitted transaction before assigning
+    # the new active status so statement ordering cannot trip that invariant.
+    await db.flush()
+
+    visible_result = await db.execute(
+        select(Project)
+        .where(Project.is_demo.is_(True), Project.is_public.is_(True))
+        .with_for_update()
+    )
+    for project in visible_result.scalars().all():
+        if project.demo_generation_id != generation_id:
+            project.is_public = False
+    for project in projects.values():
         project.is_public = True
 
+    generation.status = DemoGenerationStatus.ACTIVE.value
+    generation.activated_at = now
+    generation.retired_at = None
     await db.commit()

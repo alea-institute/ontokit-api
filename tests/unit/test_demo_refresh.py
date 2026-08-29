@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from deploy import refresh_demo_repositories as refresh
+from ontokit.services.demo_project_provisioning import build_demo_generation_key
 
 
 def _git(*arguments: str, cwd: Path | None = None) -> str:
@@ -146,7 +148,7 @@ def test_destination_push_updates_only_the_default_branch(
     monkeypatch.setattr(subprocess, "run", fake_revision_run)
     mirror = refresh.load_manifest(_manifest(tmp_path))[0]
 
-    refresh.refresh_one(
+    destination_sha = refresh.refresh_one(
         mirror,
         tmp_path,
         tmp_path / "askpass",
@@ -155,11 +157,67 @@ def test_destination_push_updates_only_the_default_branch(
         "2026-08-20T12:00:00+00:00",
     )
 
+    assert destination_sha == "a" * 40
+
     push = next(command for command, _ in commands if command[:2] == ["git", "push"])
     assert push[-1] == "HEAD:refs/heads/main"
     assert "--force" in push
     assert "--mirror" not in push
     assert "--all" not in push
+
+
+def test_refresh_hands_exact_complete_generation_to_resync(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest_path = _manifest(tmp_path)
+    resync = tmp_path / "resync"
+    resync.write_text("#!/bin/sh\n", encoding="utf-8")
+    resync.chmod(0o700)
+    lock = tmp_path / "refresh.lock"
+    mirrors = refresh.load_manifest(manifest_path)
+    commits = {
+        "alea-institute/ontokit-demo-folio": "a" * 40,
+        "alea-institute/ontokit-demo-semantic-canon": "b" * 40,
+    }
+    commands: list[list[str]] = []
+
+    monkeypatch.setenv(refresh.SOURCE_TOKEN_ENV, "source-token")
+    monkeypatch.setenv(refresh.DESTINATION_TOKEN_ENV, "destination-token")
+    monkeypatch.setattr(
+        refresh,
+        "refresh_one",
+        lambda mirror, *_args: commits[mirror.destination_repository],
+    )
+    monkeypatch.setattr(
+        refresh,
+        "run_command",
+        lambda command, **_kwargs: commands.append(list(command)),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "refresh-demo",
+            "--manifest",
+            str(manifest_path),
+            "--resync-executable",
+            str(resync),
+            "--lock-file",
+            str(lock),
+        ],
+    )
+
+    assert len(mirrors) == 2
+    refresh.main()
+
+    assert commands == [
+        [
+            str(resync),
+            str(manifest_path),
+            "--generation-key",
+            build_demo_generation_key(commits),
+        ]
+    ]
 
 
 def test_real_refresh_preserves_demo_authored_branch(
@@ -207,7 +265,7 @@ def test_real_refresh_preserves_demo_authored_branch(
     workspace = tmp_path / "workspace"
     workspace.mkdir()
 
-    refresh.refresh_one(
+    destination_sha = refresh.refresh_one(
         mirror,
         workspace,
         tmp_path / "unused-askpass",
@@ -218,6 +276,7 @@ def test_real_refresh_preserves_demo_authored_branch(
 
     assert _git("--git-dir", str(destination), "rev-parse", "refs/heads/demo-work") == first_sha
     refreshed_main = _git("--git-dir", str(destination), "rev-parse", "refs/heads/main")
+    assert destination_sha == refreshed_main
     assert refreshed_main != first_sha
     readme = _git(
         "--git-dir",

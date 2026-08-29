@@ -31,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
 from ontokit.models.llm_config import ProjectLLMConfig
-from ontokit.models.project import ProjectMember
+from ontokit.models.project import Project, ProjectMember
 from ontokit.schemas.llm import (
     LLMConfigResponse,
     LLMConfigUpdate,
@@ -64,6 +64,11 @@ from ontokit.services.llm.registry import (
     PROVIDER_REQUIRES_KEY,
 )
 from ontokit.services.llm.ssrf import provider_allows_private_network
+from ontokit.services.project_access_policy import (
+    load_visible_project,
+    require_user_managed_project,
+    visible_project_clause,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,9 +93,12 @@ _LOCAL_PROVIDERS = {
 async def _get_member_role(db: AsyncSession, project_id: UUID, user_id: str) -> str | None:
     """Return the user's role in the project, or None if not a member."""
     result = await db.execute(
-        select(ProjectMember).where(
+        select(ProjectMember)
+        .join(Project, Project.id == ProjectMember.project_id)
+        .where(
             ProjectMember.project_id == project_id,
             ProjectMember.user_id == user_id,
+            visible_project_clause(),
         )
     )
     member = result.scalar_one_or_none()
@@ -102,11 +110,14 @@ async def _require_project_member(
 ) -> str:
     """Return the user's role, raising 403 if not a member."""
     role = await _get_member_role(db, project_id, user_id)
-    if role is None and not is_superadmin:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not a member of this project",
-        )
+    if role is None:
+        if is_superadmin:
+            await load_visible_project(db, project_id)
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Not a member of this project",
+            )
     # Explicit None check: a falsy-but-present role (e.g. "") must NOT
     # silently escalate to admin.
     return role if role is not None else "admin"  # superadmin fallback
@@ -196,6 +207,7 @@ async def update_llm_config(
     key is provided.
     """
     await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
+    require_user_managed_project(await load_visible_project(db, project_id))
 
     config = await _get_llm_config(db, project_id)
 
@@ -504,6 +516,7 @@ async def update_member_flags(
     override allowing structural PR self-merge.
     """
     await _require_owner_or_admin(db, project_id, user.id, user.is_superadmin)
+    require_user_managed_project(await load_visible_project(db, project_id))
 
     result = await db.execute(
         select(ProjectMember).where(

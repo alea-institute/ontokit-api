@@ -60,6 +60,7 @@ def _make_project(
     project.name = "Test Ontology"
     project.description = "A test project"
     project.is_public = is_public
+    project.is_demo = False
     project.owner_id = owner_id
     project.pr_approval_required = pr_approval_required
     if members is None:
@@ -1893,6 +1894,22 @@ class TestSyncMergeCommitsToPrs:
 
 class TestGitHubIntegration:
     @pytest.mark.asyncio
+    async def test_hidden_demo_denied_by_direct_id_for_retained_owner(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+    ) -> None:
+        """Retained ownership does not reveal a non-public demo generation."""
+        project = _make_project(is_public=False)
+        project.is_demo = True
+        _setup_project_lookup(mock_db, project)
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.get_github_integration(PROJECT_ID, _make_user(OWNER_ID))
+
+        assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
     async def test_get_github_integration_not_admin(
         self,
         service: PullRequestService,
@@ -1968,6 +1985,29 @@ class TestGitHubIntegration:
         with pytest.raises(HTTPException) as exc_info:
             await service.update_github_integration(PROJECT_ID, update_data, user)
         assert exc_info.value.status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_update_github_integration_denied_for_active_demo_owner(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+    ) -> None:
+        """The active demo integration cannot be changed independently."""
+        project = _make_project(is_public=True)
+        project.is_demo = True
+        _setup_project_lookup(mock_db, project)
+
+        from ontokit.schemas.pull_request import GitHubIntegrationUpdate
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.update_github_integration(
+                PROJECT_ID,
+                GitHubIntegrationUpdate(default_branch="develop"),
+                _make_user(OWNER_ID),
+            )
+
+        assert exc_info.value.status_code == 403
+        mock_db.commit.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -2053,3 +2093,26 @@ class TestPRSettings:
         result = await service.update_pr_settings(PROJECT_ID, update_data, user)
         assert result.pr_approval_required == 3
         mock_db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_pr_settings_denied_for_active_demo_owner(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+    ) -> None:
+        """The active demo workflow settings cannot be changed independently."""
+        project = _make_project(is_public=True)
+        project.is_demo = True
+        _setup_project_lookup(mock_db, project)
+
+        from ontokit.schemas.pull_request import PRSettingsUpdate
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.update_pr_settings(
+                PROJECT_ID,
+                PRSettingsUpdate(pr_approval_required=3),
+                _make_user(OWNER_ID),
+            )
+
+        assert exc_info.value.status_code == 403
+        mock_db.commit.assert_not_awaited()
