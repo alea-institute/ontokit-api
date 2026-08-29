@@ -9,6 +9,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, Uni
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 if TYPE_CHECKING:
+    from ontokit.models.demo_generation import DemoGeneration
     from ontokit.models.join_request import JoinRequest
     from ontokit.models.lint import LintRun
     from ontokit.models.lint_config import ProjectLintConfig
@@ -32,8 +33,12 @@ class Project(Base):
         Boolean, nullable=False, default=False, server_default="false"
     )
     demo_source_project_id: Mapped[uuid.UUID | None] = mapped_column(
-        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=True, unique=True
+        ForeignKey("projects.id", ondelete="RESTRICT"), nullable=True
     )
+    demo_generation_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("demo_generations.id", ondelete="RESTRICT"), nullable=True
+    )
+    demo_commit_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)
     owner_id: Mapped[str] = mapped_column(String(255), nullable=False)  # Zitadel user ID
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(
@@ -81,6 +86,9 @@ class Project(Base):
     demo_source_project: Mapped["Project | None"] = relationship(
         remote_side=[id], foreign_keys=[demo_source_project_id]
     )
+    demo_generation: Mapped["DemoGeneration | None"] = relationship(
+        back_populates="projects", foreign_keys=[demo_generation_id]
+    )
     lint_runs: Mapped[list["LintRun"]] = relationship(
         back_populates="project", cascade="all, delete-orphan"
     )
@@ -99,6 +107,14 @@ class Project(Base):
 
     def __repr__(self) -> str:
         return f"<Project(id={self.id}, name={self.name!r}, is_public={self.is_public})>"
+
+    __table_args__ = (
+        UniqueConstraint(
+            "demo_source_project_id",
+            "demo_generation_id",
+            name="uq_projects_demo_source_generation",
+        ),
+    )
 
 
 def get_git_ontology_path(project: Project) -> str:

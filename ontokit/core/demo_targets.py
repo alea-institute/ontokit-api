@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -14,6 +17,19 @@ DEMO_REPOSITORY_PAIRS = {
     ),
 }
 DEMO_REPOSITORIES = frozenset(DEMO_REPOSITORY_PAIRS.values())
+_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
+
+
+def build_demo_generation_key(commits: Mapping[str, str]) -> str:
+    """Build a stable identity for the exact pair of destination snapshots."""
+    expected = {"/".join(destination) for destination in DEMO_REPOSITORY_PAIRS.values()}
+    normalized = {repository.lower(): commit.lower() for repository, commit in commits.items()}
+    if set(normalized) != expected:
+        raise ValueError("generation identity requires every approved demo repository exactly once")
+    if any(_COMMIT_RE.fullmatch(commit) is None for commit in normalized.values()):
+        raise ValueError("generation identity requires full hexadecimal commit hashes")
+    payload = json.dumps(normalized, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 def normalize_repository(owner: str, repo: str) -> tuple[str, str]:

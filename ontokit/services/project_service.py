@@ -8,7 +8,7 @@ from pathlib import Path
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from sqlalchemy import func, literal, or_, select
+from sqlalchemy import and_, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -472,12 +472,19 @@ class ProjectService:
         )
 
         # Build access-control clause (all projects the user can see)
+        demo_visibility_clause = or_(
+            Project.is_demo.is_(False),
+            Project.is_public.is_(True),
+        )
         if user is None:
-            access_clause = Project.is_public == True  # noqa: E712
+            access_clause = and_(Project.is_public == True, demo_visibility_clause)  # noqa: E712
         else:
-            access_clause = or_(
-                Project.is_public == True,  # noqa: E712
-                Project.id.in_(subquery),
+            access_clause = and_(
+                or_(
+                    Project.is_public == True,  # noqa: E712
+                    Project.id.in_(subquery),
+                ),
+                demo_visibility_clause,
             )
 
         # Unfiltered total: count of all accessible projects (no filter/search)
@@ -500,9 +507,10 @@ class ProjectService:
                 query = query.where(
                     Project.is_public == False,  # noqa: E712
                     Project.id.in_(subquery),
+                    demo_visibility_clause,
                 )
             elif filter_type == "mine":
-                query = query.where(Project.id.in_(subquery))
+                query = query.where(Project.id.in_(subquery), demo_visibility_clause)
             else:
                 query = query.where(access_clause)
 
@@ -1129,6 +1137,11 @@ class ProjectService:
 
     def _can_view(self, project: Project, user: CurrentUser | None) -> bool:
         """Check if user can view the project."""
+        # Hidden preparation and retired generations are operational records,
+        # not user-visible projects. This also prevents a source owner from
+        # observing a partially prepared generation through membership.
+        if project.is_demo and not project.is_public:
+            return False
         if project.is_public:
             return True
 
@@ -1215,6 +1228,12 @@ class ProjectService:
                 if isinstance(project.demo_source_project_id, UUID)
                 else None
             ),
+            demo_generation_id=(
+                project.demo_generation_id if isinstance(project.demo_generation_id, UUID) else None
+            ),
+            demo_commit_hash=(
+                project.demo_commit_hash if isinstance(project.demo_commit_hash, str) else None
+            ),
             demo_repository_full_name=self._demo_repository_full_name(project),
             source_file_path=project.source_file_path,
             git_ontology_path=git_ontology_path,
@@ -1246,6 +1265,12 @@ class ProjectService:
                 project.demo_source_project_id
                 if isinstance(project.demo_source_project_id, UUID)
                 else None
+            ),
+            demo_generation_id=(
+                project.demo_generation_id if isinstance(project.demo_generation_id, UUID) else None
+            ),
+            demo_commit_hash=(
+                project.demo_commit_hash if isinstance(project.demo_commit_hash, str) else None
             ),
             demo_repository_full_name=self._demo_repository_full_name(project),
             ontology_iri=project.ontology_iri,

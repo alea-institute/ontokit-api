@@ -27,8 +27,11 @@ from ontokit.git.bare_repository import BareGitRepositoryService, BareOntologyRe
 from ontokit.models.ontology_index import IndexingStatus
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.services.demo_project_provisioning import (
+    build_demo_generation_key,
     ensure_demo_projects,
+    fail_demo_generation,
     finalize_demo_publication,
+    record_demo_preparation,
 )
 from ontokit.services.ontology import get_ontology_service
 from ontokit.services.ontology_index import OntologyIndexService
@@ -161,7 +164,7 @@ async def _full_reindex_verified(
     return count
 
 
-async def resync(manifest: Path, token_file: Path | None) -> None:
+async def resync(manifest: Path, token_file: Path | None, generation_key: str) -> None:
     validate_manifest(manifest)
     token = read_demo_token(token_file)
     engine = create_async_engine(str(settings.database_url))
@@ -170,45 +173,65 @@ async def resync(manifest: Path, token_file: Path | None) -> None:
 
     try:
         async with sessions() as db:
-            provisioned = await ensure_demo_projects(db)
-            for item in provisioned:
-                project_result = await db.execute(
-                    select(Project)
-                    .options(selectinload(Project.github_integration))
-                    .where(Project.id == item.project_id)
-                )
-                project = project_result.scalar_one()
-                integration = project.github_integration
-                if integration is None:
-                    refuse(f"demo project {project.id} has no GitHub integration")
-                branch = integration.default_branch or "main"
-                with refreshed_repository(
-                    git_service,
-                    project.id,
-                    item.destination_repository,
-                    token,
-                ):
-                    repository = git_service.get_repository(project.id)
-                    commit_hash = repository.get_branch_commit_hash(branch)
-                    ontology = get_ontology_service(get_storage_service())
-                    graph = await ontology.load_from_git(
-                        project.id,
-                        branch,
-                        get_git_ontology_path(project),
+            provisioned = await ensure_demo_projects(db, generation_key)
+            if all(item.already_active for item in provisioned):
+                print(f"demo_generation={generation_key} status=already_active")
+                return
+            observed_commits: dict[str, str] = {}
+            try:
+                for item in provisioned:
+                    project_result = await db.execute(
+                        select(Project)
+                        .options(selectinload(Project.github_integration))
+                        .where(Project.id == item.project_id)
+                    )
+                    project = project_result.scalar_one()
+                    integration = project.github_integration
+                    if integration is None:
+                        refuse(f"demo project {project.id} has no GitHub integration")
+                    branch = integration.default_branch or "main"
+                    with refreshed_repository(
                         git_service,
-                    )
-                    count = await _full_reindex_verified(
-                        OntologyIndexService(db),
                         project.id,
-                        branch,
-                        graph,
-                        commit_hash,
+                        item.destination_repository,
+                        token,
+                    ):
+                        repository = git_service.get_repository(project.id)
+                        commit_hash = repository.get_branch_commit_hash(branch)
+                        ontology = get_ontology_service(get_storage_service())
+                        graph = await ontology.load_from_git(
+                            project.id,
+                            branch,
+                            get_git_ontology_path(project),
+                            git_service,
+                        )
+                        count = await _full_reindex_verified(
+                            OntologyIndexService(db),
+                            project.id,
+                            branch,
+                            graph,
+                            commit_hash,
+                        )
+                        await record_demo_preparation(db, item, commit_hash)
+                    observed_commits[item.destination_repository] = commit_hash
+                    print(
+                        f"demo_project={project.id} generation={item.generation_id} "
+                        f"repository={item.destination_repository} commit={commit_hash} "
+                        f"entities={count} created={str(item.created).lower()}"
                     )
-                print(
-                    f"demo_project={project.id} repository={item.destination_repository} "
-                    f"commit={commit_hash} entities={count} created={str(item.created).lower()}"
+                if build_demo_generation_key(observed_commits) != generation_key:
+                    raise RuntimeError(
+                        "cloned demo commits do not match the requested generation identity"
+                    )
+                await finalize_demo_publication(db, provisioned)
+            except BaseException:
+                await db.rollback()
+                await fail_demo_generation(
+                    db,
+                    provisioned,
+                    "repository_or_index_preparation_failed",
                 )
-            await finalize_demo_publication(db, provisioned)
+                raise
     finally:
         await engine.dispose()
 
@@ -216,6 +239,7 @@ async def resync(manifest: Path, token_file: Path | None) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("manifest", type=Path)
+    parser.add_argument("--generation-key", required=True)
     parser.add_argument(
         "--token-file",
         type=Path,
@@ -224,7 +248,7 @@ def main() -> None:
         else None,
     )
     args = parser.parse_args()
-    asyncio.run(resync(args.manifest, args.token_file))
+    asyncio.run(resync(args.manifest, args.token_file, args.generation_key))
 
 
 if __name__ == "__main__":
