@@ -17,11 +17,13 @@ from sqlalchemy import text
 
 from ontokit import __version__
 from ontokit.api.routes import router as api_router
+from ontokit.core.api_paths import API_V1_PREFIX
 from ontokit.core.config import settings
 from ontokit.core.database import engine
 from ontokit.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
 from ontokit.core.middleware import (
     AccessLogMiddleware,
+    AnonymousSuggestionBodyLimitMiddleware,
     RequestIDMiddleware,
     SecurityHeadersMiddleware,
 )
@@ -105,6 +107,40 @@ async def lifespan(_app: FastAPI) -> AsyncGenerator[None, None]:
     except Exception:
         _startup_print("Failed to initialise MinIO storage — continuing startup")
         logger.exception("Failed to initialise MinIO storage — continuing startup")
+
+    # --- PR Party reviewer registry (optional, KTD12) -----------------------
+    # Reviewer identity is environment data, so the registry is reconciled from
+    # PR_PARTY_REVIEWERS at every boot rather than seeded by a migration. This
+    # is best-effort by construction: GitHub node-id resolution degrades to a
+    # WARNING (retried next startup) and any failure here is logged rather than
+    # raised, because a reviewer-registry problem must never keep the whole API
+    # from serving ontology traffic.
+    if settings.is_pr_party_enabled():
+        _startup_print("Reconciling PR Party reviewers...")
+        try:
+            from ontokit.core.database import async_session_maker
+            from ontokit.services.pr_party_credentials import reconcile_reviewers
+
+            async with asyncio.timeout(30.0):
+                async with async_session_maker() as session:
+                    outcome = await reconcile_reviewers(session)
+            _startup_print(
+                f"PR Party reviewers reconciled (+{outcome.added} ~{outcome.updated} "
+                f"-{outcome.removed})"
+            )
+        except Exception:
+            _startup_print("PR Party reviewer reconcile failed — continuing startup")
+            logger.exception("PR Party reviewer reconcile failed — continuing startup")
+
+    # --- PR Party ready notifications (U9, R22) -----------------------------
+    # Both hook seams are identity-bound PR Party behavior, so they stay under
+    # the same enablement predicate as routes and registry reconciliation.
+    if settings.is_pr_party_enabled():
+        from ontokit.services.pr_party_notifications import register_ready_hook
+        from ontokit.services.pr_party_qa import register_qa_hook
+
+        register_ready_hook()
+        register_qa_hook()
 
     _startup_print("Startup complete")
     logger.info("Startup complete")
@@ -257,6 +293,14 @@ openapi_tags: list[dict[str, str]] = [
         ),
     },
     {
+        "name": "PR Party",
+        "description": (
+            "Org-scoped async pull-request review for the CatholicOS GitHub organization. "
+            "Reviewer-only: the registry is provisioned from configuration, and each "
+            "reviewer connects their own GitHub write token, stored encrypted."
+        ),
+    },
+    {
         "name": "User Settings",
         "description": (
             "User profile and integration settings. Manage GitHub personal access tokens "
@@ -305,6 +349,9 @@ app = FastAPI(
 app.state.limiter = limiter
 
 # --- Middleware (applied in reverse order — last added runs first) ----------
+
+# Bound anonymous full-document saves before FastAPI parses their JSON bodies.
+app.add_middleware(AnonymousSuggestionBodyLimitMiddleware)
 
 # CORS (outermost — must run before anything else touches the response)
 app.add_middleware(
@@ -391,7 +438,7 @@ async def unhandled_exception_handler(_request: Request, exc: Exception) -> JSON
 
 # --- Routers ---------------------------------------------------------------
 
-app.include_router(api_router, prefix="/api/v1")
+app.include_router(api_router, prefix=API_V1_PREFIX)
 
 
 @app.get("/health")

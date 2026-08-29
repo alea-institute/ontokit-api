@@ -108,10 +108,55 @@ ANNOTATION_PROPERTIES = {
     "skos:historyNote": SKOS.historyNote,
     "skos:editorialNote": SKOS.editorialNote,
     "skos:changeNote": SKOS.changeNote,
+    "skos:related": SKOS.related,
+    "skos:broader": SKOS.broader,
+    "skos:narrower": SKOS.narrower,
     # Other common RDFS/OWL
     "rdfs:seeAlso": RDFS.seeAlso,
     "rdfs:isDefinedBy": RDFS.isDefinedBy,
 }
+
+_DEDICATED_CLASS_DETAIL_PROPERTIES = {RDFS.label, RDFS.comment}
+_NON_ANNOTATION_PROPERTY_TYPES = {OWL.ObjectProperty, OWL.DatatypeProperty}
+
+
+def annotation_property_label(property_iri: URIRef | str) -> str:
+    """Return the configured compact label, or a stable local-name fallback."""
+    iri = str(property_iri)
+    for label, candidate in ANNOTATION_PROPERTIES.items():
+        if str(candidate) == iri:
+            return label
+    if "#" in iri:
+        return iri.rsplit("#", 1)[-1]
+    return iri.rstrip("/").rsplit("/", 1)[-1]
+
+
+def annotation_properties_for_graph(graph: Graph) -> dict[URIRef, str]:
+    """Classify predicates that class detail should expose as annotations.
+
+    The shared classification combines OntoKit's built-in annotation vocabulary
+    with ontology-local ``owl:AnnotationProperty`` declarations. Predicates
+    explicitly declared as object or datatype properties are never annotations,
+    and fields represented elsewhere in class detail are excluded.
+    """
+    properties = {uri: label for label, uri in ANNOTATION_PROPERTIES.items()}
+    declared = {
+        subject
+        for subject in graph.subjects(RDF.type, OWL.AnnotationProperty)
+        if isinstance(subject, URIRef)
+    }
+    for property_uri in sorted(declared, key=str):
+        properties.setdefault(property_uri, annotation_property_label(property_uri))
+
+    non_annotation = {
+        subject
+        for property_type in _NON_ANNOTATION_PROPERTY_TYPES
+        for subject in graph.subjects(RDF.type, property_type)
+        if isinstance(subject, URIRef)
+    }
+    for property_uri in _DEDICATED_CLASS_DETAIL_PROPERTIES | non_annotation:
+        properties.pop(property_uri, None)
+    return properties
 
 
 @dataclass
@@ -874,9 +919,10 @@ class OntologyService:
             1 for _ in graph.subjects(RDF.type, class_uri) if isinstance(_, URIRef)
         )
 
-        # Extract additional annotation properties (DC, SKOS, etc.)
+        # Extract additional annotation properties (DC, SKOS, and ontology-local
+        # owl:AnnotationProperty declarations).
         annotations = []
-        for prop_label, prop_uri in ANNOTATION_PROPERTIES.items():
+        for prop_uri, prop_label in annotation_properties_for_graph(graph).items():
             values = []
             for obj in graph.objects(class_uri, prop_uri):
                 if isinstance(obj, RDFLiteral):

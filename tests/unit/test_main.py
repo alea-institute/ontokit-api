@@ -291,6 +291,37 @@ class TestLifespan:
             patched_lifespan["storage"].ensure_bucket_exists.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_disabled_auth_skips_all_pr_party_startup_hooks(
+        self,
+        patched_lifespan: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from ontokit.core.config import settings
+
+        reconcile = AsyncMock()
+        ready_hook = Mock()
+        qa_hook = Mock()
+        monkeypatch.setattr(settings, "auth_mode", "disabled", raising=False)
+        monkeypatch.setattr(
+            settings, "pr_party_reviewers", "zit-damien:damienriehl", raising=False
+        )
+        monkeypatch.setattr(
+            "ontokit.services.pr_party_credentials.reconcile_reviewers", reconcile
+        )
+        monkeypatch.setattr(
+            "ontokit.services.pr_party_notifications.register_ready_hook", ready_hook
+        )
+        monkeypatch.setattr("ontokit.services.pr_party_qa.register_qa_hook", qa_hook)
+
+        async with lifespan(Mock()):
+            pass
+
+        patched_lifespan["storage"].ensure_bucket_exists.assert_awaited_once()
+        reconcile.assert_not_awaited()
+        ready_hook.assert_not_called()
+        qa_hook.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_shutdown_swallows_cleanup_errors(self, patched_lifespan: dict[str, Any]) -> None:
         """Shutdown must complete even if individual cleanup steps raise —
         otherwise a flaky Redis can mask other shutdown work."""

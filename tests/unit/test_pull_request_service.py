@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock
 
@@ -100,6 +102,15 @@ def _make_pr(
     pr.author_email = "editor@example.com"
     pr.github_pr_number = github_pr_number
     pr.github_pr_url = None
+    pr.github_sync_status = "synced" if github_pr_number is not None else "not_configured"
+    pr.github_sync_last_attempted_at = None
+    pr.github_sync_message = None
+    pr.github_sync_attempt_id = None
+    pr.github_integration_id = None
+    pr.github_repo_owner = None
+    pr.github_repo_name = None
+    pr.github_sync_generation = 0
+    pr.github_sync_merge_title = None
     pr.merged_by = merged_by
     pr.merged_at = merged_at
     pr.merge_commit_hash = merge_commit_hash
@@ -275,15 +286,20 @@ class TestCreatePullRequest:
         mock_git_service.list_branches.return_value = [main_branch, feature_branch]
         mock_git_service.get_commits_between.return_value = []
 
-        # DB calls: _get_project, max(pr_number), flush, _get_github_token, commit,
+        # DB calls: _get_project, open-source check, max(pr_number), _get_github_token,
         # refresh, notify, _to_pr_response (_get_project again)
         project_result = MagicMock()
         project_result.scalar_one_or_none.return_value = project
+
+        no_open_pr_result = MagicMock()
+        no_open_pr_result.scalar_one_or_none.return_value = None
 
         max_result = MagicMock()
         max_result.scalar.return_value = 0
 
         # _get_github_token: _get_github_integration returns None
+        sync_claim_result = MagicMock()
+        sync_claim_result.scalar_one_or_none.side_effect = lambda: mock_db.add.call_args.args[0]
         gh_integration_result = MagicMock()
         gh_integration_result.scalar_one_or_none.return_value = None
 
@@ -294,7 +310,12 @@ class TestCreatePullRequest:
         # Use project_result as fallback for any extra _get_project lookups
         mock_db.execute.side_effect = [
             project_result,  # _get_project
+            MagicMock(),  # project-scoped PR allocation lock
+            MagicMock(),  # source branch lock
+            MagicMock(),  # target branch lock
+            no_open_pr_result,  # open PR on source branch
             max_result,  # max(pr_number)
+            sync_claim_result,  # latest durable PR sync intent
             gh_integration_result,  # _get_github_token -> _get_github_integration
             project_result_2,  # _to_pr_response -> _get_project
             project_result,  # additional _get_project calls
@@ -343,6 +364,44 @@ class TestCreatePullRequest:
         assert result.target_branch == "main"
         mock_db.add.assert_called()
         mock_db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_pr_returns_conflict_for_existing_open_source_branch(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+        mock_git_service: MagicMock,
+    ) -> None:
+        """A branch cannot have two simultaneously open pull requests."""
+        project = _make_project()
+        user = _make_user(EDITOR_ID)
+        existing_pr = _make_pr(source_branch="feature", status=PRStatus.OPEN.value)
+
+        main_branch = MagicMock(name="main")
+        main_branch.name = "main"
+        feature_branch = MagicMock(name="feature")
+        feature_branch.name = "feature"
+        mock_git_service.list_branches.return_value = [main_branch, feature_branch]
+
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        existing_result = MagicMock()
+        existing_result.scalar_one_or_none.return_value = existing_pr
+        mock_db.execute.side_effect = [
+            project_result,
+            MagicMock(),  # project-scoped PR allocation lock
+            MagicMock(),  # source-branch advisory lock
+            MagicMock(),  # target-branch advisory lock
+            existing_result,
+        ]
+
+        request = PRCreate(title="Duplicate", source_branch="feature", target_branch="main")
+        with pytest.raises(HTTPException) as error:
+            await service.create_pull_request(PROJECT_ID, request, user)
+
+        assert error.value.status_code == 409
+        mock_db.add.assert_not_called()
+        mock_db.rollback.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_create_pr_source_branch_not_found(
@@ -483,8 +542,8 @@ class TestListPullRequests:
         # _sync_merge_commits_to_prs: get_history returns empty
         mock_git_service.get_history.return_value = []
 
-        # Execute calls: _get_project, sync (existing merged PRs), sync (max PR number),
-        # list query (count), list query (results), _to_pr_response -> _get_project
+        # Execute calls: _get_project, sync allocation lock, sync queries,
+        # list results, _to_pr_response -> _get_project
         sync_merged_result = MagicMock()
         sync_merged_result.scalars.return_value.all.return_value = []
 
@@ -501,6 +560,7 @@ class TestListPullRequests:
 
         mock_db.execute.side_effect = [
             project_result,  # _get_project
+            MagicMock(),  # _sync: project allocation advisory lock
             sync_merged_result,  # _sync: existing merged PRs
             sync_max_result,  # _sync: max PR number
             list_result,  # list query with pagination
@@ -553,6 +613,7 @@ class TestUpdatePullRequest:
         project_result_2.scalar_one_or_none.return_value = project
 
         mock_db.execute.side_effect = [project_result, pr_result, project_result_2]
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
         pr_update = PRUpdate(title="Updated Title")
         await service.update_pull_request(PROJECT_ID, 1, pr_update, user)
@@ -619,6 +680,7 @@ class TestClosePullRequest:
         project_result_2.scalar_one_or_none.return_value = project
 
         mock_db.execute.side_effect = [project_result, pr_result, project_result_2]
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
         await service.close_pull_request(PROJECT_ID, 1, user)
         assert pr.status == PRStatus.CLOSED.value
@@ -647,6 +709,60 @@ class TestClosePullRequest:
 
 class TestReopenPullRequest:
     @pytest.mark.asyncio
+    async def test_github_sync_runs_after_branch_lock_is_released(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+        mock_github_service: MagicMock,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        held = False
+        project = _make_project()
+        pr = _make_pr(
+            author_id=EDITOR_ID,
+            status=PRStatus.CLOSED.value,
+            github_pr_number=42,
+        )
+        user = _make_user(EDITOR_ID)
+
+        @asynccontextmanager
+        async def tracked_lock(*_args: object) -> AsyncIterator[None]:
+            nonlocal held
+            held = True
+            try:
+                yield
+            finally:
+                held = False
+
+        async def assert_unlocked(**_kwargs: object) -> None:
+            assert held is False
+
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        pr_result = MagicMock()
+        pr_result.scalar_one_or_none.return_value = pr
+        no_conflict = MagicMock()
+        no_conflict.scalar_one_or_none.return_value = None
+        response_project = MagicMock()
+        response_project.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [project_result, pr_result, no_conflict, response_project]
+
+        async def sync_and_assert(*_args: object, **_kwargs: object) -> None:
+            await assert_unlocked()
+
+        service._sync_pull_request_to_github = AsyncMock(  # type: ignore[method-assign]
+            side_effect=sync_and_assert
+        )
+        monkeypatch.setattr(
+            "ontokit.services.pull_request_service.branch_write_lock",
+            tracked_lock,
+        )
+
+        await service.reopen_pull_request(PROJECT_ID, 1, user)
+
+        service._sync_pull_request_to_github.assert_awaited_once_with(PROJECT_ID, pr)
+
+    @pytest.mark.asyncio
     async def test_reopen_closed_pr(
         self,
         service: PullRequestService,
@@ -662,10 +778,19 @@ class TestReopenPullRequest:
         project_result.scalar_one_or_none.return_value = project
         pr_result = MagicMock()
         pr_result.scalar_one_or_none.return_value = pr
+        no_conflict_result = MagicMock()
+        no_conflict_result.scalar_one_or_none.return_value = None
         project_result_2 = MagicMock()
         project_result_2.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [project_result, pr_result, project_result_2]
+        mock_db.execute.side_effect = [
+            project_result,
+            pr_result,
+            MagicMock(),  # source branch lock
+            no_conflict_result,
+            MagicMock(scalar_one_or_none=MagicMock(return_value=None)),  # no GitHub integration
+            project_result_2,
+        ]
 
         await service.reopen_pull_request(PROJECT_ID, 1, user)
         assert pr.status == PRStatus.OPEN.value
@@ -752,6 +877,59 @@ class TestMergePullRequest:
         assert exc_info.value.status_code == 403
 
     @pytest.mark.asyncio
+    async def test_system_auto_accept_uses_the_internal_merge_seam(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+        mock_git_service: MagicMock,
+    ) -> None:
+        """The quiet-period worker can merge without a human role or approval."""
+        project = _make_project(pr_approval_required=2)
+        pr = _make_pr(author_id="system:auto-accept")
+        user = _make_user("system:auto-accept")
+
+        main_branch = MagicMock(name="main")
+        main_branch.name = "main"
+        main_branch.commit_hash = "aaa111"
+        feature_branch = MagicMock(name="feature")
+        feature_branch.name = "feature"
+        feature_branch.commit_hash = "bbb222"
+        mock_git_service.list_branches.return_value = [main_branch, feature_branch]
+        merge_result = MagicMock(success=True, merge_commit_hash="ccc333")
+        mock_git_service.merge_branch.return_value = merge_result
+        _setup_project_and_pr_lookup(mock_db, project, pr)
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
+
+        result = await service.merge_pull_request(
+            PROJECT_ID,
+            1,
+            PRMergeRequest(delete_source_branch=False),
+            user,
+            system_auto_accept=True,
+        )
+
+        assert result.success is True
+        assert pr.status == PRStatus.MERGED.value
+
+    @pytest.mark.asyncio
+    async def test_system_auto_accept_flag_rejects_a_non_system_actor(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        """The internal bypass cannot be paired with an arbitrary caller."""
+        project = _make_project()
+        pr = _make_pr()
+        _setup_project_and_pr_lookup(mock_db, project, pr)
+
+        with pytest.raises(RuntimeError, match="reserved system actor"):
+            await service.merge_pull_request(
+                PROJECT_ID,
+                1,
+                PRMergeRequest(),
+                _make_user(EDITOR_ID),
+                system_auto_accept=True,
+            )
+
+    @pytest.mark.asyncio
     async def test_merge_pr_insufficient_approvals(
         self,
         service: PullRequestService,
@@ -825,6 +1003,21 @@ class TestMergePullRequest:
 
 class TestCreateReview:
     @pytest.mark.asyncio
+    async def test_halt_linked_suggestion_updates_clock_in_current_transaction(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        await service._halt_linked_suggestion_auto_accept(PR_ID)
+
+        statement = mock_db.execute.await_args.args[0]
+        compiled = statement.compile()
+        assert str(statement).startswith("UPDATE suggestion_sessions SET")
+        assert "suggestion_sessions.pr_id =" in str(statement)
+        assert compiled.params["auto_accept_after"] is None
+        assert isinstance(compiled.params["auto_accept_halted_at"], datetime)
+        assert PR_ID in compiled.params.values()
+        mock_db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_create_review_success(
         self,
         service: PullRequestService,
@@ -897,6 +1090,87 @@ class TestCreateReview:
             await service.create_review(PROJECT_ID, 1, review_create, user)
         assert exc_info.value.status_code == 400
 
+    @pytest.mark.asyncio
+    async def test_comment_and_change_request_halt_linked_suggestion(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        project = _make_project()
+        pr = _make_pr()
+        user = _make_user(OWNER_ID)
+        halt = AsyncMock()
+        service._halt_linked_suggestion_auto_accept = halt  # type: ignore[attr-defined,method-assign]
+
+        def _refresh_review(obj: object, _attrs: list[str] | None = None) -> None:
+            obj.id = REVIEW_ID  # type: ignore[attr-defined]
+            obj.pull_request_id = PR_ID  # type: ignore[attr-defined]
+            obj.github_review_id = None  # type: ignore[attr-defined]
+            obj.created_at = datetime.now(UTC)  # type: ignore[attr-defined]
+
+        mock_db.refresh.side_effect = _refresh_review
+
+        for review_status in ("commented", "changes_requested"):
+            project_result = MagicMock()
+            project_result.scalar_one_or_none.return_value = project
+            pr_result = MagicMock()
+            pr_result.scalar_one_or_none.return_value = pr
+            mock_db.execute.side_effect = [project_result, pr_result]
+            await service.create_review(
+                PROJECT_ID, 1, ReviewCreate(status=review_status, body="Objection"), user
+            )
+
+        assert halt.await_count == 2
+        halt.assert_awaited_with(pr.id)
+
+    @pytest.mark.asyncio
+    async def test_author_comment_review_does_not_halt_linked_suggestion(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        project = _make_project()
+        pr = _make_pr(author_id=OWNER_ID)
+        user = _make_user(OWNER_ID)
+        _setup_project_and_pr_lookup(mock_db, project, pr)
+        halt = AsyncMock()
+        service._halt_linked_suggestion_auto_accept = halt  # type: ignore[attr-defined,method-assign]
+
+        def _refresh_review(obj: object, _attrs: list[str] | None = None) -> None:
+            obj.id = REVIEW_ID  # type: ignore[attr-defined]
+            obj.pull_request_id = PR_ID  # type: ignore[attr-defined]
+            obj.github_review_id = None  # type: ignore[attr-defined]
+            obj.created_at = datetime.now(UTC)  # type: ignore[attr-defined]
+
+        mock_db.refresh.side_effect = _refresh_review
+
+        await service.create_review(
+            PROJECT_ID, 1, ReviewCreate(status="commented", body="Author note"), user
+        )
+
+        halt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_approval_does_not_halt_linked_suggestion(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        project = _make_project()
+        pr = _make_pr()
+        user = _make_user(OWNER_ID)
+        _setup_project_and_pr_lookup(mock_db, project, pr)
+        halt = AsyncMock()
+        service._halt_linked_suggestion_auto_accept = halt  # type: ignore[attr-defined,method-assign]
+
+        def _refresh_review(obj: object, _attrs: list[str] | None = None) -> None:
+            obj.id = REVIEW_ID  # type: ignore[attr-defined]
+            obj.pull_request_id = PR_ID  # type: ignore[attr-defined]
+            obj.github_review_id = None  # type: ignore[attr-defined]
+            obj.created_at = datetime.now(UTC)  # type: ignore[attr-defined]
+
+        mock_db.refresh.side_effect = _refresh_review
+
+        await service.create_review(
+            PROJECT_ID, 1, ReviewCreate(status="approved", body="LGTM"), user
+        )
+
+        halt.assert_not_awaited()
+
 
 # ---------------------------------------------------------------------------
 # create_comment
@@ -953,6 +1227,52 @@ class TestCreateComment:
         assert result.body == "Great work!"
         mock_db.add.assert_called()
         mock_db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("user_id", "pr_author_id", "should_halt"),
+        [
+            (EDITOR_ID, OTHER_ID, True),
+            (VIEWER_ID, OTHER_ID, False),
+            (EDITOR_ID, EDITOR_ID, False),
+        ],
+    )
+    async def test_only_reviewer_comments_halt_linked_suggestion(
+        self,
+        user_id: str,
+        pr_author_id: str,
+        should_halt: bool,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+    ) -> None:
+        project = _make_project()
+        pr = _make_pr(author_id=pr_author_id)
+        user = _make_user(user_id)
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        pr_result = MagicMock()
+        pr_result.scalar_one_or_none.return_value = pr
+        mock_db.execute.side_effect = [project_result, pr_result]
+        halt = AsyncMock()
+        service._halt_linked_suggestion_auto_accept = halt  # type: ignore[attr-defined,method-assign]
+
+        def _refresh_comment(obj: object, _attrs: list[str] | None = None) -> None:
+            obj.id = COMMENT_ID  # type: ignore[attr-defined]
+            obj.pull_request_id = PR_ID  # type: ignore[attr-defined]
+            obj.parent_id = None  # type: ignore[attr-defined]
+            obj.github_comment_id = None  # type: ignore[attr-defined]
+            obj.created_at = datetime.now(UTC)  # type: ignore[attr-defined]
+            obj.updated_at = None  # type: ignore[attr-defined]
+            obj.replies = []  # type: ignore[attr-defined]
+
+        mock_db.refresh.side_effect = _refresh_comment
+
+        await service.create_comment(PROJECT_ID, 1, CommentCreate(body="Review note"), user)
+
+        if should_halt:
+            halt.assert_awaited_once_with(pr.id)
+        else:
+            halt.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1400,7 +1720,6 @@ class TestHandleGitHubPRWebhook:
         gh_result.scalar_one_or_none.return_value = integration
         pr_result = MagicMock()
         pr_result.scalar_one_or_none.return_value = pr
-
         mock_db.execute.side_effect = [gh_result, pr_result]
 
         await service.handle_github_pr_webhook(PROJECT_ID, "closed", {"number": 42, "merged": True})
@@ -1447,8 +1766,15 @@ class TestHandleGitHubPRWebhook:
         gh_result.scalar_one_or_none.return_value = integration
         pr_result = MagicMock()
         pr_result.scalar_one_or_none.return_value = pr
+        no_conflict_result = MagicMock()
+        no_conflict_result.scalar_one_or_none.return_value = None
 
-        mock_db.execute.side_effect = [gh_result, pr_result]
+        mock_db.execute.side_effect = [
+            gh_result,
+            pr_result,
+            MagicMock(),  # source branch lock
+            no_conflict_result,
+        ]
 
         await service.handle_github_pr_webhook(PROJECT_ID, "reopened", {"number": 42})
         assert pr.status == "open"
@@ -1540,11 +1866,11 @@ class TestSyncMergeCommitsToPrs:
         max_result = MagicMock()
         max_result.scalar.return_value = 0
 
-        mock_db.execute.side_effect = [merged_result, max_result]
+        mock_db.execute.side_effect = [MagicMock(), merged_result, max_result]
 
         await service._sync_merge_commits_to_prs(PROJECT_ID)
-        # No commit because nothing was created/updated
-        mock_db.commit.assert_not_awaited()
+        # The read-only transaction commits to release its advisory lock.
+        mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_sync_history_exception_returns_early(

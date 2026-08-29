@@ -1,0 +1,45 @@
+"""Static language picker seed ordered approximately by total speakers."""
+
+from ontokit.schemas.translation import LanguagePaletteEntry
+
+LANGUAGE_PALETTE = [
+    LanguagePaletteEntry(tag="en", english_name="English", native_name="English"),
+    LanguagePaletteEntry(tag="zh", english_name="Chinese", native_name="中文"),
+    LanguagePaletteEntry(tag="hi", english_name="Hindi", native_name="हिन्दी"),
+    LanguagePaletteEntry(tag="es", english_name="Spanish", native_name="Español"),
+    LanguagePaletteEntry(tag="ar", english_name="Arabic", native_name="العربية"),
+    LanguagePaletteEntry(tag="fr", english_name="French", native_name="Français"),
+    LanguagePaletteEntry(tag="bn", english_name="Bengali", native_name="বাংলা"),
+    LanguagePaletteEntry(tag="pt", english_name="Portuguese", native_name="Português"),
+    LanguagePaletteEntry(tag="ru", english_name="Russian", native_name="Русский"),
+    LanguagePaletteEntry(tag="ur", english_name="Urdu", native_name="اردو"),
+    LanguagePaletteEntry(tag="id", english_name="Indonesian", native_name="Bahasa Indonesia"),
+    LanguagePaletteEntry(tag="de", english_name="German", native_name="Deutsch"),
+    LanguagePaletteEntry(tag="ja", english_name="Japanese", native_name="日本語"),
+    LanguagePaletteEntry(tag="sw", english_name="Swahili", native_name="Kiswahili"),
+    LanguagePaletteEntry(tag="mr", english_name="Marathi", native_name="मराठी"),
+    LanguagePaletteEntry(tag="te", english_name="Telugu", native_name="తెలుగు"),
+    LanguagePaletteEntry(tag="tr", english_name="Turkish", native_name="Türkçe"),
+    LanguagePaletteEntry(tag="ta", english_name="Tamil", native_name="தமிழ்"),
+    LanguagePaletteEntry(tag="yue", english_name="Cantonese", native_name="粵語"),
+    LanguagePaletteEntry(tag="vi", english_name="Vietnamese", native_name="Tiếng Việt"),
+    LanguagePaletteEntry(tag="tl", english_name="Filipino", native_name="Filipino"),
+    LanguagePaletteEntry(tag="ko", english_name="Korean", native_name="한국어"),
+    LanguagePaletteEntry(tag="fa", english_name="Persian", native_name="فارسی"),
+    LanguagePaletteEntry(tag="ha", english_name="Hausa", native_name="Hausa"),
+    LanguagePaletteEntry(tag="jv", english_name="Javanese", native_name="Basa Jawa"),
+    LanguagePaletteEntry(tag="it", english_name="Italian", native_name="Italiano"),
+    LanguagePaletteEntry(tag="pa", english_name="Punjabi", native_name="ਪੰਜਾਬੀ"),
+    LanguagePaletteEntry(tag="gu", english_name="Gujarati", native_name="ગુજરાતી"),
+    LanguagePaletteEntry(tag="th", english_name="Thai", native_name="ไทย"),
+    LanguagePaletteEntry(tag="kn", english_name="Kannada", native_name="ಕನ್ನಡ"),
+    LanguagePaletteEntry(tag="pl", english_name="Polish", native_name="Polski"),
+    LanguagePaletteEntry(tag="uk", english_name="Ukrainian", native_name="Українська"),
+    LanguagePaletteEntry(tag="ml", english_name="Malayalam", native_name="മലയാളം"),
+    LanguagePaletteEntry(tag="my", english_name="Burmese", native_name="မြန်မာဘာသာ"),
+    LanguagePaletteEntry(tag="ro", english_name="Romanian", native_name="Română"),
+    LanguagePaletteEntry(tag="nl", english_name="Dutch", native_name="Nederlands"),
+    LanguagePaletteEntry(tag="la", english_name="Latin", native_name="Latina"),
+]
+
+__all__ = ["LANGUAGE_PALETTE"]

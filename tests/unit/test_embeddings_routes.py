@@ -5,9 +5,60 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from uuid import uuid4
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 PROJECT_ID = "12345678-1234-5678-1234-567812345678"
+
+
+def test_semantic_search_rejects_anonymous_at_route(client: TestClient) -> None:
+    with (
+        patch("ontokit.api.routes.semantic_search.EmbeddingService") as service,
+        patch("ontokit.api.routes.semantic_search.get_project_service") as project_service,
+    ):
+        response = client.get(
+            f"/api/v1/projects/{PROJECT_ID}/search/semantic", params={"q": "contract"}
+        )
+    assert response.status_code == 401
+    service.assert_not_called()
+    project_service.assert_not_called()
+
+
+def test_find_similar_rejects_anonymous_at_route(client: TestClient) -> None:
+    with (
+        patch("ontokit.api.routes.semantic_search.EmbeddingService") as service,
+        patch("ontokit.api.routes.semantic_search.get_project_service") as project_service,
+    ):
+        response = client.get(
+            f"/api/v1/projects/{PROJECT_ID}/entities/example%3AThing/similar"
+        )
+    assert response.status_code == 401
+    service.assert_not_called()
+    project_service.assert_not_called()
+
+
+@patch("ontokit.api.routes.semantic_search.EmbeddingService")
+@patch("ontokit.api.routes.semantic_search.get_project_service")
+def test_semantic_search_allows_authenticated_user(
+    mock_get_ps: MagicMock,
+    mock_embed_cls: MagicMock,
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    client, _ = authed_client
+    mock_get_ps.return_value.get = AsyncMock(return_value=_make_project_response())
+    mock_embed_cls.return_value.semantic_search = AsyncMock(
+        return_value={"results": [], "search_mode": "semantic"}
+    )
+
+    response = client.get(
+        f"/api/v1/projects/{PROJECT_ID}/search/semantic",
+        params={"q": "contract", "branch": "main"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"results": [], "search_mode": "semantic"}
+    mock_embed_cls.return_value.semantic_search.assert_awaited_once()
 
 
 def _make_project_response(user_role: str = "owner") -> MagicMock:
@@ -114,6 +165,37 @@ class TestUpdateEmbeddingConfig:
         )
         assert response.status_code == 200
         assert response.json()["provider"] == "voyage"
+
+    @pytest.mark.asyncio
+    async def test_invalid_paid_provider_config_returns_typed_422(self) -> None:
+        from ontokit.api.routes.embeddings import update_embedding_config
+        from ontokit.schemas.embeddings import EmbeddingConfigUpdate
+
+        embed_service = MagicMock()
+        embed_service.update_config = AsyncMock(
+            side_effect=ValueError("OpenAI API key is required")
+        )
+
+        with (
+            patch(
+                "ontokit.api.routes.embeddings._verify_write_access",
+                new_callable=AsyncMock,
+            ),
+            pytest.raises(HTTPException) as raised,
+        ):
+            await update_embedding_config(
+                project_id=uuid4(),
+                data=EmbeddingConfigUpdate(
+                    provider="openai",
+                    model_name="text-embedding-3-small",
+                ),
+                db=AsyncMock(),
+                embed_service=embed_service,
+                user=MagicMock(),
+            )
+
+        assert raised.value.status_code == 422
+        assert raised.value.detail == "OpenAI API key is required"
 
 
 class TestGenerateEmbeddings:

@@ -4,7 +4,19 @@ import uuid
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ontokit.core.database import Base
@@ -16,6 +28,15 @@ class PRStatus(StrEnum):
     OPEN = "open"
     MERGED = "merged"
     CLOSED = "closed"
+
+
+class GitHubSyncStatus(StrEnum):
+    """Visibility state for the best-effort GitHub PR mirror."""
+
+    NOT_CONFIGURED = "not_configured"
+    PENDING = "pending"
+    SYNCED = "synced"
+    FAILED = "failed"
 
 
 class ReviewStatus(StrEnum):
@@ -56,6 +77,33 @@ class PullRequest(Base):
     # GitHub integration (optional)
     github_pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     github_pr_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    github_sync_status: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default=GitHubSyncStatus.NOT_CONFIGURED.value,
+        server_default=GitHubSyncStatus.NOT_CONFIGURED.value,
+    )
+    github_sync_last_attempted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    github_sync_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Repository identity is part of the mirror receipt. A PR number alone is
+    # only meaningful inside one repository and must never be reused after an
+    # integration is reconfigured.
+    github_integration_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
+    github_repo_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    github_repo_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Monotonic local intent generation. Every durable PR mutation or manual
+    # retry claims a new generation before making a network request.
+    github_sync_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    # The local merge title is durable so a failed GitHub merge can be replayed
+    # after the local PR has already transitioned to ``merged``.
+    github_sync_merge_title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Internal compare-and-set token. A stale network response must not
+    # overwrite the receipt produced by a newer retry attempt.
+    github_sync_attempt_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
 
     # Merge info
     merged_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -79,7 +127,21 @@ class PullRequest(Base):
         back_populates="pull_request", cascade="all, delete-orphan"
     )
 
-    __table_args__ = (UniqueConstraint("project_id", "pr_number", name="uq_project_pr_number"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "pr_number", name="uq_project_pr_number"),
+        CheckConstraint(
+            "github_sync_status IN ('not_configured', 'pending', 'synced', 'failed')",
+            name="ck_pull_requests_github_sync_status",
+        ),
+        Index(
+            "uq_pull_requests_open_source_branch",
+            "project_id",
+            "source_branch",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+            sqlite_where=text("status = 'open'"),
+        ),
+    )
 
     def __repr__(self) -> str:
         return f"<PullRequest(id={self.id}, project_id={self.project_id}, pr_number={self.pr_number}, title={self.title!r})>"

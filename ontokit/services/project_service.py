@@ -445,6 +445,8 @@ class ProjectService:
         limit: int = 20,
         filter_type: str | None = None,
         search: str | None = None,
+        is_demo: bool | None = None,
+        demo_source_project_id: UUID | None = None,
     ) -> ProjectListResponse:
         """
         List projects accessible to the user.
@@ -455,6 +457,8 @@ class ProjectService:
             limit: Maximum results to return
             filter_type: Filter by 'public', 'private', 'mine', or None for all accessible
             search: Case-insensitive search on name and description
+            is_demo: Filter by resettable demo-project status when provided
+            demo_source_project_id: Filter by the linked source project when provided
         """
         # Build base query with eager-loading options
         opts = [selectinload(Project.members), selectinload(Project.github_integration)]
@@ -512,6 +516,15 @@ class ProjectService:
                     Project.description.ilike(search_pattern, escape="\\"),
                 )
             )
+
+        # Demo discovery filters are deliberately applied to the SQL query before
+        # counting or pagination. Access control remains the first, independent
+        # predicate, so these filters never expose a private demo to a caller who
+        # could not otherwise list it.
+        if is_demo is not None:
+            query = query.where(Project.is_demo == is_demo)
+        if demo_source_project_id is not None:
+            query = query.where(Project.demo_source_project_id == demo_source_project_id)
 
         # Count filtered total
         count_query = select(func.count()).select_from(query.subquery())
@@ -1145,6 +1158,13 @@ class ProjectService:
             return os.path.basename(project.source_file_path)
         return "ontology.ttl"
 
+    @staticmethod
+    def _demo_repository_full_name(project: Project) -> str | None:
+        """Return the immutable Git target identity for a demo project."""
+        if project.is_demo is not True or project.github_integration is None:
+            return None
+        return f"{project.github_integration.repo_owner}/{project.github_integration.repo_name}"
+
     def _to_response(self, project: Project, user: CurrentUser | None) -> ProjectResponse:
         """Convert Project model to response schema."""
         user_role = None
@@ -1189,6 +1209,13 @@ class ProjectService:
             member_count=len(project.members),
             user_role=user_role,
             is_superadmin=user.is_superadmin if user else False,
+            is_demo=project.is_demo if isinstance(project.is_demo, bool) else False,
+            demo_source_project_id=(
+                project.demo_source_project_id
+                if isinstance(project.demo_source_project_id, UUID)
+                else None
+            ),
+            demo_repository_full_name=self._demo_repository_full_name(project),
             source_file_path=project.source_file_path,
             git_ontology_path=git_ontology_path,
             ontology_iri=project.ontology_iri,
@@ -1214,6 +1241,13 @@ class ProjectService:
             updated_at=project.updated_at,
             member_count=len(project.members),
             user_role=user_role,
+            is_demo=project.is_demo if isinstance(project.is_demo, bool) else False,
+            demo_source_project_id=(
+                project.demo_source_project_id
+                if isinstance(project.demo_source_project_id, UUID)
+                else None
+            ),
+            demo_repository_full_name=self._demo_repository_full_name(project),
             ontology_iri=project.ontology_iri,
             file_path=file_path,
         )

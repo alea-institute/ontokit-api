@@ -8,9 +8,8 @@ from typing import Any
 from uuid import UUID
 
 from arq import ArqRedis, cron, func
-from arq.connections import RedisSettings
 from sqlalchemy import select
-from sqlalchemy.exc import ProgrammingError
+from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import selectinload
 
@@ -19,21 +18,31 @@ from ontokit.core.constants import (
     LINT_UPDATES_CHANNEL,
     NORMALIZATION_UPDATES_CHANNEL,
     ONTOLOGY_INDEX_UPDATES_CHANNEL,
+    PR_PARTY_CREDENTIAL_REWRAP_APPLY_JOB_ID,
+    PR_PARTY_CREDENTIAL_REWRAP_CONFIRMATION,
+    PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID,
+    PR_PARTY_CREDENTIAL_REWRAP_TASK,
     QUALITY_UPDATES_CHANNEL,
     REMOTE_SYNC_UPDATES_CHANNEL,
 )
-from ontokit.core.encryption import decrypt_token
+from ontokit.core.redis import get_redis_settings
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
-from ontokit.models.user_github_token import UserGitHubToken
+from ontokit.services.demo_target_authorizer import DemoTargetDenied, integration_target_load
 from ontokit.services.github_sync import sync_github_project
 from ontokit.services.linter import LintResult, get_linter
 from ontokit.services.normalization_service import NormalizationService
 from ontokit.services.ontology import get_ontology_service
 from ontokit.services.storage import get_storage_service
+from ontokit.services.translation_jobs import (
+    TRANSLATION_ENTITY_MAX_TRIES,
+    run_label_diff_job,
+    run_translation_backfill_job,
+    run_translation_entity_job,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -631,12 +640,40 @@ async def auto_submit_stale_suggestions(ctx: dict[str, Any]) -> dict[str, Any]:
 
         service = SuggestionService(db)
         count = await service.auto_submit_stale_sessions()
+        # Anonymous sessions get a dedicated reaper (discard + branch delete at
+        # token TTL) — the authed sweep excludes them by design (PR-7).
+        reaped = await service.reap_stale_anonymous_sessions()
 
-        logger.info(f"Auto-submit complete: {count} stale suggestion sessions submitted")
-        return {"auto_submitted": count}
+        logger.info(
+            f"Auto-submit complete: {count} stale suggestion sessions submitted, "
+            f"{reaped} stale anonymous sessions reaped"
+        )
+        return {"auto_submitted": count, "anonymous_reaped": reaped}
 
     except Exception as e:
         logger.exception(f"Auto-submit stale suggestions failed: {e}")
+        raise
+
+
+async def auto_accept_suggestions(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Merge trusted suggestions whose quiet period has elapsed (R11).
+
+    Anonymous, untrusted and LLM-generated suggestions are excluded at the
+    query, at the atomic claim, and again by the merge-time tier re-check —
+    R13 ("LLM output never auto-accepts, at any tier, ever") is not allowed to
+    depend on a single guard.
+    """
+    db: AsyncSession = ctx["db"]
+
+    try:
+        from ontokit.services.suggestion_service import SuggestionService
+
+        count = await SuggestionService(db).auto_accept_ripe_sessions()
+        logger.info(f"Auto-accept complete: {count} trusted suggestions merged")
+        return {"auto_accepted": count}
+
+    except Exception as e:
+        logger.exception(f"Auto-accept sweep failed: {e}")
         raise
 
 
@@ -957,6 +994,52 @@ async def run_batch_entity_embed_task(
         raise
 
 
+async def run_translation_label_diff_task(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str,
+    commit_hash: str,
+    actor_id: str,
+    role: str,
+) -> dict[str, Any]:
+    """Discover newly minted labels and enqueue bounded per-language work."""
+    return await run_label_diff_job(ctx, project_id, branch, commit_hash, actor_id, role)
+
+
+async def run_translation_backfill_task(
+    ctx: dict[str, Any], project_id: str, branch: str, job_id: str, actor_id: str
+) -> dict[str, Any]:
+    """Run a durable translation backfill job."""
+    return await run_translation_backfill_job(ctx, project_id, branch, job_id, actor_id)
+
+
+async def run_translation_entity_task(
+    ctx: dict[str, Any],
+    project_id: str,
+    branch: str,
+    entity_iri: str,
+    predicate: str,
+    source_value: str | None,
+    source_language: str | None,
+    target_language: str | None,
+    actor_id: str,
+    mode: str,
+) -> dict[str, Any]:
+    """Run TranslationService and its gated commit stage for one source field."""
+    return await run_translation_entity_job(
+        ctx,
+        project_id,
+        branch,
+        entity_iri,
+        predicate,
+        source_value,
+        source_language,
+        target_language,
+        actor_id,
+        mode,
+    )
+
+
 async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
     """Periodic task: pull from remote + push local commits for all GitHub-connected projects."""
     db: AsyncSession = ctx["db"]
@@ -964,7 +1047,9 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
     try:
         # Get all integrations with sync_enabled=True and sync_status != "conflict"
         result = await db.execute(
-            select(GitHubIntegration).where(
+            select(GitHubIntegration)
+            .options(integration_target_load())
+            .where(
                 GitHubIntegration.sync_enabled == True,  # noqa: E712
                 GitHubIntegration.sync_status != "conflict",
             )
@@ -976,32 +1061,41 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
         errors = 0
 
         for integration in integrations:
-            # Resolve PAT from connected_by_user_id
-            if not integration.connected_by_user_id:
-                logger.debug(
-                    f"Skipping sync for project {integration.project_id}: no connected_by_user_id"
-                )
-                continue
-
-            token_result = await db.execute(
-                select(UserGitHubToken).where(
-                    UserGitHubToken.user_id == integration.connected_by_user_id
-                )
-            )
-            token_row = token_result.scalar_one_or_none()
-            if not token_row:
-                logger.warning(
-                    f"Skipping sync for project {integration.project_id}: "
-                    f"no GitHub token for user {integration.connected_by_user_id}"
-                )
-                continue
+            # One system-owned identity pushes every mirror (KD6). The
+            # per-user PAT remains a deprecated fallback for one release so an
+            # in-flight deployment keeps syncing.
+            from ontokit.services.mirror_credential import resolve_mirror_credential
 
             try:
-                pat = decrypt_token(token_row.encrypted_token)
-            except Exception:
+                pat = await resolve_mirror_credential(db, integration)
+            except DemoTargetDenied as exc:
+                integration.sync_status = "error"
+                integration.sync_error = str(exc)
+                errors += 1
                 logger.warning(
-                    f"Skipping sync for project {integration.project_id}: failed to decrypt token"
+                    "GitHub mirror target refused for project %s: %s",
+                    integration.project_id,
+                    exc,
                 )
+                try:
+                    await db.commit()
+                except SQLAlchemyError:
+                    logger.exception(
+                        "Failed to persist GitHub mirror target refusal for project %s",
+                        integration.project_id,
+                    )
+                    await db.rollback()
+                continue
+            except SQLAlchemyError:
+                logger.error(
+                    "GitHub mirror identity lookup failed for project %s",
+                    integration.project_id,
+                )
+                errors += 1
+                await db.rollback()
+                continue
+
+            if pat is None:
                 continue
 
             try:
@@ -1025,6 +1119,141 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
     except Exception as e:
         logger.exception(f"GitHub sync cron job failed: {e}")
         raise
+
+
+async def sweep_pr_party_prs(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Periodic task: reconcile every open CatholicOS PR into ``pr_party_pr``.
+
+    KTD14's sweep-first intake. This is deliberately thin — discovery, the
+    call-budget gate, author classification, ``missing_since`` bookkeeping and
+    the 90-minute brewing timeout all live in ``pr_party_intake`` so they are
+    testable without arq. Per-item failures are contained there; a failure that
+    reaches here means the cycle itself could not run.
+
+    ``ctx["redis"]`` is the pool the sweep enqueues U5's brief jobs on.
+    """
+    if not settings.is_pr_party_enabled():
+        return {"status": "disabled", "reason": "pr_party_disabled"}
+
+    db: AsyncSession = ctx["db"]
+
+    try:
+        from ontokit.services.pr_party_intake import sweep_open_prs
+
+        result = await sweep_open_prs(db, pool=ctx.get("redis"))
+        return result.as_dict()
+    except Exception as e:
+        logger.exception(f"PR Party sweep cron job failed: {e}")
+        raise
+
+
+async def run_pr_party_credential_rewrap_task(
+    ctx: dict[str, Any],
+    apply: bool = False,
+    confirmation: str | None = None,
+) -> dict[str, Any]:
+    """Operator-only ARQ seam for an atomic reviewer-credential key rewrap.
+
+    ``apply`` defaults false so an accidentally enqueued task is a dry run.
+    The service sanitizes all failures before they reach this boundary; this
+    function likewise logs only the ARQ job id, safe error code, row UUIDs, and
+    aggregate counts.
+    """
+    from ontokit.services.pr_party_credentials import (
+        CredentialRewrapError,
+        rewrap_reviewer_credentials,
+    )
+
+    job_id = str(ctx.get("job_id", "unknown"))
+    expected_job_id = (
+        PR_PARTY_CREDENTIAL_REWRAP_APPLY_JOB_ID
+        if apply is True
+        else PR_PARTY_CREDENTIAL_REWRAP_DRY_RUN_JOB_ID
+    )
+    valid_confirmation = (
+        confirmation == PR_PARTY_CREDENTIAL_REWRAP_CONFIRMATION
+        if apply is True
+        else confirmation is None
+    )
+    if type(apply) is not bool or job_id != expected_job_id or not valid_confirmation:
+        logger.error(
+            "PR Party rewrap request rejected: job_id=%s error_code=invalid_operator_request",
+            job_id,
+        )
+        raise RuntimeError("credential rewrap failed: invalid_operator_request")
+
+    try:
+        receipt = await rewrap_reviewer_credentials(ctx["db"], dry_run=not apply)
+    except CredentialRewrapError as exc:
+        logger.error(
+            "PR Party rewrap failed: job_id=%s error_code=%s",
+            job_id,
+            exc.code,
+        )
+        raise RuntimeError(str(exc)) from None
+
+    payload = receipt.as_dict()
+    logger.info(
+        "PR Party rewrap completed: job_id=%s dry_run=%s scanned=%s verified=%s rewrapped=%s",
+        job_id,
+        payload["dry_run"],
+        payload["credentials_scanned"],
+        payload["credentials_verified"],
+        payload["credentials_rewrapped"],
+    )
+    return payload
+
+
+async def generate_pr_brief(
+    ctx: dict[str, Any],
+    pr_id: str,
+    repo_full_name: str,
+    pr_number: int,
+    head_sha: str,
+) -> dict[str, Any]:
+    """Generate the LLM brief for one PR revision (U5).
+
+    Enqueued by name from ``pr_party_intake`` with a revision-scoped job id, so
+    webhook redelivery and a concurrent sweep collapse to one job per head SHA.
+    Registered with ``max_tries=1``: the brief runs a tool-denied LLM call
+    against a fail-closed daily budget, and an automatic retry would either
+    re-spend on a call that already failed deterministically or re-attempt one
+    the budget just refused. When a brief cannot run, the row is left brewing
+    and U4's 90-minute timeout releases the card.
+
+    Everything testable lives in ``pr_party_brief``; this is the arq seam.
+    """
+    if not settings.is_pr_party_enabled():
+        return {"status": "disabled", "reason": "pr_party_disabled"}
+
+    db: AsyncSession = ctx["db"]
+
+    try:
+        from ontokit.services.pr_party_brief import generate_brief
+
+        outcome = await generate_brief(
+            db,
+            pr_id=pr_id,
+            repo_full_name=repo_full_name,
+            pr_number=pr_number,
+            head_sha=head_sha,
+            redis=ctx.get("redis"),
+        )
+        return outcome.as_dict()
+    except Exception as e:
+        logger.exception(f"PR Party brief job failed for {repo_full_name}#{pr_number}: {e}")
+        raise
+
+
+def _pr_party_sweep_minutes() -> set[int]:
+    """Cron minutes for the sweep, derived from ``PR_PARTY_SWEEP_MINUTES``.
+
+    Clamped to 1–60: a zero or negative interval would fire every minute of
+    every hour and burn the org's search budget, and anything above 60 has no
+    expressible cron form here (use an hourly cron if that is ever wanted).
+    """
+    interval = max(1, min(60, settings.pr_party_sweep_minutes))
+    return {minute for minute in range(60) if minute % interval == 0}
 
 
 async def run_remote_check_task(
@@ -1077,15 +1306,10 @@ async def run_remote_check_task(
         )
         integration = integration_result.scalar_one_or_none()
 
-        if integration and integration.connected_by_user_id:
-            token_result = await db.execute(
-                select(UserGitHubToken).where(
-                    UserGitHubToken.user_id == integration.connected_by_user_id
-                )
-            )
-            token_row = token_result.scalar_one_or_none()
-            if token_row:
-                token = decrypt_token(token_row.encrypted_token)
+        if integration:
+            from ontokit.services.mirror_credential import resolve_mirror_credential
+
+            token = await resolve_mirror_credential(db, integration)
 
         if not token:
             config.status = "error"
@@ -1219,6 +1443,7 @@ async def startup(ctx: dict[str, Any]) -> None:
     engine = create_async_engine(
         str(settings.database_url),
         echo=settings.debug,
+        hide_parameters=True,
         pool_pre_ping=True,
     )
     session_factory = async_sessionmaker(
@@ -1230,6 +1455,15 @@ async def startup(ctx: dict[str, Any]) -> None:
     # Store in context
     ctx["engine"] = engine
     ctx["session_factory"] = session_factory
+
+    # PR Party ready notifications (U9, R22). The sweep's brewing timeout and the
+    # brief worker both fire the intake hook seam from *this* process, so the
+    # notifier has to be attached here as well as in the API lifespan — the two
+    # processes share no imports. register_ready_hook() is idempotent.
+    if settings.is_pr_party_enabled():
+        from ontokit.services.pr_party_notifications import register_ready_hook
+
+        register_ready_hook()
 
     logger.info("ARQ worker started successfully")
 
@@ -1259,27 +1493,6 @@ async def on_job_end(ctx: dict[str, Any]) -> None:
         await db.close()
 
 
-def get_redis_settings() -> RedisSettings:
-    """Get Redis settings from application config."""
-    # Parse Redis URL
-    redis_url = str(settings.redis_url)
-    # RedisSettings expects host, port, database separately
-    # URL format: redis://host:port/db
-
-    from urllib.parse import urlparse
-
-    parsed = urlparse(redis_url)
-    host = parsed.hostname or "localhost"
-    port = parsed.port or 6379
-    database = int(parsed.path.lstrip("/") or "0")
-
-    return RedisSettings(
-        host=host,
-        port=port,
-        database=database,
-    )
-
-
 class WorkerSettings:
     """ARQ worker settings."""
 
@@ -1293,10 +1506,27 @@ class WorkerSettings:
         check_all_projects_normalization,
         sync_github_projects,
         auto_submit_stale_suggestions,
+        auto_accept_suggestions,
         run_embedding_generation_task,
         run_single_entity_embed_task,
         run_batch_entity_embed_task,
+        run_translation_label_diff_task,
+        run_translation_backfill_task,
+        func(run_translation_entity_task, max_tries=TRANSLATION_ENTITY_MAX_TRIES),
         run_remote_check_task,
+        # KTD14: bounded under both the 300s worker default and the 5-minute
+        # cadence, so a wedged sweep cannot overlap the next one.
+        func(sweep_pr_party_prs, timeout=settings.pr_party_sweep_timeout_seconds),
+        # Explicit operator task: no cron/API caller and no automatic retry.
+        # A fixed enqueue job id prevents overlapping runs (see the script).
+        func(run_pr_party_credential_rewrap_task, max_tries=1),
+        # U5: one brief per PR revision. max_tries=1 — see the docstring; the
+        # brewing timeout is the retry mechanism, not arq.
+        func(
+            generate_pr_brief,
+            timeout=settings.pr_party_brief_timeout_seconds,
+            max_tries=1,
+        ),
     ]
     redis_settings = get_redis_settings()
 
@@ -1321,6 +1551,29 @@ class WorkerSettings:
             hour=None,
             minute={5, 15, 25, 35, 45, 55},
         ),
+        # Auto-accept ripe trusted suggestions every 15 minutes. The quiet
+        # period is measured in days, so finer granularity buys nothing.
+        cron(
+            auto_accept_suggestions,
+            hour=None,
+            minute={0, 15, 30, 45},
+        ),
+        # PR Party reconciliation sweep (KTD14). Registered only where the
+        # reviewer registry is configured: on a deployment with no reviewers
+        # there is no queue for the results to land in, and sweeping anyway
+        # would spend the org's GitHub search budget on nothing.
+        *(
+            [
+                cron(
+                    sweep_pr_party_prs,
+                    hour=None,
+                    minute=_pr_party_sweep_minutes(),
+                    timeout=settings.pr_party_sweep_timeout_seconds,
+                )
+            ]
+            if settings.is_pr_party_enabled()
+            else []
+        ),
     ]
 
     # Job settings
@@ -1331,3 +1584,6 @@ class WorkerSettings:
 
     # Queue name
     queue_name = "arq:queue"
+
+
+assert run_pr_party_credential_rewrap_task.__name__ == PR_PARTY_CREDENTIAL_REWRAP_TASK

@@ -84,6 +84,15 @@ def _make_pr(
     pr.author_email = "editor@example.com"
     pr.github_pr_number = github_pr_number
     pr.github_pr_url = None
+    pr.github_sync_status = "synced" if github_pr_number is not None else "not_configured"
+    pr.github_sync_last_attempted_at = None
+    pr.github_sync_message = None
+    pr.github_sync_attempt_id = None
+    pr.github_integration_id = None
+    pr.github_repo_owner = None
+    pr.github_repo_name = None
+    pr.github_sync_generation = 0
+    pr.github_sync_merge_title = None
     pr.reviews = []
     pr.comments = []
     pr.base_commit_hash = None
@@ -281,7 +290,7 @@ class TestSyncMergeCommitsToPRs:
         # DB calls: select merged PRs, select max PR number
         merged_prs_result = _scalars_result([existing_pr])
         max_number_result = _scalar_result(1)
-        mock_db.execute.side_effect = [merged_prs_result, max_number_result]
+        mock_db.execute.side_effect = [MagicMock(), merged_prs_result, max_number_result]
 
         await service._sync_merge_commits_to_prs(PROJECT_ID)
 
@@ -302,7 +311,7 @@ class TestSyncMergeCommitsToPRs:
         # No existing merged PRs
         merged_prs_result = _scalars_result([])
         max_number_result = _scalar_result(5)
-        mock_db.execute.side_effect = [merged_prs_result, max_number_result]
+        mock_db.execute.side_effect = [MagicMock(), merged_prs_result, max_number_result]
 
         await service._sync_merge_commits_to_prs(PROJECT_ID)
 
@@ -314,7 +323,7 @@ class TestSyncMergeCommitsToPRs:
     async def test_no_commit_when_nothing_changed(
         self, service: PullRequestService, mock_git_service: MagicMock, mock_db: AsyncMock
     ) -> None:
-        """No DB commit when merge commits all have existing PRs with hashes."""
+        """A no-op import still releases its transaction-scoped allocator lock."""
         merge_commit = _make_merge_commit(merged_branch="feature")
         mock_git_service.get_history.return_value = [merge_commit]
 
@@ -327,11 +336,11 @@ class TestSyncMergeCommitsToPRs:
 
         merged_prs_result = _scalars_result([existing_pr])
         max_number_result = _scalar_result(1)
-        mock_db.execute.side_effect = [merged_prs_result, max_number_result]
+        mock_db.execute.side_effect = [MagicMock(), merged_prs_result, max_number_result]
 
         await service._sync_merge_commits_to_prs(PROJECT_ID)
 
-        mock_db.commit.assert_not_awaited()
+        mock_db.commit.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +367,7 @@ class TestListPullRequestsFilters:
 
         mock_db.execute.side_effect = [
             _project_result(project),
+            MagicMock(),
             merged_prs_result,
             max_number_result,
             list_result,
@@ -386,6 +396,7 @@ class TestListPullRequestsFilters:
 
         mock_db.execute.side_effect = [
             _project_result(project),
+            MagicMock(),
             merged_prs_result,
             max_number_result,
             list_result,
@@ -408,16 +419,15 @@ class TestClosePullRequestGitHubSync:
         self,
         service: PullRequestService,
         mock_db: AsyncMock,
-        mock_github_service: MagicMock,
+        mock_github_service: MagicMock,  # noqa: ARG002
     ) -> None:
         """close_pull_request syncs to GitHub when github_pr_number is set."""
-        from unittest.mock import patch
-
         project = _make_project()
         pr = _make_pr(author_id=OWNER_ID, github_pr_number=42)
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -429,26 +439,14 @@ class TestClosePullRequestGitHubSync:
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
-            _scalar_result(integration),  # _get_github_integration
-            _scalar_result(token_row),  # UserGitHubToken lookup
-            _project_result(project),  # _to_pr_response -> _get_project
+            _project_result(project),
         ]
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
-        mock_github_service.close_pull_request = AsyncMock()
-
-        with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
-            return_value="decrypted-token",
-        ):
-            await service.close_pull_request(PROJECT_ID, 1, user)
+        await service.close_pull_request(PROJECT_ID, 1, user)
 
         assert pr.status == PRStatus.CLOSED.value
-        mock_github_service.close_pull_request.assert_awaited_once_with(
-            token="decrypted-token",
-            owner="org",
-            repo="repo",
-            pr_number=42,
-        )
+        service._sync_pull_request_to_github.assert_awaited_once_with(PROJECT_ID, pr)
 
 
 # ---------------------------------------------------------------------------
@@ -462,11 +460,9 @@ class TestReopenPullRequestGitHubSync:
         self,
         service: PullRequestService,
         mock_db: AsyncMock,
-        mock_github_service: MagicMock,
+        mock_github_service: MagicMock,  # noqa: ARG002
     ) -> None:
         """reopen_pull_request syncs to GitHub when github_pr_number is set."""
-        from unittest.mock import patch
-
         project = _make_project()
         pr = _make_pr(
             author_id=OWNER_ID,
@@ -476,6 +472,7 @@ class TestReopenPullRequestGitHubSync:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -487,26 +484,16 @@ class TestReopenPullRequestGitHubSync:
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
-            _scalar_result(integration),  # _get_github_integration
-            _scalar_result(token_row),  # UserGitHubToken
+            _scalar_result(None),  # source branch lock
+            _scalar_result(None),  # no conflicting open PR
             _project_result(project),  # _to_pr_response
         ]
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
-        mock_github_service.reopen_pull_request = AsyncMock()
-
-        with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
-            return_value="decrypted-token",
-        ):
-            await service.reopen_pull_request(PROJECT_ID, 1, user)
+        await service.reopen_pull_request(PROJECT_ID, 1, user)
 
         assert pr.status == PRStatus.OPEN.value
-        mock_github_service.reopen_pull_request.assert_awaited_once_with(
-            token="decrypted-token",
-            owner="org",
-            repo="repo",
-            pr_number=42,
-        )
+        service._sync_pull_request_to_github.assert_awaited_once_with(PROJECT_ID, pr)
 
 
 # ---------------------------------------------------------------------------
@@ -625,6 +612,7 @@ class TestCreateReviewNotification:
         mock_notif = AsyncMock()
         mock_notif.create_notification = AsyncMock()
         mock_notif_cls.return_value = mock_notif
+        service._halt_linked_suggestion_auto_accept = AsyncMock()  # type: ignore[method-assign]
 
         # After refresh, populate id and created_at on the ORM object
         def _populate(obj: object) -> None:
@@ -1107,6 +1095,7 @@ class TestSyncRemoteConfigForWebhooks:
     ) -> None:
         """Creates RemoteSyncConfig when webhooks_enabled=True and none exists."""
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.default_branch = "main"
@@ -1149,6 +1138,7 @@ class TestSyncRemoteConfigForWebhooks:
     ) -> None:
         """Updates existing sync config to 'webhook' when already present."""
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.default_branch = "main"
@@ -1231,6 +1221,8 @@ class TestHandleGitHubPRWebhook:
         mock_db.execute.side_effect = [
             _scalar_result(integration),
             _scalar_result(pr),
+            _scalar_result(None),  # source branch lock
+            _scalar_result(None),  # no conflicting open PR
         ]
 
         await service.handle_github_pr_webhook(
@@ -1379,6 +1371,69 @@ class TestHandleGitHubReviewWebhook:
             _scalar_result(integration),
             _scalar_result(None),  # no local PR
         ]
+        halt = AsyncMock()
+        service._halt_linked_suggestion_auto_accept = halt  # type: ignore[attr-defined,method-assign]
+
+        await service.handle_github_review_webhook(
+            PROJECT_ID,
+            action="submitted",
+            review_data={
+                "id": 999,
+                "state": "CHANGES_REQUESTED",
+                "body": "Please revise",
+                "user": {"login": "ghuser"},
+            },
+            pr_data={"number": 42},
+        )
+
+        mock_db.add.assert_not_called()
+        halt.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("state", ["COMMENTED", "CHANGES_REQUESTED"])
+    async def test_github_objection_halts_linked_suggestion(
+        self,
+        state: str,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+    ) -> None:
+        integration = MagicMock(sync_enabled=True)
+        pr = _make_pr(github_pr_number=42)
+        mock_db.execute.side_effect = [
+            _scalar_result(integration),
+            _scalar_result(pr),
+            _scalar_result(None),
+        ]
+        halt = AsyncMock()
+        service._halt_linked_suggestion_auto_accept = halt  # type: ignore[attr-defined,method-assign]
+
+        await service.handle_github_review_webhook(
+            PROJECT_ID,
+            action="submitted",
+            review_data={
+                "id": 999,
+                "state": state,
+                "body": "Please revisit this",
+                "user": {"login": "reviewer"},
+            },
+            pr_data={"number": 42},
+        )
+
+        halt.assert_awaited_once_with(pr.id)
+
+    @pytest.mark.asyncio
+    async def test_github_approval_does_not_halt_linked_suggestion(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        integration = MagicMock(sync_enabled=True)
+        pr = _make_pr(github_pr_number=42)
+        mock_db.execute.side_effect = [
+            _scalar_result(integration),
+            _scalar_result(pr),
+            _scalar_result(None),
+        ]
+        halt = AsyncMock()
+        service._halt_linked_suggestion_auto_accept = halt  # type: ignore[attr-defined,method-assign]
 
         await service.handle_github_review_webhook(
             PROJECT_ID,
@@ -1387,12 +1442,12 @@ class TestHandleGitHubReviewWebhook:
                 "id": 999,
                 "state": "APPROVED",
                 "body": "LGTM",
-                "user": {"login": "ghuser"},
+                "user": {"login": "reviewer"},
             },
             pr_data={"number": 42},
         )
 
-        mock_db.add.assert_not_called()
+        halt.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1414,14 +1469,35 @@ class TestHandleGitHubPushWebhook:
         mock_db.execute.return_value = _scalar_result(integration)
         mock_git_service.pull_branch = MagicMock()
 
-        await service.handle_github_push_webhook(
-            PROJECT_ID,
-            ref="refs/heads/main",
-            commits=[],
-        )
+        with patch("ontokit.services.pull_request_service.settings") as mock_settings:
+            mock_settings.github_mirror_outbound_only = False
+            await service.handle_github_push_webhook(
+                PROJECT_ID,
+                ref="refs/heads/main",
+                commits=[],
+            )
 
         mock_git_service.pull_branch.assert_called_once_with(PROJECT_ID, "main", "origin")
         mock_db.commit.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_outbound_only_push_never_pulls_canonical_state(
+        self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
+    ) -> None:
+        integration = MagicMock(sync_enabled=True, default_branch="main")
+        mock_db.execute.return_value = _scalar_result(integration)
+        mock_git_service.pull_branch = MagicMock()
+
+        with patch("ontokit.services.pull_request_service.settings") as mock_settings:
+            mock_settings.github_mirror_outbound_only = True
+            await service.handle_github_push_webhook(
+                PROJECT_ID,
+                ref="refs/heads/main",
+                commits=[],
+            )
+
+        mock_git_service.pull_branch.assert_not_called()
+        mock_db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_push_to_non_default_branch_ignored(
@@ -1954,6 +2030,7 @@ class TestCreateReviewGitHubSync:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -1966,6 +2043,9 @@ class TestCreateReviewGitHubSync:
         gh_review.id = 777
 
         mock_github_service.create_review = AsyncMock(return_value=gh_review)
+        mock_github_service.get_pull_request_or_none = AsyncMock(
+            return_value=MagicMock(number=42, head_ref="feature", base_ref="main")
+        )
 
         def _populate(obj: object) -> None:
             obj.id = uuid.uuid4()  # type: ignore[attr-defined]
@@ -1980,7 +2060,7 @@ class TestCreateReviewGitHubSync:
         mock_db.refresh.side_effect = _populate
 
         with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
+            "ontokit.services.mirror_credential.decrypt_token",
             return_value="decrypted-token",
         ):
             result = await service.create_review(
@@ -2008,7 +2088,7 @@ class TestSyncMergeCommitsTimestampError:
 
         merged_prs_result = _scalars_result([])
         max_number_result = _scalar_result(0)
-        mock_db.execute.side_effect = [merged_prs_result, max_number_result]
+        mock_db.execute.side_effect = [MagicMock(), merged_prs_result, max_number_result]
 
         await service._sync_merge_commits_to_prs(PROJECT_ID)
 
@@ -2033,6 +2113,7 @@ class TestUpdatePullRequestGitHubSync:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -2046,21 +2127,16 @@ class TestUpdatePullRequestGitHubSync:
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
-            _scalar_result(integration),  # _get_github_integration
-            _scalar_result(token_row),  # UserGitHubToken
             _project_result(project),  # _to_pr_response -> _get_project
         ]
         mock_db.refresh = AsyncMock()
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
-        with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
-            return_value="decrypted-token",
-        ):
-            result = await service.update_pull_request(
-                PROJECT_ID, 1, PRUpdate(title="Updated title"), user
-            )
+        result = await service.update_pull_request(
+            PROJECT_ID, 1, PRUpdate(title="Updated title"), user
+        )
 
-        mock_github_service.update_pull_request.assert_awaited_once()
+        service._sync_pull_request_to_github.assert_awaited_once_with(PROJECT_ID, pr)
         assert result is not None
 
 
@@ -2076,7 +2152,7 @@ class TestMergePullRequestGitHubSync:
         service: PullRequestService,
         mock_db: AsyncMock,
         mock_git_service: MagicMock,
-        mock_github_service: MagicMock,
+        mock_github_service: MagicMock,  # noqa: ARG002
     ) -> None:
         """merge_pull_request syncs merge to GitHub when github_pr_number is set."""
         project = _make_project()
@@ -2097,6 +2173,7 @@ class TestMergePullRequestGitHubSync:
         mock_git_service.merge_branch.return_value = merge_result_obj
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -2110,18 +2187,13 @@ class TestMergePullRequestGitHubSync:
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
-            _scalar_result(integration),  # _get_github_integration
-            _scalar_result(token_row),  # UserGitHubToken
         ]
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
-        with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
-            return_value="decrypted-token",
-        ):
-            result = await service.merge_pull_request(PROJECT_ID, 1, PRMergeRequest(), user)
+        result = await service.merge_pull_request(PROJECT_ID, 1, PRMergeRequest(), user)
 
         assert result.success is True
-        mock_github_service.merge_pull_request.assert_awaited_once()
+        service._sync_pull_request_to_github.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -2135,7 +2207,7 @@ class TestCloseReopenExceptionHandling:
         self,
         service: PullRequestService,
         mock_db: AsyncMock,
-        mock_github_service: MagicMock,
+        mock_github_service: MagicMock,  # noqa: ARG002
     ) -> None:
         """GitHub sync failure during close doesn't prevent local close."""
         project = _make_project()
@@ -2143,6 +2215,7 @@ class TestCloseReopenExceptionHandling:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -2151,22 +2224,15 @@ class TestCloseReopenExceptionHandling:
         token_row = MagicMock()
         token_row.encrypted_token = "encrypted-abc"
 
-        mock_github_service.close_pull_request = AsyncMock(side_effect=RuntimeError("GitHub down"))
-
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
-            _scalar_result(integration),
-            _scalar_result(token_row),
             _project_result(project),  # _to_pr_response
         ]
         mock_db.refresh = AsyncMock()
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
-        with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
-            return_value="decrypted-token",
-        ):
-            result = await service.close_pull_request(PROJECT_ID, 1, user)
+        result = await service.close_pull_request(PROJECT_ID, 1, user)
 
         assert pr.status == "closed"
         assert result is not None
@@ -2176,7 +2242,7 @@ class TestCloseReopenExceptionHandling:
         self,
         service: PullRequestService,
         mock_db: AsyncMock,
-        mock_github_service: MagicMock,
+        mock_github_service: MagicMock,  # noqa: ARG002
     ) -> None:
         """GitHub sync failure during reopen doesn't prevent local reopen."""
         project = _make_project()
@@ -2188,6 +2254,7 @@ class TestCloseReopenExceptionHandling:
         user = _make_user(OWNER_ID)
 
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.repo_owner = "org"
         integration.repo_name = "repo"
         integration.sync_enabled = True
@@ -2196,22 +2263,17 @@ class TestCloseReopenExceptionHandling:
         token_row = MagicMock()
         token_row.encrypted_token = "encrypted-abc"
 
-        mock_github_service.reopen_pull_request = AsyncMock(side_effect=RuntimeError("GitHub down"))
-
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
-            _scalar_result(integration),
-            _scalar_result(token_row),
+            _scalar_result(None),  # source branch lock
+            _scalar_result(None),  # no conflicting open PR
             _project_result(project),  # _to_pr_response
         ]
         mock_db.refresh = AsyncMock()
+        service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 
-        with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
-            return_value="decrypted-token",
-        ):
-            result = await service.reopen_pull_request(PROJECT_ID, 1, user)
+        result = await service.reopen_pull_request(PROJECT_ID, 1, user)
 
         assert pr.status == "open"
         assert result is not None
@@ -2229,6 +2291,7 @@ class TestGetGitHubToken:
     ) -> None:
         """Returns None when connected_by_user_id is missing."""
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.sync_enabled = True
         integration.connected_by_user_id = None
 
@@ -2243,6 +2306,7 @@ class TestGetGitHubToken:
     ) -> None:
         """Returns None when user has no stored token."""
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.sync_enabled = True
         integration.connected_by_user_id = "user-123"
 
@@ -2260,6 +2324,7 @@ class TestGetGitHubToken:
     ) -> None:
         """Returns None when token decryption fails."""
         integration = MagicMock()
+        integration.project = MagicMock(is_demo=False)
         integration.sync_enabled = True
         integration.connected_by_user_id = "user-123"
 
@@ -2272,7 +2337,7 @@ class TestGetGitHubToken:
         ]
 
         with patch(
-            "ontokit.services.pull_request_service.decrypt_token",
+            "ontokit.services.mirror_credential.decrypt_token",
             side_effect=ValueError("bad key"),
         ):
             result = await service._get_github_token(PROJECT_ID)

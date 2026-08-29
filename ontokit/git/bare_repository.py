@@ -17,6 +17,11 @@ from rdflib import Graph, URIRef
 from rdflib.compare import graph_diff, to_isomorphic
 
 from ontokit.core.config import settings
+from ontokit.core.demo_targets import (
+    DemoTargetAuthorization,
+    is_demo_repository,
+    repository_from_remote_url,
+)
 
 
 @dataclass
@@ -200,6 +205,8 @@ class BareOntologyRepository:
         message: str,
         author_name: str | None = None,
         author_email: str | None = None,
+        committer_name: str | None = None,
+        committer_email: str | None = None,
     ) -> CommitInfo:
         """
         Write a file to a branch and create a commit.
@@ -248,7 +255,11 @@ class BareOntologyRepository:
 
         # Create commit
         author = self._get_signature(author_name, author_email)
-        committer = author
+        committer = (
+            self._get_signature(committer_name, committer_email)
+            if committer_name is not None or committer_email is not None
+            else author
+        )
 
         parents = [parent_commit.id] if parent_commit else []
 
@@ -528,6 +539,25 @@ class BareOntologyRepository:
         commit = self._resolve_ref(ref)
         return str(commit.id)
 
+    def restore_branch_head(
+        self,
+        name: str,
+        *,
+        expected_head: str,
+        target_head: str,
+    ) -> bool:
+        """Move a branch back only when it still points at the failed write."""
+        branch_ref = f"refs/heads/{name}"
+        if branch_ref not in self.repo.references:
+            return False
+        reference = self.repo.references[branch_ref]
+        current = reference.peel(pygit2.Commit)
+        if str(current.id) != expected_head:
+            return False
+        target = self._resolve_ref(target_head)
+        reference.set_target(target.id)
+        return True
+
     def list_branches(self) -> list[BranchInfo]:
         """List all branches with their metadata."""
         branches = []
@@ -803,10 +833,18 @@ class BareOntologyRepository:
         branch: str | None = None,
         force: bool = False,
         token: str | None = None,
+        target_authorization: DemoTargetAuthorization | None = None,
     ) -> bool:
         """Push to a remote repository."""
         try:
             remote_obj = self.repo.remotes[remote]
+            target = repository_from_remote_url(remote_obj.url or "")
+            if (
+                target
+                and is_demo_repository(*target)
+                and (target_authorization is None or not target_authorization.permits(*target))
+            ):
+                return False
             branch = branch or self.get_default_branch()
             refspec = (
                 f"+refs/heads/{branch}:refs/heads/{branch}"
@@ -933,6 +971,8 @@ class BareGitRepositoryService:
         author_name: str | None = None,
         author_email: str | None = None,
         branch_name: str | None = None,
+        committer_name: str | None = None,
+        committer_email: str | None = None,
     ) -> CommitInfo:
         """
         Commit changes to a branch.
@@ -961,6 +1001,8 @@ class BareGitRepositoryService:
             message=message,
             author_name=author_name,
             author_email=author_email,
+            committer_name=committer_name,
+            committer_email=committer_email,
         )
 
     def get_history(
@@ -1129,6 +1171,21 @@ class BareGitRepositoryService:
         repo = self.get_repository(project_id)
         return repo.create_branch(name, from_ref)
 
+    def restore_branch_head(
+        self,
+        project_id: UUID,
+        name: str,
+        *,
+        expected_head: str,
+        target_head: str,
+    ) -> bool:
+        """Compensate a failed cross-store write without overwriting newer work."""
+        return self.get_repository(project_id).restore_branch_head(
+            name,
+            expected_head=expected_head,
+            target_head=target_head,
+        )
+
     def delete_branch(self, project_id: UUID, name: str, force: bool = False) -> bool:
         """
         Delete a branch for a project.
@@ -1211,6 +1268,7 @@ class BareGitRepositoryService:
         remote: str = "origin",
         force: bool = False,
         token: str | None = None,
+        target_authorization: DemoTargetAuthorization | None = None,
     ) -> bool:
         """
         Push a branch to remote.
@@ -1226,7 +1284,13 @@ class BareGitRepositoryService:
             True if push was successful
         """
         repo = self.get_repository(project_id)
-        return repo.push(remote, branch_name, force, token=token)
+        return repo.push(
+            remote,
+            branch_name,
+            force,
+            token=token,
+            target_authorization=target_authorization,
+        )
 
     def fetch_remote(
         self, project_id: UUID, remote: str = "origin", token: str | None = None

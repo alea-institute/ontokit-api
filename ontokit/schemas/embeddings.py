@@ -15,6 +15,8 @@ class EmbeddingConfig(BaseModel):
     api_key_set: bool
     dimensions: int
     auto_embed_on_save: bool
+    monthly_budget_usd: float | None = None
+    daily_cap_usd: float | None = None
     last_full_embed_at: str | None = None
 
 
@@ -23,6 +25,8 @@ class EmbeddingConfigUpdate(BaseModel):
     model_name: str | None = None
     api_key: str | None = None  # write-only
     auto_embed_on_save: bool | None = None
+    monthly_budget_usd: float | None = None
+    daily_cap_usd: float | None = None
 
 
 class EmbeddingStatus(BaseModel):
@@ -72,3 +76,15 @@ class RankedCandidate(BaseModel):
     iri: str
     label: str
     score: float
+
+
+class SemanticSearchResultWithBranch(BaseModel):
+    """Semantic search result that includes the branch — used for cross-branch duplicate detection (DEDUP-08)."""
+
+    iri: str
+    label: str
+    entity_type: str
+    score: float
+    deprecated: bool = False
+    branch: str
+    embedding_text: str

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "mirrors": [
+    {
+      "name": "folio",
+      "source_repository": "alea-institute/FOLIO",
+      "destination_repository": "alea-institute/ontokit-demo-folio",
+      "default_branch": "main"
+    },
+    {
+      "name": "semantic-canon",
+      "source_repository": "CatholicOS/ontology-semantic-canon",
+      "destination_repository": "alea-institute/ontokit-demo-semantic-canon",
+      "default_branch": "main"
+    }
+  ]
+}

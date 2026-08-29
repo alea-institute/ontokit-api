@@ -12,9 +12,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from ontokit.api.routes.pull_requests import get_service
+from ontokit.api.routes.pull_requests import get_service, retry_pull_request_github_sync
+from ontokit.core.auth import ANONYMOUS_USER
 from ontokit.main import app
 from ontokit.schemas.pull_request import (
     CommentListResponse,
@@ -181,6 +183,30 @@ class TestReopenPullRequest:
         resp = client.post(f"{BASE}/{PROJECT_ID}/pull-requests/1/reopen")
         assert resp.status_code == 200
         svc.reopen_pull_request.assert_awaited_once()
+
+
+class TestRetryGitHubSync:
+    def test_returns_200(self, svc_client: tuple[TestClient, AsyncMock]) -> None:
+        client, svc = svc_client
+        svc.retry_github_sync.return_value = _PR_RESP
+        resp = client.post(f"{BASE}/{PROJECT_ID}/pull-requests/1/github-sync/retry")
+        assert resp.status_code == 200
+        svc.retry_github_sync.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_anonymous_user_rejected_before_service_access(self) -> None:
+        svc = AsyncMock()
+
+        with pytest.raises(HTTPException) as exc_info:
+            await retry_pull_request_github_sync(
+                project_id=PROJECT_UUID,
+                pr_number=1,
+                service=svc,
+                user=ANONYMOUS_USER,
+            )
+
+        assert exc_info.value.status_code == 403
+        svc.retry_github_sync.assert_not_awaited()
 
 
 class TestMergePullRequest:

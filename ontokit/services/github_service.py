@@ -10,6 +10,13 @@ from urllib.parse import quote
 import httpx
 
 
+class _UnsetType:
+    pass
+
+
+_UNSET = _UnsetType()
+
+
 def _enc(value: str, *, allow_slash: bool = False) -> str:
     """URL-encode a path or query segment built from user-supplied input.
 
@@ -327,6 +334,21 @@ class GitHubService:
 
         return self._parse_pr(data)
 
+    async def get_pull_request_or_none(
+        self,
+        token: str,
+        owner: str,
+        repo: str,
+        pr_number: int,
+    ) -> GitHubPR | None:
+        """Get a pull request, returning ``None`` only for a verified 404."""
+        try:
+            return await self.get_pull_request(token, owner, repo, pr_number)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+
     async def update_pull_request(
         self,
         token: str,
@@ -334,15 +356,17 @@ class GitHubService:
         repo: str,
         pr_number: int,
         title: str | None = None,
-        body: str | None = None,
+        body: str | None | _UnsetType = _UNSET,
         state: str | None = None,
     ) -> GitHubPR:
         """Update a pull request on GitHub."""
         update_data: dict[str, Any] = {}
         if title is not None:
             update_data["title"] = title
-        if body is not None:
-            update_data["body"] = body
+        if body is not _UNSET:
+            # GitHub uses an empty string to clear an optional PR body. ``None``
+            # is therefore a durable value, distinct from omitting the field.
+            update_data["body"] = body if isinstance(body, str) else ""
         if state is not None:
             update_data["state"] = state
 
@@ -406,10 +430,13 @@ class GitHubService:
         owner: str,
         repo: str,
         state: str = "open",
+        head: str | None = None,
         base: str | None = None,
     ) -> list[GitHubPR]:
         """List pull requests for a repository."""
         endpoint = f"/repos/{_enc(owner)}/{_enc(repo)}/pulls?state={_enc(state)}"
+        if head:
+            endpoint += f"&head={_enc(head)}"
         if base:
             endpoint += f"&base={_enc(base)}"
 

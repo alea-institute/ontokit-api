@@ -161,7 +161,12 @@ class TestSyncGitHubProject:
 
     @pytest.mark.asyncio
     async def test_remote_ahead_fast_forwards(self) -> None:
-        """Fast-forwards local branch when remote is ahead."""
+        """Fast-forwards local branch when remote is ahead (legacy bidirectional).
+
+        Inbound sync is opt-in since U10 — outbound-only is the default, and the
+        outbound-only behavior for this case is covered in
+        test_github_sync_outbound.py.
+        """
         local_oid = MagicMock()
         remote_oid = MagicMock()
         integration = _make_integration()
@@ -174,7 +179,9 @@ class TestSyncGitHubProject:
         git_service.get_repository.return_value = mock_repo
         mock_db = AsyncMock()
 
-        result = await sync_github_project(integration, PAT, git_service, mock_db)
+        result = await sync_github_project(
+            integration, PAT, git_service, mock_db, outbound_only=False
+        )
         assert result["status"] == "pulled"
         assert result["behind"] == 3
 
@@ -266,7 +273,9 @@ class TestSyncGitHubProject:
             "ontokit.services.github_sync._try_merge",
             return_value={"conflict": True, "error": "Conflicting files: onto.ttl"},
         ):
-            result = await sync_github_project(integration, PAT, git_service, mock_db)
+            result = await sync_github_project(
+                integration, PAT, git_service, mock_db, outbound_only=False
+            )
 
         assert result["status"] == "conflict"
         assert result["ahead"] == 2
@@ -292,7 +301,9 @@ class TestSyncGitHubProject:
             "ontokit.services.github_sync._try_merge",
             return_value={"conflict": False},
         ):
-            result = await sync_github_project(integration, PAT, git_service, mock_db)
+            result = await sync_github_project(
+                integration, PAT, git_service, mock_db, outbound_only=False
+            )
 
         assert result["status"] == "merged_and_pushed"
         assert result["ahead"] == 1
@@ -318,7 +329,9 @@ class TestSyncGitHubProject:
             "ontokit.services.github_sync._try_merge",
             return_value={"conflict": False},
         ):
-            result = await sync_github_project(integration, PAT, git_service, mock_db)
+            result = await sync_github_project(
+                integration, PAT, git_service, mock_db, outbound_only=False
+            )
 
         assert result["status"] == "error"
         assert result["reason"] == "post_merge_push_failed"

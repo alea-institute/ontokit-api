@@ -4,17 +4,49 @@ from __future__ import annotations
 
 import json
 import uuid
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
+from itertools import chain, repeat
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
 
 from ontokit.core.auth import CurrentUser
+from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.services.suggestion_service import SuggestionService
 
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
+
+
+def _no_commit_identity_row() -> MagicMock:
+    """Result for the U9 commit-identity preference lookup: no opt-in row.
+
+    Every suggestion commit now resolves its author identity through
+    CommitIdentityService, which reads this table before writing. Without a row
+    the contributor gets the default noreply alias, which is what these tests
+    exercise.
+    """
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = None
+    return result
+
+
+def _padded(*results: object, project: object) -> Iterator[object]:
+    """Ordered query results, then a trust-aware tail forever.
+
+    U3 added follow-on queries AFTER the state change these tests assert on —
+    the project reload for promotion evaluation and the outcome-log count. The
+    tail answers both (project row, zero accepted outcomes) so each test stays
+    pinned to the behavior it is about rather than to an exact query count.
+    """
+    tail = MagicMock()
+    tail.scalar_one_or_none.return_value = project
+    tail.scalar.return_value = 0
+    tail.scalars.return_value.all.return_value = []
+    return chain(results, repeat(tail))
 
 
 # ---------------------------------------------------------------------------
@@ -40,8 +72,27 @@ def _make_project(project_id: uuid.UUID = PROJECT_ID, is_public: bool = True) ->
     member = MagicMock()
     member.user_id = "test-user-id"
     member.role = "editor"
+    member.is_trusted = False
+    member.trust_override = "none"
     project.members = [member]
+    project.trust_promotion_threshold = 5
     return project
+
+
+def _configure_editor_pr_claim(
+    pr_service: AsyncMock,
+    response: MagicMock,
+    project: MagicMock,
+) -> MagicMock:
+    """Configure the locked claim and post-lock finalization seams."""
+    db_pr = MagicMock()
+    db_pr.id = response.id
+    db_pr.pr_number = response.pr_number
+    db_pr.title = response.title
+    db_pr.github_pr_url = response.github_pr_url
+    pr_service._claim_pull_request_already_locked = AsyncMock(return_value=(db_pr, project))
+    pr_service._finalize_created_pull_request = AsyncMock(return_value=response)
+    return db_pr
 
 
 def _make_session(
@@ -55,6 +106,8 @@ def _make_session(
     pr_number: int | None = None,
     pr_id: uuid.UUID | None = None,
     last_activity: datetime | None = None,
+    is_anonymous: bool = False,
+    anonymous_content_bytes: int = 0,
 ) -> MagicMock:
     session = MagicMock(spec=SuggestionSession)
     session.id = uuid.uuid4()
@@ -77,6 +130,12 @@ def _make_session(
     session.reviewed_at = None
     session.revision = 1
     session.summary = None
+    # Anonymous-suggestion columns (PR-7): authenticated session defaults
+    session.is_anonymous = is_anonymous
+    session.anonymous_content_bytes = anonymous_content_bytes
+    session.submitter_name = None
+    session.submitter_email = None
+    session.client_ip = None
     session.created_at = datetime.now(UTC)
     session.last_activity = last_activity or datetime.now(UTC)
     return session
@@ -85,12 +144,18 @@ def _make_session(
 @pytest.fixture
 def mock_db() -> AsyncMock:
     """Create an async mock of AsyncSession."""
+
+    @asynccontextmanager
+    async def savepoint() -> AsyncIterator[None]:
+        yield
+
     session = AsyncMock()
     session.commit = AsyncMock()
     session.rollback = AsyncMock()
     session.execute = AsyncMock()
     session.refresh = AsyncMock()
     session.add = Mock()
+    session.begin_nested = Mock(side_effect=savepoint)
     return session
 
 
@@ -101,12 +166,33 @@ def mock_git() -> MagicMock:
     git.create_branch = MagicMock()
     git.delete_branch = MagicMock()
     git.get_default_branch = MagicMock(return_value="main")
+    git.get_file_from_branch = MagicMock(return_value=b"")
     return git
 
 
 @pytest.fixture
-def service(mock_db: AsyncMock, mock_git: MagicMock) -> SuggestionService:
-    return SuggestionService(db=mock_db, git_service=mock_git)
+def service(
+    mock_db: AsyncMock,
+    mock_git: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> SuggestionService:
+    @asynccontextmanager
+    async def unlocked(*_args: object) -> AsyncIterator[None]:
+        yield
+
+    monkeypatch.setattr("ontokit.services.suggestion_service.pull_request_write_locks", unlocked)
+    monkeypatch.setattr("ontokit.services.suggestion_service.branch_write_lock", unlocked)
+    suggestion_service = SuggestionService(db=mock_db, git_service=mock_git)
+    suggestion_service._enqueue_branch_refresh = AsyncMock()  # type: ignore[method-assign]
+    return suggestion_service
+
+
+def _outcomes(mock_db: AsyncMock) -> list[SuggestionOutcome]:
+    return [
+        call.args[0]
+        for call in mock_db.add.call_args_list
+        if isinstance(call.args[0], SuggestionOutcome)
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -436,7 +522,11 @@ class TestAutoSubmitStaleSessions:
         mock_claim_result = MagicMock()
         mock_claim_result.rowcount = 0
 
-        mock_db.execute.side_effect = [mock_stale_result, mock_claim_result]
+        project = _make_project()
+        project.members[0].user_id = stale_session.user_id
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [mock_stale_result, project_result, mock_claim_result]
 
         count = await service.auto_submit_stale_sessions()
         assert count == 0
@@ -689,6 +779,7 @@ class TestSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         commit_info = MagicMock()
@@ -764,6 +855,7 @@ class TestSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         mock_git.commit_to_branch = MagicMock(side_effect=RuntimeError("git error"))
@@ -804,6 +896,7 @@ class TestSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         commit_info = MagicMock()
@@ -857,13 +950,13 @@ class TestSubmit:
         mock_no_pr_result = MagicMock()
         mock_no_pr_result.scalar_one_or_none.return_value = None
 
-        mock_db.execute.side_effect = [
+        mock_db.execute.side_effect = _padded(
             mock_session_result,  # _get_session
             mock_project_result,  # _verify_project_access -> _get_project
             mock_no_pr_result,  # existing PR check
             mock_project_result,  # _get_project for notification
-        ]
-
+            project=project,
+        )
         mock_git.get_default_branch = MagicMock(return_value="main")
 
         mock_pr_response = MagicMock()
@@ -884,7 +977,7 @@ class TestSubmit:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
@@ -981,12 +1074,12 @@ class TestSubmit:
         mock_existing_pr_result = MagicMock()
         mock_existing_pr_result.scalar_one_or_none.return_value = existing_pr
 
-        mock_db.execute.side_effect = [
+        mock_db.execute.side_effect = _padded(
             mock_session_result,  # _get_session
             mock_project_result,  # _verify_project_access
             mock_existing_pr_result,  # existing PR check
-        ]
-
+            project=project,
+        )
         from ontokit.schemas.suggestion import SuggestionSubmitRequest
 
         data = SuggestionSubmitRequest(summary="test")
@@ -995,6 +1088,61 @@ class TestSubmit:
         result = await service.submit(PROJECT_ID, session.session_id, data, user)
         assert result.pr_number == 10
         assert result.status == "submitted"
+
+    @pytest.mark.asyncio
+    async def test_submit_reconciles_open_pr_created_after_precheck(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+    ) -> None:
+        """A concurrent winner is returned instead of surfacing a spurious 409."""
+        session = _make_session(
+            status=SuggestionSessionStatus.ACTIVE.value,
+            changes_count=2,
+            entities_modified=json.dumps(["Person"]),
+        )
+        no_pr_result = MagicMock()
+        no_pr_result.scalar_one_or_none.return_value = None
+        raced_pr = MagicMock(
+            id=uuid.uuid4(),
+            pr_number=11,
+            github_pr_url="https://github.com/org/repo/pull/11",
+        )
+        raced_pr_result = MagicMock()
+        raced_pr_result.scalar_one_or_none.return_value = raced_pr
+        project = _make_project()
+        project.members[0].role = "suggester"
+        project.members[0].is_trusted = True
+        project.auto_accept_enabled = True
+        project.auto_accept_quiet_days = 3
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [no_pr_result, raced_pr_result, project_result]
+        mock_git.get_default_branch.return_value = "main"
+
+        with patch(
+            "ontokit.services.suggestion_service.get_pull_request_service"
+        ) as mock_pr_svc_factory:
+            mock_pr_svc_factory.return_value._claim_pull_request_already_locked = AsyncMock(
+                side_effect=HTTPException(
+                    status_code=409,
+                    detail="An open pull request already exists for this source branch",
+                )
+            )
+            result = await service._create_pr_for_session(
+                PROJECT_ID,
+                session,
+                _make_user(),
+                "summary",
+                SuggestionSessionStatus.SUBMITTED.value,
+            )
+
+        assert result.pr_number == 11
+        assert result.pr_url == raced_pr.github_pr_url
+        assert session.pr_id == raced_pr.id
+        assert session.status == SuggestionSessionStatus.SUBMITTED.value
+        mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_submit_fallback_to_direct_pr_on_403(
@@ -1017,18 +1165,21 @@ class TestSubmit:
         mock_project_result.scalar_one_or_none.return_value = project
         mock_no_pr_result = MagicMock()
         mock_no_pr_result.scalar_one_or_none.return_value = None
+        mock_no_direct_pr_result = MagicMock()
+        mock_no_direct_pr_result.scalar_one_or_none.return_value = None
         # For _create_pr_directly: max pr_number query
         mock_max_result = MagicMock()
         mock_max_result.scalar.return_value = 5
 
-        mock_db.execute.side_effect = [
+        mock_db.execute.side_effect = _padded(
             mock_session_result,  # _get_session
             mock_project_result,  # _verify_project_access
             mock_no_pr_result,  # existing PR check
+            mock_no_direct_pr_result,  # locked direct-creation check
             mock_max_result,  # max pr_number
             mock_project_result,  # _get_project for notification
-        ]
-
+            project=project,
+        )
         mock_git.get_default_branch = MagicMock(return_value="main")
 
         # Make the PR service raise 403
@@ -1050,7 +1201,7 @@ class TestSubmit:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(
+            mock_pr_svc._claim_pull_request_already_locked = AsyncMock(
                 side_effect=HTTPException(status_code=403, detail="Forbidden")
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
@@ -1095,7 +1246,9 @@ class TestApprove:
         mock_session_result = MagicMock()
         mock_session_result.scalar_one_or_none.return_value = session
 
-        mock_db.execute.side_effect = [mock_project_result, mock_session_result]
+        mock_db.execute.side_effect = _padded(
+            mock_project_result, mock_session_result, project=project
+        )
 
         user = _make_user()
 
@@ -1154,7 +1307,9 @@ class TestApprove:
         mock_session_result = MagicMock()
         mock_session_result.scalar_one_or_none.return_value = session
 
-        mock_db.execute.side_effect = [mock_project_result, mock_session_result]
+        mock_db.execute.side_effect = _padded(
+            mock_project_result, mock_session_result, project=project
+        )
 
         user = _make_user()
 
@@ -1188,7 +1343,9 @@ class TestApprove:
         mock_session_result = MagicMock()
         mock_session_result.scalar_one_or_none.return_value = session
 
-        mock_db.execute.side_effect = [mock_project_result, mock_session_result]
+        mock_db.execute.side_effect = _padded(
+            mock_project_result, mock_session_result, project=project
+        )
 
         user = _make_user()
         await service.approve(PROJECT_ID, session.session_id, user)
@@ -1196,12 +1353,45 @@ class TestApprove:
         assert session.status == SuggestionSessionStatus.MERGED.value
 
     @pytest.mark.asyncio
-    async def test_approve_merge_failure_still_merges(
+    async def test_approve_resumes_finalization_when_linked_pr_already_merged(
+        self, service: SuggestionService, mock_db: AsyncMock
+    ) -> None:
+        from ontokit.models.pull_request import PRStatus
+
+        pr_id = uuid.uuid4()
+        session = _make_session(
+            status=SuggestionSessionStatus.SUBMITTED.value,
+            pr_number=5,
+            pr_id=pr_id,
+        )
+        project = _make_project()
+        project.members[0].role = "admin"
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        linked_pr = MagicMock()
+        linked_pr.status = PRStatus.MERGED.value
+        pr_result = MagicMock()
+        pr_result.scalar_one_or_none.return_value = linked_pr
+        mock_db.execute.side_effect = _padded(
+            project_result, session_result, pr_result, project=project
+        )
+
+        with patch("ontokit.services.suggestion_service.get_pull_request_service") as pr_factory:
+            await service.approve(PROJECT_ID, session.session_id, _make_user())
+
+        pr_factory.assert_not_called()
+        assert session.status == SuggestionSessionStatus.MERGED.value
+        assert mock_db.add.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_approve_merge_failure_preserves_submitted_session(
         self,
         service: SuggestionService,
         mock_db: AsyncMock,
     ) -> None:
-        """Marks session merged even if PR merge raises HTTPException."""
+        """Propagates a PR conflict without recording a terminal outcome."""
         session = _make_session(
             status=SuggestionSessionStatus.SUBMITTED.value,
             pr_number=5,
@@ -1214,7 +1404,9 @@ class TestApprove:
         mock_session_result = MagicMock()
         mock_session_result.scalar_one_or_none.return_value = session
 
-        mock_db.execute.side_effect = [mock_project_result, mock_session_result]
+        mock_db.execute.side_effect = _padded(
+            mock_project_result, mock_session_result, project=project
+        )
 
         user = _make_user()
 
@@ -1227,9 +1419,13 @@ class TestApprove:
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
 
-            await service.approve(PROJECT_ID, session.session_id, user)
+            with pytest.raises(HTTPException) as exc_info:
+                await service.approve(PROJECT_ID, session.session_id, user)
 
-        assert session.status == SuggestionSessionStatus.MERGED.value
+        assert exc_info.value.status_code == 409
+        assert session.status == SuggestionSessionStatus.SUBMITTED.value
+        mock_db.add.assert_not_called()
+        mock_db.commit.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -1245,9 +1441,19 @@ class TestReject:
         mock_db: AsyncMock,
     ) -> None:
         """Rejects a submitted session with a reason."""
-        session = _make_session(status=SuggestionSessionStatus.SUBMITTED.value)
+        session = _make_session(
+            user_id="submitter-1", status=SuggestionSessionStatus.SUBMITTED.value
+        )
+        session.user_name = "Submitter Account"
+        session.user_email = "submitter@example.com"
         project = _make_project()
         project.members[0].role = "admin"
+        submitter = MagicMock()
+        submitter.user_id = "submitter-1"
+        submitter.role = "suggester"
+        submitter.is_trusted = True
+        submitter.trust_override = "none"
+        project.members.append(submitter)
 
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
@@ -1266,6 +1472,18 @@ class TestReject:
         assert session.status == SuggestionSessionStatus.REJECTED.value
         assert session.reviewer_feedback == "Not aligned with ontology design"
         assert session.reviewer_id == user.id
+        outcomes = _outcomes(mock_db)
+        assert len(outcomes) == 1
+        assert outcomes[0].snapshot_tier == "trusted"
+        assert outcomes[0].snapshot_role == "suggester"
+        assert outcomes[0].submitter_name == "Submitter Account"
+        assert outcomes[0].submitter_email == "submitter@example.com"
+        assert outcomes[0].decided_by_name == "Test User"
+        assert outcomes[0].snapshot_captured_at is not None
+
+        # Covers AE2: later membership changes cannot rewrite the snapshot.
+        submitter.role = "editor"
+        assert outcomes[0].snapshot_role == "suggester"
 
     @pytest.mark.asyncio
     async def test_reject_wrong_status_raises_400(
@@ -1322,6 +1540,105 @@ class TestReject:
 
 
 # ---------------------------------------------------------------------------
+# dismiss / bulk review
+# ---------------------------------------------------------------------------
+
+
+class TestDismissAndBulkReview:
+    async def test_dismiss_snapshots_anonymous_attribution(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+    ) -> None:
+        """Covers AE4 and the dismiss terminal path."""
+        session = _make_session(
+            user_id="anonymous-abc", status=SuggestionSessionStatus.SUBMITTED.value
+        )
+        session.is_anonymous = True
+        session.submitter_name = "Anonymous Author"
+        session.submitter_email = "author@example.com"
+        project = _make_project()
+        project.members[0].role = "admin"
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        mock_db.execute.side_effect = [project_result, session_result]
+
+        await service.dismiss(PROJECT_ID, session.session_id, _make_user(), "spam")
+
+        outcomes = _outcomes(mock_db)
+        assert len(outcomes) == 1
+        assert outcomes[0].outcome == "dismissed"
+        assert outcomes[0].is_anonymous is True
+        assert outcomes[0].snapshot_tier is None
+        assert outcomes[0].snapshot_role is None
+        assert outcomes[0].submitter_name == "Anonymous Author"
+        assert outcomes[0].submitter_email == "author@example.com"
+        assert outcomes[0].snapshot_captured_at is not None
+
+    async def test_bulk_dismiss_funnels_through_snapshot_seam(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+    ) -> None:
+        from ontokit.schemas.suggestion import BulkReviewAction, BulkReviewRequest
+
+        session = _make_session(status=SuggestionSessionStatus.SUBMITTED.value)
+        project = _make_project()
+        project.members[0].role = "admin"
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        # bulk_review verifies once and passes the loaded project through the
+        # unchecked dismiss path so snapshot capture does not add an N+1 query.
+        mock_db.execute.side_effect = [project_result, session_result]
+        data = BulkReviewRequest(
+            session_ids=[session.session_id],
+            action=BulkReviewAction.DISMISS,
+            note="bulk triage",
+        )
+
+        response = await service.bulk_review(PROJECT_ID, data, _make_user())
+
+        assert response.succeeded == [session.session_id]
+        assert response.failed == []
+        outcomes = _outcomes(mock_db)
+        assert len(outcomes) == 1
+        assert outcomes[0].snapshot_tier == "reviewer"
+        assert outcomes[0].snapshot_role == "admin"
+        assert outcomes[0].snapshot_captured_at is not None
+
+    async def test_bulk_accept_reuses_the_authorized_project(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+    ) -> None:
+        from ontokit.schemas.suggestion import BulkReviewAction, BulkReviewRequest
+
+        project = _make_project()
+        project.members[0].role = "admin"
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.return_value = project_result
+        user = _make_user()
+        data = BulkReviewRequest(
+            session_ids=["session-1"],
+            action=BulkReviewAction.ACCEPT,
+        )
+
+        with patch.object(
+            service, "_approve_unchecked", new_callable=AsyncMock
+        ) as approve_unchecked:
+            response = await service.bulk_review(PROJECT_ID, data, user)
+
+        assert response.succeeded == ["session-1"]
+        assert response.failed == []
+        approve_unchecked.assert_awaited_once_with("session-1", user, project)
+
+
+# ---------------------------------------------------------------------------
 # request_changes
 # ---------------------------------------------------------------------------
 
@@ -1355,6 +1672,7 @@ class TestRequestChanges:
         assert session.status == SuggestionSessionStatus.CHANGES_REQUESTED.value
         assert session.reviewer_feedback == "Please fix the label"
         assert session.reviewer_id == user.id
+        assert _outcomes(mock_db) == []
 
     @pytest.mark.asyncio
     async def test_request_changes_wrong_status_raises_400(
@@ -1408,7 +1726,9 @@ class TestResubmit:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [mock_session_result, mock_project_result]
+        mock_db.execute.side_effect = _padded(
+            mock_session_result, mock_project_result, project=project
+        )
 
         from ontokit.schemas.suggestion import SuggestionResubmitRequest
 
@@ -1482,6 +1802,7 @@ class TestBeaconSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         mock_git.commit_to_branch = MagicMock()
@@ -1501,6 +1822,52 @@ class TestBeaconSave:
 
         assert session.changes_count == 2
         mock_git.commit_to_branch.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_beacon_save_derives_and_blocks_untrusted_minting(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+    ) -> None:
+        session = _make_session(status=SuggestionSessionStatus.ACTIVE.value)
+        project = _make_project()
+        project.members[0].role = "suggester"
+        project.members[0].is_trusted = False
+        project.members[0].trust_override = "none"
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [
+            session_result,
+            project_result,
+            project_result,
+            _no_commit_identity_row(),
+        ]
+        mock_git.get_file_from_branch.return_value = b"@prefix : <http://example.org/> ."
+
+        from ontokit.schemas.suggestion import SuggestionBeaconRequest
+
+        data = SuggestionBeaconRequest(
+            session_id=session.session_id,
+            content=(
+                "@prefix : <http://example.org/> .\n"
+                "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+                ":NewClass a owl:Class ."
+            ),
+        )
+        with (
+            patch(
+                "ontokit.services.suggestion_service.verify_beacon_token",
+                return_value=session.session_id,
+            ),
+            pytest.raises(HTTPException) as exc,
+        ):
+            await service.beacon_save(PROJECT_ID, data, "valid-token")
+
+        assert exc.value.status_code == 403
+        mock_git.commit_to_branch.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_beacon_save_invalid_token_raises_401(
@@ -1587,6 +1954,7 @@ class TestBeaconSave:
             mock_session_result,
             mock_project_result,
             mock_project_result,
+            _no_commit_identity_row(),  # U9 commit-identity preference lookup
         ]
 
         mock_git.commit_to_branch = MagicMock(side_effect=RuntimeError("disk full"))
@@ -1604,6 +1972,136 @@ class TestBeaconSave:
 
         # changes_count should NOT have been incremented
         assert session.changes_count == 1
+
+
+# ---------------------------------------------------------------------------
+# anonymous write budgets
+# ---------------------------------------------------------------------------
+
+
+class TestAnonymousWriteBudgets:
+    @pytest.mark.asyncio
+    async def test_beacon_silently_refuses_an_exhausted_anonymous_session(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = _make_session(is_anonymous=True, changes_count=2)
+        project = _make_project()
+        service._get_project = AsyncMock(return_value=project)  # type: ignore[method-assign]
+        service.commit_identity.resolve = AsyncMock(return_value=("Anonymous", "anon@example"))
+        monkeypatch.setattr(
+            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_COMMITS", 2
+        )
+
+        from ontokit.schemas.suggestion import SuggestionBeaconRequest
+
+        await service._beacon_flush(
+            PROJECT_ID,
+            session,
+            SuggestionBeaconRequest(
+                session_id=session.session_id,
+                content="@prefix : <http://example.org/> .",
+            ),
+        )
+
+        mock_git.commit_to_branch.assert_not_called()
+        mock_db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_save_rejects_the_commit_limit_before_git(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = _make_session(is_anonymous=True, changes_count=2)
+        project = _make_project()
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [session_result, project_result]
+        monkeypatch.setattr(
+            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_COMMITS", 2
+        )
+
+        from ontokit.schemas.suggestion import SuggestionSaveRequest
+
+        data = SuggestionSaveRequest(
+            content="@prefix : <http://example.org/> .",
+            entity_iri="http://example.org/Foo",
+            entity_label="Foo",
+        )
+        with pytest.raises(HTTPException) as exc:
+            await service.save_anonymous(
+                PROJECT_ID, session.session_id, data, session.session_id
+            )
+
+        assert exc.value.status_code == 429
+        mock_git.commit_to_branch.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_repeated_saves_account_for_committed_utf8_bytes(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        session = _make_session(is_anonymous=True)
+        project = _make_project()
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [
+            session_result,
+            project_result,
+            session_result,
+            project_result,
+            session_result,
+            project_result,
+        ]
+        commit = MagicMock(hash="abc123")
+        mock_git.commit_to_branch.return_value = commit
+        from ontokit.schemas.suggestion import SuggestionSaveRequest
+
+        first_content = '@prefix : <http://example.org/> .\n:s :p "éé" .'
+        second_content = '@prefix : <http://example.org/> .\n:s :p "ééé" .'
+        first_size = len(first_content.encode("utf-8"))
+        second_size = len(second_content.encode("utf-8"))
+        monkeypatch.setattr(
+            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_BYTES",
+            first_size + second_size - 1,
+        )
+
+        first = SuggestionSaveRequest(
+            content=first_content,
+            entity_iri="http://example.org/Foo",
+            entity_label="Foo",
+        )
+        second = SuggestionSaveRequest(
+            content=second_content,
+            entity_iri="http://example.org/Foo",
+            entity_label="Foo",
+        )
+
+        await service.save_anonymous(
+            PROJECT_ID, session.session_id, first, session.session_id
+        )
+        with pytest.raises(HTTPException) as exc:
+            await service.save_anonymous(
+                PROJECT_ID, session.session_id, second, session.session_id
+            )
+
+        assert exc.value.status_code == 413
+        assert session.anonymous_content_bytes == first_size
+        assert session.changes_count == 1
+        assert mock_git.commit_to_branch.call_count == 1
 
 
 # ---------------------------------------------------------------------------
@@ -1641,14 +2139,14 @@ class TestAutoSubmitStaleSessionsExtended:
         mock_no_pr_result = MagicMock()
         mock_no_pr_result.scalar_one_or_none.return_value = None
 
-        mock_db.execute.side_effect = [
+        mock_db.execute.side_effect = _padded(
             mock_stale_result,  # select stale sessions
-            mock_claim_result,  # claim session UPDATE
             mock_project_result,  # _verify_project_access -> _get_project
+            mock_claim_result,  # claim session UPDATE
             mock_no_pr_result,  # existing PR check
             mock_project_result,  # _get_project for notification
-        ]
-
+            project=project,
+        )
         mock_git.get_default_branch = MagicMock(return_value="main")
 
         mock_pr_response = MagicMock()
@@ -1664,7 +2162,7 @@ class TestAutoSubmitStaleSessionsExtended:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
@@ -1697,11 +2195,7 @@ class TestAutoSubmitStaleSessionsExtended:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [
-            mock_stale_result,
-            mock_claim_result,
-            mock_project_result,  # _verify_project_access
-        ]
+        mock_db.execute.side_effect = [mock_stale_result, mock_project_result]
 
         count = await service.auto_submit_stale_sessions()
         assert count == 0
@@ -1737,8 +2231,8 @@ class TestAutoSubmitStaleSessionsExtended:
 
         mock_db.execute.side_effect = [
             mock_stale_result,
-            mock_claim_result,
             mock_project_result,  # _verify_project_access
+            mock_claim_result,
             mock_no_pr_result,  # existing PR check
         ]
 
@@ -1750,7 +2244,7 @@ class TestAutoSubmitStaleSessionsExtended:
             ) as mock_pr_svc_factory,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(
+            mock_pr_svc._claim_pull_request_already_locked = AsyncMock(
                 side_effect=RuntimeError("PR creation failed")
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
@@ -1759,6 +2253,29 @@ class TestAutoSubmitStaleSessionsExtended:
 
         assert count == 0
         assert stale_session.status == SuggestionSessionStatus.ACTIVE.value
+
+    @pytest.mark.asyncio
+    async def test_stale_untrusted_session_waits_for_interactive_submit(
+        self, service: SuggestionService, mock_db: AsyncMock
+    ) -> None:
+        stale_session = _make_session(
+            changes_count=2,
+            last_activity=datetime.now(UTC) - timedelta(hours=1),
+        )
+        project = _make_project()
+        project.members[0].user_id = stale_session.user_id
+        project.members[0].role = "suggester"
+        project.members[0].is_trusted = False
+        project.members[0].trust_override = "none"
+        stale_result = MagicMock()
+        stale_result.scalars.return_value.all.return_value = [stale_session]
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [stale_result, project_result]
+
+        assert await service.auto_submit_stale_sessions() == 0
+        assert stale_session.status == SuggestionSessionStatus.ACTIVE.value
+        assert mock_db.execute.await_count == 2
 
 
 # ---------------------------------------------------------------------------
@@ -1785,7 +2302,9 @@ class TestListPending:
         mock_sessions_result = MagicMock()
         mock_sessions_result.scalars.return_value.all.return_value = [session]
 
-        mock_db.execute.side_effect = [mock_project_result, mock_sessions_result]
+        mock_db.execute.side_effect = _padded(
+            mock_project_result, mock_sessions_result, project=project
+        )
 
         user = _make_user()
         result = await service.list_pending(PROJECT_ID, user)
@@ -2029,7 +2548,9 @@ class TestCreatePrForSession:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [mock_no_pr_result, mock_project_result]
+        mock_db.execute.side_effect = _padded(
+            mock_no_pr_result, mock_project_result, project=project
+        )
 
         mock_git.get_default_branch = MagicMock(return_value="main")
 
@@ -2048,7 +2569,7 @@ class TestCreatePrForSession:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
@@ -2056,7 +2577,7 @@ class TestCreatePrForSession:
             await service._create_pr_for_session(PROJECT_ID, session, user, "summary", "submitted")
 
         # Verify the PR was created with the right title structure
-        call_args = mock_pr_svc.create_pull_request.call_args
+        call_args = mock_pr_svc._claim_pull_request_already_locked.call_args
         pr_create_arg = call_args[0][1]  # second positional arg
         assert "(+3 more)" in pr_create_arg.title
 
@@ -2080,7 +2601,9 @@ class TestCreatePrForSession:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [mock_no_pr_result, mock_project_result]
+        mock_db.execute.side_effect = _padded(
+            mock_no_pr_result, mock_project_result, project=project
+        )
 
         mock_git.get_default_branch = MagicMock(return_value="main")
 
@@ -2099,14 +2622,14 @@ class TestCreatePrForSession:
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
         ):
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.create_pull_request = AsyncMock(return_value=mock_pr_response)
+            _configure_editor_pr_claim(mock_pr_svc, mock_pr_response, project)
             mock_pr_svc_factory.return_value = mock_pr_svc
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
 
             await service._create_pr_for_session(PROJECT_ID, session, user, None, "submitted")
 
-        call_args = mock_pr_svc.create_pull_request.call_args
+        call_args = mock_pr_svc._claim_pull_request_already_locked.call_args
         pr_create_arg = call_args[0][1]
         assert pr_create_arg.title == "Suggestion"
 

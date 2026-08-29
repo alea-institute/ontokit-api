@@ -10,7 +10,7 @@ from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Requ
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
-from ontokit.core.auth import OptionalUser, RequiredUser
+from ontokit.core.auth import OptionalUser, RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.schemas.pull_request import (
     BranchCreate,
@@ -175,6 +175,21 @@ async def reopen_pull_request(
     - Can only reopen closed PRs (not merged)
     """
     return await service.reopen_pull_request(project_id, pr_number, user)
+
+
+@router.post(
+    "/{project_id}/pull-requests/{pr_number}/github-sync/retry",
+    response_model=PRResponse,
+)
+async def retry_pull_request_github_sync(
+    project_id: UUID,
+    pr_number: int,
+    service: Annotated[PullRequestService, Depends(get_service)],
+    user: RequiredUser,
+) -> PRResponse:
+    """Retry the best-effort GitHub mirror as the PR author or a project administrator."""
+    require_authenticated_identity(user)
+    return await service.retry_github_sync(project_id, pr_number, user)
 
 
 @router.post("/{project_id}/pull-requests/{pr_number}/merge", response_model=PRMergeResponse)

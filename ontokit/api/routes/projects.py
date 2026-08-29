@@ -26,9 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser, RequiredUserWithToken
+from ontokit.core.config import settings
 from ontokit.core.constants import ONTOLOGY_INDEX_UPDATES_CHANNEL
 from ontokit.core.database import get_db
 from ontokit.core.encryption import decrypt_token
+from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.branch_metadata import BranchMetadata
 from ontokit.models.pull_request import GitHubIntegration, PRStatus, PullRequest
@@ -61,6 +63,7 @@ from ontokit.schemas.pull_request import (
     GitHubRepoFilesResponse,
     ProjectCreateFromGitHub,
 )
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.change_event_service import ChangeEventService
 from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.github_service import get_github_service
@@ -75,8 +78,8 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# Maximum file size for import (50 MB)
-MAX_IMPORT_FILE_SIZE = 50 * 1024 * 1024
+# Imports and full-document editor saves share one Turtle size contract.
+MAX_IMPORT_FILE_SIZE = MAX_TURTLE_PAYLOAD_BYTES
 
 
 def get_service(db: Annotated[AsyncSession, Depends(get_db)]) -> ProjectService:
@@ -137,6 +140,14 @@ async def list_projects(
     search: str | None = Query(
         default=None, max_length=200, description="Search by project name or description"
     ),
+    is_demo: Annotated[
+        bool | None,
+        Query(description="Filter by resettable demo-project status when provided"),
+    ] = None,
+    demo_source_project_id: Annotated[
+        UUID | None,
+        Query(description="Filter demos linked to this source project when provided"),
+    ] = None,
 ) -> ProjectListResponse:
     """
     List projects accessible to the current user.
@@ -149,7 +160,13 @@ async def list_projects(
     - filter=null: All accessible (public + user's private projects)
     """
     return await service.list_accessible(
-        user, skip=skip, limit=limit, filter_type=filter, search=search
+        user,
+        skip=skip,
+        limit=limit,
+        filter_type=filter,
+        search=search,
+        is_demo=is_demo,
+        demo_source_project_id=demo_source_project_id,
     )
 
 
@@ -194,7 +211,7 @@ async def import_project(
     content = await file.read()
     if len(content) > MAX_IMPORT_FILE_SIZE:
         raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE,
             detail=f"File too large. Maximum size is {MAX_IMPORT_FILE_SIZE // (1024 * 1024)} MB",
         )
 
@@ -229,10 +246,13 @@ async def import_project(
 
 
 async def _resolve_github_pat(db: AsyncSession, user_id: str) -> str:
-    """Resolve a user's GitHub PAT from the database.
+    """Resolve the system mirror token, with a legacy user PAT fallback.
 
-    Raises HTTPException if no token is stored.
+    Raises HTTPException if neither credential is configured.
     """
+    if settings.github_mirror_token:
+        return settings.github_mirror_token
+
     result = await db.execute(select(UserGitHubToken).where(UserGitHubToken.user_id == user_id))
     token_row = result.scalar_one_or_none()
     if not token_row:
@@ -1269,6 +1289,7 @@ async def delete_branch(
 async def save_source_content(
     project_id: UUID,
     data: SourceContentSave,
+    db: Annotated[AsyncSession, Depends(get_db)],
     service: Annotated[ProjectService, Depends(get_service)],
     storage: Annotated[StorageService, Depends(get_storage)],
     ontology: Annotated[OntologyService, Depends(get_ontology)],
@@ -1338,56 +1359,53 @@ async def save_source_content(
             detail=f"Failed to save to storage: {e}",
         ) from e
 
-    # Capture old graph for change event diffing (before the commit)
-    old_graph = None
-    was_loaded = ontology.is_loaded(project_id, current_branch)
-    try:
-        if not was_loaded:
+    async with branch_write_lock(db, project_id, current_branch):
+        # Capture old graph for change event diffing (before the commit).
+        old_graph = None
+        was_loaded = ontology.is_loaded(project_id, current_branch)
+        try:
+            if not was_loaded:
+                await ontology.load_from_git(project_id, current_branch, filename, git)
+            old_graph = await ontology._get_graph(project_id, current_branch)
+        except Exception:
+            logger.debug("Could not capture pre-commit graph for diff", exc_info=True)
+
+        try:
+            commit_info = git.commit_changes(
+                project_id=project_id,
+                ontology_content=content_bytes,
+                filename=filename,
+                message=data.commit_message,
+                author_name=user.name,
+                author_email=user.email,
+                branch_name=current_branch,
+            )
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Failed to commit changes: {e}",
+            ) from e
+
+        try:
+            ontology.unload(project_id, current_branch)
             await ontology.load_from_git(project_id, current_branch, filename, git)
-        old_graph = await ontology._get_graph(project_id, current_branch)
-    except Exception:
-        logger.debug("Could not capture pre-commit graph for diff", exc_info=True)
+        except Exception as e:
+            logger.warning("Failed to reload ontology after save: %s", e)
 
-    # Commit to git on the specified branch
-    try:
-        commit_info = git.commit_changes(
-            project_id=project_id,
-            ontology_content=content_bytes,
-            filename=filename,
-            message=data.commit_message,
-            author_name=user.name,
-            author_email=user.email,
-            branch_name=current_branch,
-        )
-    except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Failed to commit changes: {e}",
-        ) from e
-
-    # Reload the ontology in memory to reflect changes
-    try:
-        ontology.unload(project_id, current_branch)
-        await ontology.load_from_git(project_id, current_branch, filename, git)
-    except Exception as e:
-        # Log but don't fail - the commit succeeded
-        logger.warning("Failed to reload ontology after save: %s", e)
-
-    # Record change events (analytics)
-    change_events = []
-    try:
-        new_graph = await ontology._get_graph(project_id, current_branch)
-        change_events = await change_service.record_events_from_diff(
-            project_id,
-            current_branch,
-            old_graph,
-            new_graph,
-            user.id,
-            user.name,
-            commit_info.hash,
-        )
-    except Exception:
-        logger.warning("Failed to record change events", exc_info=True)
+        change_events = []
+        try:
+            new_graph = await ontology._get_graph(project_id, current_branch)
+            change_events = await change_service.record_events_from_diff(
+                project_id,
+                current_branch,
+                old_graph,
+                new_graph,
+                user.id,
+                user.name,
+                commit_info.hash,
+            )
+        except Exception:
+            logger.warning("Failed to record change events", exc_info=True)
 
     # Auto-embed changed entities if configured
     if change_events:
@@ -1430,6 +1448,20 @@ async def save_source_content(
             )
     except Exception:
         logger.warning("Failed to queue ontology re-index", exc_info=True)
+
+    # Commit-before-enqueue: translation discovery always observes a durable tree.
+    try:
+        from ontokit.services.translation_jobs import enqueue_label_diff_after_commit
+
+        await enqueue_label_diff_after_commit(
+            project_id=project_id,
+            branch=current_branch,
+            commit_hash=commit_info.hash,
+            actor_id=user.id,
+            role=project.user_role or "viewer",
+        )
+    except Exception:
+        logger.warning("Failed to queue translation label diff", exc_info=True)
 
     return SourceContentSaveResponse(
         success=True,

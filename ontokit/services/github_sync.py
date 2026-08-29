@@ -1,14 +1,20 @@
 """GitHub sync service for periodic pull/push of GitHub-connected projects."""
 
 import logging
+import secrets
 from datetime import UTC, datetime
 from typing import cast
 
 import pygit2
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.core.config import settings
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.pull_request import GitHubIntegration
+from ontokit.services.demo_target_authorizer import (
+    DemoTargetDenied,
+    authorize_integration_target,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -18,27 +24,55 @@ async def sync_github_project(
     pat: str,
     git_service: BareGitRepositoryService,
     db: AsyncSession,
+    outbound_only: bool | None = None,
 ) -> dict[str, str | int | bool]:
     """Sync a single project with its GitHub remote.
 
-    1. Fetch from remote (with PAT auth)
-    2. Check if remote has new commits (compare local branch tip vs origin/branch)
-    3. If remote is ahead: fast-forward merge local branch to remote tip
-       - If merge conflict detected: set sync_status="conflict", return
-    4. If local is ahead: push local commits to remote
-    5. Update last_sync_at timestamp
+    In OUTBOUND-ONLY mode (the default, R16/KD6) the local bare repository is
+    canonical and the mirror is downstream: the system identity pushes history
+    out, and GitHub-side changes never enter the canonical repository. Fetching
+    is retained purely to detect divergence; the fast-forward and merge branches
+    are unreachable. A remote that has moved ahead is reported as
+    ``sync_status="diverged"`` for an operator to resolve, with the canonical
+    repository untouched.
+
+    This closes the review-bypass hole: without it, a change merged directly on
+    GitHub would sync back into the canonical ontology, around the suggestion
+    pipeline and its trust ladder entirely.
+
+    Setting ``outbound_only=False`` (or ``GITHUB_MIRROR_OUTBOUND_ONLY=false``)
+    restores the legacy bidirectional behavior.
 
     Args:
         integration: GitHubIntegration model instance
-        pat: Decrypted GitHub PAT
+        pat: Token authenticating the push (system mirror identity, or the
+            deprecated per-user PAT fallback)
         git_service: Git service for repo operations
         db: Database session for updating integration status
+        outbound_only: Override the configured direction for this call
 
     Returns:
         Dict with sync result details
     """
     project_id = integration.project_id
     branch = integration.default_branch or "main"
+    if outbound_only is None:
+        outbound_only = settings.github_mirror_outbound_only
+
+    try:
+        authorization = await authorize_integration_target(
+            db, integration, operation="GitHub synchronization"
+        )
+    except DemoTargetDenied as exc:
+        integration.sync_status = "error"
+        integration.sync_error = str(exc)
+        await db.commit()
+        return {"status": "error", "reason": "target_refused"}
+    if authorization.token and not secrets.compare_digest(pat, authorization.token):
+        integration.sync_status = "error"
+        integration.sync_error = "GitHub synchronization refused: wrong credential class"
+        await db.commit()
+        return {"status": "error", "reason": "credential_refused"}
 
     # Check if repository exists
     if not git_service.repository_exists(project_id):
@@ -80,7 +114,11 @@ async def sync_github_project(
             remote_oid = pygit2_repo.references[remote_ref_name].target
         except KeyError:
             # Remote branch doesn't exist yet — push local
-            if repo.push(branch=branch, token=pat):
+            if repo.push(
+                branch=branch,
+                token=pat,
+                target_authorization=authorization.capability,
+            ):
                 integration.sync_status = "idle"
                 integration.sync_error = None
                 integration.last_sync_at = datetime.now(UTC)
@@ -103,6 +141,24 @@ async def sync_github_project(
         # Check divergence
         ahead, behind = pygit2_repo.ahead_behind(local_oid, remote_oid)
 
+        if outbound_only and behind > 0:
+            # R16: the canonical repository is never advanced from the mirror,
+            # whether the remote is simply ahead or genuinely diverged. Report
+            # it and leave the local refs alone.
+            integration.sync_status = "diverged"
+            integration.sync_error = (
+                f"Remote has {behind} commit(s) not in the canonical repository. The mirror "
+                "is outbound-only; resolve on the GitHub side or reset the mirror."
+            )
+            await db.commit()
+            logger.warning(
+                "Outbound-only mirror for project %s is behind by %s commit(s) — "
+                "canonical repository left untouched",
+                project_id,
+                behind,
+            )
+            return {"status": "diverged", "ahead": ahead, "behind": behind}
+
         if behind > 0 and ahead == 0:
             # Remote is ahead, local is not — fast-forward
             pygit2_repo.references[local_ref_name].set_target(remote_oid)
@@ -114,7 +170,11 @@ async def sync_github_project(
 
         elif ahead > 0 and behind == 0:
             # Local is ahead — push
-            if repo.push(branch=branch, token=pat):
+            if repo.push(
+                branch=branch,
+                token=pat,
+                target_authorization=authorization.capability,
+            ):
                 integration.sync_status = "idle"
                 integration.sync_error = None
                 integration.last_sync_at = datetime.now(UTC)
@@ -140,7 +200,11 @@ async def sync_github_project(
                 return {"status": "conflict", "ahead": ahead, "behind": behind}
 
             # Merge succeeded — push the merge commit
-            if repo.push(branch=branch, token=pat):
+            if repo.push(
+                branch=branch,
+                token=pat,
+                target_authorization=authorization.capability,
+            ):
                 integration.sync_status = "idle"
                 integration.sync_error = None
                 integration.last_sync_at = datetime.now(UTC)

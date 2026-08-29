@@ -5,7 +5,18 @@ from datetime import datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 if TYPE_CHECKING:
@@ -54,6 +65,33 @@ class SuggestionSession(Base):
     # Auth
     beacon_token: Mapped[str] = mapped_column(String(500), nullable=False)
 
+    # Anonymous session fields
+    is_anonymous: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
+    submitter_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    submitter_email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    client_ip: Mapped[str | None] = mapped_column(String(45), nullable=True)
+    anonymous_content_bytes: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+
+    # Trust-ladder state. LLM-authored suggestions are never scheduled for
+    # automatic acceptance, irrespective of the submitter's trust tier.
+    is_llm_generated: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+    auto_accept_after: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    auto_accept_halted_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    auto_accept_claimed_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    verification_passed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
+
     # PR link (set after submit)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     pr_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -79,7 +117,15 @@ class SuggestionSession(Base):
     project: Mapped["Project"] = relationship()
     pull_request: Mapped["PullRequest | None"] = relationship()
 
-    __table_args__ = (UniqueConstraint("project_id", "session_id", name="uq_suggestion_session"),)
+    __table_args__ = (
+        UniqueConstraint("project_id", "session_id", name="uq_suggestion_session"),
+        Index(
+            "ix_suggestion_sessions_stale_anonymous",
+            "last_activity",
+            "id",
+            postgresql_where=text("status = 'active' AND is_anonymous IS true"),
+        ),
+    )
 
     def __repr__(self) -> str:
         return (
