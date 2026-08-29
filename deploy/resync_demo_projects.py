@@ -27,6 +27,7 @@ from ontokit.git.bare_repository import BareGitRepositoryService, BareOntologyRe
 from ontokit.models.ontology_index import IndexingStatus
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.services.demo_project_provisioning import (
+    DEMO_DEFAULT_BRANCH,
     build_demo_generation_key,
     ensure_demo_projects,
     fail_demo_generation,
@@ -177,6 +178,8 @@ async def resync(manifest: Path, token_file: Path | None, generation_key: str) -
             if all(item.already_active for item in provisioned):
                 print(f"demo_generation={generation_key} status=already_active")
                 return
+            ontology = get_ontology_service(get_storage_service())
+            index_service = OntologyIndexService(db)
             observed_commits: dict[str, str] = {}
             try:
                 for item in provisioned:
@@ -189,7 +192,7 @@ async def resync(manifest: Path, token_file: Path | None, generation_key: str) -
                     integration = project.github_integration
                     if integration is None:
                         refuse(f"demo project {project.id} has no GitHub integration")
-                    branch = integration.default_branch or "main"
+                    branch = integration.default_branch or DEMO_DEFAULT_BRANCH
                     with refreshed_repository(
                         git_service,
                         project.id,
@@ -198,7 +201,6 @@ async def resync(manifest: Path, token_file: Path | None, generation_key: str) -
                     ):
                         repository = git_service.get_repository(project.id)
                         commit_hash = repository.get_branch_commit_hash(branch)
-                        ontology = get_ontology_service(get_storage_service())
                         graph = await ontology.load_from_git(
                             project.id,
                             branch,
@@ -206,7 +208,7 @@ async def resync(manifest: Path, token_file: Path | None, generation_key: str) -
                             git_service,
                         )
                         count = await _full_reindex_verified(
-                            OntologyIndexService(db),
+                            index_service,
                             project.id,
                             branch,
                             graph,
