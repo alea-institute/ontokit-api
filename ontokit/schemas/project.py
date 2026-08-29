@@ -258,6 +258,10 @@ class RevisionFileResponse(BaseModel):
 
     project_id: UUID
     version: str
+    revision: str = Field(
+        ...,
+        description="Immutable full commit hash resolved from version before reading the file",
+    )
     filename: str
     content: str
 
@@ -316,6 +320,29 @@ class SourceContentSave(BaseModel):
     commit_message: str = Field(
         ..., min_length=1, max_length=500, description="Commit message describing the changes"
     )
+    base_revision: str = Field(
+        ...,
+        min_length=40,
+        max_length=40,
+        pattern=r"^[0-9a-fA-F]{40}$",
+        description="Immutable full commit hash returned by the source read used for this edit",
+    )
+
+    @field_validator("base_revision")
+    @classmethod
+    def normalize_base_revision(cls, value: str) -> str:
+        """Normalize hexadecimal commit identity before compare-and-set."""
+        return value.lower()
+
+
+class SourceRevisionConflictDetail(BaseModel):
+    """Stable detail body returned when a whole-document save is stale."""
+
+    code: Literal["SOURCE_REVISION_CONFLICT"] = "SOURCE_REVISION_CONFLICT"
+    message: str
+    base_revision: str
+    current_revision: str
+    branch: str
 
 
 class SourceContentSaveResponse(BaseModel):

@@ -56,6 +56,7 @@ from ontokit.schemas.project import (
     RevisionHistoryResponse,
     SourceContentSave,
     SourceContentSaveResponse,
+    SourceRevisionConflictDetail,
     TransferOwnership,
 )
 from ontokit.schemas.pull_request import (
@@ -871,7 +872,10 @@ async def get_file_at_revision(
         filename = project.git_ontology_path
 
     try:
-        content = git.get_file_at_version(project_id, filename, version)
+        # Resolve symbolic refs first, then read by immutable identity so the
+        # returned content and revision cannot describe different branch heads.
+        revision = git.get_repository(project_id).get_branch_commit_hash(version)
+        content = git.get_file_at_version(project_id, filename, revision)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -881,6 +885,7 @@ async def get_file_at_revision(
     return RevisionFileResponse(
         project_id=project_id,
         version=version,
+        revision=revision,
         filename=filename,
         content=content,
     )
@@ -1350,16 +1355,40 @@ async def save_source_content(
     # Convert content to bytes
     content_bytes = data.content.encode("utf-8")
 
-    # Save to storage
-    try:
-        await storage.upload_file(project.source_file_path, content_bytes, "text/turtle")
-    except StorageError as e:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail=f"Failed to save to storage: {e}",
-        ) from e
-
     async with branch_write_lock(db, project_id, current_branch):
+        try:
+            current_revision = git.get_repository(project_id).get_branch_commit_hash(current_branch)
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Could not resolve source branch '{current_branch}': {e}",
+            ) from e
+
+        if current_revision != data.base_revision:
+            detail = SourceRevisionConflictDetail(
+                message=("The ontology source changed after it was loaded; reload before saving."),
+                base_revision=data.base_revision,
+                current_revision=current_revision,
+                branch=current_branch,
+            )
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=detail.model_dump(),
+            )
+
+        # Storage must not reflect a stale document. Keep it behind the same
+        # compare-and-set gate as the branch commit.
+        try:
+            await storage.upload_file(project.source_file_path, content_bytes, "text/turtle")
+        except StorageError as e:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=f"Failed to save to storage: {e}",
+            ) from e
+
         # Capture old graph for change event diffing (before the commit).
         old_graph = None
         was_loaded = ontology.is_loaded(project_id, current_branch)
@@ -1381,6 +1410,7 @@ async def save_source_content(
                 branch_name=current_branch,
             )
         except Exception as e:
+            await db.rollback()
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Failed to commit changes: {e}",
@@ -1406,6 +1436,19 @@ async def save_source_content(
             )
         except Exception:
             logger.warning("Failed to record change events", exc_info=True)
+
+        # Release the transaction-scoped advisory lock before another writer
+        # can enter this process-local critical section.
+        try:
+            await db.commit()
+        except Exception as e:
+            await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=(
+                    f"Source was committed but the save transaction could not be finalized: {e}"
+                ),
+            ) from e
 
     # Auto-embed changed entities if configured
     if change_events:

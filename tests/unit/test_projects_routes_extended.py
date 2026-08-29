@@ -532,7 +532,11 @@ class TestSaveSourceContent:
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/source",
-            json={"content": "@prefix : <http://ex.org/> .", "commit_message": "Update"},
+            json={
+                "content": "@prefix : <http://ex.org/> .",
+                "commit_message": "Update",
+                "base_revision": "a" * 40,
+            },
         )
         assert response.status_code == 403
 
@@ -556,7 +560,11 @@ class TestSaveSourceContent:
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/source",
-            json={"content": "@prefix : <http://ex.org/> .", "commit_message": "Update"},
+            json={
+                "content": "@prefix : <http://ex.org/> .",
+                "commit_message": "Update",
+                "base_revision": "a" * 40,
+            },
         )
         assert response.status_code == 400
 
@@ -580,7 +588,11 @@ class TestSaveSourceContent:
 
         response = client.put(
             f"/api/v1/projects/{PROJECT_ID}/source",
-            json={"content": "THIS IS NOT VALID TURTLE {{{{", "commit_message": "Bad"},
+            json={
+                "content": "THIS IS NOT VALID TURTLE {{{{",
+                "commit_message": "Bad",
+                "base_revision": "a" * 40,
+            },
         )
         assert response.status_code == 422
 

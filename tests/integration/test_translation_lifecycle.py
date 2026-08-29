@@ -207,9 +207,14 @@ async def _source_save(
             AsyncMock(return_value=True),
         ),
     ):
+        base_revision = git.get_repository(project_id).get_branch_commit_hash("main")
         result = await projects.save_source_content(
             project_id,
-            SourceContentSave(content=content, commit_message="Mint translated concept"),
+            SourceContentSave(
+                content=content,
+                commit_message="Mint translated concept",
+                base_revision=base_revision,
+            ),
             db,
             ProjectService(db, git),
             SimpleNamespace(upload_file=AsyncMock()),
