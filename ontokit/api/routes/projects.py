@@ -874,8 +874,9 @@ async def get_file_at_revision(
     try:
         # Resolve symbolic refs first, then read by immutable identity so the
         # returned content and revision cannot describe different branch heads.
-        revision = git.get_repository(project_id).get_branch_commit_hash(version)
-        content = git.get_file_at_version(project_id, filename, revision)
+        repository = git.get_repository(project_id)
+        revision = repository.get_branch_commit_hash(version)
+        content = repository.get_file_at_version(filename, revision)
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
