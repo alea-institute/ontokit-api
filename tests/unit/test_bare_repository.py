@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from ontokit.git.bare_repository import BareOntologyRepository
+from ontokit.git.bare_repository import BareOntologyRepository, BranchHeadMismatchError
 
 
 class TestWriteAndReadFile:
@@ -46,6 +46,54 @@ class TestWriteAndReadFile:
         """The fixture's initial commit file is readable."""
         result = bare_git_repo.read_file("main", "ontology.ttl")
         assert result == sample_ontology_turtle.encode()
+
+    def test_expected_head_rejects_interleaved_ref_advance(
+        self,
+        bare_git_repo: BareOntologyRepository,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The final ref update cannot overwrite a writer that wins after the pre-check."""
+        base_revision = bare_git_repo.get_branch_commit_hash("main")
+        compare_and_swap = bare_git_repo._compare_and_swap_branch_head
+        alternate_content = b"# alternate writer\n"
+
+        def advance_before_compare_and_swap(
+            branch_name: str,
+            *,
+            new_head: str,
+            expected_head: str,
+        ) -> None:
+            bare_git_repo.write_file(
+                branch_name="main",
+                filepath="ontology.ttl",
+                content=alternate_content,
+                message="Alternate writer wins",
+            )
+            compare_and_swap(
+                branch_name,
+                new_head=new_head,
+                expected_head=expected_head,
+            )
+
+        monkeypatch.setattr(
+            bare_git_repo,
+            "_compare_and_swap_branch_head",
+            advance_before_compare_and_swap,
+        )
+
+        with pytest.raises(BranchHeadMismatchError) as caught:
+            bare_git_repo.write_file(
+                branch_name="main",
+                filepath="ontology.ttl",
+                content=b"# guarded writer\n",
+                message="Guarded writer loses",
+                expected_head=base_revision,
+            )
+
+        assert caught.value.expected_head == base_revision
+        assert caught.value.actual_head == bare_git_repo.get_branch_commit_hash("main")
+        assert bare_git_repo.read_file("main", "ontology.ttl") == alternate_content
+        assert len(bare_git_repo.get_history(branch="main", all_branches=False)) == 2
 
 
 class TestHistory:

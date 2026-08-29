@@ -2168,8 +2168,9 @@ class TestRevisionEndpoints:
             return_value=_project_response(git_ontology_path="sub/ontology.ttl")
         )
         mock_git_service.repository_exists.return_value = True
-        mock_git_service.get_file_at_version.return_value = "@prefix : <#> ."
-        mock_git_service.get_repository.return_value.get_branch_commit_hash.return_value = "c" * 40
+        repository = mock_git_service.get_repository.return_value
+        repository.get_branch_commit_hash.return_value = "c" * 40
+        repository.get_file_at_version.return_value = "@prefix : <#> ."
 
         response = client.get(
             f"/api/v1/projects/{PROJECT_ID}/revisions/file",
@@ -2182,6 +2183,8 @@ class TestRevisionEndpoints:
         assert data["revision"] == "c" * 40
         # Verify git_ontology_path mapping (line 823-824)
         assert data["filename"] == "sub/ontology.ttl"
+        repository.get_file_at_version.assert_called_once_with("sub/ontology.ttl", "c" * 40)
+        mock_git_service.get_file_at_version.assert_not_called()
 
     def test_get_file_at_revision_error(
         self,
@@ -2194,13 +2197,16 @@ class TestRevisionEndpoints:
 
         mock_project_service.get = AsyncMock(return_value=_project_response())
         mock_git_service.repository_exists.return_value = True
-        mock_git_service.get_file_at_version.side_effect = RuntimeError("bad ref")
+        repository = mock_git_service.get_repository.return_value
+        repository.get_branch_commit_hash.return_value = "d" * 40
+        repository.get_file_at_version.side_effect = RuntimeError("bad ref")
 
         response = client.get(
             f"/api/v1/projects/{PROJECT_ID}/revisions/file",
             params={"version": "badref"},
         )
         assert response.status_code == 404
+        repository.get_file_at_version.assert_called_once_with("ontology.ttl", "d" * 40)
 
     def test_get_revision_diff_success(
         self,

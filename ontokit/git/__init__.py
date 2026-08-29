@@ -8,6 +8,7 @@ for concurrent access support.
 from ontokit.git.bare_repository import (
     BareGitRepositoryService,
     BareOntologyRepository,
+    BranchHeadMismatchError,
     BranchInfo,
     CommitInfo,
     DiffInfo,
@@ -27,6 +28,7 @@ __all__ = [
     # New names (preferred)
     "BareGitRepositoryService",
     "BareOntologyRepository",
+    "BranchHeadMismatchError",
     "get_bare_git_service",
     # Backward-compatible aliases
     "GitRepositoryService",

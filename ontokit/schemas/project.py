@@ -345,6 +345,23 @@ class SourceRevisionConflictDetail(BaseModel):
     branch: str
 
 
+class SourceRevisionConflictResponse(BaseModel):
+    """HTTP error envelope for a stale whole-document save."""
+
+    detail: SourceRevisionConflictDetail
+
+
+class SourceSaveConsistencyFailureDetail(BaseModel):
+    """Observable failure when cross-store compensation is incomplete."""
+
+    code: Literal["SOURCE_SAVE_CONSISTENCY_FAILURE"] = "SOURCE_SAVE_CONSISTENCY_FAILURE"
+    message: str
+    commit_hash: str | None
+    branch: str
+    git_restored: bool
+    storage_restored: bool
+
+
 class SourceContentSaveResponse(BaseModel):
     """Response after saving ontology source content."""
 

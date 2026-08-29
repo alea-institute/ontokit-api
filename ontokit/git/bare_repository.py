@@ -6,6 +6,7 @@ without the limitations of working directory-based operations.
 """
 
 import shutil
+import subprocess
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -87,6 +88,23 @@ class MergeResult:
     message: str
     merge_commit_hash: str | None = None
     conflicts: list[str] = field(default_factory=list)
+
+
+class BranchHeadMismatchError(RuntimeError):
+    """Raised when a guarded branch update observes a different head."""
+
+    def __init__(
+        self,
+        branch: str,
+        expected_head: str,
+        actual_head: str | None,
+    ) -> None:
+        self.branch = branch
+        self.expected_head = expected_head
+        self.actual_head = actual_head
+        super().__init__(
+            f"Branch '{branch}' moved from {expected_head} to {actual_head or '<missing>'}"
+        )
 
 
 class BareOntologyRepository:
@@ -207,6 +225,7 @@ class BareOntologyRepository:
         author_email: str | None = None,
         committer_name: str | None = None,
         committer_email: str | None = None,
+        expected_head: str | None = None,
     ) -> CommitInfo:
         """
         Write a file to a branch and create a commit.
@@ -222,8 +241,14 @@ class BareOntologyRepository:
             author_name: Author's display name
             author_email: Author's email address
 
+            expected_head: If provided, update the branch only when it still
+                points to this exact commit.
+
         Returns:
             CommitInfo with details about the created commit
+
+        Raises:
+            BranchHeadMismatchError: The guarded branch moved before the ref update.
         """
         branch_ref = f"refs/heads/{branch_name}"
 
@@ -237,6 +262,10 @@ class BareOntologyRepository:
         if branch_ref in self.repo.references:
             parent_commit = self.repo.references[branch_ref].peel(pygit2.Commit)
             parent_tree = parent_commit.tree
+
+        actual_head = str(parent_commit.id) if parent_commit else None
+        if expected_head is not None and actual_head != expected_head:
+            raise BranchHeadMismatchError(branch_name, expected_head, actual_head)
 
         # Build new tree with the file
         tree_builder = (
@@ -264,7 +293,7 @@ class BareOntologyRepository:
         parents = [parent_commit.id] if parent_commit else []
 
         commit_id = self.repo.create_commit(
-            branch_ref,  # Update this reference
+            None if expected_head is not None else branch_ref,
             author,
             committer,
             message,
@@ -272,8 +301,48 @@ class BareOntologyRepository:
             parents,
         )
 
+        if expected_head is not None:
+            self._compare_and_swap_branch_head(
+                branch_name,
+                new_head=str(commit_id),
+                expected_head=expected_head,
+            )
+
         commit = cast(pygit2.Commit, self.repo.get(commit_id))
         return self._commit_to_info(commit)
+
+    def _compare_and_swap_branch_head(
+        self,
+        branch_name: str,
+        *,
+        new_head: str,
+        expected_head: str,
+    ) -> None:
+        """Atomically move a branch ref when its old object ID still matches."""
+        branch_ref = f"refs/heads/{branch_name}"
+        result = subprocess.run(
+            [
+                "git",
+                f"--git-dir={self.repo_path}",
+                "update-ref",
+                branch_ref,
+                new_head,
+                expected_head,
+            ],
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+        if result.returncode == 0:
+            return
+
+        actual_head: str | None = None
+        if branch_ref in self.repo.references:
+            actual_head = str(self.repo.references[branch_ref].peel(pygit2.Commit).id)
+        if actual_head == expected_head:
+            error = result.stderr.strip() or "unknown git update-ref failure"
+            raise RuntimeError(f"Could not update {branch_ref} atomically: {error}")
+        raise BranchHeadMismatchError(branch_name, expected_head, actual_head)
 
     def _add_nested_blob(
         self,
@@ -550,12 +619,18 @@ class BareOntologyRepository:
         branch_ref = f"refs/heads/{name}"
         if branch_ref not in self.repo.references:
             return False
-        reference = self.repo.references[branch_ref]
-        current = reference.peel(pygit2.Commit)
+        current = self.repo.references[branch_ref].peel(pygit2.Commit)
         if str(current.id) != expected_head:
             return False
         target = self._resolve_ref(target_head)
-        reference.set_target(target.id)
+        try:
+            self._compare_and_swap_branch_head(
+                name,
+                new_head=str(target.id),
+                expected_head=expected_head,
+            )
+        except BranchHeadMismatchError:
+            return False
         return True
 
     def list_branches(self) -> list[BranchInfo]:
@@ -973,6 +1048,7 @@ class BareGitRepositoryService:
         branch_name: str | None = None,
         committer_name: str | None = None,
         committer_email: str | None = None,
+        expected_head: str | None = None,
     ) -> CommitInfo:
         """
         Commit changes to a branch.
@@ -985,6 +1061,7 @@ class BareGitRepositoryService:
             author_name: Author's display name
             author_email: Author's email address
             branch_name: Branch to commit to (defaults to active/default branch)
+            expected_head: Optional full commit hash required at the atomic ref update.
 
         Returns:
             CommitInfo for the new commit
@@ -1003,6 +1080,7 @@ class BareGitRepositoryService:
             author_email=author_email,
             committer_name=committer_name,
             committer_email=committer_email,
+            expected_head=expected_head,
         )
 
     def get_history(

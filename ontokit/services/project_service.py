@@ -34,6 +34,7 @@ from ontokit.schemas.project import (
     ProjectUpdate,
     TransferOwnership,
 )
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.ontology_extractor import (
     NormalizationReport,
     OntologyMetadataExtractor,
@@ -651,15 +652,62 @@ class ProjectService:
             logger.debug(f"Project {project.id} has no source file, skipping RDF sync")
             return None
 
+        if self.git_service.repository_exists(project.id):
+            branch = self.git_service.get_default_branch(project.id)
+            async with branch_write_lock(self.db, project.id, branch):
+                expected_head = self.git_service.get_repository(project.id).get_branch_commit_hash(
+                    branch
+                )
+                try:
+                    return await self._sync_metadata_to_rdf_locked(
+                        project,
+                        new_name,
+                        new_description,
+                        user,
+                        storage,
+                        branch=branch,
+                        expected_head=expected_head,
+                    )
+                finally:
+                    # End the transaction-scoped advisory lock before the
+                    # process-local branch lock admits another writer.
+                    await self.db.commit()
+
+        return await self._sync_metadata_to_rdf_locked(
+            project,
+            new_name,
+            new_description,
+            user,
+            storage,
+            branch=None,
+            expected_head=None,
+        )
+
+    async def _sync_metadata_to_rdf_locked(
+        self,
+        project: Project,
+        new_name: str | None,
+        new_description: str | None,
+        user: CurrentUser,
+        storage: StorageService,
+        *,
+        branch: str | None,
+        expected_head: str | None,
+    ) -> str | None:
+        """Apply the metadata update after any branch writer lock is held."""
+        source_file_path = project.source_file_path
+        if source_file_path is None:
+            return None
+
         try:
             # Extract object name from source_file_path (e.g., "projects/{id}/ontology.ttl")
             # The source_file_path is stored as "bucket/object_name", extract just the object part
-            if "/" in project.source_file_path:
+            if "/" in source_file_path:
                 # Remove bucket prefix if present
-                parts = project.source_file_path.split("/", 1)
-                object_name = parts[1] if len(parts) > 1 else project.source_file_path
+                parts = source_file_path.split("/", 1)
+                object_name = parts[1] if len(parts) > 1 else source_file_path
             else:
-                object_name = project.source_file_path
+                object_name = source_file_path
 
             # Compute the actual git filename (may differ from MinIO basename for GitHub
             # projects, e.g. "source/ontology-semantic-canon.ttl" vs "ontology.ttl")
@@ -669,9 +717,8 @@ class ProjectService:
             # loads from git, so MinIO content may be stale.  Read from git when
             # a repository exists to ensure we update the correct content.
             content: bytes | None = None
-            if self.git_service.repository_exists(project.id):
+            if branch is not None:
                 try:
-                    branch = self.git_service.get_default_branch(project.id)
                     content = self.git_service.get_file_at_version(
                         project.id, git_filename, branch
                     ).encode("utf-8")
@@ -699,7 +746,7 @@ class ProjectService:
             await storage.upload_file(object_name, updated_content, "text/turtle")
 
             # Commit to git using the correct file path
-            if self.git_service.repository_exists(project.id):
+            if branch is not None:
                 # Build commit message
                 change_lines = "\n".join(f"- {change}" for change in changes)
                 commit_message = f"Update ontology metadata\n\n{change_lines}\n\nAutomated sync from project settings."
@@ -711,6 +758,8 @@ class ProjectService:
                     message=commit_message,
                     author_name=user.name,
                     author_email=user.email,
+                    branch_name=branch,
+                    expected_head=expected_head,
                 )
                 logger.info(
                     f"Synced metadata to RDF for project {project.id}, "
