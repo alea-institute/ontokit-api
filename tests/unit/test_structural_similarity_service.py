@@ -26,7 +26,9 @@ def test_pinned_folio_normalizes_current_and_legacy_iris() -> None:
     )
 
 
-def test_factory_constructs_folio_with_supported_cache_option(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_factory_constructs_folio_with_supported_cache_option(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The lazy factory invokes the verified folio-python 0.4.0 constructor contract."""
     calls: list[bool] = []
 
