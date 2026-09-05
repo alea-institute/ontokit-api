@@ -14,7 +14,7 @@ def _get_folio_instance(project_key: str = "default") -> Any:
     if project_key in _folio_cache:
         return _folio_cache[project_key]
     try:
-        from folio.graph import FOLIO  # pyright: ignore[reportMissingImports]
+        from folio.graph import FOLIO  # type: ignore[import-untyped]
 
         instance = FOLIO(use_cache=True)
         _folio_cache[project_key] = instance

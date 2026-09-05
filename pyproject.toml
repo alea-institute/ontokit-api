@@ -23,11 +23,11 @@ classifiers = [
 
 dependencies = [
     "fastapi>=0.141.1",
+    "folio-python==0.4.0",
     "uvicorn[standard]>=0.51.0",
     "pydantic>=2.13.4,<2.14",
     "pydantic-settings>=2.15.0,<2.16",
     "rdflib>=7.1.0",
-    "owlready2>=0.51",
     "sqlalchemy>=2.0.52",
     "asyncpg>=0.30.0",
     "alembic>=1.19.1",
