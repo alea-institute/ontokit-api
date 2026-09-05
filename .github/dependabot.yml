@@ -4,6 +4,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     rebase-strategy: "auto"
     groups:
       python-dependencies:
@@ -17,6 +19,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+    cooldown:
+      default-days: 7
     rebase-strategy: "auto"
     groups:
       github-actions:
