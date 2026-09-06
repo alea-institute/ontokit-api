@@ -1,0 +1,34 @@
+{
+  "terminal_status": "completed",
+  "summary": "Restored and reviewed attempt-1 U4 parity ledger and 13 minimal carries; clarified both entity-kind finding pointers. Left all changes uncommitted. Three policy findings remain explicitly deferred to host review.",
+  "changed_files": [
+    "compose.yaml",
+    "docs/audits/2026-09-05-pr-party-dev-parity-ledger.md",
+    "implementation-result.json",
+    "ontokit/api/routes/semantic_search.py",
+    "ontokit/git/bare_repository.py",
+    "ontokit/services/suggestion_service.py",
+    "scripts/setup-zitadel.sh",
+    "tests/integration/test_llm_review_regressions.py",
+    "tests/unit/test_bare_repository_service.py",
+    "tests/unit/test_duplicate_check.py",
+    "tests/unit/test_llm_pricing.py",
+    "tests/unit/test_llm_prompt_safety.py",
+    "tests/unit/test_projects_routes_coverage.py",
+    "tests/unit/test_suggestion_service.py",
+    "tests/unit/test_suggestion_trust_integration.py"
+  ],
+  "evidence": [
+    "sha256sum verified both supplied archives against packet hashes. git apply --check, git apply without --index, and tar xf succeeded; initial restored status was exactly 10 modified and 4 untracked paths.",
+    "Python ledger validation matched git diff --name-status feat/pr-party dev exactly: 240 unique rows (62 A, 19 D, 158 M, 1 R097); dispositions: carry 13, dev supersedes 200, superseded by U5 17, drop 10. Every disposition has a pointer or reason.",
+    "Removed-symbol validation: 14 unique candidates; carry 0, dev supersedes 12, superseded by U5 0, drop 2. All 12 AST source-definition removals are covered; two literal route changes are also covered. Four candidates retain their public binding/URL, leaving 10 absent bindings and zero lost route paths.",
+    "Carried paths: compose.yaml, ontokit/api/routes/semantic_search.py, ontokit/git/bare_repository.py, ontokit/services/suggestion_service.py, scripts/setup-zitadel.sh, tests/integration/test_llm_review_regressions.py, tests/unit/test_bare_repository_service.py, tests/unit/test_duplicate_check.py, tests/unit/test_llm_pricing.py, tests/unit/test_llm_prompt_safety.py, tests/unit/test_projects_routes_coverage.py, tests/unit/test_suggestion_service.py, tests/unit/test_suggestion_trust_integration.py.",
+    "Migration AST/content validation passed for all 41 frozen revisions: 35 identical, 5 same-id/different-content, 1 superseded. x1y2z3a4b5c6 changes from add_pr_party to add_distinct_entity_decisions; PR Party moves to h7i8j9k0l1m2. All 49 dev revisions form one complete acyclic chain with head h6i7j8k9l0m1. U9 database reset prerequisite is recorded; no migrations changed.",
+    "Frozen y2z3a4b5c6d7 statuses: [active, submitted, auto-submitted, discarded, merged, rejected, changes-requested]. Dev e3f4g5h6i7j8 statuses: [active, submitted, auto-submitted, discarded, merged, rejected, changes-requested]. Value sets are equal. Initial comparison script incorrectly compared SQL text to tuple values; corrected SQL-literal extraction passed.",
+    "Adaptations: integration tests add dev billing_user_id and explicit embedding dimensions, and mock the locked PR claim seam; 14 of 15 frozen test functions carried, with the conflicting malformed-parent VALID-04 case explicitly deferred. Both deleted unit test files remain byte-identical to frozen. Existing suggestion tests mock commit_changes and use valid Turtle to reach downstream failures. Refresh calls follow dev lock release/finalization; dev distinct-decision, quota, CAS, and declaration policies remain intact.",
+    "python3 in-memory compile and local import-source inspection passed for all 11 changed Python files. bash -n scripts/setup-zitadel.sh, PyYAML safe_load of compose.yaml, git diff --check, ref-SHA checks, migration graph checks, and regression-case-map checks passed.",
+    "No pytest, uv run, installs, network, Alembic CLI, Ruff, mypy, or Git index writes were invoked. Ruff was not found on PATH; formatting was reviewed by inspection. Full PostgreSQL/Redis tests, Ruff checks, alembic heads, and CI/mypy remain orchestrator-owned.",
+    "Complete Git delta reviewed against scope: 14 implementation paths plus the explicitly requested implementation-result.json (15 total paths reported to include the result artifact itself). No disposable check artifacts remain; git diff --cached --name-only is empty. A shell invocation emitted Failed to create stream fd: Operation not permitted while returning exit code 0; no host capability conclusion was drawn."
+  ],
+  "scope_expansion": null
+}

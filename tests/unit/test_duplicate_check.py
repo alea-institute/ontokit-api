@@ -336,3 +336,61 @@ async def test_response_includes_score_breakdown():
     assert isinstance(candidate.label, str)
     assert isinstance(candidate.score, float)
     assert candidate.source in ("main", "pending", "rejected")
+
+
+@pytest.mark.asyncio
+async def test_exact_label_blocks_even_when_other_signals_are_weaker():
+    """An exact normalized label is deterministic duplicate evidence."""
+    svc, _ = _make_service()
+
+    sem_result = _make_sem_result(label="Legal Entity", score=0.8, branch="main")
+
+    with (
+        patch.object(
+            svc._embedding_svc,
+            "semantic_search_all_branches",
+            new=AsyncMock(return_value=[sem_result]),
+        ),
+        patch.object(
+            svc._structural_svc,
+            "try_compute_similarity",
+            return_value=0.5,
+        ),
+        patch.object(
+            svc,
+            "_classify_source",
+            new=AsyncMock(return_value="main"),
+        ),
+    ):
+        response = await svc.check(
+            project_id=PROJECT_ID,
+            label="Legal Entity",
+            parent_iri="http://example.org/Entity",
+        )
+
+    assert response.verdict == "block"
+    assert response.composite_score == 1.0
+
+
+@pytest.mark.asyncio
+async def test_missing_structural_signal_renormalizes_available_weights():
+    """A minted IRI with no parent can still block on exact + semantic identity."""
+    svc, _ = _make_service()
+    sem_result = _make_sem_result(label="Legal Entity", score=0.9, branch="main")
+
+    with (
+        patch.object(
+            svc._embedding_svc,
+            "semantic_search_all_branches",
+            new=AsyncMock(return_value=[sem_result]),
+        ),
+        patch.object(svc, "_classify_source", new=AsyncMock(return_value="main")),
+    ):
+        response = await svc.check(
+            project_id=PROJECT_ID,
+            label="Legal Entity",
+            parent_iri=None,
+        )
+
+    assert response.composite_score == 1.0
+    assert response.verdict == "block"

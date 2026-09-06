@@ -584,7 +584,19 @@ class BareOntologyRepository:
         return self.get_default_branch()
 
     def get_default_branch(self) -> str:
-        """Get the name of the default branch."""
+        """Get the default branch named by the repository's symbolic HEAD."""
+        try:
+            target = self.repo.references["HEAD"].target
+            if (
+                isinstance(target, str)
+                and target.startswith("refs/heads/")
+                and target in self.repo.references
+            ):
+                return target.removeprefix("refs/heads/")
+        except (KeyError, ValueError):
+            pass
+
+        # Recover gracefully from an unborn or broken HEAD in older repositories.
         for name in ["main", "master"]:
             if f"refs/heads/{name}" in self.repo.references:
                 return name
