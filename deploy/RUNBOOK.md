@@ -125,8 +125,9 @@ Rebuilding both images keeps the deployed pair internally consistent.
 
 ## Automated deploy
 
-`.github/workflows/deploy-dev.yml` deploys after a push to `feat/pr-party` or a
-manual workflow dispatch. Every run targets the `dev-deploy` GitHub Environment,
+`.github/workflows/deploy-dev.yml` triggers on pushes to `dev` that change
+`deploy/release-manifest.json`. `workflow_dispatch` re-runs the manifest-declared
+API/web pair and consumes no inputs. Every run targets the `dev-deploy` GitHub Environment,
 so GitHub pauses the deploy job until Damien approves it from the run's
 **Review deployments** prompt. Both trigger forms read
 `deploy/release-manifest.json`; there are no per-run SHA inputs and no branch-head
@@ -134,6 +135,9 @@ fallback. The validator accepts only the declared ALEA repositories and full
 lowercase 40-character commit SHAs, and the workflow proves both commits are
 fetchable before the forced command sees them. Updating DEV therefore means
 reviewing and committing one matched API/web pair in the manifest.
+
+`feat/pr-party` no longer deploys from this workflow copy; its own frozen copy
+stays armed until gate B12 locks that branch.
 
 ### One-time: mint the deploy key (Damien only)
 
@@ -356,6 +360,8 @@ system after the 2026-08-10 flip, superseding KTD2.
   deploy is a separate gated operation (U9/B11).
 - Required status checks and rulesets on `dev` are repository settings, not
   workflow content (gate B12).
-- `feat/pr-party` keeps its own armed `deploy-dev` workflow until B12 locks that
-  branch. This copy on `dev` still triggers only on `feat/pr-party` pushes until
-  U20 flips it to `dev`, restricted to `deploy/release-manifest.json` changes.
+- This workflow copy triggers on pushes to `dev` that change
+  `deploy/release-manifest.json`; the API/web pair is manifest-declared.
+  `workflow_dispatch` re-runs the manifest pair and consumes no inputs.
+- `feat/pr-party` no longer deploys from this workflow copy; its own frozen
+  `deploy-dev` copy stays armed until gate B12 locks that branch.
