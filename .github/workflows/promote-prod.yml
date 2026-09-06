@@ -4,7 +4,7 @@ on:
   workflow_run:
     workflows: [Deploy DEV]
     types: [completed]
-    branches: [feat/pr-party]
+    branches: [dev]
 
 concurrency:
   group: prod-promotion
@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   validate-release:
-    if: github.event.workflow_run.conclusion == 'success'
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
       api_sha: ${{ steps.release.outputs.api_sha }}
@@ -60,6 +60,7 @@ jobs:
 
   smoke-dev:
     needs: validate-release
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     environment: dev-smoke
     env:
@@ -68,6 +69,7 @@ jobs:
       SMOKE_BEARER_TOKEN: ${{ secrets.DEV_SMOKE_BEARER_TOKEN }}
       SMOKE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      # nosemgrep: yaml.github-actions.security.workflow-run-target-code-checkout.workflow-run-target-code-checkout  Reason: head_sha is a same-repository push to dev that Deploy DEV already ran; guarded by the job if: above
       - name: Check out smoke assets from the exact green contract
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -79,12 +81,14 @@ jobs:
 
   promotion-gate:
     needs: [validate-release, smoke-dev]
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     env:
       PROD_ENABLED: ${{ vars.PROD_ENABLED }}
       PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
       PROD_DEPLOY_USER: ${{ vars.PROD_DEPLOY_USER }}
     steps:
+      # nosemgrep: yaml.github-actions.security.workflow-run-target-code-checkout.workflow-run-target-code-checkout  Reason: head_sha is a same-repository push to dev that Deploy DEV already ran; guarded by the job if: above
       - name: Check out gate assets
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -103,7 +107,7 @@ jobs:
 
   promote:
     needs: [validate-release, smoke-dev, promotion-gate]
-    if: vars.PROD_ENABLED == 'true'
+    if: vars.PROD_ENABLED == 'true' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     environment: production
     env:
@@ -114,6 +118,7 @@ jobs:
       PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
       PROD_DEPLOY_USER: ${{ vars.PROD_DEPLOY_USER }}
     steps:
+      # nosemgrep: yaml.github-actions.security.workflow-run-target-code-checkout.workflow-run-target-code-checkout  Reason: head_sha is a same-repository push to dev that Deploy DEV already ran; guarded by the job if: above
       - name: Check out the exact protected promotion assets
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
