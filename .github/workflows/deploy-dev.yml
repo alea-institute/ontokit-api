@@ -2,13 +2,8 @@ name: Deploy DEV
 
 on:
   push:
-    branches: [feat/pr-party]
-    paths-ignore:
-      - docs/**
-      - "**/*.md"
-      - deploy/RUNBOOK.md
-      - .github/ISSUE_TEMPLATE/**
-      - LICENSE
+    branches: [dev]
+    paths: [deploy/release-manifest.json]
   workflow_dispatch:
 
 concurrency:
