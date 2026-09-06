@@ -26,7 +26,7 @@ from ontokit.core.limits import (
 )
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.embedding import EmbeddingJob
-from ontokit.models.project import Project, ProjectMember
+from ontokit.models.project import Project, ProjectMember, get_git_ontology_path
 from ontokit.models.pull_request import PRStatus, PullRequest
 from ontokit.models.suggestion_outcome import SuggestionOutcomeType
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
@@ -160,9 +160,11 @@ class SuggestionService:
         return content_bytes
 
     async def _get_project(self, project_id: UUID) -> Project:
-        """Get a project by ID with members loaded, or raise 404."""
+        """Get a project by ID with members and GitHub integration loaded, or raise 404."""
         result = await self.db.execute(
-            select(Project).options(selectinload(Project.members)).where(Project.id == project_id)
+            select(Project)
+            .options(selectinload(Project.members), selectinload(Project.github_integration))
+            .where(Project.id == project_id)
         )
         project = result.scalar_one_or_none()
         if project is None:
@@ -214,16 +216,43 @@ class SuggestionService:
         return project
 
     def _get_git_ontology_path(self, project: Project) -> str:
-        """Get the ontology file path within the git repo."""
+        """Resolve the ontology path from the default branch's Git tree."""
+        if project.github_integration:
+            return get_git_ontology_path(project)
+
+        configured_path = "ontology.ttl"
         if project.source_file_path:
-            path = os.path.normpath(project.source_file_path).lstrip("/\\")
-            if path.startswith(".."):
+            configured_path = os.path.normpath(project.source_file_path).lstrip("/\\")
+            if configured_path.startswith(".."):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="Invalid ontology path",
                 )
-            return path
+
+        default_branch = self.git_service.get_default_branch(project.id)
+        candidates = list(
+            dict.fromkeys((configured_path, os.path.basename(configured_path), "ontology.ttl"))
+        )
+        for candidate in candidates:
+            try:
+                self.git_service.get_file_from_branch(project.id, default_branch, candidate)
+            except KeyError:
+                continue
+            return candidate
+
+        # A repository without an ontology is a genuinely new/empty project. Keep
+        # its first ontology at the canonical root path rather than reproducing a
+        # storage-key-shaped directory hierarchy in Git.
         return "ontology.ttl"
+
+    def _find_existing_ontology_path(self, project_id: UUID, branch: str) -> list[str]:
+        """Return all ontology candidates from a branch tree in deterministic order."""
+        files = self.git_service.get_repository(project_id).list_files(branch)
+        return sorted(
+            path
+            for path in files
+            if os.path.splitext(path)[1].casefold() in {".ttl", ".owl", ".rdf"}
+        )
 
     @staticmethod
     def _declared_entity_iris(content: bytes | str) -> set[str]:
@@ -233,8 +262,8 @@ class SuggestionService:
             graph.parse(data=content, format="turtle")
         except Exception as e:  # rdflib exposes parser-specific exception subclasses
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Invalid Turtle content",
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Suggestion content is not valid Turtle",
             ) from e
         return {
             str(subject)
@@ -277,7 +306,23 @@ class SuggestionService:
             )
             baseline.parse(data=baseline_content.decode("utf-8"), format="turtle")
         except KeyError:
-            pass
+            existing_paths = self._find_existing_ontology_path(project_id, default_branch)
+            if existing_paths:
+                logger.error(
+                    "Ontology path mismatch: project=%s branch=%s "
+                    "resolved_path=%s existing_paths=%s",
+                    project_id,
+                    default_branch,
+                    filename,
+                    existing_paths,
+                )
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "message": "Ontology path is misconfigured for this project",
+                        "code": "ONTOLOGY_PATH_MISMATCH",
+                    },
+                ) from None
 
         new_entities = self._declared_entities(proposed) - self._declared_entities(baseline)
         if len(new_entities) > MAX_NEW_ENTITIES_PER_SUBMISSION:
@@ -365,11 +410,11 @@ class SuggestionService:
         proposed_content: bytes | str,
     ) -> None:
         """Enforce minting from the actual branch delta, never a client hint."""
+        proposed_entities = self._declared_entity_iris(proposed_content)
         tier = self.trust.resolve_tier(project, user)
         if self.trust.can_mint_entities(tier):
             return
         current_entities = self._declared_entity_iris(current_content)
-        proposed_entities = self._declared_entity_iris(proposed_content)
         if proposed_entities - current_entities:
             self._assert_can_mint(project, user)
 
@@ -624,7 +669,7 @@ class SuggestionService:
             # Commit to the suggestion branch
             commit_message = f"Update {data.entity_label}"
             try:
-                commit_info = self.git_service.commit_to_branch(  # type: ignore[attr-defined]
+                commit_info = self.git_service.commit_changes(
                     project_id=project_id,
                     branch_name=session.branch,
                     ontology_content=data.content.encode("utf-8"),
@@ -661,6 +706,7 @@ class SuggestionService:
                     detail="Saved to branch but failed to update session metadata",
                 ) from e
 
+        await self._enqueue_branch_refresh(project_id, session.branch, entity_iri=data.entity_iri)
         return SuggestionSaveResponse(
             commit_hash=commit_info.hash,
             branch=session.branch,
@@ -730,9 +776,11 @@ class SuggestionService:
                 "submitted",
                 default_branch,
             )
-        return await self._finalize_pr_for_session(
+        result = await self._finalize_pr_for_session(
             project_id, user, data.summary, "submitted", claimed_pr
         )
+        await self._enqueue_branch_refresh(project_id, session.branch, full_embedding=True)
+        return result
 
     async def _verify_untrusted_human(
         self,
@@ -824,9 +872,11 @@ class SuggestionService:
                 new_status,
                 default_branch,
             )
-        return await self._finalize_pr_for_session(
+        result = await self._finalize_pr_for_session(
             project_id, user, summary, new_status, claimed_pr
         )
+        await self._enqueue_branch_refresh(project_id, session.branch, full_embedding=True)
+        return result
 
     async def _create_pr_for_session_already_locked(
         self,
@@ -1867,7 +1917,7 @@ class SuggestionService:
             )
             self._assert_branch_content_can_mint(project, actor, current_content, data.content)
             try:
-                self.git_service.commit_to_branch(  # type: ignore[attr-defined]
+                self.git_service.commit_changes(
                     project_id=project_id,
                     branch_name=session.branch,
                     ontology_content=content,
@@ -2040,7 +2090,7 @@ class SuggestionService:
             self._assert_branch_content_can_mint(project, None, current_content, data.content)
             commit_message = f"Update {data.entity_label}"
             try:
-                commit_info = self.git_service.commit_to_branch(  # type: ignore[attr-defined]
+                commit_info = self.git_service.commit_changes(
                     project_id=project_id,
                     branch_name=session.branch,
                     ontology_content=content,

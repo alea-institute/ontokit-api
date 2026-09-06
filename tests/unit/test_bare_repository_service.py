@@ -576,6 +576,18 @@ class TestBranchDetection:
         repo = initialized_service.get_repository(project_id)
         assert repo.get_default_branch() == "main"
 
+    def test_get_default_branch_follows_symbolic_head(
+        self,
+        initialized_service: BareGitRepositoryService,
+        project_id: uuid.UUID,
+    ) -> None:
+        """The symbolic HEAD, not a conventional branch name, defines the default."""
+        repo = initialized_service.get_repository(project_id)
+        initialized_service.create_branch(project_id, "develop", "main")
+        repo.repo.set_head("refs/heads/develop")
+
+        assert repo.get_default_branch() == "develop"
+
 
 # ---------------------------------------------------------------------------
 # BareOntologyRepository: get_branch_commit_hash

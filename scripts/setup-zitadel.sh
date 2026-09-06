@@ -9,6 +9,7 @@
 #   ./setup-zitadel.sh --docker-init      # Start Docker stack and configure
 #   ./setup-zitadel.sh --update-env --docker-init  # Full automated setup
 #   ./setup-zitadel.sh --force-secrets    # Regenerate client secrets (invalidates sessions)
+#   ./setup-zitadel.sh --show-secrets     # Display full client secrets and PATs
 
 set -e
 
@@ -23,19 +24,29 @@ NC='\033[0m' # No Color
 ZITADEL_URL="${ZITADEL_URL:-http://localhost:8080}"
 ZITADEL_DATA_VOLUME="${ZITADEL_DATA_VOLUME:-ontokit-api_zitadel_data}"
 WEB_PORT="${WEB_PORT:-3000}"
+WEB_BASE_URL="${WEB_BASE_URL:-http://localhost:${WEB_PORT}}"
+ADMIN_USERNAME="${ADMIN_USERNAME:-admin@ontokit.localhost}"
+if [ -n "${ZITADEL_ADMIN_PASSWORD:-}" ]; then
+    ADMIN_PASSWORD_FROM_ENV="true"
+else
+    ADMIN_PASSWORD_FROM_ENV="false"
+fi
+ZITADEL_ADMIN_PASSWORD="${ZITADEL_ADMIN_PASSWORD:-Admin123!}"
+MAILPIT_URL="${MAILPIT_URL-http://localhost:8025}"
 MAX_RETRIES=30
 RETRY_INTERVAL=5
 
 # Output files
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 API_DIR="${SCRIPT_DIR}/.."
-API_ENV_FILE="${API_DIR}/.env"
-WEB_ENV_FILE="${SCRIPT_DIR}/../../ontokit-web/.env.local"
+API_ENV_FILE="${API_ENV_FILE:-${API_DIR}/.env}"
+WEB_ENV_FILE="${WEB_ENV_FILE:-${SCRIPT_DIR}/../../ontokit-web/.env.local}"
 
 # Parse command line arguments
 UPDATE_ENV="${UPDATE_ENV:-false}"
 DOCKER_INIT="${DOCKER_INIT:-false}"
 FORCE_SECRETS="${FORCE_SECRETS:-false}"
+SHOW_SECRETS="${SHOW_SECRETS:-false}"
 for arg in "$@"; do
     case $arg in
         --update-env)
@@ -47,8 +58,21 @@ for arg in "$@"; do
         --force-secrets)
             FORCE_SECRETS="true"
             ;;
+        --show-secrets)
+            SHOW_SECRETS="true"
+            ;;
     esac
 done
+
+display_secret() {
+    local secret="$1"
+
+    if [[ "$SHOW_SECRETS" == "true" ]]; then
+        printf '%s' "$secret"
+    else
+        printf '%s…' "${secret:0:4}"
+    fi
+}
 
 echo -e "${BLUE}========================================${NC}"
 echo -e "${BLUE}  OntoKit Zitadel Setup Script${NC}"
@@ -286,13 +310,16 @@ create_oidc_app() {
 # Function to get admin user ID
 get_admin_user_id() {
     local pat="$1"
+    local request_body
     echo -e "${YELLOW}Getting admin user ID...${NC}" >&2
 
     # Search for the admin user
+    request_body=$(jq -n --arg username "$ADMIN_USERNAME" \
+        '{queries: [{userNameQuery: {userName: $username, method: "TEXT_QUERY_METHOD_EQUALS"}}]}')
     result=$(curl -s -X POST "${ZITADEL_URL}/management/v1/users/_search" \
         -H "Authorization: Bearer $pat" \
         -H "Content-Type: application/json" \
-        -d '{"queries": [{"userNameQuery": {"userName": "admin@ontokit.localhost", "method": "TEXT_QUERY_METHOD_EQUALS"}}]}')
+        -d "$request_body")
 
     admin_id=$(echo "$result" | jq -r '.result[0].id // empty')
 
@@ -355,14 +382,16 @@ main() {
     # Create OntoKit Web app
     echo
     WEB_CREDS=$(create_oidc_app "$PAT" "$PROJECT_ID" "OntoKit Web" \
-        "http://localhost:${WEB_PORT}/api/auth/callback/zitadel" \
-        "http://localhost:${WEB_PORT}")
+        "${WEB_BASE_URL}/api/auth/callback/zitadel" \
+        "${WEB_BASE_URL}")
     WEB_CLIENT_ID=$(echo "$WEB_CREDS" | cut -d: -f1)
     WEB_CLIENT_SECRET=$(echo "$WEB_CREDS" | cut -d: -f2)
 
     # Get admin user ID for superadmin
     echo
     ADMIN_USER_ID=$(get_admin_user_id "$PAT")
+    DISPLAY_WEB_CLIENT_SECRET=$(display_secret "$WEB_CLIENT_SECRET")
+    DISPLAY_PAT=$(display_secret "$PAT")
 
     echo
     echo -e "${BLUE}========================================${NC}"
@@ -371,8 +400,8 @@ main() {
     echo
     echo -e "${GREEN}Zitadel Credentials:${NC}"
     echo -e "  Client ID:       ${WEB_CLIENT_ID}"
-    echo -e "  Client Secret:   ${WEB_CLIENT_SECRET}"
-    echo -e "  Service Token:   ${PAT}"
+    echo -e "  Client Secret:   ${DISPLAY_WEB_CLIENT_SECRET}"
+    echo -e "  Service Token:   ${DISPLAY_PAT}"
     if [ -n "$ADMIN_USER_ID" ]; then
         echo -e "  Admin User ID:   ${ADMIN_USER_ID}"
     fi
@@ -427,11 +456,17 @@ main() {
     else
         echo -e "${YELLOW}To automatically update .env files, run with --update-env flag${NC}"
         echo
+        MANUAL_WEB_CLIENT_SECRET="<hidden; re-run with --show-secrets or use --update-env>"
+        MANUAL_PAT="<hidden; re-run with --show-secrets or use --update-env>"
+        if [[ "$SHOW_SECRETS" == "true" ]]; then
+            MANUAL_WEB_CLIENT_SECRET="$WEB_CLIENT_SECRET"
+            MANUAL_PAT="$PAT"
+        fi
         echo -e "Manual configuration:"
         echo -e "  1. Add these to ontokit-api/.env:"
         echo -e "     ZITADEL_CLIENT_ID=${WEB_CLIENT_ID}"
-        echo -e "     ZITADEL_CLIENT_SECRET=${WEB_CLIENT_SECRET}"
-        echo -e "     ZITADEL_SERVICE_TOKEN=${PAT}"
+        echo -e "     ZITADEL_CLIENT_SECRET=${MANUAL_WEB_CLIENT_SECRET}"
+        echo -e "     ZITADEL_SERVICE_TOKEN=${MANUAL_PAT}"
         if [ -n "$ADMIN_USER_ID" ]; then
             echo -e "     SUPERADMIN_USER_IDS=${ADMIN_USER_ID}"
         fi
@@ -439,17 +474,23 @@ main() {
         echo -e "  2. Add these to ontokit-web/.env.local:"
         echo -e "     ZITADEL_CLIENT_ID=${WEB_CLIENT_ID}"
         echo -e "     NEXT_PUBLIC_ZITADEL_CLIENT_ID=${WEB_CLIENT_ID}"
-        echo -e "     ZITADEL_CLIENT_SECRET=${WEB_CLIENT_SECRET}"
+        echo -e "     ZITADEL_CLIENT_SECRET=${MANUAL_WEB_CLIENT_SECRET}"
     fi
 
     echo
     echo -e "${GREEN}Zitadel Admin Login:${NC}"
     echo -e "  URL:      ${ZITADEL_URL}/ui/console"
-    echo -e "  Username: admin@ontokit.localhost"
-    echo -e "  Password: Admin123!"
-    echo
-    echo -e "${GREEN}Mailpit (Email Testing):${NC}"
-    echo -e "  URL: http://localhost:8025"
+    echo -e "  Username: ${ADMIN_USERNAME}"
+    if [[ "$ADMIN_PASSWORD_FROM_ENV" == "true" ]]; then
+        echo -e "  Password: (from ZITADEL_ADMIN_PASSWORD)"
+    else
+        echo -e "  Password: ${ZITADEL_ADMIN_PASSWORD}"
+    fi
+    if [ -n "$MAILPIT_URL" ]; then
+        echo
+        echo -e "${GREEN}Mailpit (Email Testing):${NC}"
+        echo -e "  URL: ${MAILPIT_URL}"
+    fi
     echo
 }
 

@@ -443,7 +443,7 @@ class TestMintingGate:
         )
         commit_info = MagicMock()
         commit_info.hash = "abc123"
-        service.git_service.commit_to_branch = MagicMock(return_value=commit_info)
+        service.git_service.commit_changes = MagicMock(return_value=commit_info)
         service.git_service.get_file_from_branch = MagicMock(
             return_value=(
                 b"@prefix : <http://x#> .\n"
@@ -473,7 +473,7 @@ class TestMintingGate:
         mock_db.execute.side_effect = _results(
             _result_for(session), _result_for(project), _result_for(project), project=project
         )
-        service.git_service.commit_to_branch = MagicMock()
+        service.git_service.commit_changes = MagicMock()
         service.git_service.get_file_from_branch = MagicMock(
             return_value=b"@prefix : <http://x#> ."
         )
@@ -491,7 +491,7 @@ class TestMintingGate:
                 _user("contributor-1"),
             )
         assert exc.value.status_code == 403
-        service.git_service.commit_to_branch.assert_not_called()
+        service.git_service.commit_changes.assert_not_called()
 
     async def test_anonymous_save_derives_minting_without_client_hint(
         self, service: SuggestionService, mock_db: AsyncMock
@@ -509,7 +509,7 @@ class TestMintingGate:
         service.git_service.get_file_from_branch = MagicMock(
             return_value=b"@prefix : <http://x#> ."
         )
-        service.git_service.commit_to_branch = MagicMock()
+        service.git_service.commit_changes = MagicMock()
 
         with pytest.raises(HTTPException) as exc:
             await service.save_anonymous(
@@ -525,7 +525,7 @@ class TestMintingGate:
             )
 
         assert exc.value.status_code == 403
-        service.git_service.commit_to_branch.assert_not_called()
+        service.git_service.commit_changes.assert_not_called()
 
 
 class TestCapabilities:

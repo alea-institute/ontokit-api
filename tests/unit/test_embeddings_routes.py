@@ -9,6 +9,8 @@ import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from ontokit.services.embedding_service import EmbeddingBudgetExceeded, EmbeddingPricingUnavailable
+
 PROJECT_ID = "12345678-1234-5678-1234-567812345678"
 
 
@@ -58,6 +60,52 @@ def test_semantic_search_allows_authenticated_user(
 
     assert response.status_code == 200
     assert response.json() == {"results": [], "search_mode": "semantic"}
+    mock_embed_cls.return_value.semantic_search.assert_awaited_once()
+
+
+@patch("ontokit.api.routes.semantic_search.EmbeddingService")
+@patch("ontokit.api.routes.semantic_search.get_project_service")
+def test_semantic_search_budget_exceeded_returns_402(
+    mock_get_ps: MagicMock,
+    mock_embed_cls: MagicMock,
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    client, _ = authed_client
+    mock_get_ps.return_value.get = AsyncMock(return_value=_make_project_response())
+    mock_embed_cls.return_value.semantic_search = AsyncMock(
+        side_effect=EmbeddingBudgetExceeded("Embedding budget exceeded")
+    )
+
+    response = client.get(
+        f"/api/v1/projects/{PROJECT_ID}/search/semantic",
+        params={"q": "contract", "branch": "main"},
+    )
+
+    assert response.status_code == 402
+    assert response.json() == {"detail": "Embedding budget exceeded"}
+    mock_embed_cls.return_value.semantic_search.assert_awaited_once()
+
+
+@patch("ontokit.api.routes.semantic_search.EmbeddingService")
+@patch("ontokit.api.routes.semantic_search.get_project_service")
+def test_semantic_search_pricing_unavailable_returns_503(
+    mock_get_ps: MagicMock,
+    mock_embed_cls: MagicMock,
+    authed_client: tuple[TestClient, AsyncMock],
+) -> None:
+    client, _ = authed_client
+    mock_get_ps.return_value.get = AsyncMock(return_value=_make_project_response())
+    mock_embed_cls.return_value.semantic_search = AsyncMock(
+        side_effect=EmbeddingPricingUnavailable("unpriced-model")
+    )
+
+    response = client.get(
+        f"/api/v1/projects/{PROJECT_ID}/search/semantic",
+        params={"q": "contract", "branch": "main"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Embedding pricing is unavailable; search is paused."}
     mock_embed_cls.return_value.semantic_search.assert_awaited_once()
 
 

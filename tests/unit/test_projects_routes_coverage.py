@@ -1711,6 +1711,30 @@ class TestOntologyNavigation:
         data = response.json()
         assert data["total_classes"] == 5
 
+    def test_get_ontology_tree_root_uses_non_main_default_branch(
+        self,
+        authed_client: tuple[TestClient, AsyncMock],
+        mock_project_service: AsyncMock,
+        mock_ontology_service: MagicMock,
+        mock_git_service: MagicMock,
+    ) -> None:
+        """A missing branch resolves the repository's own non-main default."""
+        client, _db = authed_client
+        mock_project_service.get = AsyncMock(
+            return_value=_project_response(source_file_path="ontology.ttl")
+        )
+        mock_ontology_service.is_loaded.return_value = True
+        mock_git_service.get_default_branch.return_value = "develop"
+        mock_git_service.repository_exists.return_value = True
+        self.mock_indexed.get_root_tree_nodes = AsyncMock(return_value=[])
+        self.mock_indexed.get_class_count = AsyncMock(return_value=0)
+
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/ontology/tree")
+
+        assert response.status_code == 200
+        self.mock_indexed.get_root_tree_nodes.assert_awaited_once_with(PROJECT_ID, None, "develop")
+        self.mock_indexed.get_class_count.assert_awaited_once_with(PROJECT_ID, "develop")
+
     def test_get_ontology_tree_root_with_branch(
         self,
         authed_client: tuple[TestClient, AsyncMock],
