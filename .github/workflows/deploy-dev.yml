@@ -1,0 +1,106 @@
+name: Deploy DEV
+
+on:
+  push:
+    branches: [feat/pr-party]
+    paths-ignore:
+      - docs/**
+      - "**/*.md"
+      - deploy/RUNBOOK.md
+      - .github/ISSUE_TEMPLATE/**
+      - LICENSE
+  workflow_dispatch:
+
+concurrency:
+  group: dev-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    outputs:
+      configured: ${{ steps.deploy-key.outputs.configured }}
+    steps:
+      - name: Check deploy key configuration
+        id: deploy-key
+        env:
+          DEV_DEPLOY_SSH_KEY: ${{ secrets.DEV_DEPLOY_SSH_KEY }}
+          DEV_DEPLOY_KNOWN_HOSTS: ${{ secrets.DEV_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          if [[ -n "$DEV_DEPLOY_SSH_KEY" && -n "$DEV_DEPLOY_KNOWN_HOSTS" ]]; then
+            echo 'configured=true' >>"$GITHUB_OUTPUT"
+          else
+            echo 'configured=false' >>"$GITHUB_OUTPUT"
+            echo 'DEV deploy skipped: the deploy key is not yet installed; see deploy/RUNBOOK.md.'
+          fi
+
+  deploy:
+    needs: preflight
+    if: needs.preflight.outputs.configured == 'true'
+    runs-on: ubuntu-latest
+    environment: dev-deploy
+    env:
+      DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST || '178.156.208.239' }}
+    steps:
+      - name: Check out the deployment contract
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Resolve deployment paths
+        run: |
+          printf 'DEPLOY_KEY_FILE=%s/ontokit-deploy-key\n' "$RUNNER_TEMP" >>"$GITHUB_ENV"
+          printf 'DEPLOY_KNOWN_HOSTS_FILE=%s/ontokit-deploy-known-hosts\n' "$RUNNER_TEMP" >>"$GITHUB_ENV"
+
+      - name: Resolve matched commit pair
+        id: pair
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 deploy/validate_release_manifest.py \
+            deploy/release-manifest.json \
+            --github-output "$GITHUB_OUTPUT"
+
+          api_sha=$(jq -r '.api_sha' deploy/release-manifest.json)
+          web_sha=$(jq -r '.web_sha' deploy/release-manifest.json)
+          gh api "repos/alea-institute/ontokit-api/commits/$api_sha" >/dev/null || {
+            echo 'Manifest API SHA is not fetchable from the declared repository.' >&2
+            exit 1
+          }
+          gh api "repos/alea-institute/ontokit-web/commits/$web_sha" >/dev/null || {
+            echo 'Manifest web SHA is not fetchable from the declared repository.' >&2
+            exit 1
+          }
+
+      - name: Install SSH credentials
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEV_DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEV_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -m 600 /dev/null "$DEPLOY_KEY_FILE"
+          install -m 600 /dev/null "$DEPLOY_KNOWN_HOSTS_FILE"
+          printf '%s' "$DEPLOY_SSH_KEY" >"$DEPLOY_KEY_FILE"
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" >"$DEPLOY_KNOWN_HOSTS_FILE"
+
+      - name: Deploy approved pair
+        env:
+          API_SHA: ${{ steps.pair.outputs.api_sha }}
+          WEB_SHA: ${{ steps.pair.outputs.web_sha }}
+        run: |
+          set -euo pipefail
+          ssh \
+            -i "$DEPLOY_KEY_FILE" \
+            -o "UserKnownHostsFile=$DEPLOY_KNOWN_HOSTS_FILE" \
+            -o StrictHostKeyChecking=yes \
+            "root@$DEPLOY_HOST" \
+            "deploy $API_SHA $WEB_SHA"
+
+      - name: Remove SSH credentials
+        if: always()
+        run: |
+          rm -f -- "$DEPLOY_KEY_FILE" "$DEPLOY_KNOWN_HOSTS_FILE"

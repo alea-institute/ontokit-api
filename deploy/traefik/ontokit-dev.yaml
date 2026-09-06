@@ -1,0 +1,94 @@
+# Lives at /data/coolify/proxy/dynamic/ontokit-dev.yaml on the hetzner-dev proxy box.
+# The gate middleware was removed 2026-08-10, superseding KTD2; Zitadel is the sole auth.
+# The ClientIP router exempts CPX41 server-side OIDC calls.
+# Edit only by validated rewrite, never by hand (F6 lesson).
+http:
+  routers:
+    ontokit-dev-web:
+      rule: Host(`ontokit.dev.openlegalstandard.org`)
+      priority: 10000
+      entryPoints:
+      - https
+      service: ontokit-dev-web
+      tls:
+        certResolver: letsencrypt
+    ontokit-dev-api:
+      rule: Host(`ontokit.dev.openlegalstandard.org`) && (PathPrefix(`/api/v1`) ||
+        PathPrefix(`/ws`) || PathPrefix(`/health`) || PathPrefix(`/openapi.json`))
+      priority: 20000
+      entryPoints:
+      - https
+      service: ontokit-dev-api
+      tls:
+        certResolver: letsencrypt
+    ontokit-dev-http:
+      rule: Host(`ontokit.dev.openlegalstandard.org`)
+      entryPoints:
+      - http
+      service: ontokit-dev-web
+      middlewares:
+      - ontokit-dev-redirect
+    ontokit-api-dev-gate:
+      rule: Host(`ontokit-api.dev.openlegalstandard.org`)
+      priority: 30000
+      entryPoints:
+      - https
+      service: ontokit-dev-deadend
+      tls:
+        certResolver: letsencrypt
+    ontokit-auth-login:
+      rule: Host(`ontokit-auth.dev.openlegalstandard.org`) && PathPrefix(`/ui/v2/login`)
+      priority: 45000
+      entryPoints:
+      - https
+      service: ontokit-dev-login
+      tls:
+        certResolver: letsencrypt
+    ontokit-auth-zitadel:
+      rule: Host(`ontokit-auth.dev.openlegalstandard.org`)
+      priority: 40000
+      entryPoints:
+      - https
+      service: ontokit-dev-zitadel
+      tls:
+        certResolver: letsencrypt
+    ontokit-auth-internal:
+      rule: Host(`ontokit-auth.dev.openlegalstandard.org`) && ClientIP(`178.156.208.239`)
+      priority: 50000
+      entryPoints:
+      - https
+      service: ontokit-dev-zitadel
+      tls:
+        certResolver: letsencrypt
+    ontokit-auth-http:
+      rule: Host(`ontokit-auth.dev.openlegalstandard.org`)
+      entryPoints:
+      - http
+      service: ontokit-dev-zitadel
+      middlewares:
+      - ontokit-dev-redirect
+  middlewares:
+    ontokit-dev-redirect:
+      redirectScheme:
+        scheme: https
+        permanent: true
+  services:
+    ontokit-dev-web:
+      loadBalancer:
+        servers:
+        - url: http://178.156.208.239:3000
+    ontokit-dev-api:
+      loadBalancer:
+        servers:
+        - url: http://178.156.208.239:8000
+    ontokit-dev-deadend:
+      loadBalancer:
+        servers: []
+    ontokit-dev-zitadel:
+      loadBalancer:
+        servers:
+        - url: http://178.156.208.239:8080
+    ontokit-dev-login:
+      loadBalancer:
+        servers:
+        - url: http://178.156.208.239:8081

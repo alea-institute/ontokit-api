@@ -1,0 +1,13 @@
+# Installed as a systemd unit and enabled on CPX41; its script lives at
+# /usr/local/sbin/ontokit-firewall.sh. Bare /etc/iptables/rules.v* files had no
+# restore mechanism in U7, and whole-table restore risks stale Docker chains.
+[Unit]
+Description=OntoKit DEV firewall rules (F9+U7 port lockdown)
+After=docker.service network-online.target
+Wants=network-online.target
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/ontokit-firewall.sh
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
