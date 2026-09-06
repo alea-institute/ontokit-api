@@ -248,7 +248,8 @@ services:
       MINIO_BUCKET: ontokit
       MINIO_SECURE: "false"
       # Zitadel
-      ZITADEL_ISSUER: http://localhost:8080
+      # Match the origin configured by ZITADEL_EXTERNALDOMAIN/PORT/SECURE above.
+      ZITADEL_ISSUER: ${ZITADEL_ISSUER:-http://localhost:8080}
       ZITADEL_INTERNAL_URL: http://zitadel:8080
       ZITADEL_CLIENT_ID: ${ZITADEL_CLIENT_ID:-}
       ZITADEL_CLIENT_SECRET: ${ZITADEL_CLIENT_SECRET:-}
@@ -315,6 +316,9 @@ services:
       MINIO_SECRET_KEY: minio123
       MINIO_BUCKET: ontokit
       MINIO_SECURE: "false"
+      # Zitadel: use the same external issuer as the API.
+      ZITADEL_ISSUER: ${ZITADEL_ISSUER:-http://localhost:8080}
+      ZITADEL_INTERNAL_URL: http://zitadel:8080
       # Git Repository Storage
       GIT_REPOS_BASE_PATH: /data/repos
       # GitHub Integration

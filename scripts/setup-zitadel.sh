@@ -456,11 +456,17 @@ main() {
     else
         echo -e "${YELLOW}To automatically update .env files, run with --update-env flag${NC}"
         echo
+        MANUAL_WEB_CLIENT_SECRET="<hidden; re-run with --show-secrets or use --update-env>"
+        MANUAL_PAT="<hidden; re-run with --show-secrets or use --update-env>"
+        if [[ "$SHOW_SECRETS" == "true" ]]; then
+            MANUAL_WEB_CLIENT_SECRET="$WEB_CLIENT_SECRET"
+            MANUAL_PAT="$PAT"
+        fi
         echo -e "Manual configuration:"
         echo -e "  1. Add these to ontokit-api/.env:"
         echo -e "     ZITADEL_CLIENT_ID=${WEB_CLIENT_ID}"
-        echo -e "     ZITADEL_CLIENT_SECRET=${DISPLAY_WEB_CLIENT_SECRET}"
-        echo -e "     ZITADEL_SERVICE_TOKEN=${DISPLAY_PAT}"
+        echo -e "     ZITADEL_CLIENT_SECRET=${MANUAL_WEB_CLIENT_SECRET}"
+        echo -e "     ZITADEL_SERVICE_TOKEN=${MANUAL_PAT}"
         if [ -n "$ADMIN_USER_ID" ]; then
             echo -e "     SUPERADMIN_USER_IDS=${ADMIN_USER_ID}"
         fi
@@ -468,7 +474,7 @@ main() {
         echo -e "  2. Add these to ontokit-web/.env.local:"
         echo -e "     ZITADEL_CLIENT_ID=${WEB_CLIENT_ID}"
         echo -e "     NEXT_PUBLIC_ZITADEL_CLIENT_ID=${WEB_CLIENT_ID}"
-        echo -e "     ZITADEL_CLIENT_SECRET=${DISPLAY_WEB_CLIENT_SECRET}"
+        echo -e "     ZITADEL_CLIENT_SECRET=${MANUAL_WEB_CLIENT_SECRET}"
     fi
 
     echo

@@ -68,6 +68,7 @@ def _make_project(project_id: uuid.UUID = PROJECT_ID, is_public: bool = True) ->
     project.name = "Test Project"
     project.is_public = is_public
     project.source_file_path = None
+    project.github_integration = None
 
     member = MagicMock()
     member.user_id = "test-user-id"
@@ -240,6 +241,18 @@ class TestUpdateEntitiesModified:
 
 
 class TestGetGitOntologyPath:
+    def test_missing_github_path_does_not_fall_back_to_root(
+        self, service: SuggestionService, mock_git: MagicMock
+    ) -> None:
+        project = _make_project()
+        project.github_integration = MagicMock(
+            turtle_file_path="src/domain.ttl", ontology_file_path="src/domain.owl"
+        )
+        mock_git.get_file_from_branch.side_effect = KeyError("src/domain.ttl")
+
+        assert service._get_git_ontology_path(project) == "src/domain.ttl"
+        mock_git.get_file_from_branch.assert_not_called()
+
     def test_default_path(self, service: SuggestionService) -> None:
         """Returns 'ontology.ttl' when project has no source_file_path."""
         project = _make_project()
@@ -264,6 +277,50 @@ class TestGetGitOntologyPath:
 # ---------------------------------------------------------------------------
 # _can_suggest / _get_user_role
 # ---------------------------------------------------------------------------
+
+
+class TestValidateSubmissionBaseline:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "existing_paths",
+        [["ontology.ttl"], ["domain/second.owl", "domain/first.ttl"]],
+        ids=["one_file", "two_files"],
+    )
+    async def test_missing_baseline_reports_path_mismatch(
+        self,
+        service: SuggestionService,
+        mock_git: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+        existing_paths: list[str],
+    ) -> None:
+        mock_git.get_file_from_branch.side_effect = KeyError("missing.ttl")
+        mock_git.get_repository.return_value.list_files.return_value = existing_paths
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service._validate_submission_content(
+                PROJECT_ID, "suggest/test", "missing.ttl", "", "test-user-id"
+            )
+
+        assert exc_info.value.status_code == 409
+        assert exc_info.value.detail == {
+            "message": "Ontology path is misconfigured for this project",
+            "code": "ONTOLOGY_PATH_MISMATCH",
+        }
+        assert "resolved_path=missing.ttl" in caplog.text
+        for path in existing_paths:
+            assert path in caplog.text
+        mock_git.get_repository.return_value.list_files.assert_called_once_with("main")
+
+    @pytest.mark.asyncio
+    async def test_no_ontology_files_allows_empty_baseline(
+        self, service: SuggestionService, mock_git: MagicMock
+    ) -> None:
+        mock_git.get_file_from_branch.side_effect = KeyError("ontology.ttl")
+        mock_git.get_repository.return_value.list_files.return_value = ["README.md"]
+
+        await service._validate_submission_content(
+            PROJECT_ID, "suggest/test", "ontology.ttl", "", "test-user-id"
+        )
 
 
 class TestCanSuggest:
@@ -801,6 +858,59 @@ class TestSave:
         assert result.branch == session.branch
         assert result.changes_count == 1
         mock_git.commit_changes.assert_called_once()
+        service._enqueue_branch_refresh.assert_awaited_once_with(
+            PROJECT_ID, session.branch, entity_iri=data.entity_iri
+        )
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("turtle_path", ["src/domain.ttl", None])
+    async def test_save_github_integration_path_preserves_unrelated_root(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        mock_git: MagicMock,
+        turtle_path: str | None,
+    ) -> None:
+        from ontokit.schemas.suggestion import SuggestionSaveRequest
+
+        project = _make_project()
+        project.source_file_path = "storage/project/ontology.ttl"
+        project.github_integration = MagicMock(
+            turtle_file_path=turtle_path, ontology_file_path="src/source.ttl"
+        )
+        filename = turtle_path or "src/source.ttl"
+        session = _make_session()
+        session_result = MagicMock()
+        session_result.scalar_one_or_none.return_value = session
+        project_result = MagicMock()
+        project_result.scalar_one_or_none.return_value = project
+        mock_db.execute.side_effect = [
+            session_result,
+            project_result,
+            project_result,
+            _no_commit_identity_row(),
+        ]
+        files = {"ontology.ttl": b"# unrelated root ontology\n", filename: b""}
+        mock_git.get_file_from_branch.side_effect = lambda _id, _branch, path: files[path]
+
+        def commit_changes(**kwargs: object) -> MagicMock:
+            content = kwargs["ontology_content"]
+            assert isinstance(content, bytes)
+            files[str(kwargs["filename"])] = content
+            return MagicMock(hash="abc123")
+
+        mock_git.commit_changes.side_effect = commit_changes
+        data = SuggestionSaveRequest(
+            content="@prefix : <http://example.org/> .",
+            entity_iri="http://example.org/Person",
+            entity_label="Person",
+        )
+
+        await service.save(PROJECT_ID, session.session_id, data, _make_user())
+
+        assert mock_git.commit_changes.call_args.kwargs["filename"] == filename
+        assert files[filename] == data.content.encode()
+        assert files["ontology.ttl"] == b"# unrelated root ontology\n"
 
     @pytest.mark.asyncio
     async def test_save_non_active_session_raises_400(
@@ -986,6 +1096,9 @@ class TestSubmit:
 
         assert result.pr_number == 42
         assert result.status == "submitted"
+        service._enqueue_branch_refresh.assert_awaited_once_with(
+            PROJECT_ID, session.branch, full_embedding=True
+        )
 
     @pytest.mark.asyncio
     async def test_submit_no_changes_raises_400(
@@ -2579,6 +2692,10 @@ class TestCreatePrForSession:
             await service._create_pr_for_session(PROJECT_ID, session, user, "summary", "submitted")
 
         # Verify the PR was created with the right title structure
+        service._enqueue_branch_refresh.assert_awaited_once_with(
+            PROJECT_ID, session.branch, full_embedding=True
+        )
+
         call_args = mock_pr_svc._claim_pull_request_already_locked.call_args
         pr_create_arg = call_args[0][1]  # second positional arg
         assert "(+3 more)" in pr_create_arg.title
@@ -2630,6 +2747,10 @@ class TestCreatePrForSession:
             mock_notif_cls.return_value = mock_notif
 
             await service._create_pr_for_session(PROJECT_ID, session, user, None, "submitted")
+
+        service._enqueue_branch_refresh.assert_awaited_once_with(
+            PROJECT_ID, session.branch, full_embedding=True
+        )
 
         call_args = mock_pr_svc._claim_pull_request_already_locked.call_args
         pr_create_arg = call_args[0][1]

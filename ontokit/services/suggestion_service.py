@@ -26,7 +26,7 @@ from ontokit.core.limits import (
 )
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.embedding import EmbeddingJob
-from ontokit.models.project import Project, ProjectMember
+from ontokit.models.project import Project, ProjectMember, get_git_ontology_path
 from ontokit.models.pull_request import PRStatus, PullRequest
 from ontokit.models.suggestion_outcome import SuggestionOutcomeType
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
@@ -160,9 +160,11 @@ class SuggestionService:
         return content_bytes
 
     async def _get_project(self, project_id: UUID) -> Project:
-        """Get a project by ID with members loaded, or raise 404."""
+        """Get a project by ID with members and GitHub integration loaded, or raise 404."""
         result = await self.db.execute(
-            select(Project).options(selectinload(Project.members)).where(Project.id == project_id)
+            select(Project)
+            .options(selectinload(Project.members), selectinload(Project.github_integration))
+            .where(Project.id == project_id)
         )
         project = result.scalar_one_or_none()
         if project is None:
@@ -215,6 +217,9 @@ class SuggestionService:
 
     def _get_git_ontology_path(self, project: Project) -> str:
         """Resolve the ontology path from the default branch's Git tree."""
+        if project.github_integration:
+            return get_git_ontology_path(project)
+
         configured_path = "ontology.ttl"
         if project.source_file_path:
             configured_path = os.path.normpath(project.source_file_path).lstrip("/\\")
@@ -240,19 +245,14 @@ class SuggestionService:
         # storage-key-shaped directory hierarchy in Git.
         return "ontology.ttl"
 
-    def _find_existing_ontology_path(self, project_id: UUID, branch: str) -> str | None:
-        """Return a deterministic ontology candidate from a branch tree, if any."""
+    def _find_existing_ontology_path(self, project_id: UUID, branch: str) -> list[str]:
+        """Return all ontology candidates from a branch tree in deterministic order."""
         files = self.git_service.get_repository(project_id).list_files(branch)
-        ontology_files = [
+        return sorted(
             path
             for path in files
             if os.path.splitext(path)[1].casefold() in {".ttl", ".owl", ".rdf"}
-        ]
-        if "ontology.ttl" in ontology_files:
-            return "ontology.ttl"
-        if len(ontology_files) == 1:
-            return ontology_files[0]
-        return None
+        )
 
     @staticmethod
     def _declared_entity_iris(content: bytes | str) -> set[str]:
@@ -306,14 +306,21 @@ class SuggestionService:
             )
             baseline.parse(data=baseline_content.decode("utf-8"), format="turtle")
         except KeyError:
-            existing_path = self._find_existing_ontology_path(project_id, default_branch)
-            if existing_path is not None:
+            existing_paths = self._find_existing_ontology_path(project_id, default_branch)
+            if existing_paths:
+                logger.error(
+                    "Ontology path mismatch: project=%s branch=%s "
+                    "resolved_path=%s existing_paths=%s",
+                    project_id,
+                    default_branch,
+                    filename,
+                    existing_paths,
+                )
                 raise HTTPException(
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    status_code=status.HTTP_409_CONFLICT,
                     detail={
-                        "message": "Resolved ontology path is missing from the default branch",
-                        "resolved_path": filename,
-                        "existing_path": existing_path,
+                        "message": "Ontology path is misconfigured for this project",
+                        "code": "ONTOLOGY_PATH_MISMATCH",
                     },
                 ) from None
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 from uuid import UUID, uuid4
 
 import pytest
@@ -140,6 +140,9 @@ async def test_f5_storage_key_path_saves_to_existing_root_ontology(
         repo = git.get_repository(project_id)
         assert repo.read_file(session.branch, "ontology.ttl") == content.encode()
         assert repo.list_files(session.branch) == ["ontology.ttl"]
+        suggestions._enqueue_branch_refresh.assert_awaited_once_with(
+            project_id, session.branch, entity_iri="https://example.test/Thing"
+        )
     finally:
         await _delete_project(real_db_session, project_id)
 
@@ -161,11 +164,10 @@ async def test_f5_missing_resolved_baseline_names_existing_ontology_path(
             project_id, "suggestion/f5-inconsistent", wrong_path, content.decode(), "f5-path-user"
         )
 
-    assert exc_info.value.status_code == 500
+    assert exc_info.value.status_code == 409
     assert exc_info.value.detail == {
-        "message": "Resolved ontology path is missing from the default branch",
-        "resolved_path": wrong_path,
-        "existing_path": "ontology.ttl",
+        "message": "Ontology path is misconfigured for this project",
+        "code": "ONTOLOGY_PATH_MISMATCH",
     }
 
 
@@ -291,6 +293,10 @@ async def test_r2_1_saved_entity_embedding_does_not_block_its_own_submit(
             user,
         )
         assert result.status == "submitted"
+        assert suggestions._enqueue_branch_refresh.await_args_list == [
+            call(project_id, session.branch, entity_iri=minted_iri),
+            call(project_id, session.branch, full_embedding=True),
+        ]
     finally:
         await _delete_project(real_db_session, project_id)
 
@@ -371,6 +377,10 @@ ex:RestrictedWork a owl:Class ;
         )
 
         assert result.status == "submitted"
+        assert suggestions._enqueue_branch_refresh.await_args_list == [
+            call(project_id, session.branch, entity_iri=minted_iri),
+            call(project_id, session.branch, full_embedding=True),
+        ]
     finally:
         await _delete_project(real_db_session, project_id)
 
@@ -439,6 +449,10 @@ folio:Actor a owl:Class ; rdfs:label "Actor" .
             user,
         )
         assert result.status == "submitted"
+        assert suggestions._enqueue_branch_refresh.await_args_list == [
+            call(project_id, session.branch, entity_iri=minted_iri),
+            call(project_id, session.branch, full_embedding=True),
+        ]
     finally:
         await _delete_project(real_db_session, project_id)
 
@@ -501,6 +515,9 @@ ex:Existing a owl:Class ; rdfs:label "Zorptic Widget Claim"@en .
             )
         assert exc_info.value.status_code == 409
         assert exc_info.value.detail == "Suggestion duplicates an existing entity label"
+        suggestions._enqueue_branch_refresh.assert_awaited_once_with(
+            project_id, session.branch, entity_iri="https://folio.example/ontology/Minted"
+        )
     finally:
         await _delete_project(real_db_session, project_id)
 
