@@ -1,0 +1,172 @@
+name: Promote matched release to PROD
+
+on:
+  workflow_run:
+    workflows: [Deploy DEV]
+    types: [completed]
+    branches: [feat/pr-party]
+
+concurrency:
+  group: prod-promotion
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate-release:
+    if: github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    outputs:
+      api_sha: ${{ steps.release.outputs.api_sha }}
+      web_sha: ${{ steps.release.outputs.web_sha }}
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha }}
+      SOURCE_RUN_ID: ${{ github.event.workflow_run.id }}
+    steps:
+      - name: Check out the exact green deployment contract
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+
+      - name: Validate immutable matched release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 deploy/validate_release_manifest.py \
+            deploy/release-manifest.json \
+            --github-output "$GITHUB_OUTPUT"
+
+          api_sha=$(jq -r '.api_sha' deploy/release-manifest.json)
+          web_sha=$(jq -r '.web_sha' deploy/release-manifest.json)
+          gh api "repos/alea-institute/ontokit-api/commits/$api_sha" >/dev/null
+          gh api "repos/alea-institute/ontokit-web/commits/$web_sha" >/dev/null
+
+      - name: Require an actual successful DEV deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          conclusion=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/runs/${SOURCE_RUN_ID}/jobs" \
+            --jq '[.jobs[] | select(.name == "deploy") | .conclusion] | first // "missing"')
+          [[ "$conclusion" == success ]] || {
+            echo "The source Deploy DEV run did not execute a successful deploy job: $conclusion" >&2
+            exit 1
+          }
+
+  smoke-dev:
+    needs: validate-release
+    runs-on: ubuntu-latest
+    environment: dev-smoke
+    env:
+      SMOKE_BASE_URL: ${{ vars.DEV_API_URL || 'https://ontokit.dev.openlegalstandard.org' }}
+      SMOKE_WEB_URL: ${{ vars.DEV_WEB_URL || 'https://ontokit.dev.openlegalstandard.org' }}
+      SMOKE_BEARER_TOKEN: ${{ secrets.DEV_SMOKE_BEARER_TOKEN }}
+      SMOKE_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out smoke assets from the exact green contract
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Prove read and isolated write paths on DEV
+        run: bash deploy/smoke-release.sh
+
+  promotion-gate:
+    needs: [validate-release, smoke-dev]
+    runs-on: ubuntu-latest
+    env:
+      PROD_ENABLED: ${{ vars.PROD_ENABLED }}
+      PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+      PROD_DEPLOY_USER: ${{ vars.PROD_DEPLOY_USER }}
+    steps:
+      - name: Check out gate assets
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Report dormant gate
+        if: env.PROD_ENABLED != 'true'
+        run: |
+          bash deploy/check-prod-gate.sh || status=$?
+          [[ ${status:-0} == 78 ]]
+
+      - name: Validate enabled non-secret prerequisites
+        if: env.PROD_ENABLED == 'true'
+        run: bash deploy/check-prod-gate.sh
+
+  promote:
+    needs: [validate-release, smoke-dev, promotion-gate]
+    if: vars.PROD_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      API_SHA: ${{ needs.validate-release.outputs.api_sha }}
+      WEB_SHA: ${{ needs.validate-release.outputs.web_sha }}
+      PROD_ENABLED: ${{ vars.PROD_ENABLED }}
+      PROD_ENVIRONMENT_READY: ${{ vars.PROD_ENVIRONMENT_READY }}
+      PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
+      PROD_DEPLOY_USER: ${{ vars.PROD_DEPLOY_USER }}
+    steps:
+      - name: Check out the exact protected promotion assets
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+          persist-credentials: false
+
+      - name: Resolve promotion paths
+        run: |
+          printf 'PROD_DEPLOY_KEY_FILE=%s/ontokit-prod-deploy-key\n' "$RUNNER_TEMP" >>"$GITHUB_ENV"
+          printf 'PROD_KNOWN_HOSTS_FILE=%s/ontokit-prod-known-hosts\n' "$RUNNER_TEMP" >>"$GITHUB_ENV"
+
+      - name: Refuse incomplete protected-environment authority
+        env:
+          PROD_DEPLOY_SSH_KEY: ${{ secrets.PROD_DEPLOY_SSH_KEY }}
+          PROD_DEPLOY_KNOWN_HOSTS: ${{ secrets.PROD_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          bash deploy/check-prod-gate.sh
+          [[ "$PROD_ENVIRONMENT_READY" == parallel-uat-v1 ]] || {
+            echo 'PROD_ENVIRONMENT_READY is not configured in the production Environment.' >&2
+            exit 1
+          }
+          [[ -n "$PROD_DEPLOY_SSH_KEY" ]] || {
+            echo 'PROD_DEPLOY_SSH_KEY is not configured in the production Environment.' >&2
+            exit 1
+          }
+          [[ -n "$PROD_DEPLOY_KNOWN_HOSTS" ]] || {
+            echo 'PROD_DEPLOY_KNOWN_HOSTS is not configured in the production Environment.' >&2
+            exit 1
+          }
+
+      - name: Install forced-command SSH credentials
+        env:
+          PROD_DEPLOY_SSH_KEY: ${{ secrets.PROD_DEPLOY_SSH_KEY }}
+          PROD_DEPLOY_KNOWN_HOSTS: ${{ secrets.PROD_DEPLOY_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          install -m 600 /dev/null "$PROD_DEPLOY_KEY_FILE"
+          install -m 600 /dev/null "$PROD_KNOWN_HOSTS_FILE"
+          printf '%s' "$PROD_DEPLOY_SSH_KEY" >"$PROD_DEPLOY_KEY_FILE"
+          printf '%s\n' "$PROD_DEPLOY_KNOWN_HOSTS" >"$PROD_KNOWN_HOSTS_FILE"
+
+      - name: Promote the exact green API/web pair
+        run: |
+          set -euo pipefail
+          ssh \
+            -i "$PROD_DEPLOY_KEY_FILE" \
+            -o IdentitiesOnly=yes \
+            -o "UserKnownHostsFile=$PROD_KNOWN_HOSTS_FILE" \
+            -o StrictHostKeyChecking=yes \
+            "$PROD_DEPLOY_USER@$PROD_DEPLOY_HOST" \
+            "deploy $API_SHA $WEB_SHA"
+
+      - name: Remove SSH credentials
+        if: always()
+        run: rm -f -- "$PROD_DEPLOY_KEY_FILE" "$PROD_KNOWN_HOSTS_FILE"

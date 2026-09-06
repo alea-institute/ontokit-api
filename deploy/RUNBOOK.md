@@ -349,3 +349,13 @@ system after the 2026-08-10 flip, superseding KTD2.
   undici to preserve a Host override.
 - Both first-instance Zitadel PATs expire at `2026-09-15T00:00:00Z`. Rotate them
   before that date and update the affected server-side credentials.
+
+## Seam status on dev (2026-09-06)
+
+- The DEV host has no database-reset verb; the reset before the first `dev`
+  deploy is a separate gated operation (U9/B11).
+- Required status checks and rulesets on `dev` are repository settings, not
+  workflow content (gate B12).
+- `feat/pr-party` keeps its own armed `deploy-dev` workflow until B12 locks that
+  branch. This copy on `dev` still triggers only on `feat/pr-party` pushes until
+  U20 flips it to `dev`, restricted to `deploy/release-manifest.json` changes.
