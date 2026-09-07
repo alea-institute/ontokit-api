@@ -40,6 +40,7 @@ from ontokit.schemas.project import (
     BranchCreate,
     BranchInfo,
     BranchListResponse,
+    DemoGenerationRetiredResponse,
     MemberCreate,
     MemberListResponse,
     MemberResponse,
@@ -382,7 +383,25 @@ async def create_project_from_github(
     return result
 
 
-@router.get("/{project_id}", response_model=ProjectResponse)
+@router.get(
+    "/{project_id}",
+    response_model=ProjectResponse,
+    responses={
+        410: {
+            "model": DemoGenerationRetiredResponse,
+            "description": (
+                "This demo generation is retired. Open detail.current_project_id for the "
+                "current public demo of the same source. This response must not be cached."
+            ),
+            "headers": {
+                "Cache-Control": {
+                    "description": "Retirement resolution must not be cached.",
+                    "schema": {"type": "string", "const": "no-store"},
+                }
+            },
+        }
+    },
+)
 async def get_project(
     project_id: UUID,
     service: Annotated[ProjectService, Depends(get_service)],
@@ -392,8 +411,9 @@ async def get_project(
     Get a project by ID.
 
     Returns 403 if the project is private and user doesn't have access.
+    Returns a non-cacheable 410 with the replacement ID for a retired demo.
     """
-    return await service.get(project_id, user)
+    return await service.get(project_id, user, resolve_retired_demo=True)
 
 
 @router.patch("/{project_id}", response_model=ProjectResponse)

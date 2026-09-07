@@ -9,9 +9,15 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from ontokit.core.auth import CurrentUser
+from ontokit.core.database import Base
+from ontokit.models.demo_generation import DemoGeneration
+from ontokit.models.project import Project
 from ontokit.schemas.project import MemberCreate, ProjectCreate, ProjectUpdate, TransferOwnership
+from ontokit.services.demo_project_provisioning import resolve_current_demo_project
 from ontokit.services.ontology_extractor import OntologyMetadataExtractor, OntologyParseError
 from ontokit.services.project_service import ProjectService, get_project_service
 
@@ -187,9 +193,72 @@ class TestCreate:
 
 
 class TestGet:
+    @pytest.mark.parametrize("user", [None, _make_user()])
+    async def test_retired_demo_resolution_for_anonymous_and_owner(
+        self, service: ProjectService, mock_db: AsyncMock, user: CurrentUser | None
+    ) -> None:
+        project = _make_project(is_public=False)
+        project.is_demo = True
+        project.demo_source_project_id = uuid.uuid4()
+        retired_at = datetime(2026, 9, 7, 12, 0, tzinfo=UTC)
+        project.demo_generation = DemoGeneration(status="retired", retired_at=retired_at)
+        current = Project(id=uuid.uuid4())
+        retired_result, current_result = MagicMock(), MagicMock()
+        retired_result.scalar_one_or_none.return_value = project
+        current_result.scalar_one_or_none.return_value = current
+        mock_db.execute.side_effect = [retired_result, current_result]
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.get(PROJECT_ID, user, resolve_retired_demo=True)
+
+        assert exc_info.value.status_code == 410
+        assert exc_info.value.detail == {
+            "code": "demo_generation_retired",
+            "current_project_id": str(current.id),
+            "retired_at": "2026-09-07T12:00:00Z",
+        }
+        assert exc_info.value.headers == {"Cache-Control": "no-store"}
+
+    async def test_retired_demo_without_active_counterpart_is_hidden(
+        self, service: ProjectService, mock_db: AsyncMock
+    ) -> None:
+        project = _make_project(is_public=False)
+        project.is_demo = True
+        project.demo_source_project_id = uuid.uuid4()
+        project.demo_generation = DemoGeneration(status="retired")
+        retired_result, missing_result = MagicMock(), MagicMock()
+        retired_result.scalar_one_or_none.return_value = project
+        missing_result.scalar_one_or_none.return_value = None
+        mock_db.execute.side_effect = [retired_result, missing_result]
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.get(PROJECT_ID, _make_user(), resolve_retired_demo=True)
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == "Project not found"
+
+    async def test_retired_demo_resolution_is_opt_in(
+        self, service: ProjectService, mock_db: AsyncMock
+    ) -> None:
+        project = _make_project(is_public=False)
+        project.is_demo = True
+        project.demo_source_project_id = uuid.uuid4()
+        project.demo_generation = DemoGeneration(status="retired")
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = project
+        mock_db.execute.return_value = result
+
+        with pytest.raises(HTTPException) as exc_info:
+            await service.get(PROJECT_ID, _make_user())
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == "Project not found"
+        mock_db.execute.assert_awaited_once()
+
+    @pytest.mark.parametrize("resolve_retired_demo", [False, True])
     @pytest.mark.asyncio
     async def test_get_public_project_as_anonymous(
-        self, service: ProjectService, mock_db: AsyncMock
+        self, service: ProjectService, mock_db: AsyncMock, resolve_retired_demo: bool
     ) -> None:
         """A public project is accessible without authentication."""
         project = _make_project(is_public=True)
@@ -197,7 +266,7 @@ class TestGet:
         mock_result.scalar_one_or_none.return_value = project
         mock_db.execute.return_value = mock_result
 
-        response = await service.get(project.id, None)
+        response = await service.get(project.id, None, resolve_retired_demo=resolve_retired_demo)
         assert response.is_public is True
         assert response.user_role is None
 
@@ -236,9 +305,10 @@ class TestGet:
 
         assert exc_info.value.status_code == 404
 
+    @pytest.mark.parametrize("resolve_retired_demo", [False, True])
     @pytest.mark.asyncio
     async def test_get_private_project_denied_for_non_member(
-        self, service: ProjectService, mock_db: AsyncMock
+        self, service: ProjectService, mock_db: AsyncMock, resolve_retired_demo: bool
     ) -> None:
         """A private project returns 403 for a non-member."""
         project = _make_project(is_public=False)
@@ -248,19 +318,73 @@ class TestGet:
 
         non_member = _make_user(user_id="stranger-id")
         with pytest.raises(HTTPException) as exc_info:
-            await service.get(PROJECT_ID, non_member)
+            await service.get(PROJECT_ID, non_member, resolve_retired_demo=resolve_retired_demo)
         assert exc_info.value.status_code == 403
 
+    @pytest.mark.parametrize("resolve_retired_demo", [False, True])
     @pytest.mark.asyncio
-    async def test_get_project_not_found(self, service: ProjectService, mock_db: AsyncMock) -> None:
+    async def test_get_project_not_found(
+        self, service: ProjectService, mock_db: AsyncMock, resolve_retired_demo: bool
+    ) -> None:
         """A missing project returns 404."""
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = None
         mock_db.execute.return_value = mock_result
 
         with pytest.raises(HTTPException) as exc_info:
-            await service.get(uuid.uuid4(), _make_user())
+            await service.get(uuid.uuid4(), _make_user(), resolve_retired_demo=resolve_retired_demo)
         assert exc_info.value.status_code == 404
+
+
+@pytest.mark.parametrize(
+    ("generation_status", "is_demo", "is_public", "same_source", "expected"),
+    [
+        ("active", True, True, True, True),
+        ("active", True, True, False, False),
+        ("active", False, True, True, False),
+        ("active", True, False, True, False),
+        ("preparing", True, True, True, False),
+        ("failed", True, True, True, False),
+        ("retired", True, True, True, False),
+    ],
+)
+async def test_resolve_current_demo_project_filters_candidates(
+    generation_status: str, is_demo: bool, is_public: bool, same_source: bool, expected: bool
+) -> None:
+    """Execute the resolver SQL against in-memory rows, without external services."""
+    engine = create_engine("sqlite://")
+    try:
+        Base.metadata.create_all(engine, tables=[DemoGeneration.__table__, Project.__table__])
+        with Session(engine) as session:
+            source_id = uuid.uuid4()
+            retired = Project(demo_source_project_id=source_id)
+            candidate = Project(
+                name="Candidate",
+                owner_id=OWNER_ID,
+                is_demo=is_demo,
+                is_public=is_public,
+                demo_source_project_id=source_id if same_source else uuid.uuid4(),
+                demo_generation=DemoGeneration(generation_key="a" * 64, status=generation_status),
+            )
+            session.add(candidate)
+            session.flush()
+            db = AsyncMock()
+            db.execute.side_effect = session.execute
+
+            resolved = await resolve_current_demo_project(db, retired)
+
+            assert resolved is (candidate if expected else None)
+            db.commit.assert_not_awaited()
+            db.flush.assert_not_awaited()
+    finally:
+        engine.dispose()
+
+
+async def test_resolve_current_demo_project_without_source_returns_none() -> None:
+    db = AsyncMock()
+
+    assert await resolve_current_demo_project(db, Project()) is None
+    db.execute.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
