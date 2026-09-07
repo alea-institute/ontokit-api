@@ -79,7 +79,8 @@ jobs:
           set -euo pipefail
           install -m 600 /dev/null "$DEPLOY_KEY_FILE"
           install -m 600 /dev/null "$DEPLOY_KNOWN_HOSTS_FILE"
-          printf '%s' "$DEPLOY_SSH_KEY" >"$DEPLOY_KEY_FILE"
+          # OpenSSH private keys need a final newline; GitHub strips it from the secret.
+          printf '%s\n' "$DEPLOY_SSH_KEY" >"$DEPLOY_KEY_FILE"
           printf '%s\n' "$DEPLOY_KNOWN_HOSTS" >"$DEPLOY_KNOWN_HOSTS_FILE"
 
       - name: Deploy approved pair
