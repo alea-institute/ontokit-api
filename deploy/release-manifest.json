@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "api_repository": "alea-institute/ontokit-api",
-  "api_sha": "435dc393f52d2607a744fdc7c2320d706e47a0f3",
+  "api_sha": "773c51aa0dd2959fd07c48627d86d66639cd13fb",
   "web_repository": "alea-institute/ontokit-web",
-  "web_sha": "83b62b0b47916736274bb48f87448c8dbc3fb09b"
+  "web_sha": "4cbe4d4c17437660b70764acb364d24b20ef20ba"
 }
