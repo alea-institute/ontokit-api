@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import uuid
+from contextlib import asynccontextmanager
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -16,6 +18,7 @@ from ontokit.core.constants import (
 )
 from ontokit.models.project import Project
 from ontokit.models.pull_request import GitHubIntegration
+from ontokit.services.demo_retention import RetentionSummary
 from ontokit.services.demo_target_authorizer import DemoTargetDenied
 from ontokit.services.pr_party_credentials import (
     CredentialRewrapError,
@@ -28,6 +31,7 @@ from ontokit.worker import (
     check_normalization_status_task,
     on_job_end,
     on_job_start,
+    purge_demo_generations,
     run_batch_entity_embed_task,
     run_embedding_generation_task,
     run_lint_task,
@@ -40,6 +44,62 @@ from ontokit.worker import (
     startup,
     sync_github_projects,
 )
+
+
+def test_demo_retention_cron_is_daily_at_0430() -> None:
+    jobs = [job for job in WorkerSettings.cron_jobs if job.coroutine is purge_demo_generations]
+    assert len(jobs) == 1
+    job = jobs[0]
+    assert job.hour == 4 and job.minute == 30
+    assert job.month is None and job.day is None and job.weekday is None
+    assert job.timeout_s > 600
+
+
+@pytest.mark.asyncio
+async def test_demo_retention_worker_owns_session_and_per_generation_lease(caplog) -> None:
+    engine = MagicMock()
+    connection = object()
+    engine.connect.return_value.__aenter__ = AsyncMock(return_value=connection)
+    session_factory = MagicMock()
+    db = object()
+    session_factory.return_value.__aenter__ = AsyncMock(return_value=db)
+    lease_entries = []
+
+    @asynccontextmanager
+    async def lease(actual_connection):
+        assert actual_connection is connection
+        lease_entries.append("enter")
+        try:
+            yield
+        finally:
+            lease_entries.append("exit")
+
+    def service(actual_db, *, lease_factory):
+        assert actual_db is db
+
+        async def apply():
+            for _ in range(2):
+                async with lease_factory():
+                    pass
+            return RetentionSummary(retained=[], purged=["a" * 64], yielded=["b" * 64])
+
+        return Mock(apply=apply)
+
+    with (
+        patch("ontokit.worker.DemoRetentionService", side_effect=service),
+        patch("ontokit.worker.demo_generation_attempt_lease", lease),
+        caplog.at_level("INFO", logger="ontokit.worker"),
+    ):
+        result = await purge_demo_generations(
+            {"engine": engine, "session_factory": session_factory, "db": object()}
+        )
+    assert lease_entries == ["enter", "exit", "enter", "exit"]
+    assert engine.connect.call_count == 2
+    assert engine.connect.return_value.__aexit__.await_count == 2
+    session_factory.return_value.__aexit__.assert_awaited_once()
+    records = [r.message for r in caplog.records if r.message.startswith("demo_retention ")]
+    assert len(records) == 1
+    assert json.loads(records[0].removeprefix("demo_retention ")) == result
 
 
 @pytest.fixture
