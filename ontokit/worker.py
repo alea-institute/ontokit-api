@@ -2,7 +2,10 @@
 
 import json
 import logging
+from collections.abc import AsyncIterator
 from collections.abc import Set as AbstractSet
+from contextlib import asynccontextmanager
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
@@ -31,6 +34,8 @@ from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
+from ontokit.services.demo_project_provisioning import demo_generation_attempt_lease
+from ontokit.services.demo_retention import DemoRetentionService
 from ontokit.services.demo_target_authorizer import DemoTargetDenied, integration_target_load
 from ontokit.services.github_sync import sync_github_project
 from ontokit.services.linter import LintResult, get_linter
@@ -1435,6 +1440,21 @@ async def run_remote_check_task(
         raise
 
 
+async def purge_demo_generations(ctx: dict[str, Any]) -> dict[str, Any]:
+    """Run retention with a dedicated session and a separate connection per lease."""
+
+    @asynccontextmanager
+    async def lease() -> AsyncIterator[None]:
+        async with ctx["engine"].connect() as connection, demo_generation_attempt_lease(connection):
+            yield
+
+    async with ctx["session_factory"]() as db:
+        summary = await DemoRetentionService(db, lease_factory=lease).apply()
+    result = asdict(summary)
+    logger.info("demo_retention %s", json.dumps(result, default=str, sort_keys=True))
+    return result
+
+
 async def startup(ctx: dict[str, Any]) -> None:
     """Initialize worker context on startup."""
     logger.info("Starting ARQ worker...")
@@ -1497,6 +1517,7 @@ class WorkerSettings:
     """ARQ worker settings."""
 
     functions = [
+        func(purge_demo_generations, timeout=settings.demo_retention_run_budget_seconds + 300),
         run_ontology_index_task,
         run_lint_task,
         func(run_consistency_check_task, timeout=900),  # 15 min for large ontologies
@@ -1537,6 +1558,13 @@ class WorkerSettings:
 
     # Cron jobs
     cron_jobs = [
+        # After the 03:17 host refresh; the service leases one generation at a time.
+        cron(
+            purge_demo_generations,
+            hour=4,
+            minute=30,
+            timeout=settings.demo_retention_run_budget_seconds + 300,
+        ),
         # Normalization check every hour
         cron(check_all_projects_normalization, hour=None, minute=0),
         # GitHub sync every 5 minutes

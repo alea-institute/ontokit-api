@@ -337,6 +337,22 @@ class SourceContentSave(BaseModel):
         return value.lower()
 
 
+class DemoGenerationRetiredDetail(BaseModel):
+    """Replacement project signal for a retired demo's single-project read."""
+
+    code: Literal["demo_generation_retired"] = "demo_generation_retired"
+    current_project_id: UUID
+    retired_at: datetime | None = Field(
+        description="Retirement timestamp from the demo generation record"
+    )
+
+
+class DemoGenerationRetiredResponse(BaseModel):
+    """HTTP 410 envelope; clients can open current_project_id and must not cache it."""
+
+    detail: DemoGenerationRetiredDetail
+
+
 class SourceRevisionConflictDetail(BaseModel):
     """Stable detail body returned when a whole-document save is stale."""
 

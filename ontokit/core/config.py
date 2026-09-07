@@ -121,6 +121,11 @@ class Settings(BaseSettings):
     # restore the legacy bidirectional behavior.
     github_mirror_outbound_only: bool = True
 
+    # Demo retention: always preserve at least one retired generation for rollback.
+    demo_retention_keep_retired: int = Field(default=1, ge=1)
+    demo_retention_min_age_days: int = Field(default=7, ge=0)
+    demo_retention_run_budget_seconds: int = Field(default=600, ge=1)
+
     # --- PR Party (KTD12, KTD13) ---
     # The reviewer registry is provisioned from configuration, not from schema:
     # comma-separated "zitadel_user_id:github_login" pairs, reconciled into

@@ -1,6 +1,7 @@
 """Tests for the Settings configuration module."""
 
 import pytest
+from pydantic import ValidationError
 
 from ontokit.core.config import Settings
 
@@ -28,6 +29,59 @@ class TestDefaultSettings:
         assert default_settings.cors_origins == ["http://localhost:3000"]
         assert default_settings.superadmin_user_ids == ""
         assert default_settings.git_repos_base_path == "/data/repos"
+
+
+class TestDemoRetentionSettings:
+    """Retention keeps a rollback generation and enforces policy bounds at startup."""
+
+    @pytest.fixture(autouse=True)
+    def clear_retention_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        for name in (
+            "DEMO_RETENTION_KEEP_RETIRED",
+            "DEMO_RETENTION_MIN_AGE_DAYS",
+            "DEMO_RETENTION_RUN_BUDGET_SECONDS",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_defaults(self, default_settings: Settings) -> None:
+        assert default_settings.demo_retention_keep_retired == 1
+        assert default_settings.demo_retention_min_age_days == 7
+        assert default_settings.demo_retention_run_budget_seconds == 600
+
+    @pytest.mark.parametrize("keep, age, budget", [(3, 14, 900), (1, 0, 1)])
+    def test_environment_overrides(
+        self, monkeypatch: pytest.MonkeyPatch, keep: int, age: int, budget: int
+    ) -> None:
+        monkeypatch.setenv("DEMO_RETENTION_KEEP_RETIRED", str(keep))
+        monkeypatch.setenv("DEMO_RETENTION_MIN_AGE_DAYS", str(age))
+        monkeypatch.setenv("DEMO_RETENTION_RUN_BUDGET_SECONDS", str(budget))
+
+        settings = Settings(_env_file=None)
+
+        assert settings.demo_retention_keep_retired == keep
+        assert settings.demo_retention_min_age_days == age
+        assert settings.demo_retention_run_budget_seconds == budget
+
+    @pytest.mark.parametrize(
+        "field, value",
+        [
+            ("demo_retention_keep_retired", "0"),
+            ("demo_retention_keep_retired", "-1"),
+            ("demo_retention_min_age_days", "-1"),
+            ("demo_retention_run_budget_seconds", "0"),
+            ("demo_retention_run_budget_seconds", "-1"),
+        ],
+    )
+    def test_invalid_environment_rejected(
+        self, monkeypatch: pytest.MonkeyPatch, field: str, value: str
+    ) -> None:
+        monkeypatch.setenv(field.upper(), value)
+
+        with pytest.raises(ValidationError) as exc_info:
+            Settings(_env_file=None)
+
+        assert exc_info.value.errors()[0]["loc"] == (field,)
+        assert exc_info.value.errors()[0]["type"] == "greater_than_equal"
 
 
 class TestSuperadminIds:

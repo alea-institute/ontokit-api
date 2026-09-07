@@ -8,6 +8,13 @@ from types import ModuleType
 from unittest.mock import MagicMock
 
 import pytest
+import sqlalchemy as sa
+from alembic.config import Config
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
+from alembic.script import ScriptDirectory
+
+from ontokit.models.demo_generation import DemoGeneration
 
 MIGRATION = (
     Path(__file__).parents[2]
@@ -15,6 +22,7 @@ MIGRATION = (
     / "versions"
     / "h6i7j8k9l0m1_add_atomic_demo_generations.py"
 )
+PURGE_MIGRATION = MIGRATION.with_name("i7j8k9l0m1n2_add_demo_generation_purge_marker.py")
 
 APPROVED_LEGACY_DEMOS = [
     (
@@ -34,8 +42,8 @@ APPROVED_LEGACY_DEMOS = [
 ]
 
 
-def _load_migration() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("atomic_demo_generation_migration", MIGRATION)
+def _load_migration(path: Path = MIGRATION) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(path.stem, path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -149,3 +157,78 @@ def test_upgrade_accepts_exactly_the_approved_uniform_legacy_demo_set() -> None:
     fake_op.drop_constraint.assert_called_once_with(
         "uq_projects_demo_source_project_id", "projects", type_="unique"
     )
+
+
+def test_purge_migration_is_the_single_head() -> None:
+    module = _load_migration(PURGE_MIGRATION)
+    config = Config()
+    config.set_main_option("script_location", str(MIGRATION.parents[1]))
+
+    assert module.down_revision == "h6i7j8k9l0m1"
+    assert ScriptDirectory.from_config(config).get_heads() == [module.revision]
+
+
+def test_purge_columns_match_model_and_are_nullable() -> None:
+    module = _load_migration(PURGE_MIGRATION)
+    fake_op = MagicMock()
+    module.op = fake_op
+
+    module.upgrade()
+
+    calls = fake_op.add_column.call_args_list
+    assert len(calls) == 2
+    columns = {call.args[1].name: call.args[1] for call in calls}
+    assert set(columns) == {"purged_at", "purge_receipt"}
+    for call in calls:
+        assert call.args[0] == "demo_generations"
+    for name, column in columns.items():
+        model_column = DemoGeneration.__table__.c[name]
+        assert column.nullable is True
+        assert model_column.nullable is True
+        if name == "purged_at":
+            assert isinstance(column.type, sa.DateTime)
+            assert isinstance(model_column.type, sa.DateTime)
+            assert column.type.timezone is True
+            assert model_column.type.timezone is True
+        else:
+            assert isinstance(column.type, sa.Text)
+            assert isinstance(model_column.type, sa.Text)
+
+
+def test_purge_migration_round_trips_empty_generation_table() -> None:
+    """Exercise real DDL locally; PostgreSQL full-chain verification is host-owned."""
+    old_op = _upgrade_with_legacy_demos([])
+    table = sa.Table(
+        *old_op.create_table.call_args.args[:1],
+        sa.MetaData(),
+        *old_op.create_table.call_args.args[1:],
+    )
+    module = _load_migration(PURGE_MIGRATION)
+    engine = sa.create_engine("sqlite:///:memory:")
+    try:
+        with engine.begin() as connection:
+            table.create(connection)
+            before = sa.inspect(connection).get_columns("demo_generations")
+            module.op = Operations(MigrationContext.configure(connection))
+
+            module.upgrade()
+
+            columns = {
+                column["name"]: column
+                for column in sa.inspect(connection).get_columns("demo_generations")
+            }
+            assert set(columns) == {column["name"] for column in before} | {
+                "purged_at",
+                "purge_receipt",
+            }
+            assert columns["purged_at"]["nullable"] is True
+            assert columns["purge_receipt"]["nullable"] is True
+
+            module.downgrade()
+
+            after = sa.inspect(connection).get_columns("demo_generations")
+            assert [(c["name"], str(c["type"]), c["nullable"]) for c in after] == [
+                (c["name"], str(c["type"]), c["nullable"]) for c in before
+            ]
+    finally:
+        engine.dispose()

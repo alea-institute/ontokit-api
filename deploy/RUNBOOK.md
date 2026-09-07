@@ -326,6 +326,44 @@ Activation remains gated. Before installing `deploy/demo-refresh.cron.example`:
 The checked-in cron example is inert. No demo repository, token, host cron, or
 project is created by committing these assets.
 
+## Demo retention
+
+The worker runs demo retention daily at **04:30** in the worker's timezone,
+after the host refresh scheduled at **03:17**, leaving more than an hour for
+refresh preparation. Keep the worker and host schedule timezones aligned.
+The refresh lease prevents overlap even when a refresh runs late. Retention
+acquires that lease for one generation at a time and releases it between
+generations; it stops starting generations when its run budget expires.
+
+Configuration (setting name, environment variable, default):
+
+- `demo_retention_keep_retired` / `DEMO_RETENTION_KEEP_RETIRED`: **1** retired generation.
+- `demo_retention_min_age_days` / `DEMO_RETENTION_MIN_AGE_DAYS`: **7** days.
+- `demo_retention_run_budget_seconds` / `DEMO_RETENTION_RUN_BUDGET_SECONDS`: **600** seconds.
+
+From the API repository with its configured runtime environment:
+
+```bash
+uv run python deploy/purge_demo_generations.py --dry-run
+uv run python deploy/purge_demo_generations.py --status
+uv run python deploy/purge_demo_generations.py --apply --env development
+```
+
+`--dry-run` prints eligible and retained generations with reasons without
+changes. `--status` reads persisted generation markers and purge receipts:
+retained count means generations whose content has not been purged (including
+eligible generations), and purged count means generations with `purged_at`.
+It also reports the latest `purged_at` and the latest failed purge attempt,
+including failures followed by a successful retry. Generation identities remain
+after content is purged.
+
+`--apply` prints the service summary and persisted receipts. It refuses with
+exit code 64 unless `--env` exactly matches `settings.app_env` / `APP_ENV`
+(`development`, `staging`, or `production`). A yielded lease exits zero;
+recorded purge failures exit one. The development apply command above is for
+the U10 acceptance pass only. This section installs no host cron and authorizes
+no DEV or PROD mutation; the arq cron is code shipped with the worker deploy.
+
 ## Logs and health
 
 Use `docker logs <container-name>` (optionally with `--tail` or `--follow`) for

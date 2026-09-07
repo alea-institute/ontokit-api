@@ -5,7 +5,9 @@ from __future__ import annotations
 import uuid
 from collections.abc import Sequence
 from contextlib import AbstractAsyncContextManager
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -24,6 +26,7 @@ from ontokit.services.demo_project_provisioning import (
     finalize_demo_publication,
     record_demo_preparation,
 )
+from ontokit.services.demo_retention import DemoRetentionService
 
 
 class _Result:
@@ -195,6 +198,40 @@ async def _prepare(
         await record_demo_preparation(session, item, commit)  # type: ignore[arg-type]
 
 
+async def test_purged_failed_key_can_be_republished_then_selected_again() -> None:
+    session = _ProvisioningSession(
+        [
+            _source("alea-institute", "FOLIO", "main", "FOLIO.owl"),
+            _source("CatholicOS", "ontology-semantic-canon", "main", "ontology.ttl"),
+        ]
+    )
+    key = build_demo_generation_key(_commits("e", "f"))
+    session.queue_ensure(key)
+    await ensure_demo_projects(session, key)  # type: ignore[arg-type]
+    candidate = session.generation(key)
+    assert candidate is not None
+    candidate.status = "failed"
+    candidate.purged_at = datetime.now(UTC)
+    candidate.purge_receipt = '{"outcome":"success"}'
+    session.queue_ensure(key)
+    await ensure_demo_projects(session, key)  # type: ignore[arg-type]
+    assert candidate.status == "preparing"
+    assert candidate.purged_at is None and candidate.purge_receipt is None
+    now = datetime.now(UTC)
+    candidate.status = "retired"
+    candidate.retired_at = now - timedelta(days=30)
+    newer = DemoGeneration(
+        id=uuid.uuid4(),
+        generation_key="a" * 64,
+        status="retired",
+        retired_at=now - timedelta(days=10),
+    )
+    db = AsyncMock()
+    db.execute.return_value = _Result([candidate, newer])
+    plan = await DemoRetentionService(db, clock=lambda: now, keep_retired=1, min_age_days=7).plan()
+    assert [entry.generation_id for entry in plan.eligible] == [candidate.id]
+
+
 async def test_failed_preparation_preserves_active_generation_and_retry_is_idempotent() -> None:
     session = _ProvisioningSession(
         [
@@ -247,12 +284,16 @@ async def test_failed_preparation_preserves_active_generation_and_retry_is_idemp
     assert second_generation.failure_count == 1
     assert all(project.is_public for project in first_projects)
 
+    second_generation.purged_at = datetime.now(UTC)
+    second_generation.purge_receipt = '{"outcome":"success"}'
     session.queue_ensure(second_key)
     retry = await ensure_demo_projects(session, second_key)  # type: ignore[arg-type]
     assert {item.project_id for item in retry} == second_ids
     assert not any(item.created or item.already_active for item in retry)
     assert second_generation.attempt_count == 2
     assert second_generation.failure_count == 1
+    assert second_generation.purged_at is None
+    assert second_generation.purge_receipt is None
     assert len(session.members) == 4
 
     await _prepare(session, retry, second_commits)

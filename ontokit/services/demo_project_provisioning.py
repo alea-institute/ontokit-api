@@ -101,6 +101,25 @@ async def demo_generation_attempt_lease(
             raise
 
 
+async def resolve_current_demo_project(
+    db: AsyncSession, retired_project: Project
+) -> Project | None:
+    """Find the active public demo for a retired project's live source, without writes."""
+    if retired_project.demo_source_project_id is None:
+        return None
+    result = await db.execute(
+        select(Project)
+        .join(DemoGeneration, Project.demo_generation_id == DemoGeneration.id)
+        .where(
+            Project.demo_source_project_id == retired_project.demo_source_project_id,
+            Project.is_demo.is_(True),
+            Project.is_public.is_(True),
+            DemoGeneration.status == DemoGenerationStatus.ACTIVE.value,
+        )
+    )
+    return result.scalar_one_or_none()
+
+
 def build_demo_generation_key(commits: Mapping[str, str]) -> str:
     """Build a generation identity while preserving the service refusal contract."""
     try:
@@ -174,6 +193,8 @@ async def ensure_demo_projects(
         raise DemoProvisioningRefused("a retired demo generation cannot be republished")
     elif generation.status == DemoGenerationStatus.FAILED.value:
         generation.status = DemoGenerationStatus.PREPARING.value
+        generation.purged_at = None
+        generation.purge_receipt = None
         generation.attempt_count += 1
         generation.attempt_token = uuid.uuid4()
     elif generation.status == DemoGenerationStatus.PREPARING.value:

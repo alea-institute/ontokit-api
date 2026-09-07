@@ -14,11 +14,13 @@ from sqlalchemy.orm import selectinload
 
 from ontokit.core.auth import CurrentUser
 from ontokit.git import GitRepositoryService, get_git_service
+from ontokit.models.demo_generation import DemoGenerationStatus
 from ontokit.models.normalization import NormalizationRun
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.pull_request import GitHubIntegration
 from ontokit.models.user_github_token import UserGitHubToken
 from ontokit.schemas.project import (
+    DemoGenerationRetiredDetail,
     MemberCreate,
     MemberListResponse,
     MemberResponse,
@@ -35,6 +37,7 @@ from ontokit.schemas.project import (
     TransferOwnership,
 )
 from ontokit.services.branch_lock import branch_write_lock
+from ontokit.services.demo_project_provisioning import resolve_current_demo_project
 from ontokit.services.ontology_extractor import (
     NormalizationReport,
     OntologyMetadataExtractor,
@@ -559,13 +562,56 @@ class ProjectService:
             limit=limit,
         )
 
-    async def get(self, project_id: UUID, user: CurrentUser | None) -> ProjectResponse:
+    async def get(
+        self,
+        project_id: UUID,
+        user: CurrentUser | None,
+        *,
+        resolve_retired_demo: bool = False,
+    ) -> ProjectResponse:
         """
         Get a project by ID.
 
         Raises 404 if not found, 403 if user doesn't have access.
+        Only the single-project GET opts into the retired demo 410 signal.
         """
-        project = await self._get_project(project_id)
+        if resolve_retired_demo:
+            # Keep the shared loader fail-closed for all other callers.
+            result = await self.db.execute(
+                select(Project)
+                .options(
+                    selectinload(Project.members),
+                    selectinload(Project.github_integration),
+                    selectinload(Project.demo_generation),
+                )
+                .where(Project.id == project_id)
+            )
+            project = result.scalar_one_or_none()
+            if project is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail="Project not found",
+                )
+            generation = project.demo_generation
+            if (
+                project.is_demo
+                and generation is not None
+                and generation.status == DemoGenerationStatus.RETIRED.value
+            ):
+                current = await resolve_current_demo_project(self.db, project)
+                if current is not None:
+                    detail = DemoGenerationRetiredDetail(
+                        current_project_id=current.id,
+                        retired_at=generation.retired_at,
+                    )
+                    raise HTTPException(
+                        status_code=status.HTTP_410_GONE,
+                        detail=detail.model_dump(mode="json"),
+                        headers={"Cache-Control": "no-store"},
+                    )
+            require_visible_project(project)
+        else:
+            project = await self._get_project(project_id)
 
         if not self._can_view(project, user):
             raise HTTPException(
