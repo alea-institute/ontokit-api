@@ -114,6 +114,12 @@ whose auth behavior disagrees with the API. Compose also stamps each built API
 and web image with its corresponding `org.opencontainers.image.revision`
 label. A manual build therefore needs both `ONTOKIT_*_REVISION` exports above.
 
+The host's installed forced-command script at `/usr/local/sbin/ontokit-deploy`
+is a separate copy. Refresh it from `deploy/ontokit-deploy.sh` for the checkout
+umask change to take effect on the host. Until it is refreshed, the Dockerfile's
+explicit `COPY --chmod` settings still protect image builds from restrictive
+source-file modes.
+
 ## Rollback
 
 Prefer the forced command's `rollback` verb, which preserves the known-good

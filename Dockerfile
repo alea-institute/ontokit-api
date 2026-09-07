@@ -21,8 +21,8 @@ RUN useradd --create-home --shell /bin/bash ontokit && \
 WORKDIR /home/ontokit/app
 
 # Install Python dependencies
-COPY pyproject.toml README.md ./
-COPY ontokit/version.py ./ontokit/version.py
+COPY --chmod=0644 pyproject.toml README.md ./
+COPY --chmod=0644 ontokit/version.py ./ontokit/version.py
 RUN pip install --upgrade pip && \
     pip install .
 
@@ -30,12 +30,12 @@ RUN pip install --upgrade pip && \
 COPY --chown=ontokit:ontokit ontokit/ ./ontokit/
 
 # Copy alembic configuration for migrations
-COPY --chown=ontokit:ontokit alembic.ini ./
+COPY --chown=ontokit:ontokit --chmod=0644 alembic.ini ./
 COPY --chown=ontokit:ontokit alembic/ ./alembic/
 
 # Copy entrypoint script (runs migrations before starting the app)
-COPY --chown=ontokit:ontokit scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
-COPY --chown=ontokit:ontokit scripts/rewrap_pr_party_credentials.py /usr/local/bin/rewrap-pr-party-credentials
+COPY --chown=ontokit:ontokit --chmod=0644 scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY --chown=ontokit:ontokit --chmod=0644 scripts/rewrap_pr_party_credentials.py /usr/local/bin/rewrap-pr-party-credentials
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 # Switch to non-root user
