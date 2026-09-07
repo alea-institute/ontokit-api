@@ -288,8 +288,8 @@ deploy_pair() {
     if [[ $record_previous == true ]]; then
         record_previous_pair || return
     fi
-    git -C "$API_REPO" checkout --detach "$api_sha" || return
-    git -C "$WEB_REPO" checkout --detach "$web_sha" || return
+    ( umask 022; git -C "$API_REPO" checkout --detach "$api_sha" ) || return
+    ( umask 022; git -C "$WEB_REPO" checkout --detach "$web_sha" ) || return
 
     docker compose --project-directory "$DEPLOY_ROOT" build api || return
     docker compose --project-directory "$DEPLOY_ROOT" build --no-cache web || return
