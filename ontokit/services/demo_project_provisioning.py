@@ -193,6 +193,8 @@ async def ensure_demo_projects(
         raise DemoProvisioningRefused("a retired demo generation cannot be republished")
     elif generation.status == DemoGenerationStatus.FAILED.value:
         generation.status = DemoGenerationStatus.PREPARING.value
+        generation.purged_at = None
+        generation.purge_receipt = None
         generation.attempt_count += 1
         generation.attempt_token = uuid.uuid4()
     elif generation.status == DemoGenerationStatus.PREPARING.value:

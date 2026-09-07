@@ -3,11 +3,16 @@
 import asyncio
 from io import BytesIO
 from typing import Any
+from uuid import UUID
 
 from minio import Minio
 from minio.error import S3Error
+from sqlalchemy import or_, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.config import settings
+from ontokit.core.database import async_session_maker
+from ontokit.models.project import Project
 
 
 class StorageError(Exception):
@@ -140,6 +145,65 @@ class StorageService:
             return True
         except S3Error:
             return False
+
+    async def delete_project_files(
+        self, project_id: UUID, *, db: AsyncSession | None = None
+    ) -> int:
+        """Delete only this UUID's derived objects, preserving every referenced source.
+
+        Source paths may be either object keys or bucket/key paths. References
+        from *any* project protect an object, including references from live
+        sources and other generations. The retention orchestrator only passes
+        UUIDs and never uses a source path as a deletion target.
+        """
+        if not isinstance(project_id, UUID):
+            raise TypeError("project_id must be a UUID")
+        if db is None:
+            async with async_session_maker() as session:
+                return await self.delete_project_files(project_id, db=session)
+        prefix = f"projects/{project_id}/"
+        result = await db.execute(
+            select(Project.source_file_path).where(
+                or_(
+                    Project.source_file_path.startswith(prefix, autoescape=True),
+                    Project.source_file_path.startswith(f"{self.bucket}/{prefix}", autoescape=True),
+                )
+            )
+        )
+        protected = set()
+        for path in result.scalars().all():
+            if path is not None:
+                protected.add(path)
+                protected.add(path.removeprefix(f"{self.bucket}/"))
+
+        def remove() -> int:
+            count = 0
+            try:
+                # Iteration performs network I/O too, so keep the entire lazy
+                # listing and deletion lifecycle off the event loop.
+                for obj in self.client.list_objects(self.bucket, prefix=prefix, recursive=True):
+                    key = obj.object_name
+                    if key is not None and key.startswith(prefix) and key not in protected:
+                        try:
+                            self.client.remove_object(self.bucket, key)
+                        except S3Error as exc:
+                            if exc.code == "NoSuchKey":
+                                continue
+                            raise
+                        count += 1
+            except S3Error as exc:
+                if exc.code == "NoSuchBucket":
+                    return count
+                raise StorageError("Project object deletion failed") from exc
+            return count
+
+        task = asyncio.create_task(asyncio.to_thread(remove))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            # Keep the caller's generation lease until deletion actually stops.
+            await task
+            raise
 
 
 def get_storage_service() -> StorageService:

@@ -230,6 +230,26 @@ class OntologyIndexService:
         # Fetch and return the row
         return await self.get_index_status(project_id, branch)
 
+    async def delete_project_index(self, project_id: UUID) -> int:
+        """Delete every branch's index, including children and status; return row count.
+
+        The caller owns the transaction. Explicit child deletes make the count
+        include labels and annotations as well as entities and hierarchy rows.
+        """
+        entity_ids = select(IndexedEntity.id).where(IndexedEntity.project_id == project_id)
+        count = 0
+        for model, condition in (
+            (IndexedLabel, IndexedLabel.entity_id.in_(entity_ids)),
+            (IndexedAnnotation, IndexedAnnotation.entity_id.in_(entity_ids)),
+            (IndexedEntity, IndexedEntity.project_id == project_id),
+            (IndexedHierarchy, IndexedHierarchy.project_id == project_id),
+            (OntologyIndexStatus, OntologyIndexStatus.project_id == project_id),
+        ):
+            result = await self.db.execute(select(func.count()).select_from(model).where(condition))
+            count += result.scalar_one()
+            await self.db.execute(delete(model).where(condition))
+        return count
+
     async def _delete_index_data(self, project_id: UUID, branch: str) -> None:
         """Delete all index data for a project/branch."""
         # Delete entities (cascade will handle labels and annotations)
