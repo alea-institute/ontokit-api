@@ -158,7 +158,8 @@ jobs:
           set -euo pipefail
           install -m 600 /dev/null "$PROD_DEPLOY_KEY_FILE"
           install -m 600 /dev/null "$PROD_KNOWN_HOSTS_FILE"
-          printf '%s' "$PROD_DEPLOY_SSH_KEY" >"$PROD_DEPLOY_KEY_FILE"
+          # OpenSSH private keys need a final newline; GitHub strips it from the secret.
+          printf '%s\n' "$PROD_DEPLOY_SSH_KEY" >"$PROD_DEPLOY_KEY_FILE"
           printf '%s\n' "$PROD_DEPLOY_KNOWN_HOSTS" >"$PROD_KNOWN_HOSTS_FILE"
 
       - name: Promote the exact green API/web pair
