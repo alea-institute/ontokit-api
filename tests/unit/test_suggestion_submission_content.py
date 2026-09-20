@@ -6,7 +6,9 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from fastapi import HTTPException
 
+from ontokit.services.embedding_service import EmbeddingBudgetExceeded, EmbeddingPricingUnavailable
 from ontokit.services.suggestion_service import SuggestionService
 
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
@@ -156,3 +158,91 @@ async def test_individuals_do_not_expand_submission_validation_or_entity_cap() -
     check.assert_not_awaited()
     validate.assert_not_awaited()
     namespace.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "status_code", "detail"),
+    [
+        (
+            EmbeddingBudgetExceeded("Project embedding budget exceeded"),
+            402,
+            "Project embedding budget exceeded",
+        ),
+        (
+            EmbeddingPricingUnavailable("internal model pricing credential reference"),
+            503,
+            "Embedding pricing is unavailable; duplicate check is paused.",
+        ),
+    ],
+    ids=["budget", "pricing"],
+)
+async def test_submission_maps_embedding_failure(
+    failure: RuntimeError, status_code: int, detail: str
+) -> None:
+    service, _git = _service()
+    proposed = BASELINE.decode() + 'ex:Minted a owl:Class; rdfs:label "New class" .'
+    check = AsyncMock(side_effect=failure)
+    with (
+        patch("ontokit.services.duplicate_check_service.DuplicateCheckService.check", new=check),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await service._validate_submission_content(
+            PROJECT_ID, "suggestion/test", "ontology.ttl", proposed, "test-user-id"
+        )
+    assert exc.value.status_code == status_code
+    assert exc.value.detail == detail
+    assert exc.value.__cause__ is failure
+    check.assert_awaited_once_with(
+        PROJECT_ID,
+        "New class",
+        entity_type="class",
+        parent_iri=None,
+        billing_user_id="test-user-id",
+        exclude_branch="suggestion/test",
+        exclude_iris={"http://example.org/Minted"},
+        proposed_iri="http://example.org/Minted",
+    )
+
+
+@pytest.mark.asyncio
+async def test_submission_leaves_unknown_embedding_errors_unchanged() -> None:
+    service, _git = _service()
+    failure = RuntimeError("unexpected provider failure")
+    proposed = BASELINE.decode() + 'ex:Minted a owl:Class; rdfs:label "New class" .'
+    with (
+        patch(
+            "ontokit.services.duplicate_check_service.DuplicateCheckService.check",
+            new=AsyncMock(side_effect=failure),
+        ),
+        pytest.raises(RuntimeError) as exc,
+    ):
+        await service._validate_submission_content(
+            PROJECT_ID, "suggestion/test", "ontology.ttl", proposed, "test-user-id"
+        )
+    assert exc.value is failure
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_type", [EmbeddingBudgetExceeded, EmbeddingPricingUnavailable])
+async def test_submission_stops_after_later_embedding_failure(
+    failure_type: type[RuntimeError],
+) -> None:
+    service, _git = _service()
+    proposed = BASELINE.decode() + "\n".join(
+        f'ex:Minted{i} a owl:Class; rdfs:label "New class {i}" .' for i in range(3)
+    )
+    failure = failure_type("later check refused")
+    check = AsyncMock(side_effect=[MagicMock(verdict="pass", suppressed_decisions=[]), failure])
+    with (
+        patch("ontokit.services.duplicate_check_service.DuplicateCheckService.check", new=check),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await service._validate_submission_content(
+            PROJECT_ID, "suggestion/test", "ontology.ttl", proposed, "test-user-id"
+        )
+    assert exc.value.__cause__ is failure
+    assert check.await_count == 2
+    assert len({call.kwargs["proposed_iri"] for call in check.await_args_list}) == 2
+    service.db.commit.assert_not_awaited()
+    service.db.rollback.assert_not_awaited()
