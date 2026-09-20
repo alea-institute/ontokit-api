@@ -21,6 +21,9 @@ RUN useradd --create-home --shell /bin/bash ontokit && \
 WORKDIR /home/ontokit/app
 
 # Install Python dependencies
+# Pre-create the package directory: a nested COPY --chmod=0644 would otherwise
+# create its parent without traversal permission for the runtime user.
+RUN mkdir -m 0755 ontokit
 COPY --chmod=0644 pyproject.toml README.md ./
 COPY --chmod=0644 ontokit/version.py ./ontokit/version.py
 RUN pip install --upgrade pip && \

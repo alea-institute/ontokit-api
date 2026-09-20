@@ -116,6 +116,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build default development runtime image
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+        with:
+          context: .
+          file: Dockerfile
+          push: false
+          load: true
+          tags: ontokit-runtime-smoke:ci
+          cache-from: type=gha,scope=dev-runtime
+          cache-to: type=gha,mode=max,scope=dev-runtime
+      - name: Smoke test default image as its configured runtime user
+        run: bash scripts/smoke-runtime-image.sh ontokit-runtime-smoke:ci
+
   publish_pypi:
     if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/ontokit-')
     needs: [lint, test, build, publish_docker]
