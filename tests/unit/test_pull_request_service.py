@@ -1477,15 +1477,37 @@ class TestGetPRCommits:
 
 class TestToPrResponse:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("status", "merge_hash", "base_hash", "head_hash"),
+        [
+            pytest.param(PRStatus.OPEN.value, None, None, None, id="open-without-revisions"),
+            pytest.param(
+                PRStatus.MERGED.value,
+                "a" * 40,
+                "b" * 40,
+                "c" * 40,
+                id="merged-with-persisted-revisions",
+            ),
+        ],
+    )
     async def test_to_pr_response_basic(
         self,
         service: PullRequestService,
         mock_db: AsyncMock,
         mock_git_service: MagicMock,
+        status: str,
+        merge_hash: str | None,
+        base_hash: str | None,
+        head_hash: str | None,
     ) -> None:
-        """_to_pr_response converts a PR ORM model to a PRResponse schema."""
+        """PR responses preserve stored revisions, including nulls before merge."""
         project = _make_project(pr_approval_required=0)
-        pr = _make_pr()
+        pr = _make_pr(
+            status=status,
+            merge_commit_hash=merge_hash,
+            base_commit_hash=base_hash,
+            head_commit_hash=head_hash,
+        )
 
         mock_git_service.get_commits_between.return_value = []
 
@@ -1500,7 +1522,10 @@ class TestToPrResponse:
         assert result.target_branch == "main"
         assert result.review_count == 0
         assert result.approval_count == 0
-        assert result.can_merge is True  # 0 approvals required, 0 approvals
+        assert result.can_merge is (status == PRStatus.OPEN.value)
+        assert result.merge_commit_hash == merge_hash
+        assert result.base_commit_hash == base_hash
+        assert result.head_commit_hash == head_hash
 
     @pytest.mark.asyncio
     async def test_to_pr_response_with_reviews(
