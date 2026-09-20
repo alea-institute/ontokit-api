@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, call, patch
@@ -689,6 +690,18 @@ async def test_p1_1_unpriced_model_stops_before_provider_on_real_budget_rows(
     [
         pytest.param("not valid turtle", 422, id="malformed"),
         pytest.param("ex:Minted a owl:Class .", 403, id="class"),
+        *[
+            pytest.param(content, 403, id=f"{schema_type}-{case}")
+            for schema_type in (
+                "owl:DeprecatedClass",
+                "owl:DeprecatedProperty",
+                "rdfs:ContainerMembershipProperty",
+            )
+            for case, content in [
+                ("new-schema", f"ex:Minted a {schema_type} ."),
+                ("mixed-denial", f'ex:Existing rdfs:label "edited" . ex:Minted a {schema_type} .'),
+            ]
+        ],
         pytest.param("ex:Minted a owl:NamedIndividual .", 403, id="explicit-individual"),
         pytest.param("ex:Minted a ex:ExternalClass .", 403, id="ordinary-individual"),
         pytest.param(
@@ -726,25 +739,34 @@ async def test_p1_7_p1_12_server_gates_content_before_real_git_commit(
     real_db_session.add_all([project, session])
     await real_db_session.commit()
 
-    git = BareGitRepositoryService(base_path=str(tmp_path))
-    initial = b"@prefix ex: <https://example.test/> .\n"
-    git.initialize_repository(project_id, initial, "ontology.ttl")
-    git.create_branch(project_id, session.branch, from_ref="main")
-    head = git.get_repository(project_id).get_branch_commit_hash(session.branch)
-    fields = (
-        "changes_count",
-        "anonymous_content_bytes",
-        "entities_modified",
-        "last_activity",
-        "revision",
-        "status",
-        "summary",
-    )
-    before = {field: getattr(session, field) for field in fields}
-    content = initial.decode() + "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n" + declaration
-    service = SuggestionService(real_db_session, git)
-
     try:
+        git = BareGitRepositoryService(base_path=str(tmp_path))
+        initial = (
+            b"@prefix ex: <https://example.test/> .\n"
+            b"@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+            b"@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
+            b'ex:Existing a owl:Class ; rdfs:label "original" .\n'
+        )
+        git.initialize_repository(project_id, initial, "ontology.ttl")
+        git.create_branch(project_id, session.branch, from_ref="main")
+        head = git.get_repository(project_id).get_branch_commit_hash(session.branch)
+        fields = (
+            "changes_count",
+            "anonymous_content_bytes",
+            "entities_modified",
+            "last_activity",
+            "revision",
+            "status",
+            "summary",
+        )
+        before = {field: getattr(session, field) for field in fields}
+        content = initial.decode() + declaration
+        if declaration.startswith('ex:Existing rdfs:label "edited" . '):
+            content = initial.decode().replace('rdfs:label "original"', 'rdfs:label "edited"')
+            content += declaration.removeprefix('ex:Existing rdfs:label "edited" . ')
+
+        service = SuggestionService(real_db_session, git)
+
         with (
             patch.object(service, "_enqueue_branch_refresh", new_callable=AsyncMock) as refresh,
             patch(
@@ -780,6 +802,129 @@ async def test_p1_7_p1_12_server_gates_content_before_real_git_commit(
         refresh.assert_not_awaited()
     finally:
         await _delete_project(real_db_session, project_id)
+    assert await real_db_session.scalar(select(Project.id).where(Project.id == project_id)) is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "entry_point", ["save", "save_anonymous", "beacon_save", "beacon_save_anonymous"]
+)
+@pytest.mark.parametrize(
+    ("schema_type", "replacement"),
+    [
+        ("owl:DeprecatedClass", "ex:Ordinary"),
+        ("owl:DeprecatedProperty", "owl:DeprecatedProperty"),
+        ("rdfs:ContainerMembershipProperty", "rdfs:ContainerMembershipProperty"),
+    ],
+)
+async def test_schema_identity_edit_persists_after_trust_loss(
+    real_db_session: AsyncSession,
+    tmp_path: Path,
+    entry_point: str,
+    schema_type: str,
+    replacement: str,
+) -> None:
+    """Only the suggestion branch owns the identity; revoked trust still permits edits."""
+    project_id = uuid4()
+    user = CurrentUser(id="schema-editor", name="Schema Editor")
+    anonymous = entry_point.endswith("anonymous")
+    project = Project(id=project_id, name="schema-edit", owner_id="owner", is_public=True)
+    member = ProjectMember(user_id=user.id, role="suggester", is_trusted=True)
+    project.members.append(member)
+    session = SuggestionSession(
+        project_id=project_id,
+        user_id=user.id,
+        user_name=user.name,
+        session_id="schema-edit",
+        branch="suggestion/schema-edit",
+        beacon_token="integration-token",
+        is_anonymous=anonymous,
+        changes_count=2,
+        revision=3,
+        entities_modified=json.dumps(["Before"]),
+        anonymous_content_bytes=0,
+    )
+    real_db_session.add_all([project, session])
+    await real_db_session.commit()
+    try:
+        git = BareGitRepositoryService(base_path=str(tmp_path))
+        initial = (
+            "@prefix ex: <https://example.test/> .\n"
+            "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
+            "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .\n"
+        )
+        git.initialize_repository(project_id, initial.encode(), "ontology.ttl")
+        git.create_branch(project_id, session.branch, from_ref="main")
+        baseline = initial + f'ex:Existing a {schema_type} ; rdfs:label "before" .\n'
+        git.commit_changes(
+            project_id=project_id,
+            branch_name=session.branch,
+            ontology_content=baseline.encode(),
+            filename="ontology.ttl",
+            message="Seed existing branch identity",
+            author_name="Fixture",
+            author_email="fixture@example.test",
+        )
+        head = git.get_repository(project_id).get_branch_commit_hash(session.branch)
+        if not anonymous:
+            member.is_trusted = False
+            member.trust_override = "revoked"
+            await real_db_session.commit()
+            await real_db_session.refresh(member)
+            await real_db_session.refresh(project, attribute_names=["members"])
+            assert project.members[0].is_trusted is False
+            assert project.members[0].trust_override == "revoked"
+        before_activity = session.last_activity
+        content = initial + f'ex:Existing a {replacement} ; rdfs:label "edited" .\n'
+        service = SuggestionService(real_db_session, git)
+        with (
+            patch.object(service, "_enqueue_branch_refresh", new_callable=AsyncMock) as refresh,
+            patch(
+                "ontokit.services.suggestion_service.verify_beacon_token",
+                return_value=session.session_id,
+            ),
+        ):
+            if entry_point.startswith("beacon"):
+                await getattr(service, entry_point)(
+                    project_id,
+                    SuggestionBeaconRequest(session_id=session.session_id, content=content),
+                    session.session_id,
+                )
+            else:
+                await getattr(service, entry_point)(
+                    project_id,
+                    session.session_id,
+                    SuggestionSaveRequest(
+                        content=content,
+                        entity_iri="https://example.test/Existing",
+                        entity_label="Edited",
+                        mints_entity=False,
+                    ),
+                    session.session_id if anonymous else user,
+                )
+            if entry_point == "save":
+                refresh.assert_awaited_once_with(
+                    project_id, session.branch, entity_iri="https://example.test/Existing"
+                )
+            else:
+                refresh.assert_not_awaited()
+        assert git.get_file_from_branch(project_id, "main", "ontology.ttl") == initial.encode()
+        assert (
+            git.get_file_from_branch(project_id, session.branch, "ontology.ttl") == content.encode()
+        )
+        assert git.get_repository(project_id).get_branch_commit_hash(session.branch) != head
+        await real_db_session.refresh(session)
+        assert session.changes_count == 3
+        assert session.revision == 3
+        assert session.last_activity > before_activity
+        assert session.status == SuggestionSessionStatus.ACTIVE.value
+        assert json.loads(session.entities_modified) == (
+            ["Before"] if entry_point.startswith("beacon") else ["Before", "Edited"]
+        )
+        assert session.anonymous_content_bytes == (len(content.encode()) if anonymous else 0)
+    finally:
+        await _delete_project(real_db_session, project_id)
+    assert await real_db_session.scalar(select(Project.id).where(Project.id == project_id)) is None
 
 
 @pytest.mark.asyncio

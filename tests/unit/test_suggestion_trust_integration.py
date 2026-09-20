@@ -530,7 +530,15 @@ class TestMintingGate:
         service.git_service.commit_changes.assert_not_called()
 
 
-_SAVE_PREFIXES = "@prefix : <http://x#> . @prefix owl: <http://www.w3.org/2002/07/owl#> . "
+_SAVE_PREFIXES = (
+    "@prefix : <http://x#> . @prefix owl: <http://www.w3.org/2002/07/owl#> . "
+    "@prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> . "
+)
+_SCHEMA_TYPES = (
+    "owl:DeprecatedClass",
+    "owl:DeprecatedProperty",
+    "rdfs:ContainerMembershipProperty",
+)
 
 
 class TestIndividualSaveBoundaries:
@@ -577,6 +585,57 @@ class TestIndividualSaveBoundaries:
                 id="reference-then-type",
             ),
             pytest.param(None, ":A a :External .", True, id="missing-branch-baseline"),
+            *[
+                pytest.param(baseline, proposed, denied, id=f"{schema_type}-{case}")
+                for schema_type in _SCHEMA_TYPES
+                for case, baseline, proposed, denied in [
+                    (
+                        "label-edit",
+                        f":A a {schema_type} .",
+                        f':A a {schema_type} ; rdfs:label "edit" .',
+                        False,
+                    ),
+                    ("schema-to-ordinary", f":A a {schema_type} .", ":A a :External .", False),
+                    ("ordinary-to-schema", ":A a :External .", f":A a {schema_type} .", False),
+                    (
+                        "schema-punning",
+                        f":A a {schema_type} .",
+                        f":A a {schema_type}, :External .",
+                        False,
+                    ),
+                    (
+                        "ordinary-punning",
+                        ":A a :External .",
+                        f":A a :External, {schema_type} .",
+                        False,
+                    ),
+                    ("new-schema", "", f":A a {schema_type} .", True),
+                    (
+                        "label-first-type",
+                        ':A rdfs:label "seed" .',
+                        f':A rdfs:label "seed" ; a {schema_type} .',
+                        True,
+                    ),
+                    (
+                        "reference-first-type",
+                        ":Other :related :A .",
+                        f":Other :related :A . :A a {schema_type} .",
+                        True,
+                    ),
+                    (
+                        "structural-first-type",
+                        ":A a owl:Restriction .",
+                        f":A a owl:Restriction, {schema_type} .",
+                        True,
+                    ),
+                    (
+                        "mixed-denial",
+                        f":A a {schema_type} .",
+                        f':A a {schema_type} ; rdfs:label "edit" . :B a {schema_type} .',
+                        True,
+                    ),
+                ]
+            ],
         ],
     )
     async def test_branch_relative_identity_on_resumed_session(
@@ -671,7 +730,10 @@ class TestIndividualSaveBoundaries:
             )
 
     @pytest.mark.parametrize("role,trusted", [("suggester", True), ("editor", False)])
-    @pytest.mark.parametrize("declaration", [":A a owl:NamedIndividual .", ":A a :External ."])
+    @pytest.mark.parametrize(
+        "declaration",
+        [":A a owl:NamedIndividual .", ":A a :External .", *[f":A a {t} ." for t in _SCHEMA_TYPES]],
+    )
     @pytest.mark.parametrize("entry_point", ["save", "beacon_save"])
     async def test_trusted_and_reviewer_create_individuals(
         self,
