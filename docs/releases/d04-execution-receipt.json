@@ -1,0 +1,107 @@
+{
+  "status": "complete",
+  "plan_path": "docs/plans/2026-09-20-0839-fix-individual-mint-enforcement-plan.md",
+  "changed_files": [
+    "ontokit/services/suggestion_service.py",
+    "tests/unit/test_suggestion_mint_entities.py",
+    "tests/unit/test_suggestion_submission_content.py",
+    "tests/unit/test_suggestion_trust_integration.py",
+    "tests/integration/test_llm_review_regressions.py"
+  ],
+  "u_ids_attempted": [
+    "U1",
+    "U2"
+  ],
+  "u_ids_completed": [
+    "U1",
+    "U2"
+  ],
+  "verification_results": {
+    "full_suite": "3243 passed,34 warnings,40.66s;87% combined coverage;0 skipped",
+    "ruff": "passed",
+    "format": "194 production files formatted",
+    "mypy": "Python3.11 locked environment:193 files,0 issues",
+    "pyright": "Python3.11 locked environment:0 errors,0 warnings",
+    "initial_test_runner_failure": "GIT_REPOS_BASE_PATH override conflicted with default-settings assertion; removed override and reran entire suite successfully"
+  },
+  "verification_evidence": [
+    {
+      "unit": "U1",
+      "commit": "a5b3c163",
+      "behavior_changed": true,
+      "existing_tests_inspected": [
+        "tests/unit/test_suggestion_submission_content.py",
+        "tests/unit/test_suggestion_trust_integration.py"
+      ],
+      "tests_added_or_changed": [
+        "tests/unit/test_suggestion_mint_entities.py",
+        "tests/unit/test_suggestion_submission_content.py"
+      ],
+      "red_observed": "Worker observed all 9 initial named-individual cases fail with empty set before implementation; expanded matrix 32 failed / 25 passed before production edit.",
+      "authoritative_verification": "pytest two owned test files -q --no-cov: 57 passed",
+      "static_checks": {
+        "ruff": "passed; 194 production files formatted",
+        "mypy_default": "Blocked by installed Python 3.13 NumPy stub syntax when configured target is 3.11; no source checking completed",
+        "mypy_python_3_13": "passed; 193 source files",
+        "pyright": "passed; 0 errors/warnings after linking existing venv into worktree"
+      },
+      "environment": "Existing API Python 3.13.11 environment; imports verified resolve to canonical worktree. CI Python 3.11 remains required."
+    },
+    {
+      "unit": "U2",
+      "behavior_changed": false,
+      "existing_tests_inspected": [
+        "tests/unit/test_suggestion_trust_integration.py",
+        "tests/unit/test_suggestion_service.py",
+        "tests/unit/test_suggestion_submission_content.py",
+        "tests/unit/test_auto_accept_clock.py",
+        "tests/integration/test_llm_review_regressions.py"
+      ],
+      "tests_added_or_changed": [
+        "tests/unit/test_suggestion_trust_integration.py",
+        "tests/integration/test_llm_review_regressions.py"
+      ],
+      "verification": "Worker focused 227 passed,9 warnings,3.90s under exact lockfile Python3.11.14; Ruff and diff checks pass",
+      "evidence": "30 real Git/database denial cases and 36 unit save-boundary cases; all four public entry points; persisted metadata reloaded; current branch differs from default branch.",
+      "red_observed": null,
+      "exception_reason": "Characterization of U1 implementation; no production changes. Initial failures were corrected fixture path assumptions."
+    }
+  ],
+  "implementation_engine_binding": null,
+  "requested_route": "native Codex subagents",
+  "actual_route": "native Codex subagents",
+  "requested_model": null,
+  "actual_model": "unverified",
+  "requested_effort": null,
+  "fallback_reason": null,
+  "run_id": null,
+  "source_kind": "plan",
+  "source_digest": "033cc5a1d9a8159200c505ac89dad13e520ad7a8fa08c8701120dabc39f6b12b",
+  "unit_receipts": [
+    {
+      "unit": "U1",
+      "commit": "a5b3c163",
+      "verification": "57 focused passed; full suite passed",
+      "integration": "canonical",
+      "cleanup": "worker completed"
+    },
+    {
+      "unit": "U2",
+      "commit": "beef32dd",
+      "verification": "227 focused passed; full suite passed",
+      "integration": "canonical",
+      "cleanup": "worker completed"
+    }
+  ],
+  "plan_checkpoint": "28e2f5c5",
+  "blockers": [],
+  "recovery_path": null,
+  "settled_decision_conflicts": [],
+  "behavior_change": true,
+  "standalone_shipping_skipped": true,
+  "simplification": {
+    "applied": 0,
+    "skipped": 2,
+    "reason": "Helper rename offers insufficient benefit beyond explicit policy docstring; repeated trust resolution is pre-existing outside changed logic. Reuse review clean."
+  }
+}

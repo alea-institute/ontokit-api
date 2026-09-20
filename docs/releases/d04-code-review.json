@@ -1,0 +1,184 @@
+{
+  "status": "complete",
+  "verdict": "Ready to merge",
+  "scope": {
+    "base": "39a1fa14",
+    "branch": "fix/d04-individual-mint-20260920",
+    "head_sha": "beef32ddad8bc85e88390fb6df6f3d309bb0fde1",
+    "pr_url": null,
+    "files_changed": 7
+  },
+  "intent": "Close the individual-mint authorization omission in all suggestion-save paths while preserving existing-identity edits and class/property-only paid submission validation. Prove denials do not persist Git or session changes.",
+  "intent_confidence": "explicit",
+  "reviewers": [
+    "correctness",
+    "security",
+    "testing",
+    "maintainability",
+    "project-standards",
+    "adversarial-claude"
+  ],
+  "findings": [],
+  "actionable_findings": [],
+  "triage_groups": [],
+  "pre_existing_findings": [
+    {
+      "#": 1,
+      "autofix_class": "advisory",
+      "confidence": 75,
+      "evidence": [
+        "ontokit/services/suggestion_service.py:141-145 excludes OWL.DeprecatedClass, OWL.DeprecatedProperty and RDFS.ContainerMembershipProperty from ordinary individual recognition.",
+        "ontokit/services/suggestion_service.py:302-308 omits subjects typed only with excluded schema IRIs; :453-455 checks mint permission only for a nonempty identity delta.",
+        "Provenance: baseline 39a1fa14 already omitted these three schema declaration types from _ENTITY_DECLARATION_TYPES; D04 did not introduce the gap.",
+        "ontokit/services/suggestion_service.py:363 retains class/property-only submission recognition. tests/unit/test_suggestion_mint_entities.py:44-50 pins schema-only typing exclusion."
+      ],
+      "file": "ontokit/services/suggestion_service.py",
+      "first_evidence": "ontokit/services/suggestion_service.py:141-142 `OWL.DeprecatedClass,` / `OWL.DeprecatedProperty,` and :145 `RDFS.ContainerMembershipProperty,` inside `_MINT_STRUCTURAL_TYPES`",
+      "independent_reviewers": [
+        "adversarial-claude"
+      ],
+      "line": 141,
+      "owner": "human",
+      "pre_existing": true,
+      "requires_verification": true,
+      "reviewers": [
+        "adversarial-claude"
+      ],
+      "severity": "P2",
+      "suggested_fix": "In a separate B14 schema-taxonomy follow-up, decide and test mint recognition for owl:DeprecatedClass, owl:DeprecatedProperty and rdfs:ContainerMembershipProperty without changing submission billing or caps.",
+      "title": "Deprecated class/property types excluded: restricted actor mints class-like entity",
+      "why_it_matters": "Restricted actors can save new subjects typed only as owl:DeprecatedClass, owl:DeprecatedProperty or rdfs:ContainerMembershipProperty without the mint check. Baseline 39a1fa14 already omitted these declaration types. D04 repairs explicit and ordinary typed individuals and explicitly excludes schema declarations; its new behavior does not depend on recognizing these additional schema entities. Track this existing taxonomy gap separately in B14 reconciliation."
+    }
+  ],
+  "requirements_completeness": {
+    "plan": "/home/damienriehl/Coding Projects/ontokit-web/.worktrees/api-d04-mint/docs/plans/2026-09-20-0839-fix-individual-mint-enforcement-plan.md",
+    "source": "explicit",
+    "requirements": [
+      {
+        "id": "R1",
+        "status": "met",
+        "requirement": "- R1. Authenticated save, anonymous save and beacon save reject newly introduced named individuals when the current actor lacks mint permission, using the existing 403 trust-required contract."
+      },
+      {
+        "id": "R2",
+        "status": "met",
+        "requirement": "- R2. Recognition includes explicit `owl:NamedIndividual` declarations and ordinary class-membership assertions whose class need not be declared locally. Identity is the subject IRI, deduplicated across its types."
+      },
+      {
+        "id": "R3",
+        "status": "met",
+        "requirement": "- R3. Existing recognized entity IRIs remain editable, including additional types, relationship/label changes and class/property-individual punning. Referenced objects and blank-node identities alone do not count as newly minted named entities."
+      },
+      {
+        "id": "R4",
+        "status": "met",
+        "requirement": "- R4. Rejected saves preserve Git content/revisions, session metadata/counters and refresh scheduling. Existing parsing, ownership, branch locks, quotas and missing-baseline protections remain effective."
+      },
+      {
+        "id": "R5",
+        "status": "met",
+        "requirement": "- R5. Trusted/reviewer creation remains permitted; mint authorization changes do not expand submission duplicate validation, billing, namespace policy or the 25-entity validation cap."
+      },
+      {
+        "id": "R6",
+        "status": "met",
+        "requirement": "- R6. Resumed sessions use their existing branch as the save baseline. Submit/resubmit preserve their existing behavior, including demotion handling; this repair does not retroactively revoke previously stored entities."
+      }
+    ],
+    "implementation_units": [
+      {
+        "id": "U1",
+        "status": "met",
+        "unit": "### U1. Recognize typed individual minting without changing submission policy"
+      },
+      {
+        "id": "U2",
+        "status": "met",
+        "unit": "### U2. Prove permission and persistence behavior across every save path"
+      }
+    ],
+    "evidence": "The reviewed service change expands mint identity recognition while preserving submission recognition. Changed mint-entity, trust-integration, submission-content and LLM regression tests cover the planned boundaries; the dispatch context reports the full 3243-test suite and static checks passing."
+  },
+  "learnings": [],
+  "agent_native_gaps": [],
+  "deployment_notes": [],
+  "residual_risks": [],
+  "testing_gaps": [],
+  "coverage": {
+    "depth": "full",
+    "reviewer_selection": [
+      {
+        "reviewer": "correctness",
+        "tier": "session",
+        "reason": "always-on"
+      },
+      {
+        "reviewer": "security",
+        "tier": "session",
+        "reason": "mint authorization"
+      },
+      {
+        "reviewer": "testing",
+        "tier": "mid",
+        "reason": "changed regression coverage"
+      },
+      {
+        "reviewer": "maintainability",
+        "tier": "mid",
+        "reason": "536 executable changed lines including tests"
+      },
+      {
+        "reviewer": "project-standards",
+        "tier": "mid",
+        "reason": "AGENTS instruction fallback"
+      }
+    ],
+    "notes": [
+      "AGENTS.md supplies project standards; CLAUDE.md is its symlink.",
+      "Two untracked execution/readiness docs excluded from reviewed tracked diff.",
+      "Full local suite:3243 passed,34 warnings,no skips; Python3.11 lockfile environment; Ruff/mypy/pyright pass.",
+      "Review is pre-publication; merge/deployment obligations are caller-owned gates after review.",
+      "Testing reviewer used an interpreter without pygit2 and could not rerun tests; parent independently ran all3243 tests under /tmp/d04-api-python311 with exact lockfile and isolated database/Redis. This is a reviewer rerun limitation, not a missing implementation verification.",
+      "Independent cross-model adversarial review: route claude, requested/actual model claude-opus-5, requested effort high, actual effort unverified, receipt_supported true, independence_verified true.",
+      "One peer candidate reclassified as pre-existing: baseline 39a1fa14 already omits deprecated schema and container-property declaration types; D04 explicitly excludes schema declarations from ordinary individual recognition. No primary findings remain.",
+      "First-evidence backfilled: 0; missing-quote demotions: 0; confidence suppressions: 0; mode-aware demotions: 0.",
+      "Validator shortcut-skipped: 0. Selected findings: 0; no primary P0/P1 or actionable candidate requires a validator."
+    ],
+    "cross_model_outcome": "folded",
+    "validator": {
+      "outcome": "empty-batch",
+      "reason": "Merge leaf selected zero findings for validation.",
+      "confirmed": 0,
+      "rejected": 0,
+      "unresolved": 0,
+      "malformed": 0,
+      "failed": 0,
+      "shortcut_skipped": 0,
+      "selected": 0
+    },
+    "suppressed_by_confidence": {},
+    "first_evidence_backfilled": 0,
+    "missing_quote_demotions": 0,
+    "mode_aware_demotions": 0,
+    "protected_subject_reclassifications": 0,
+    "degraded_blockers": 0,
+    "failed_reviewers": [],
+    "timed_out_reviewers": [],
+    "compound_packs": {
+      "roots": [],
+      "errors": [],
+      "warnings": []
+    },
+    "untracked_excluded": [
+      "docs/releases/d04-execution-receipt.json",
+      "docs/releases/d04-individual-mint-readiness.md"
+    ],
+    "not_assessed": [
+      "Dedicated learnings, agent-native and deployment reviewer lenses were not dispatched."
+    ],
+    "apply": "Skipped: agent report-only mode; caller owns fixes and delivery."
+  },
+  "artifact_path": "/tmp/compound-engineering-1000/ce-code-review/d04-20260920-090124-323ec862",
+  "run_id": "d04-20260920-090124-323ec862",
+  "verdict_reason": "No primary findings or unmet explicit-plan requirements remain. The deprecated schema-type recognition gap predates this change and is retained separately for B14 reconciliation. Publication and deployment gates remain caller-owned."
+}
