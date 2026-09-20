@@ -23,6 +23,7 @@ from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.generation import GenerateSuggestionsRequest
 from ontokit.schemas.suggestion import (
+    SuggestionBeaconRequest,
     SuggestionSaveRequest,
     SuggestionSubmitRequest,
     SuggestionSubmitResponse,
@@ -85,8 +86,10 @@ async def test_p0_1_suggestion_save_commits_with_real_git_service(
             user,
         )
         assert result.commit_hash
-        assert git.get_repository(project_id).read_file(session.branch, "ontology.ttl").endswith(
-            b"ex:Thing a ex:Class .\n"
+        assert (
+            git.get_repository(project_id)
+            .read_file(session.branch, "ontology.ttl")
+            .endswith(b"ex:Thing a ex:Class .\n")
         )
     finally:
         await _delete_project(real_db_session, project_id)
@@ -249,8 +252,7 @@ async def test_r2_1_saved_entity_embedding_does_not_block_its_own_submit(
     git.create_branch(project_id, session.branch, from_ref="main")
     minted_iri = f"http://example.org/ontology/{project_id}#Minted"
     content = (
-        initial.decode()
-        + f'<{minted_iri}> a owl:Class ; rdfs:label "Minted concept" ; '
+        initial.decode() + f'<{minted_iri}> a owl:Class ; rdfs:label "Minted concept" ; '
         "rdfs:subClassOf owl:Thing .\n"
     )
     suggestions = SuggestionService(real_db_session, git)
@@ -344,8 +346,7 @@ ex:RestrictedWork a owl:Class ;
     git.create_branch(project_id, session.branch, from_ref="main")
     minted_iri = "https://folio.example/ontology/Minted"
     content = (
-        initial.decode()
-        + f'\n<{minted_iri}> a owl:Class ; rdfs:label "Minted" ; '
+        initial.decode() + f'\n<{minted_iri}> a owl:Class ; rdfs:label "Minted" ; '
         "rdfs:subClassOf ex:RestrictedWork, [\n"
         "    a owl:Restriction ;\n"
         "    owl:onProperty ex:hasRisk ;\n"
@@ -421,8 +422,7 @@ folio:Actor a owl:Class ; rdfs:label "Actor" .
     git.create_branch(project_id, session.branch, from_ref="main")
     minted_iri = "https://folio.example/ontology/ZorpticWidgetClaim"
     content = (
-        initial.decode()
-        + f'\n<{minted_iri}> a owl:Class ; rdfs:label "Zorptic Widget Claim"@en ; '
+        initial.decode() + f'\n<{minted_iri}> a owl:Class ; rdfs:label "Zorptic Widget Claim"@en ; '
         "rdfs:subClassOf folio:Actor .\n"
     )
     suggestions = SuggestionService(real_db_session, git)
@@ -488,8 +488,7 @@ ex:Existing a owl:Class ; rdfs:label "Zorptic Widget Claim"@en .
     git.initialize_repository(project_id, initial, "ontology.ttl")
     git.create_branch(project_id, session.branch, from_ref="main")
     content = (
-        initial.decode()
-        + '\nex:Minted a owl:Class ; rdfs:label "Zorptic Widget Claim"@en ; '
+        initial.decode() + '\nex:Minted a owl:Class ; rdfs:label "Zorptic Widget Claim"@en ; '
         "rdfs:subClassOf ex:Actor .\n"
     )
     suggestions = SuggestionService(real_db_session, git)
@@ -675,36 +674,54 @@ async def test_p1_1_unpriced_model_stops_before_provider_on_real_budget_rows(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("role", "content", "expected_status"),
+    ("entry_point", "hint"),
     [
-        ("editor", "not valid turtle", 422),
-        (
-            "suggester",
-            "@prefix ex: <https://example.test/> .\n"
-            "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n"
-            "ex:Minted a owl:Class .\n",
+        ("save", None),
+        ("save", False),
+        ("save_anonymous", None),
+        ("save_anonymous", False),
+        ("beacon_save", None),
+        ("beacon_save_anonymous", None),
+    ],
+)
+@pytest.mark.parametrize(
+    ("declaration", "expected_status"),
+    [
+        pytest.param("not valid turtle", 422, id="malformed"),
+        pytest.param("ex:Minted a owl:Class .", 403, id="class"),
+        pytest.param("ex:Minted a owl:NamedIndividual .", 403, id="explicit-individual"),
+        pytest.param("ex:Minted a ex:ExternalClass .", 403, id="ordinary-individual"),
+        pytest.param(
+            "ex:Minted a [ a owl:Restriction ; owl:onProperty ex:p ; "
+            "owl:someValuesFrom ex:ExternalClass ] .",
             403,
+            id="class-expression-instance",
         ),
     ],
 )
 async def test_p1_7_p1_12_server_gates_content_before_real_git_commit(
     real_db_session: AsyncSession,
     tmp_path: Path,
-    role: str,
-    content: str,
+    entry_point: str,
+    hint: bool | None,
+    declaration: str,
     expected_status: int,
 ) -> None:
-    """Malformed Turtle and client-hidden minting never reach the branch."""
+    """Every public writer refuses hidden minting before Git or session mutation."""
     project_id = uuid4()
-    user = CurrentUser(id=f"write-{role}", name="Writer")
-    project = Project(id=project_id, name=f"write-{role}", owner_id="owner")
-    project.members.append(ProjectMember(user_id=user.id, role=role))
+    anonymous = entry_point.endswith("anonymous")
+    user = CurrentUser(id="write-suggester", name="Writer")
+    project = Project(id=project_id, name="write-gate", owner_id="owner", is_public=True)
+    project.members.append(
+        ProjectMember(user_id=user.id, role="editor" if expected_status == 422 else "suggester")
+    )
     session = SuggestionSession(
         project_id=project_id,
         user_id=user.id,
-        session_id=f"write-{role}",
-        branch=f"suggestion/write-{role}",
+        session_id="write-gate",
+        branch="suggestion/write-gate",
         beacon_token="integration-token",
+        is_anonymous=anonymous,
     )
     real_db_session.add_all([project, session])
     await real_db_session.commit()
@@ -713,22 +730,54 @@ async def test_p1_7_p1_12_server_gates_content_before_real_git_commit(
     initial = b"@prefix ex: <https://example.test/> .\n"
     git.initialize_repository(project_id, initial, "ontology.ttl")
     git.create_branch(project_id, session.branch, from_ref="main")
+    head = git.get_repository(project_id).get_branch_commit_hash(session.branch)
+    fields = (
+        "changes_count",
+        "anonymous_content_bytes",
+        "entities_modified",
+        "last_activity",
+        "revision",
+        "status",
+        "summary",
+    )
+    before = {field: getattr(session, field) for field in fields}
+    content = initial.decode() + "@prefix owl: <http://www.w3.org/2002/07/owl#> .\n" + declaration
+    service = SuggestionService(real_db_session, git)
 
     try:
-        with pytest.raises(HTTPException) as exc_info:
-            await SuggestionService(real_db_session, git).save(
-                project_id,
-                session.session_id,
-                SuggestionSaveRequest(
+        with (
+            patch.object(service, "_enqueue_branch_refresh", new_callable=AsyncMock) as refresh,
+            patch(
+                "ontokit.services.suggestion_service.verify_beacon_token",
+                return_value=session.session_id,
+            ),
+            pytest.raises(HTTPException) as exc_info,
+        ):
+            if entry_point.startswith("beacon"):
+                beacon = SuggestionBeaconRequest(session_id=session.session_id, content=content)
+                await getattr(service, entry_point)(project_id, beacon, session.session_id)
+            else:
+                request = SuggestionSaveRequest(
                     content=content,
                     entity_iri="https://example.test/Minted",
                     entity_label="Minted",
-                    mints_entity=False,
-                ),
-                user,
-            )
+                    **({} if hint is None else {"mints_entity": hint}),
+                )
+                await getattr(service, entry_point)(
+                    project_id,
+                    session.session_id,
+                    request,
+                    session.session_id if anonymous else user,
+                )
         assert exc_info.value.status_code == expected_status
+        if expected_status == 403:
+            assert exc_info.value.detail["reason"] == "trust_required_to_mint"
         assert git.get_file_from_branch(project_id, session.branch, "ontology.ttl") == initial
+        assert git.get_repository(project_id).get_branch_commit_hash(session.branch) == head
+        assert {field: getattr(session, field) for field in fields} == before
+        await real_db_session.refresh(session)
+        assert {field: getattr(session, field) for field in fields} == before
+        refresh.assert_not_awaited()
     finally:
         await _delete_project(real_db_session, project_id)
 

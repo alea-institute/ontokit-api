@@ -1,0 +1,270 @@
+{
+  "status": "complete",
+  "mode": "non-interactive",
+  "plan_path": "docs/plans/2026-09-20-0839-fix-individual-mint-enforcement-plan.md",
+  "sha256": "033cc5a1d9a8159200c505ac89dad13e520ad7a8fa08c8701120dabc39f6b12b",
+  "raw_reviews": {
+    "noniri-local": {
+      "reviewer": "noniri-local",
+      "findings": [
+        {
+          "title": "Cover named individuals typed with anonymous class expressions",
+          "severity": "P2",
+          "section": "KTD2 \u2014 Parsed identity sets; U1 \u2014 Individual recognition",
+          "why_it_matters": "A new named subject can assert membership in a blank-node class expression, for example ex:new a [ a owl:Restriction; owl:onProperty ex:p; owl:someValuesFrom ex:C ]. Restricting membership targets to URIRef objects would let that subject evade the repaired guard, while all listed positive tests still pass. This is explicit graph membership rather than OWL inference; the subject remains named even though its class expression is anonymous. The mapping is documented in the [W3C OWL-to-RDF mapping](https://www.w3.org/TR/2009/REC-owl2-mapping-to-rdf-20091027/).",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Specify that a URIRef subject with a BNode rdf:type object counts as a named individual for mint authorization. Add an extraction regression and a restricted-save denial for a named subject typed with an anonymous restriction, while retaining the exclusion of BNode subjects themselves. Keep literal rdf:type objects distinct from these class-expression assertions rather than treating every non-URI object alike.",
+          "confidence": 75,
+          "evidence": [
+            "Recognition includes explicit `owl:NamedIndividual` declarations and ordinary class-membership assertions whose class need not be declared locally.",
+            "Explicit individual, ordinary local/external type, both forms, multiple types and `owl:Thing` each yield one named identity.",
+            "Object-only IRI references, blank-node individuals/restrictions/lists and ontology/datatype/axiom metadata do not create individual identities by themselves."
+          ]
+        }
+      ],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "whole-doc-claude": {
+      "reviewer": "whole-doc-claude",
+      "cross_model_route": "claude",
+      "cross_model_target": "claude",
+      "cross_model_harness": "claude",
+      "serving_family": "claude",
+      "independence_verified": true,
+      "model_requested": "claude-opus-5",
+      "model_actual": "claude-opus-5",
+      "effort_requested": "high",
+      "findings": [
+        {
+          "title": "R1 enforcement requirement has no implementing unit",
+          "severity": "P2",
+          "section": "U1 - Recognize typed individual minting / U2 - Prove permission and persistence behavior (Implementation Units)",
+          "why_it_matters": "An implementer following the unit table will not find where R1 (the three save paths return the existing 403 trust denial for new individuals) actually gets built: U1 claims only R2/R3/R5 and U2 is explicitly tests-only (\"production service only if integration reveals a necessary correction\"). The plan relies on KTD3's statement that all three writers already call `_assert_branch_content_can_mint`, so R1 is satisfied only if the helper U1 extends is the one that guard consumes \u2014 a dependency the plan never states. Naming R1 on U1 and stating that the extended helper must be the guard's input makes the wiring an explicit U1 deliverable rather than something discovered when U2's tests fail.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "In U1, change **Requirements** to \"R1, R2, R3, R5\" and add to the Approach: \"The extended recognition helper must be the set `_assert_branch_content_can_mint` compares, so all three writers (save, save_anonymous, beacon_save) enforce R1 without further production changes; U2 only verifies this.\"",
+          "confidence": 50,
+          "evidence": [
+            "**Goal:** Implement the bounded RDF identity rule. **Requirements:** R2, R3, R5. **Dependencies:** None.",
+            "production service only if integration reveals a necessary correction",
+            "All three writers already invoke the guard before commit under the branch lock."
+          ]
+        },
+        {
+          "title": "Definition of Done requires cross-repo roadmap update no unit owns",
+          "severity": "P3",
+          "section": "Definition of Done",
+          "why_it_matters": "The DoD cannot be met from within the plan's own units: every listed file is in ontokit-api, yet completion requires the OntoKit *web* master roadmap to link the plan and publication evidence. The Goal Capsule assigns publication/integration to the delivery orchestrator but never mentions the roadmap, so an executing agent either stops at the merged PR (DoD unmet) or edits a second repository without a stated mandate. Naming the owner and the artifact in the DoD removes that ambiguity.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Amend the DoD sentence to: \"The reviewed change is merged into API `dev` after required checks, and the delivery orchestrator (not U1/U2) records the plan link and publication evidence in the web master roadmap entry for D04 under B14.\"",
+          "confidence": 50,
+          "evidence": [
+            "The reviewed change is merged into API `dev` after required checks, and the web master roadmap links its plan and publication evidence.",
+            "The delivery orchestrator owns publication and integration under standing authorization.",
+            "**Files:** `ontokit/services/suggestion_service.py`, new `tests/unit/test_suggestion_mint_entities.py`"
+          ]
+        },
+        {
+          "title": "R4 side-effect checks only scripted for beacon denials",
+          "severity": "P3",
+          "section": "U2 - Prove permission and persistence behavior across every save path (Test scenarios)",
+          "why_it_matters": "R4 (rejected saves leave Git, session metadata/counters and refresh scheduling untouched) and AE1 (\"denied without persisting anything\") apply to authenticated and anonymous `save` as well, but U2's scenarios assert metadata/counter/refresh non-mutation only for beacon actors (scenario 2); scenario 1 checks the reason payload and scenario 5 checks Git only. A denial path in `save`/`save_anonymous` that bumps a counter or schedules a refresh before raising would pass U2 as written. Extending scenario 1 with the same side-effect assertions closes the gap at no design cost.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Change U2 test scenario 1 to end: \"...preserving the existing reason payload, and with no session metadata/counter change or refresh scheduling (same assertions as scenario 2).\"",
+          "confidence": 50,
+          "evidence": [
+            "1. Restricted authenticated and anonymous saves deny both new individual forms despite an absent/false client hint, preserving the existing reason payload.",
+            "2. Authenticated and anonymous beacon actors receive the same enforcement without Git commit, metadata/counter change or refresh scheduling.",
+            "R4. Rejected saves preserve Git content/revisions, session metadata/counters and refresh scheduling."
+          ]
+        }
+      ],
+      "residual_risks": [
+        "KTD2's explicit exclusion set is enumerated only by category (ontology metadata, datatype, axiom, restriction, list). Content that legitimately introduces a new IRI typed with an unlisted RDF/OWL/SKOS structural type (e.g., a new `owl:Ontology` header IRI or `skos:ConceptScheme`) will be treated as minting and denied for restricted actors; U1 scenario 3/4 tests only prove the listed categories.",
+        "Branch-relative comparison (KTD3/R6) means a restricted actor who removes an existing individual in one save cannot restore it in a later save on the same branch, since the intermediate branch head no longer contains it. This is consistent with the plan's rule but is not called out as an accepted behavior."
+      ],
+      "deferred_questions": []
+    },
+    "adversarial-claude": {
+      "reviewer": "adversarial-claude",
+      "cross_model_route": "claude",
+      "cross_model_target": "claude",
+      "cross_model_harness": "claude",
+      "serving_family": "claude",
+      "independence_verified": true,
+      "model_requested": "claude-opus-5",
+      "model_actual": "claude-opus-5",
+      "effort_requested": "high",
+      "findings": [
+        {
+          "title": "'Existing' baseline undefined; reference-then-type two-step bypasses mint check",
+          "severity": "P1",
+          "section": "Product Contract \u2014 R3 (existing entities remain editable) and R2 (recognition rule)",
+          "why_it_matters": "A restricted contributor can mint an individual in two saves if 'existing' is computed as 'any IRI already present in the baseline graph' rather than 'IRI the same typed-entity detector recognizes in the baseline': save 1 adds `:a :rel :newB` (object-only reference, allowed under R3), save 2 adds `:newB rdf:type :C` \u2014 and :newB now 'exists' in the branch. R3 says 'Existing recognized entity IRIs remain editable' and 'Referenced objects ... alone do not count as newly minted', which reads both ways, and none of AE1\u2013AE4 exercise the sequence. Stating that the baseline set is the detector's output on the baseline (not the set of all baseline IRIs) closes the gap with no change to the agreed outcome.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "In R3, replace 'Existing recognized entity IRIs remain editable' with 'IRIs the same typed-entity detector recognizes in the save baseline remain editable; an IRI present in the baseline only as an object or untyped subject is not existing for mint purposes.' Add AE5: a restricted actor first references `:newB` as an object, then in a later save types it; the second save is denied. Covers R2, R3.",
+          "confidence": 75,
+          "evidence": [
+            "Existing recognized entity IRIs remain editable, including additional types, relationship/label changes and class/property-individual punning. Referenced objects and blank-node identities alone do not count as newly minted named entities.",
+            "Recognition includes explicit `owl:NamedIndividual` declarations and ordinary class-membership assertions whose class need not be declared locally."
+          ]
+        },
+        {
+          "title": "'Ordinary class-membership' assumes a clean meta-type partition",
+          "severity": "P2",
+          "section": "Product Contract \u2014 R2 (recognition rule) and Summary",
+          "why_it_matters": "Implementers will pick different exclusion sets for what counts as 'ordinary', because the rule fires on any `?s rdf:type ?C` whose class is not one the helper already treats as a class/property declaration. Subjects typed `owl:Ontology`, `owl:AllDifferent`, `owl:Axiom`, `rdfs:Datatype`, or `sh:NodeShape` are then either treated as minted individuals (blocking restricted contributors from ontology metadata/shape edits) or silently excluded (creating gaps), depending on the implementer's list. Naming the exclusion rule makes AE2's 'external class' case and the tests deterministic.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "In R2, define 'ordinary' as: any `rdf:type` object that is not a class, property, or datatype meta-type already recognized by the declaration helper (`owl:Class`, `rdfs:Class`, `owl:ObjectProperty`, `owl:DatatypeProperty`, `owl:AnnotationProperty`, `rdf:Property`, `rdfs:Datatype`) and not `owl:Ontology`, `owl:Axiom`, `owl:AllDifferent`, `owl:AllDisjointClasses`. Note that the list is the helper's existing taxonomy plus these ontology-structure types, so the editor/index taxonomy is unchanged.",
+          "confidence": 50,
+          "evidence": [
+            "ordinary class-membership assertions whose class need not be declared locally",
+            "Apply the existing mint capability to explicit named individuals and ordinary class-typed named individuals"
+          ]
+        },
+        {
+          "title": "Blank-node typed individuals stay permitted; success criteria may not close the stated problem",
+          "severity": "P2",
+          "section": "Product Contract \u2014 Problem Frame, Objective, and R3 blank-node exclusion",
+          "why_it_matters": "All acceptance examples can pass while the Problem Frame's stated gap ('add typed individuals despite lacking the capability') remains open: a restricted contributor can still write `[] a :Person ; rdfs:label \"Bob\" ; :worksFor :acme` and the save is allowed because blank-node identities 'do not count'. If any downstream step (submit, merge, index) skolemizes blank nodes into IRIs, the restriction is trivially bypassed; if not, the individual still lands in the branch and index as a typed entity without an IRI. The document narrows the Objective to 'named, typed' individuals but never states that blank-node individuals are an accepted residual or that no skolemization occurs, so an implementer cannot tell whether this is a deliberate boundary or an oversight.",
+          "finding_type": "omission",
+          "autofix_class": "manual",
+          "suggested_fix": "State in Scope Boundaries whether blank-node typed individuals are an accepted residual of this repair (with the assumption that no submit/merge/index step assigns them IRIs), or bring typed blank nodes with labels into the detector.",
+          "confidence": 50,
+          "evidence": [
+            "A contributor can therefore add typed individuals despite lacking the capability advertised by TrustService.",
+            "Referenced objects and blank-node identities alone do not count as newly minted named entities.",
+            "Contributors without mint permission cannot add new named, typed individuals through suggestion saves."
+          ]
+        }
+      ],
+      "residual_risks": [
+        "The Means assumes authenticated, anonymous and beacon saves all route through the single 'existing branch-content authorization check' so one helper extension covers 'every suggestion content-save path'; if beacon save or anonymous save short-circuits that check today (common for fire-and-forget endpoints), R1 is unmet for that path and only the codebase can confirm.",
+        "Scope Boundaries defers 'retroactive submit authorization' and R6 keeps resumed-session branches as baseline, so a branch that already contains individuals minted through the old omission remains editable, extendable and submittable by a restricted contributor; the repair therefore closes new drafts but not the existing population until B14 reconciliation lands."
+      ],
+      "deferred_questions": [
+        "Does any submit, merge or index step skolemize blank nodes into IRIs? If yes, blank-node typed individuals are a live bypass and must enter the detector; if no, the blank-node exclusion can be recorded as an accepted residual.",
+        "Which rdf:type objects does the existing declaration helper already treat as class/property/datatype meta-types? The 'ordinary class-membership' exclusion set must be defined relative to that list."
+      ]
+    },
+    "security-lens-claude": {
+      "reviewer": "security-lens-claude",
+      "cross_model_route": "claude",
+      "cross_model_target": "claude",
+      "cross_model_harness": "claude",
+      "serving_family": "claude",
+      "independence_verified": true,
+      "model_requested": "claude-opus-5",
+      "model_actual": "claude-opus-5",
+      "effort_requested": "high",
+      "findings": [
+        {
+          "title": "Non-IRI rdf:type objects unaddressed; anonymous-class typing may bypass mint check",
+          "severity": "P2",
+          "section": "KTD2 - Compare parsed named-IRI sets (Planning Contract) and U1 - Recognize typed individual minting",
+          "why_it_matters": "A restricted actor could mint a new named subject whose only type is an anonymous class expression (`ex:new a [ a owl:Restriction ; owl:onProperty ex:p ; owl:someValuesFrom ex:C ]`, or an `owl:unionOf`/`owl:oneOf` bnode) or a literal, if the helper is implemented as 'subject IRI whose rdf:type object is a URIRef not in the exclusion set'. KTD2 describes ordinary typing as a 'class-membership target' and the U1 matrix only exercises IRI types ('ordinary local/external type') and blank-node *subjects*; nothing states that a blank-node or literal type object still counts as minting the named subject. Because the fix's whole purpose is closing a Turtle-derived bypass, leaving the non-IRI type-object case unspecified reopens a realistic OWL idiom as a hole. Committing KTD2 to fail-closed for any non-excluded type object, with a positive test, removes the ambiguity.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "In KTD2 add: 'Any rdf:type triple on a named subject whose object is not an IRI in the documented exclusion set counts as ordinary typing, including blank-node class expressions (restrictions, unionOf/oneOf lists) and literal objects; the rule is fail-closed on type objects.' In U1 test scenario 1 add: 'a named subject whose only type is an anonymous restriction/union bnode, or a literal, yields one named identity.'",
+          "confidence": 75,
+          "evidence": [
+            "Explicit individuals count; ordinary typing counts when its type is a class-membership target rather than an RDF/OWL schema or structural declaration. Use an explicit documented exclusion set, not a whole-namespace blacklist",
+            "1. Explicit individual, ordinary local/external type, both forms, multiple types and `owl:Thing` each yield one named identity.",
+            "3. Object-only IRI references, blank-node individuals/restrictions/lists and ontology/datatype/axiom metadata do not create individual identities by themselves."
+          ]
+        },
+        {
+          "title": "Exclusion set can silently exceed existing class/property recognizer coverage",
+          "severity": "P3",
+          "section": "Assumptions and KTD2 - Compare parsed named-IRI sets (Planning Contract)",
+          "why_it_matters": "Every IRI placed in the mint helper's 'schema/structural' exclusion set that the existing `_declared_entity_iris` class/property recognizer does not itself claim becomes a mint path for restricted actors (e.g. `ex:new a owl:FunctionalProperty`, `rdfs:Class`, `rdf:Property`, `owl:AnnotationProperty`, `rdfs:Datatype` alone). The plan requires an explicit exclusion set and tests for structural types but does not state the invariant that the set must be limited to types the existing recognizer already covers or that cannot introduce a named entity, so an implementer choosing a 'complete' OWL vocabulary list would widen the gap the fix is closing. Stating the invariant and adding one negative test per excluded IRI keeps the two recognizers gap-free.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Add to KTD2: 'The exclusion set is limited to IRIs that are either already recognized by `_declared_entity_iris` as class/property declarations or are non-entity structural/metadata types (owl:Ontology, owl:Axiom, owl:Restriction, owl:AllDisjointClasses, rdf:List and similar). Each excluded IRI gets a test proving a restricted actor cannot introduce a new named subject typed solely with it.'",
+          "confidence": 50,
+          "evidence": [
+            "Standard ontology metadata, datatype, axiom, restriction and list structure types require exclusions, verified by explicit tests.",
+            "Use an explicit documented exclusion set, not a whole-namespace blacklist"
+          ]
+        }
+      ],
+      "residual_risks": [
+        "Historical branches that already contain individuals minted through the old omission remain editable and submittable by restricted actors under R6/KTD3 (baseline is the branch itself); the plan defers reconciliation to B14 but records nothing that lets B14 identify those branches, so the window stays open indefinitely without a separate inventory step.",
+        "Restricted actors can still introduce untyped named subjects (label-only, owl:sameAs, rdfs:subClassOf-only) and named datatypes; the plan scopes these out explicitly, so they remain an open mint path until B14 policy work lands."
+      ],
+      "deferred_questions": [
+        "Should B14 reconciliation get an inventory of pre-fix branches containing restricted-actor individuals (e.g., by running the new mint helper over stored branches against the default branch), or is per-submission review the intended detection?"
+      ]
+    },
+    "adversarial": {
+      "reviewer": "adversarial",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "coherence": {
+      "reviewer": "coherence",
+      "findings": [
+        {
+          "title": "Anonymous beacon entry point is missing from the writer contract",
+          "severity": "P2",
+          "section": "U2 - Prove permission and persistence behavior across every save path",
+          "why_it_matters": "Implementers can satisfy the stated \"all three content writers\" scope while omitting the separate anonymous beacon entry point, leaving one required save path without a direct enforcement or persistence regression. The plan already requires coverage for \"authenticated and anonymous beacon actors\" but its source list names only `beacon_save`; explicitly mapping both public beacon methods to the shared flush gate makes the promised every-path coverage checkable.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Name both `beacon_save` and `beacon_save_anonymous` in the Sources and U2 approach, and state that both are exercised through the shared `_beacon_flush` gate; update the scenario matrix to show authenticated and anonymous beacon coverage separately.",
+          "confidence": 75,
+          "evidence": [
+            "This deliverable repairs the three existing content-write gates.",
+            "Parameterize established permission fixtures over both individual forms and exercise all three content writers.",
+            "Authenticated and anonymous beacon actors receive the same enforcement without Git commit, metadata/counter change or refresh scheduling.",
+            "`ontokit/services/suggestion_service.py`: `_declared_entity_iris`, `_declared_entities`, `_assert_branch_content_can_mint`, `save`, `save_anonymous`, `beacon_save`."
+          ]
+        }
+      ],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "scope": {
+      "reviewer": "scope-guardian",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "security": {
+      "reviewer": "security-lens",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "feasibility": {
+      "reviewer": "feasibility",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    }
+  },
+  "resolved_reviews": {
+    "coherence": "Applied: explicitly map four public methods to three write gates and test both beacon entry points.",
+    "noniri-local": "Applied: named subjects with blank-node class expressions count; add extraction and save regression.",
+    "security-lens-claude": "First finding independently corroborated for blank-node class expressions and applied. Literal rdf:type is not OWL class membership; conservative implementation handling may be tested without claiming semantic validity. Exclusion invariant proposal conflicts with the explicit metadata/datatype scope and existing class/property coverage. Historical/untyped concerns already deferred to B14; no new decision.",
+    "adversarial-claude": "Reference-then-type concern already resolved by parsed recognized-set comparison KTD2 and first-typing assumption. Meta-type categories already require documented exclusions and tests. Blank-node subjects explicitly outside named-identity contract; source search found no skolemization. All four entry paths verified to share three guards. Historical residual already deferred.",
+    "whole-doc-claude": "No retained defects: U1 existing extraction seam and KTD1/3 establish wiring; delivery orchestrator owns integration including roadmap; R4 and U2 verification require all-save persistence evidence. Unknown structural vocabularies use stated ordinary class membership policy. Removal then re-add follows explicit branch-relative semantics; no new policy needed.",
+    "feasibility": "No findings.",
+    "security": "No findings.",
+    "scope": "No findings.",
+    "adversarial": "No findings."
+  },
+  "fixes_applied": 2,
+  "proposed_fixes_count": 0,
+  "decisions_count": 0,
+  "fyi_count": 0,
+  "authority": "Authorized corrections to implementation and verification under established Product Contract",
+  "result": "Document review complete (non-interactive mode). Applied 2 fixes: explicit public beacon coverage; anonymous-class-expression individual coverage. Review complete."
+}

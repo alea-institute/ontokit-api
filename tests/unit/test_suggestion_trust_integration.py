@@ -22,6 +22,7 @@ from ontokit.models.suggestion_session import SuggestionSessionStatus
 from ontokit.schemas.suggestion import (
     BulkReviewAction,
     BulkReviewRequest,
+    SuggestionBeaconRequest,
     SuggestionRejectRequest,
     SuggestionRequestChangesRequest,
     SuggestionSaveRequest,
@@ -70,7 +71,8 @@ def _project(
     project.id = PROJECT_ID
     project.name = "Test Project"
     project.is_public = True
-    project.source_file_path = None
+    project.source_file_path = "ontology.ttl"
+    project.github_integration = None
     project.members = members if members is not None else []
     project.trust_promotion_threshold = threshold
     project.auto_accept_enabled = auto_accept_enabled
@@ -526,6 +528,194 @@ class TestMintingGate:
 
         assert exc.value.status_code == 403
         service.git_service.commit_changes.assert_not_called()
+
+
+_SAVE_PREFIXES = "@prefix : <http://x#> . @prefix owl: <http://www.w3.org/2002/07/owl#> . "
+
+
+class TestIndividualSaveBoundaries:
+    @pytest.mark.parametrize(
+        "entry_point",
+        [
+            "save",
+            "save_anonymous",
+            "beacon_save",
+            "beacon_save_anonymous",
+        ],
+    )
+    @pytest.mark.parametrize(
+        ("baseline", "proposed", "denied"),
+        [
+            pytest.param(
+                ":A a owl:NamedIndividual .",
+                ':A a owl:NamedIndividual, :Extra ; :label "edit" .',
+                False,
+                id="existing-explicit",
+            ),
+            pytest.param(
+                ":A a :External .",
+                ":A a :External, :Extra ; :related :Reference .",
+                False,
+                id="existing-ordinary",
+            ),
+            pytest.param(
+                ":A a owl:Class .", ":A a owl:Class, owl:NamedIndividual .", False, id="punning"
+            ),
+            pytest.param(
+                ":A a :External .",
+                ":A a :External . :B a :External .",
+                True,
+                id="second-individual",
+            ),
+            pytest.param(
+                ':A :label "seed" .', ':A :label "seed" ; a :External .', True, id="label-then-type"
+            ),
+            pytest.param(
+                ":Other :related :A .",
+                ":Other :related :A . :A a :External .",
+                True,
+                id="reference-then-type",
+            ),
+            pytest.param(None, ":A a :External .", True, id="missing-branch-baseline"),
+        ],
+    )
+    async def test_branch_relative_identity_on_resumed_session(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        entry_point: str,
+        baseline: str | None,
+        proposed: str,
+        denied: bool,
+    ) -> None:
+        """The resumed branch is the baseline, including after the actor loses trust."""
+        project = _project([_member("contributor-1")])
+        session = _session(
+            status=SuggestionSessionStatus.ACTIVE.value,
+            is_anonymous=entry_point.endswith("anonymous"),
+            changes_count=3,
+        )
+        session.revision = 2
+        mock_db.execute.side_effect = _results(_result_for(session), project=project)
+        service.git_service.get_default_branch.return_value = "main"
+
+        def branch_content(_project_id: uuid.UUID, branch: str, _filename: str) -> bytes:
+            if branch == "main":
+                return _SAVE_PREFIXES.encode()
+            assert branch == session.branch
+            if baseline is None:
+                raise KeyError("ontology.ttl")
+            return (_SAVE_PREFIXES + baseline).encode()
+
+        service.git_service.get_file_from_branch.side_effect = branch_content
+        service.git_service.commit_changes.return_value.hash = "saved"
+        before = (
+            session.changes_count,
+            session.anonymous_content_bytes,
+            session.entities_modified,
+            session.last_activity,
+            session.revision,
+        )
+        with (
+            patch(
+                "ontokit.services.suggestion_service.verify_beacon_token",
+                return_value=session.session_id,
+            ),
+            patch.object(service, "_enqueue_branch_refresh", new_callable=AsyncMock) as refresh,
+        ):
+
+            async def save() -> None:
+                content = _SAVE_PREFIXES + proposed
+                if entry_point.startswith("beacon"):
+                    await getattr(service, entry_point)(
+                        PROJECT_ID,
+                        SuggestionBeaconRequest(session_id=session.session_id, content=content),
+                        session.session_id,
+                    )
+                else:
+                    await getattr(service, entry_point)(
+                        PROJECT_ID,
+                        session.session_id,
+                        SuggestionSaveRequest(
+                            content=content,
+                            entity_iri="http://x#A",
+                            entity_label="A",
+                            mints_entity=False,
+                        ),
+                        session.session_id if session.is_anonymous else _user(),
+                    )
+
+            if denied:
+                with pytest.raises(KeyError if baseline is None else HTTPException) as exc:
+                    await save()
+                if baseline is not None:
+                    assert exc.value.status_code == 403
+                    assert exc.value.detail["reason"] == "trust_required_to_mint"
+                service.git_service.commit_changes.assert_not_called()
+                mock_db.commit.assert_not_awaited()
+                refresh.assert_not_awaited()
+                assert (
+                    session.changes_count,
+                    session.anonymous_content_bytes,
+                    session.entities_modified,
+                    session.last_activity,
+                    session.revision,
+                ) == before
+            else:
+                await save()
+                service.git_service.commit_changes.assert_called_once()
+                assert session.changes_count == 4
+                assert session.revision == 2
+            service.git_service.get_file_from_branch.assert_called_with(
+                PROJECT_ID, session.branch, "ontology.ttl"
+            )
+
+    @pytest.mark.parametrize("role,trusted", [("suggester", True), ("editor", False)])
+    @pytest.mark.parametrize("declaration", [":A a owl:NamedIndividual .", ":A a :External ."])
+    @pytest.mark.parametrize("entry_point", ["save", "beacon_save"])
+    async def test_trusted_and_reviewer_create_individuals(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        role: str,
+        trusted: bool,
+        declaration: str,
+        entry_point: str,
+    ) -> None:
+        project = _project([_member("contributor-1", role, is_trusted=trusted)])
+        session = _session(status=SuggestionSessionStatus.ACTIVE.value, changes_count=0)
+        mock_db.execute.side_effect = _results(_result_for(session), project=project)
+        service.git_service.get_file_from_branch.return_value = _SAVE_PREFIXES.encode()
+        service.git_service.commit_changes.return_value.hash = "saved"
+        with (
+            patch.object(service, "_enqueue_branch_refresh", new_callable=AsyncMock),
+            patch.object(
+                service, "_validate_submission_content", new_callable=AsyncMock
+            ) as validate,
+            patch(
+                "ontokit.services.suggestion_service.verify_beacon_token",
+                return_value=session.session_id,
+            ),
+        ):
+            content = _SAVE_PREFIXES + declaration
+            if entry_point == "save":
+                await service.save(
+                    PROJECT_ID,
+                    session.session_id,
+                    SuggestionSaveRequest(
+                        content=content, entity_iri="http://x#A", entity_label="A"
+                    ),
+                    _user(),
+                )
+            else:
+                await service.beacon_save(
+                    PROJECT_ID,
+                    SuggestionBeaconRequest(session_id=session.session_id, content=content),
+                    "token",
+                )
+            service.git_service.commit_changes.assert_called_once()
+            assert session.changes_count == 1
+            validate.assert_not_awaited()
 
 
 class TestCapabilities:
