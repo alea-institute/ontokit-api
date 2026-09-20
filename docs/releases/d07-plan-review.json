@@ -1,0 +1,344 @@
+{
+  "status": "complete",
+  "document": "docs/plans/2026-09-20-1820-fix-schema-mint-authorization-plan.md",
+  "sha256": "133eefd8733ff56d25ab0a71a1dbe42f5a4aa8162b5cf84df4b6227644a78476",
+  "mode": "non-interactive",
+  "edit_authority": "Apply corrections needed to satisfy R1\u2013R6, preserving constraints and user-directed KTD5.",
+  "coverage": [
+    {
+      "reviewer": "coherence",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    {
+      "reviewer": "feasibility",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    {
+      "reviewer": "security-lens",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    {
+      "reviewer": "scope-guardian",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    {
+      "reviewer": "adversarial",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    {
+      "reviewer": "security-lens-claude",
+      "cross_model_route": "claude",
+      "cross_model_target": "claude",
+      "cross_model_harness": "claude",
+      "serving_family": "claude",
+      "independence_verified": true,
+      "model_requested": "claude-opus-5",
+      "model_actual": "claude-opus-5",
+      "effort_requested": "high",
+      "findings": [
+        {
+          "title": "Denial matrix omits untrusted true-hint form for R1 types",
+          "severity": "P3",
+          "section": "U2 \u2014 Prove all save paths preserve authorization and existing edits, test scenario 1",
+          "why_it_matters": "R2 (deny new schema identities regardless of the client mint hint) is only proven for false/omitted hints; an untrusted client asserting the hint as true is the most direct spoof and is not among the six enumerated writer/hint forms, so the R2 claim would be recorded as satisfied without its literal adversarial case being executed. Adding the true-hint form for normal and anonymous saves makes the persisted denial evidence match the requirement text and rules out any hint-dependent branch in the guard being exercised differently for the three new types.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "In U2 test scenario 1, change 'the existing six writer/hint forms: normal and anonymous saves with false/omitted hints, and both beacons' to also include normal and anonymous saves with the hint explicitly set true for an actor without mint capability, so every R1 type is denied across true/false/omitted hints plus both beacons.",
+          "confidence": 50,
+          "evidence": [
+            "R2. All four suggestion save entry points deny new R1 identities without mint capability before changing Git content/head, persistent session state or refresh work, regardless of the client mint hint.",
+            "Each R1 declaration denies across the existing six writer/hint forms: normal and anonymous saves with false/omitted hints, and both beacons."
+          ]
+        },
+        {
+          "title": "No inventory of already-admitted schema identities on existing branches",
+          "severity": "P3",
+          "section": "Assumptions / U2 readiness record",
+          "why_it_matters": "Any suggestion branch where an untrusted contributor already exploited the gap keeps its schema identities as 'existing recognized' after the fix, so that contributor retains edit rights and can submit them while schema-only subjects stay outside the 25-cap, billing and duplicate controls retained by R4. The plan defers reconciliation but never asks whether such branches exist, so the exposure scope is unknown when the B14 remainder is recorded. A read-only inventory in the readiness record turns an open-ended historical question into a bounded one without changing this slice's code scope.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Add to U2 approach step 3: record in `docs/releases/d07-schema-mint-readiness.md` a read-only inventory (count and branch identifiers) of open suggestion branches containing named subjects whose only declaration is one of the three R1 types and which are absent from the default branch, so the deferred historical-branch reconciliation seam carries its exposure scope.",
+          "confidence": 50,
+          "evidence": [
+            "Existing recognized identities remain editable even if they entered a branch before this repair. Reconciliation of historical admitted content is outside this slice.",
+            "Record executed checks, cleanup, review/publication evidence and the B14 remainder in the readiness document."
+          ]
+        }
+      ],
+      "residual_risks": [
+        "Schema-only new subjects remain uncounted by the submission cap, billing and duplicate-label checks by design (R4/KTD1), so after this fix the mint-capability grant is the sole control against unbounded or duplicate-labelled deprecated-class/property creation by trusted contributors; this is not listed among the retained B14 seams.",
+        "Named subjects with no explicit type (e.g., only rdfs:label plus rdfs:subClassOf) and named subjects typed with the remaining structural exclusions can still be added without mint capability; the plan defers this under B14 with no entailment, so a semantically class-like resource can be introduced by an untrusted contributor until that follow-up lands."
+      ],
+      "deferred_questions": [
+        "Confirm that `save`, `save_anonymous`, `beacon_save` and `beacon_save_anonymous` are the only paths that write suggestion-branch content (no reviewer, LLM-review or import path bypasses `_assert_branch_content_can_mint`).",
+        "Confirm the guard evaluates authenticated mint capability from current persisted trust at save time rather than a session-cached flag, since U2 scenario 6 reloads member/project state in the test before saving."
+      ]
+    },
+    {
+      "reviewer": "adversarial-claude",
+      "cross_model_route": "claude",
+      "cross_model_target": "claude",
+      "cross_model_harness": "claude",
+      "serving_family": "claude",
+      "independence_verified": true,
+      "model_requested": "claude-opus-5",
+      "model_actual": "claude-opus-5",
+      "effort_requested": "high",
+      "findings": [
+        {
+          "title": "Three-type list assumed complete without stating the enumeration rule",
+          "severity": "P2",
+          "section": "Product Contract \u2014 Problem Frame and R1 (recognize the three schema types)",
+          "why_it_matters": "If the detector treats other named schema types (rdfs:Datatype is the obvious candidate; owl:Ontology or owl:AnnotationProperty are possible) as non-identity structural declarations, an untrusted contributor can still mint a named schema entity after this fix lands and every acceptance example still passes, because AE1\u2013AE3 only probe the three listed types. The Problem Frame asserts the gap is exactly these three by pointing at the D04 readiness record, but the plan never states the rule that produced that list (which type IRIs the detector currently classifies as structural-but-not-identity), so neither an implementer nor a later reader can check whether the list is exhaustive or merely the three D04 happened to notice. Stating the rule turns a closed-list claim into a verifiable one and lets the implementer add a regression case for any type that falls out of it.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "In the Problem Frame, add one sentence naming the detector's current classification rule and its full structural-non-identity type set (e.g., \"the detector treats the following type IRIs as structural, not identities: \u2026\"), and state that rdfs:Datatype was checked and is already recognized (or, if it is not, add it to R1 and AE1). Add a negative acceptance example asserting that no other named type in that structural set is a schema entity, so the completeness claim has executed evidence under R6.",
+          "confidence": 50,
+          "evidence": [
+            "The current mint detector omits subjects whose only declaration is `owl:DeprecatedClass`, `owl:DeprecatedProperty`, or `rdfs:ContainerMembershipProperty`.",
+            "R1. Recognize named subjects explicitly typed as any of the three schema types named in the Problem Frame when determining newly introduced identities.",
+            "R5. Preserve current handling of blank subjects, references, untyped subjects, other structural types, ordinary individuals"
+          ]
+        },
+        {
+          "title": "R1 and R4 assume detector and classifier type sets are independent",
+          "severity": "P2",
+          "section": "Product Contract \u2014 R1 (mint recognition) vs R4 (submission classifier unchanged)",
+          "why_it_matters": "If the mint detector and the submission declaration-classifier draw their schema-type vocabulary from a shared constant or helper, extending recognition for R1 silently changes the 25-new-entity cap and billing behavior, violating R4 and tripping the stop condition mid-implementation; if they are already separate, the fix deliberately makes the two definitions of \"new schema entity\" diverge (a mint-capable actor can add unlimited deprecated-class subjects without hitting the cap, per AE3). The plan commits to both outcomes without saying which structural situation it expects or how independence is preserved, so the implementer discovers the answer only when the R4 regression suite runs. Naming the assumption up front converts a mid-unit stop into a pre-work check.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Add to the Product Contract Summary (or KTD1's rationale) a sentence stating that the mint detector's type recognition is implemented independently of the submission declaration-classifier's type list, that the R1 extension must not touch the classifier's list, and that the resulting divergence in what the two components count as a new entity is accepted for this deliverable.",
+          "confidence": 50,
+          "evidence": [
+            "R4. Submission duplicate validation, authenticated billing requirements and the 25-new-entity cap retain their existing declaration-classifier behavior.",
+            "A change to submission billing/caps, a missing safe test database, or evidence that the existing save guard cannot enforce R2 requires resolution before dependent work.",
+            "AE3. Covers R4. Given more than 25 newly named schema-only subjects, submission retains its existing classification and billing behavior."
+          ]
+        }
+      ],
+      "residual_risks": [
+        "AE2 (resumed-branch editing) only holds if the branch baseline identity set is recomputed with the new detector at save time. If the baseline is persisted from an earlier detector run, every pre-existing deprecated-class/deprecated-property/container-membership subject on a resumed branch reads as newly minted after rollout and untrusted contributors lose the ability to save at all; the plan defers 'historical-branch reconciliation' without stating which baseline model it assumes.",
+        "After this change the mint detector and the submission cap classifier intentionally disagree on what counts as a new schema entity (R4/AE3). A mint-capable actor can add an unbounded number of deprecated-class subjects without invoking the 25-new-entity cap or billing; the plan accepts this, but nothing records that the divergence is deliberate for future readers."
+      ],
+      "deferred_questions": [
+        "Is the branch-relative baseline computed live from branch content at each save, or persisted from an earlier detector version? The answer determines whether AE2 passes on branches created before this fix.",
+        "Does rdfs:Datatype (and any other type the detector currently classifies as structural) count as a named schema entity for mint purposes, or is it intentionally left to the B14 remainder?"
+      ]
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "cross_model_route": "claude",
+      "cross_model_target": "claude",
+      "cross_model_harness": "claude",
+      "serving_family": "claude",
+      "independence_verified": true,
+      "model_requested": "claude-opus-5",
+      "model_actual": "claude-opus-5",
+      "effort_requested": "high",
+      "findings": [
+        {
+          "title": "Definition of Done requires roadmap update no unit delivers",
+          "severity": "P2",
+          "section": "Definition of Done / U2 - Prove all save paths preserve authorization and existing edits",
+          "why_it_matters": "An implementer who completes U1 and U2 exactly as written will still fail the Definition of Done, because DoD requires the master roadmap to identify completed B14 work while neither unit's Files list nor Approach mentions the roadmap \u2014 U2 step 3 only updates the D07 readiness record, and R6 (the evidence/completion-record requirement) likewise names only that record. KTD5 (serial bounded follow-up) explicitly relies on the roadmap retaining remaining work, so the roadmap edit is a real deliverable, not optional polish. Adding the roadmap document to U2's Files and step 3 closes the gap at the unit that already owns durable evidence.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "In U2, add the master roadmap document to **Files** and extend Approach step 3 to: \"Record executed checks, cleanup, review/publication evidence and the B14 remainder in the readiness document, and mark the completed B14 schema-mint item in the master roadmap while retaining every other outstanding requirement.\"",
+          "confidence": 75,
+          "evidence": [
+            "The readiness record and master roadmap identify completed B14 work and retain every other outstanding requirement.",
+            "Files: `tests/unit/test_suggestion_trust_integration.py`; `tests/integration/test_llm_review_regressions.py`; `docs/releases/d07-schema-mint-readiness.md`.",
+            "Record executed checks, cleanup, review/publication evidence and the B14 remainder in the readiness document."
+          ]
+        },
+        {
+          "title": "R2 'regardless of hint' but U2 tests only false/omitted hints",
+          "severity": "P3",
+          "section": "U2 - Prove all save paths preserve authorization and existing edits, test scenario 1",
+          "why_it_matters": "R2 (the four-writer pre-mutation denial rule) promises denial regardless of the client mint hint, but the U2 denial matrix enumerates only false/omitted hints plus the two beacons, so an untrusted actor sending hint=true with a new R1 identity is never exercised for the newly recognized types. If the hint=true path reaches the guard through a different branch, the plan's own R2 claim would be unproven by its Verification Contract row (\"hints ... satisfy R2/R3\"). Adding the true-hint form to the per-type matrix makes the evidence match the requirement wording.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Change U2 test scenario 1 to: \"Each R1 declaration denies across the existing writer/hint forms plus the true-hint form: normal and anonymous saves with true/false/omitted hints, and both beacons.\"",
+          "confidence": 50,
+          "evidence": [
+            "R2. All four suggestion save entry points deny new R1 identities without mint capability before changing Git content/head, persistent session state or refresh work, regardless of the client mint hint.",
+            "Each R1 declaration denies across the existing six writer/hint forms: normal and anonymous saves with false/omitted hints, and both beacons."
+          ]
+        },
+        {
+          "title": "U1 scenario 7 second clause drops default-branch qualifier",
+          "severity": "P3",
+          "section": "U1 - Recognize schema declarations without changing submission accounting, test scenario 7",
+          "why_it_matters": "Read literally, \"an ordinary classified identity gaining schema typing introduces no submission entity\" is false for a newly added ordinary class (it is itself a submission entity), so an implementer may write an assertion of zero entities that fails, or guess at intent. The first clause is scoped to a default-branch identity; the second clause is only true under that same scoping (the identity already exists on the default branch, so adding schema typing adds nothing new to the classifier). Stating the qualifier makes the R4 control unambiguous.",
+          "finding_type": "error",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Rewrite U1 test scenario 7 as: \"A default-branch schema-only identity gaining ordinary class/property typing enters existing submission validation; a default-branch ordinary classified identity gaining schema typing introduces no additional submission entity.\"",
+          "confidence": 50,
+          "evidence": [
+            "A default-branch schema-only identity gaining ordinary class/property typing enters existing submission validation; an ordinary classified identity gaining schema typing introduces no submission entity."
+          ]
+        }
+      ],
+      "residual_risks": [
+        "KTD1 (adjust mint exclusions only) assumes the existing named typed-subject path recognizes any non-structural rdf:type; if the detector instead uses an allow-list, removing the three types from `_MINT_STRUCTURAL_TYPES` will not by itself satisfy R1 and the U1 regression-first cases will keep failing after the change.",
+        "KTD3 cites RDFLib 7.6.0 namespace constants and Graph.subjects; if the pinned project version differs, the constant references (OWL.DeprecatedClass, OWL.DeprecatedProperty, RDFS.ContainerMembershipProperty) still exist in older RDFLib but the documented API links would be stale."
+      ],
+      "deferred_questions": [
+        "The Assumptions section labels mint-gating of sole owl:DeprecatedClass / owl:DeprecatedProperty / rdfs:ContainerMembershipProperty declarations as agent-selected rather than user-settled; with a ce-plan-bootstrap origin, confirm the user accepts this policy before U1 changes production recognition.",
+        "Which file is the master roadmap that the Definition of Done requires updating (needed to add it to U2's Files list)."
+      ]
+    }
+  ],
+  "resolved_review": [
+    {
+      "reviewer": "security-lens-claude",
+      "claim": "Denial matrix omits untrusted true-hint form for R1 types",
+      "disposition": "dismissed",
+      "reason": "Both normal save implementations pass data.content directly to the shared guard; data.is_mint is never read. The existing six forms plus source inspection establish the hint-independent guard; adding another identical path is optional detail, not a plan defect."
+    },
+    {
+      "reviewer": "security-lens-claude",
+      "claim": "No inventory of already-admitted schema identities on existing branches",
+      "disposition": "dismissed",
+      "reason": "Historical inventory and reconciliation are explicitly deferred under B14. Hosted authority is independently blocked under D02, and this slice promises no deployment or complete historical remediation."
+    },
+    {
+      "reviewer": "security-lens-claude",
+      "claim": "Schema-only new subjects remain uncounted by the submission cap, billing and duplicate-label checks by design (R4/KTD1), so after this fix the mint-capability grant is the sole control against unbounded or duplicate-labelled deprecated-class/property creation by trusted contributors; this is not listed among the retained B14 seams.",
+      "disposition": "dismissed",
+      "reason": "This is an expressly preserved classifier/structural-type boundary or deferred B14 question, not a newly introduced consequence. R4/R5 and Scope Boundaries already state it."
+    },
+    {
+      "reviewer": "security-lens-claude",
+      "claim": "Named subjects with no explicit type (e.g., only rdfs:label plus rdfs:subClassOf) and named subjects typed with the remaining structural exclusions can still be added without mint capability; the plan defers this under B14 with no entailment, so a semantically class-like resource can be introduced by an untrusted contributor until that follow-up lands.",
+      "disposition": "dismissed",
+      "reason": "This is an expressly preserved classifier/structural-type boundary or deferred B14 question, not a newly introduced consequence. R4/R5 and Scope Boundaries already state it."
+    },
+    {
+      "reviewer": "security-lens-claude",
+      "claim": "Confirm that `save`, `save_anonymous`, `beacon_save` and `beacon_save_anonymous` are the only paths that write suggestion-branch content (no reviewer, LLM-review or import path bypasses `_assert_branch_content_can_mint`).",
+      "disposition": "dismissed",
+      "reason": "Local source research traced all four contributor save entry points and their common guard; broader reviewer/import authority auditing is outside this detector repair."
+    },
+    {
+      "reviewer": "security-lens-claude",
+      "claim": "Confirm the guard evaluates authenticated mint capability from current persisted trust at save time rather than a session-cached flag, since U2 scenario 6 reloads member/project state in the test before saving.",
+      "disposition": "dismissed",
+      "reason": "Service loads the project and resolves tier from members; planned persisted revocation/reload tests exercise this existing behavior. No session trust flag controls this gate."
+    },
+    {
+      "reviewer": "adversarial-claude",
+      "claim": "Three-type list assumed complete without stating the enumeration rule",
+      "disposition": "dismissed",
+      "reason": "The plan claims a bounded three-type repair, not exhaustive schema taxonomy. R5 explicitly preserves other structural types; RDFS.Datatype remains among them. Expanding R1 contradicts the declared scope."
+    },
+    {
+      "reviewer": "adversarial-claude",
+      "claim": "R1 and R4 assume detector and classifier type sets are independent",
+      "disposition": "dismissed",
+      "reason": "KTD1 explicitly keeps the separate submission classifier unchanged; service code confirms independent constants and functions. The sliced product review did not include this already-supplied implementation detail."
+    },
+    {
+      "reviewer": "adversarial-claude",
+      "claim": "AE2 (resumed-branch editing) only holds if the branch baseline identity set is recomputed with the new detector at save time. If the baseline is persisted from an earlier detector run, every pre-existing deprecated-class/deprecated-property/container-membership subject on a resumed branch reads as newly minted after rollout and untrusted contributors lose the ability to save at all; the plan defers 'historical-branch reconciliation' without stating which baseline model it assumes.",
+      "disposition": "dismissed",
+      "reason": "KTD2 explicitly uses current suggestion-branch content; _assert_branch_content_can_mint parses the current content on each untrusted save. No stored detector-version snapshot exists."
+    },
+    {
+      "reviewer": "adversarial-claude",
+      "claim": "After this change the mint detector and the submission cap classifier intentionally disagree on what counts as a new schema entity (R4/AE3). A mint-capable actor can add an unbounded number of deprecated-class subjects without invoking the 25-new-entity cap or billing; the plan accepts this, but nothing records that the divergence is deliberate for future readers.",
+      "disposition": "dismissed",
+      "reason": "This is an expressly preserved classifier/structural-type boundary or deferred B14 question, not a newly introduced consequence. R4/R5 and Scope Boundaries already state it."
+    },
+    {
+      "reviewer": "adversarial-claude",
+      "claim": "Is the branch-relative baseline computed live from branch content at each save, or persisted from an earlier detector version? The answer determines whether AE2 passes on branches created before this fix.",
+      "disposition": "dismissed",
+      "reason": "The lockfile and installed metadata were checked: RDFLib 7.6.0; no version uncertainty remains."
+    },
+    {
+      "reviewer": "adversarial-claude",
+      "claim": "Does rdfs:Datatype (and any other type the detector currently classifies as structural) count as a named schema entity for mint purposes, or is it intentionally left to the B14 remainder?",
+      "disposition": "dismissed",
+      "reason": "This is an expressly preserved classifier/structural-type boundary or deferred B14 question, not a newly introduced consequence. R4/R5 and Scope Boundaries already state it."
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "claim": "Definition of Done requires roadmap update no unit delivers",
+      "disposition": "dismissed",
+      "reason": "The Goal Capsule assigns delivery to the executing agent; the existing outer LFG workflow owns the Web repository master roadmap. The API-local worker files intentionally exclude that different repository. The DoD supplies the obligation and existing project conventions supply the owner/path; no missing outcome."
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "claim": "R2 'regardless of hint' but U2 tests only false/omitted hints",
+      "disposition": "dismissed",
+      "reason": "The real save paths do not branch on the hint. Existing source and six-form matrix establish the contract; no distinct true-hint branch exists."
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "claim": "U1 scenario 7 second clause drops default-branch qualifier",
+      "disposition": "dismissed",
+      "reason": "The semicolon joins two contrasting default-branch classification controls, and KTD1 explicitly defines the submission baseline. A competent implementer can derive the shared scope; no incompatible instruction."
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "claim": "KTD1 (adjust mint exclusions only) assumes the existing named typed-subject path recognizes any non-structural rdf:type; if the detector instead uses an allow-list, removing the three types from `_MINT_STRUCTURAL_TYPES` will not by itself satisfy R1 and the U1 regression-first cases will keep failing after the change.",
+      "disposition": "dismissed",
+      "reason": "Source inspection confirms named typed subjects are accepted unless the object type is in _MINT_STRUCTURAL_TYPES; KTD1 is supported."
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "claim": "KTD3 cites RDFLib 7.6.0 namespace constants and Graph.subjects; if the pinned project version differs, the constant references (OWL.DeprecatedClass, OWL.DeprecatedProperty, RDFS.ContainerMembershipProperty) still exist in older RDFLib but the documented API links would be stale.",
+      "disposition": "dismissed",
+      "reason": "The lockfile and installed metadata were checked: RDFLib 7.6.0; no version uncertainty remains."
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "claim": "The Assumptions section labels mint-gating of sole owl:DeprecatedClass / owl:DeprecatedProperty / rdfs:ContainerMembershipProperty declarations as agent-selected rather than user-settled; with a ce-plan-bootstrap origin, confirm the user accepts this policy before U1 changes production recognition.",
+      "disposition": "dismissed",
+      "reason": "The user authorized autonomous backlog implementation and routine implementation choices. Three-type mint gating applies the retained D04 repair; no new user approval is required."
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "claim": "Which file is the master roadmap that the Definition of Done requires updating (needed to add it to U2's Files list).",
+      "disposition": "dismissed",
+      "reason": "The outer delivery workflow owns docs/plans/2026-09-20-0649-requirements-delivery-roadmap.md in the Web repository; its update is explicit in DoD."
+    }
+  ],
+  "fixes_applied": 0,
+  "proposed_fixes_count": 0,
+  "decisions_count": 0,
+  "fyi_count": 0,
+  "remaining_findings": [],
+  "confidence_deepening": {
+    "sections": [
+      "Key Technical Decisions",
+      "Implementation Units",
+      "System-Wide Impact",
+      "Risks and Dependencies"
+    ],
+    "improvements": [
+      "Distinct save/submission baselines",
+      "Denial-only atomicity",
+      "Separate billing/cap/duplicate controls",
+      "Persisted revocation and mixed proposal coverage",
+      "Guaranteed fixture cleanup"
+    ]
+  },
+  "packs": {
+    "roots": [],
+    "warnings": [],
+    "errors": []
+  },
+  "cross_model_cleanup": "All three terminal done jobs collected through verified reads; consumed job directories removed."
+}
