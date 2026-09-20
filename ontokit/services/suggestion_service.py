@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from fastapi import HTTPException, status
-from rdflib import Graph, Literal, URIRef
+from rdflib import BNode, Graph, Literal, URIRef
 from rdflib.namespace import OWL, RDF, RDFS
 from sqlalchemy import or_, select, update
 from sqlalchemy.exc import IntegrityError
@@ -119,6 +119,35 @@ _ENTITY_DECLARATION_TYPES = frozenset(
         OWL.AsymmetricProperty,
         OWL.ReflexiveProperty,
         OWL.IrreflexiveProperty,
+    }
+)
+
+
+# These types describe RDF/OWL schema or serialization structures, not ordinary
+# class membership. Keep this list explicit: owl:Thing, owl:Nothing and custom
+# classes (including classes not declared in this graph) must still count.
+# Submission duplicate validation deliberately retains _ENTITY_DECLARATION_TYPES.
+_MINT_STRUCTURAL_TYPES = frozenset(
+    {
+        OWL.Ontology,
+        OWL.Restriction,
+        OWL.Axiom,
+        OWL.Annotation,
+        OWL.AllDifferent,
+        OWL.AllDisjointClasses,
+        OWL.AllDisjointProperties,
+        OWL.NegativePropertyAssertion,
+        OWL.DataRange,
+        OWL.DeprecatedClass,
+        OWL.DeprecatedProperty,
+        RDFS.Datatype,
+        RDFS.Container,
+        RDFS.ContainerMembershipProperty,
+        RDF.Statement,
+        RDF.List,
+        RDF.Bag,
+        RDF.Seq,
+        RDF.Alt,
     }
 )
 
@@ -256,7 +285,12 @@ class SuggestionService:
 
     @staticmethod
     def _declared_entity_iris(content: bytes | str) -> set[str]:
-        """Return explicitly declared RDF class/property IRIs in Turtle content."""
+        """Return named class, property and typed-individual IRIs for mint checks.
+
+        A named instance of an anonymous class expression counts too. Structural
+        typing never masks an ordinary type on the same subject; set identity
+        also keeps edits and class/property-individual punning from minting anew.
+        """
         graph = Graph()
         try:
             graph.parse(data=content, format="turtle")
@@ -268,7 +302,9 @@ class SuggestionService:
         return {
             str(subject)
             for subject, object_type in graph.subject_objects(RDF.type)
-            if isinstance(subject, URIRef) and object_type in _ENTITY_DECLARATION_TYPES
+            if isinstance(subject, URIRef)
+            and isinstance(object_type, (URIRef, BNode))
+            and object_type not in _MINT_STRUCTURAL_TYPES
         }
 
     @staticmethod

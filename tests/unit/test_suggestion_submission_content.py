@@ -39,9 +39,7 @@ async def test_marked_distinct_exact_label_pair_can_submit() -> None:
         iri_a="http://example.org/Existing",
         iri_b="http://example.org/Minted",
     )
-    check = AsyncMock(
-        return_value=MagicMock(verdict="pass", suppressed_decisions=[decision])
-    )
+    check = AsyncMock(return_value=MagicMock(verdict="pass", suppressed_decisions=[decision]))
 
     with (
         patch(
@@ -78,9 +76,7 @@ async def test_marked_distinct_semantic_pair_can_submit() -> None:
         ex:Existing a owl:Class ; rdfs:label "Existing" .
         ex:Minted a owl:Class ; rdfs:label "Closely Related" .
     """
-    check = AsyncMock(
-        return_value=MagicMock(verdict="pass", suppressed_decisions=[MagicMock()])
-    )
+    check = AsyncMock(return_value=MagicMock(verdict="pass", suppressed_decisions=[MagicMock()]))
 
     with (
         patch(
@@ -117,9 +113,7 @@ async def test_property_submission_preserves_type_for_distinct_fingerprint() -> 
         ex:Existing a owl:Class ; rdfs:label "Existing" .
         ex:MintedProperty a owl:ObjectProperty ; rdfs:label "Closely Related" .
     """
-    check = AsyncMock(
-        return_value=MagicMock(verdict="pass", suppressed_decisions=[])
-    )
+    check = AsyncMock(return_value=MagicMock(verdict="pass", suppressed_decisions=[]))
 
     with patch(
         "ontokit.services.duplicate_check_service.DuplicateCheckService.check",
@@ -135,3 +129,30 @@ async def test_property_submission_preserves_type_for_distinct_fingerprint() -> 
 
     assert check.await_args.kwargs["entity_type"] == "property"
     assert check.await_args.kwargs["proposed_iri"] == "http://example.org/MintedProperty"
+
+
+@pytest.mark.asyncio
+async def test_individuals_do_not_expand_submission_validation_or_entity_cap() -> None:
+    service, _git = _service()
+    # More than 25 new individuals must not enter the class/property-only cap,
+    # billing identity requirement, duplicate check, or namespace validation.
+    proposed = BASELINE.decode() + "\n".join(
+        f'ex:individual{i} a owl:NamedIndividual, ex:Person; rdfs:label "Existing" .'
+        for i in range(26)
+    )
+    check = AsyncMock()
+    validate = AsyncMock()
+    namespace = AsyncMock()
+    with (
+        patch("ontokit.services.duplicate_check_service.DuplicateCheckService.check", new=check),
+        patch(
+            "ontokit.services.validation_service.ValidationService.validate_entity", new=validate
+        ),
+        patch("ontokit.services.validation_service.detect_project_namespace", new=namespace),
+    ):
+        await service._validate_submission_content(
+            PROJECT_ID, "suggestion/test", "ontology.ttl", proposed, None
+        )
+    check.assert_not_awaited()
+    validate.assert_not_awaited()
+    namespace.assert_not_awaited()
