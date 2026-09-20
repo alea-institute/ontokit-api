@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from ontokit.core.auth import CurrentUser
 from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
+from ontokit.services.embedding_service import EmbeddingBudgetExceeded, EmbeddingPricingUnavailable
 from ontokit.services.suggestion_service import SuggestionService
 
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
@@ -1848,7 +1849,18 @@ class TestResubmit:
         data = SuggestionResubmitRequest(summary="Fixed the labels")
         user = _make_user()
 
-        result = await service.resubmit(PROJECT_ID, session.session_id, data, user)
+        session.reviewer_feedback = "Please fix the labels"
+        session.reviewed_at = datetime.now(UTC)
+        with (
+            patch.object(service, "_validate_submission_content", new=AsyncMock()) as validate,
+            patch(
+                "ontokit.services.duplicate_check_service.DuplicateCheckService.check",
+                new=AsyncMock(),
+            ) as duplicate_check,
+        ):
+            result = await service.resubmit(PROJECT_ID, session.session_id, data, user)
+        validate.assert_not_awaited()
+        duplicate_check.assert_not_awaited()
 
         assert result.pr_number == 10
         assert result.status == "submitted"
@@ -2801,3 +2813,112 @@ class TestGetSuggestionServiceFactory:
         mock_db = AsyncMock()
         svc = get_suggestion_service(mock_db)
         assert isinstance(svc, SuggestionService)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure_type", "status_code"),
+    [(EmbeddingBudgetExceeded, 402), (EmbeddingPricingUnavailable, 503)],
+)
+async def test_submit_embedding_refusal_precedes_submission_effects(
+    service: SuggestionService,
+    mock_db: AsyncMock,
+    mock_git: MagicMock,
+    failure_type: type[RuntimeError],
+    status_code: int,
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionSubmitRequest
+
+    session = _make_session(changes_count=1)
+    project = _make_project()
+    baseline = b"@prefix ex: <http://example.org/> ."
+    proposed = baseline + (
+        b" ex:New a <http://www.w3.org/2002/07/owl#Class>; "
+        b'<http://www.w3.org/2000/01/rdf-schema#label> "New" .'
+    )
+    mock_git.get_file_from_branch.side_effect = lambda _project_id, branch, _filename: (
+        baseline if branch == "main" else proposed
+    )
+    failure = failure_type("refused")
+    with (
+        patch.object(service, "_get_session", new=AsyncMock(return_value=session)),
+        patch.object(service, "_verify_project_access", new=AsyncMock(return_value=project)),
+        patch.object(service, "_consume_untrusted_submission", new=AsyncMock()) as allowance,
+        patch.object(service, "_create_pr_for_session_already_locked", new=AsyncMock()) as claim,
+        patch.object(service, "_bind_session_to_pr", new=AsyncMock()) as bind,
+        patch.object(service, "_finalize_pr_for_session", new=AsyncMock()) as finalize,
+        patch("ontokit.services.suggestion_service.NotificationService") as notifications,
+        patch(
+            "ontokit.services.duplicate_check_service.DuplicateCheckService.check",
+            new=AsyncMock(side_effect=failure),
+        ),
+        pytest.raises(HTTPException) as exc,
+    ):
+        await service.submit(
+            PROJECT_ID,
+            session.session_id,
+            SuggestionSubmitRequest(summary="Saved change"),
+            _make_user(),
+        )
+    assert exc.value.status_code == status_code
+    assert exc.value.__cause__ is failure
+    for effect in (
+        allowance,
+        claim,
+        bind,
+        finalize,
+        service._enqueue_branch_refresh,
+        mock_db.commit,
+        mock_db.rollback,
+    ):
+        effect.assert_not_awaited()
+    notifications.assert_not_called()
+    assert session.status == SuggestionSessionStatus.ACTIVE.value
+    assert session.pr_id is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_type", [EmbeddingBudgetExceeded, EmbeddingPricingUnavailable])
+async def test_stale_submit_embedding_refusal_restores_active(
+    service: SuggestionService,
+    mock_db: AsyncMock,
+    mock_git: MagicMock,
+    failure_type: type[RuntimeError],
+) -> None:
+    session = _make_session(changes_count=1, last_activity=datetime.now(UTC) - timedelta(hours=1))
+    project = _make_project()
+    stale = MagicMock()
+    stale.scalars.return_value.all.return_value = [session]
+    claimed = MagicMock(rowcount=1)
+    no_pr = MagicMock()
+    no_pr.scalar_one_or_none.return_value = None
+    mock_db.execute.side_effect = [stale, claimed, no_pr]
+    baseline = b"@prefix ex: <http://example.org/> ."
+    proposed = baseline + (
+        b" ex:New a <http://www.w3.org/2002/07/owl#Class>; "
+        b'<http://www.w3.org/2000/01/rdf-schema#label> "New" .'
+    )
+    mock_git.get_file_from_branch.side_effect = lambda _project_id, branch, _filename: (
+        baseline if branch == "main" else proposed
+    )
+
+    async def reflect_claim(_session: object) -> None:
+        session.status = SuggestionSessionStatus.AUTO_SUBMITTED.value
+
+    mock_db.refresh.side_effect = reflect_claim
+    check = AsyncMock(side_effect=failure_type("refused"))
+    with (
+        patch.object(service, "_verify_project_access", new=AsyncMock(return_value=project)),
+        patch.object(service, "_get_project", new=AsyncMock(return_value=project)),
+        patch("ontokit.services.duplicate_check_service.DuplicateCheckService.check", new=check),
+        patch("ontokit.services.suggestion_service.get_pull_request_service") as pr_factory,
+        patch.object(service, "_finalize_pr_for_session", new=AsyncMock()) as finalize,
+    ):
+        assert await service.auto_submit_stale_sessions() == 0
+    check.assert_awaited_once()
+    assert session.status == SuggestionSessionStatus.ACTIVE.value
+    mock_db.rollback.assert_awaited_once()
+    assert mock_db.commit.await_count == 2  # Durable claim, then durable restoration.
+    pr_factory.assert_not_called()
+    finalize.assert_not_awaited()
+    service._enqueue_branch_refresh.assert_not_awaited()

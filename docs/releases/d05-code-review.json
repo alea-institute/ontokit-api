@@ -1,0 +1,193 @@
+{
+  "status": "complete",
+  "verdict": "Ready to merge",
+  "verdict_reason": "No admitted defects or unaddressed plan requirements remain in the reviewed diff. Independent cross-model corroboration was unavailable; the native adversarial fallback completed.",
+  "scope": {
+    "base": "c6e552c844f315987f4eb614d04527c4c4a5e5af",
+    "branch": "fix/d05-submit-embedding-errors-20260920",
+    "head_sha": "ab7b0c5f5456c7fc2ca4ffa1448c3c717b695b83",
+    "pr_url": null,
+    "files_changed": 7
+  },
+  "intent": "Return recoverable 402 budget and safe503 pricing errors at shared submission duplicate validation. Preserve saved drafts, explicit fresh-request retries and existing paid-accounting/resubmit/background behavior. No new billing, classification or transaction policy.",
+  "intent_confidence": "explicit",
+  "reviewers": [
+    "correctness",
+    "project-standards",
+    "testing",
+    "maintainability",
+    "security",
+    "api-contract",
+    "reliability",
+    "adversarial"
+  ],
+  "findings": [],
+  "actionable_findings": [],
+  "triage_groups": [],
+  "pre_existing_findings": [],
+  "requirements_completeness": {
+    "plan": "/home/damienriehl/Coding Projects/ontokit-web/.worktrees/api-d05-errors/docs/plans/2026-09-20-1224-fix-submission-embedding-errors-plan.md",
+    "source": "explicit",
+    "requirements": [
+      {
+        "id": "R1",
+        "text": "Submission validation maps `EmbeddingBudgetExceeded` to HTTP 402 with its existing application message in JSON `detail`.",
+        "status": "met",
+        "evidence": "Narrow EmbeddingBudgetExceeded catch returns HTTP 402 with detail=str(exc); unit and HTTP assertions cover the response."
+      },
+      {
+        "id": "R2",
+        "text": "Submission validation maps `EmbeddingPricingUnavailable` to HTTP 503 with `detail` equal to `Embedding pricing is unavailable; duplicate check is paused.`; raw pricing exception details are not returned.",
+        "status": "met",
+        "evidence": "Narrow EmbeddingPricingUnavailable catch returns the fixed safe HTTP 503 detail; unit and HTTP assertions cover redaction."
+      },
+      {
+        "id": "R3",
+        "text": "Unrelated exceptions retain their existing failure path, and existing 403/409/422 validation responses remain intact.",
+        "status": "met",
+        "evidence": "Unknown-error identity regression added; existing validation branches remain outside the narrow catches."
+      },
+      {
+        "id": "R4",
+        "text": "A refused interactive submission preserves saved Git content/head and durable draft status, revision, reviewer feedback and PR linkage; it creates no PR, consumes no submission allowance and triggers no submission finalization, notifications or index refresh.",
+        "status": "met",
+        "evidence": "Unit effect-order spies and real database/Git integration assertions cover preserved draft state, no PR, no allowance and no finalization on refusal."
+      },
+      {
+        "id": "R5",
+        "text": "A later explicit request can succeed after readiness returns, using fresh request state and creating one PR through the existing successful submission path.",
+        "status": "met",
+        "evidence": "Integration test closes the failed request session, retries through a distinct session and asserts exactly one persisted PR and successful side effects."
+      },
+      {
+        "id": "R6",
+        "text": "Paid-call reservations and audit records retain existing semantics, including earlier successful checks before a later refusal; this repair adds no refunds, automatic POST retry or recovery-delay promise.",
+        "status": "met",
+        "evidence": "Integration test preserves real accounting persistence and checks earlier paid receipts survive later refusal; no retry, refund or transaction policy added."
+      },
+      {
+        "id": "R7",
+        "text": "Resubmit retains its existing no-paid-validation behavior and revision/feedback transition; shared background submission failures still restore the draft to ACTIVE rather than count as success.",
+        "status": "met",
+        "evidence": "Resubmit test asserts validation is not called and revision/feedback transitions persist; stale-submit tests assert ACTIVE restoration for both failures."
+      },
+      {
+        "id": "R8",
+        "text": "Existing entity classification, entity cap, trust/mint policy, anonymous restrictions, duplicate distinct-decisions and caller arguments remain unchanged.",
+        "status": "met",
+        "evidence": "Production diff leaves classification, caps, policy and all duplicate-check arguments unchanged; existing regression coverage retained."
+      }
+    ],
+    "implementation_units": [
+      {
+        "id": "U1",
+        "title": "Translate known failures and protect submission ordering",
+        "status": "met",
+        "evidence": "Shared mapper and focused compatibility regressions are present."
+      },
+      {
+        "id": "U2",
+        "title": "Prove HTTP recovery and durable draft preservation",
+        "status": "met",
+        "evidence": "HTTP integration coverage uses fresh request sessions, real persistence and saved Git content, including paid accounting."
+      }
+    ]
+  },
+  "learnings": [],
+  "agent_native_gaps": [],
+  "deployment_notes": [],
+  "residual_risks": [],
+  "testing_gaps": [],
+  "coverage": {
+    "depth": "full",
+    "reviewer_selection": [
+      {
+        "reviewer": "correctness",
+        "tier": "session",
+        "reason": "always-on"
+      },
+      {
+        "reviewer": "project-standards",
+        "tier": "mid-tier",
+        "reason": "root AGENTS.md governs changed paths"
+      },
+      {
+        "reviewer": "testing",
+        "tier": "mid-tier",
+        "reason": "new error branches plus unit/integration fixtures"
+      },
+      {
+        "reviewer": "maintainability",
+        "tier": "mid-tier",
+        "reason": "548 executable changed lines including comprehensive integration test"
+      },
+      {
+        "reviewer": "security",
+        "tier": "session",
+        "reason": "public budget/error boundary and internal pricing information"
+      },
+      {
+        "reviewer": "api-contract",
+        "tier": "mid-tier",
+        "reason": "public submit status/detail changes"
+      },
+      {
+        "reviewer": "reliability",
+        "tier": "mid-tier",
+        "reason": "failure propagation, background restoration and retry semantics"
+      },
+      {
+        "reviewer": "adversarial",
+        "tier": "session",
+        "reason": "Claude terminal max-turn exhaustion; required local fallback"
+      }
+    ],
+    "notes": [
+      "Full depth selected for public error and money boundary despite 31 executable production changed lines.",
+      "Root AGENTS.md provides fallback standards for all changed files.",
+      "Untracked docs/releases/d05-execution-receipt.json excluded.",
+      "No applicable learnings corpus, packs, agent surface, migrations, performance query changes, UI or prior PR comments.",
+      "One independent Claude attempt exhausted max_turns; native adversarial fallback completed. No cross-model corroboration claimed.",
+      "adversarial lens: in-process fallback (cross-model peer not run: Claude claude-opus-5 requested high reached terminal max_turns without a usable review; actual model/effort unverified). Requested Claude route ran read-only; independent cross-model corroboration unavailable.",
+      "One maintainability candidate rejected during synthesis as an unsupported file-organization preference; no soft-bucket concern retained.",
+      "Confidence suppression: 0; missing-first-evidence demotions: 0; first_evidence_backfilled: 0; malformed findings/returns: 0; mode-aware demotions: 0.",
+      "Validator shortcut-skipped: 0. No primary findings survive synthesis, so the validator batch is empty."
+    ],
+    "cross_model": {
+      "selected": true,
+      "target": "claude",
+      "route": "claude",
+      "preference_source": "default",
+      "outcome": "in-process-fallback",
+      "artifact": null,
+      "coverage": "adversarial lens: in-process fallback (cross-model peer not run: Claude claude-opus-5 requested high reached terminal max_turns without a usable review; actual model/effort unverified). Requested Claude route ran read-only; independent cross-model corroboration unavailable."
+    },
+    "validator": {
+      "outcome": "empty-batch",
+      "reason": "No findings selected by merge leaf.",
+      "verdicts": null,
+      "confirmed": 0,
+      "rejected": 0,
+      "unresolved": 0,
+      "malformed": 0,
+      "failed": 0,
+      "shortcut_skipped": 0
+    },
+    "suppressed_by_confidence": {},
+    "synthesis_rejected_candidates": 1,
+    "first_evidence_backfilled": 0,
+    "first_evidence_demoted": 0,
+    "mode_aware_demotion_count": 0,
+    "protected_subject_reclassifications": 0,
+    "degraded_blockers": 0,
+    "failed_reviewers": [],
+    "compound_packs": {
+      "roots": [],
+      "errors": [],
+      "warnings": []
+    },
+    "verification_limit": "Report leaf inspected the diff and collected review artifacts; it did not rerun tests. Merge CI and deployment acceptance are separate delivery gates."
+  },
+  "artifact_path": "/tmp/compound-engineering-1000/ce-code-review/d05-20260920-124921-8f871493",
+  "run_id": "d05-20260920-124921-8f871493"
+}

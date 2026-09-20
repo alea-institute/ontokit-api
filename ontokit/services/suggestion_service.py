@@ -59,6 +59,7 @@ from ontokit.schemas.suggestion import (
 from ontokit.schemas.trust import TrustTier
 from ontokit.services.branch_lock import branch_write_lock, pull_request_write_locks
 from ontokit.services.commit_identity import CommitIdentityService
+from ontokit.services.embedding_service import EmbeddingBudgetExceeded, EmbeddingPricingUnavailable
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.project_access_policy import require_visible_project
 from ontokit.services.pull_request_service import PullRequestService, get_pull_request_service
@@ -411,16 +412,26 @@ class SuggestionService:
                 if normalized_label in checked_labels:
                     continue
                 checked_labels.add(normalized_label)
-                duplicate = await duplicate_service.check(
-                    project_id,
-                    str(label),
-                    entity_type=get_entity_type(proposed, entity),
-                    parent_iri=parents[0] if parents else None,
-                    billing_user_id=billing_user_id,
-                    exclude_branch=branch,
-                    exclude_iris=excluded_iris,
-                    proposed_iri=str(entity),
-                )
+                try:
+                    duplicate = await duplicate_service.check(
+                        project_id,
+                        str(label),
+                        entity_type=get_entity_type(proposed, entity),
+                        parent_iri=parents[0] if parents else None,
+                        billing_user_id=billing_user_id,
+                        exclude_branch=branch,
+                        exclude_iris=excluded_iris,
+                        proposed_iri=str(entity),
+                    )
+                except EmbeddingBudgetExceeded as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_402_PAYMENT_REQUIRED, detail=str(exc)
+                    ) from exc
+                except EmbeddingPricingUnavailable as exc:
+                    raise HTTPException(
+                        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                        detail="Embedding pricing is unavailable; duplicate check is paused.",
+                    ) from exc
                 if existing is not None and existing != entity:
                     pair = {str(entity), str(existing)}
                     pair_is_distinct = any(

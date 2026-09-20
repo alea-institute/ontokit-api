@@ -1,0 +1,424 @@
+{
+  "status": "complete",
+  "plan_path": "docs/plans/2026-09-20-1224-fix-submission-embedding-errors-plan.md",
+  "plan_sha256": "270120fe9c968445f82bdecaecb1e0784044130410337ffd4204a7e5f58c9aa1",
+  "mode": "non-interactive",
+  "fixes_applied": 2,
+  "proposed_fixes_count": 0,
+  "decisions_count": 0,
+  "fyi_count": 0,
+  "raw_reviews": {
+    "design-lens": {
+      "reviewer": "design-lens",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "scope-guardian": {
+      "reviewer": "scope-guardian",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "adversarial": {
+      "reviewer": "adversarial",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "coherence": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "title": "Document Review Findings",
+      "reviewer": "coherence",
+      "findings": [
+        {
+          "title": "U1 omits its accounting regression test file",
+          "severity": "P2",
+          "section": "U1 \u2014 Translate known failures and protect submission ordering",
+          "why_it_matters": "Implementers can miss the required paid-call accounting regression coverage because U1's Files list does not include the test file that its fifth scenario explicitly requires them to pair with. Adding the established file to the unit's file set makes the planned change and verification surface complete and removes that execution ambiguity.",
+          "finding_type": "omission",
+          "autofix_class": "safe_auto",
+          "suggested_fix": "Add `tests/unit/test_embedding_service.py` to U1's Files list.",
+          "confidence": 100,
+          "evidence": [
+            "**Files:** `ontokit/services/suggestion_service.py`; `tests/unit/test_suggestion_submission_content.py`; `tests/unit/test_suggestion_service.py`.",
+            "5. Covers AE3: a later check fails after an earlier successful call; validation stops, without adding rollback/refund or replay behavior (R6). Pair this ordering proof with the existing real embedding-accounting regressions in `tests/unit/test_embedding_service.py`; mocked checker calls alone do not prove durable receipt retention."
+          ]
+        }
+      ],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "security-lens": {
+      "reviewer": "security-lens",
+      "findings": [],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "feasibility": {
+      "reviewer": "feasibility",
+      "findings": [
+        {
+          "title": "Referenced accounting regressions do not verify durable receipts",
+          "severity": "P2",
+          "section": "U1 \u2014 Translate known failures and protect submission ordering",
+          "why_it_matters": "Following the proposed verification pairing cannot establish the promised durable accounting boundary: tests/unit/test_embedding_service.py replaces reserve_llm_call and finalize_llm_call with AsyncMocks, including its successful-call and failed-reservation tests. It verifies call ordering, not retained database records after a later submission refusal. The implementation needs a real persistence assertion to supply the evidence the plan explicitly requires.",
+          "finding_type": "error",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Describe the existing embedding-service tests as mocked metering-order regressions, and assign U2 a real PostgreSQL case that retains the production reservation/finalization functions, completes one mocked-provider paid call before a later validation refusal, then verifies its audit record from a fresh session after the failed request closes.",
+          "confidence": 100,
+          "evidence": [
+            "Pair this ordering proof with the existing real embedding-accounting regressions in `tests/unit/test_embedding_service.py`; mocked checker calls alone do not prove durable receipt retention."
+          ]
+        }
+      ],
+      "residual_risks": [],
+      "deferred_questions": []
+    },
+    "adversarial-claude": {
+      "reviewer": "adversarial-claude",
+      "cross_model_route": "claude",
+      "cross_model_target": "claude",
+      "cross_model_harness": "claude",
+      "serving_family": "claude",
+      "independence_verified": true,
+      "model_requested": "claude-opus-5",
+      "model_actual": "claude-opus-5",
+      "effort_requested": "high",
+      "findings": [
+        {
+          "title": "No decision path if persisted-state tests expose a commit-before-validate defect",
+          "severity": "P1",
+          "section": "Goal Capsule (Stop conditions) and KTD2 - Keep transaction ownership at existing boundaries",
+          "why_it_matters": "An implementer who runs U2 scenario 5 (verification bookkeeping must not leave a partially submitted durable session) and finds that something already commits before the duplicate check has nowhere to go: KTD2 forbids adding an inner commit or blanket rollback, the Assumptions section says a demonstrated persistence defect is an 'implementation-time discovery' without saying whether repairing it is in scope, and the Stop conditions list billing policy, resubmit validation, authorization, and destructive data changes but not transaction restructuring. The result is either an unauthorized widening of a 'bounded API repair' into transaction-boundary changes, or a weakened R4 assertion, both of which the Definition of Done prohibits. Adding an explicit stop condition for this case resolves it by routing the discovery to the user rather than leaving it to the implementer.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Add to Stop conditions: 'Stop for evidence that a persisted-state assertion in U2 (draft status, revision, feedback, PR linkage, branch head) fails because existing code commits or externally persists state before duplicate validation; repairing that ordering is a separate decision, not part of this mapping repair.' Mirror the same sentence in the Assumptions paragraph where persistence defects are called implementation-time discoveries.",
+          "confidence": 75,
+          "evidence": [
+            "Stop for evidence that requires changed billing policy, added resubmit validation, weakened authorization, or destructive data changes.",
+            "Do not add an inner commit or blanket rollback to the mapper (R4\u2013R6).",
+            "Exact fixture adaptation and any demonstrated persistence defect remain implementation-time discoveries.",
+            "Existing verification bookkeeping does not leave a partially submitted durable session when a later validation failure occurs; no commit is added merely to make the fixture pass."
+          ]
+        },
+        {
+          "title": "KTD1 mirrors the route mapping, creating the duplication it claims to avoid",
+          "severity": "P2",
+          "section": "KTD1 - Translate at the shared duplicate-check call",
+          "why_it_matters": "Two hand-maintained copies of the same translation (in `duplicate_check.py` and in `SuggestionService._validate_submission_content`) means R2's exact public detail string and the 402/503 status choices can drift independently, and the service layer starts raising HTTP-shaped exceptions into non-HTTP callers, which is exactly why the plan has to add a separate risk note that background restoration 'must remain effective despite the mapped exception type.' KTD1 dismisses an app-level FastAPI exception handler in a subordinate clause without stating why; a single shared translator (a function both the route and the service call, or a registered handler for the two domain exceptions) would give one source of truth for the R2 string and keep the worker path free of HTTPException. Concrete benefit: R2's message becomes a single constant that both tests and the existing route assert against.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Amend KTD1 to: 'Extract the existing mapping in `ontokit/api/routes/duplicate_check.py` into one shared translator (single R2 message constant) and call it from both the route and `SuggestionService._validate_submission_content`, so the two seams cannot drift.' Record the rejected alternative (app-wide exception handler) with its reason in the KTD text.",
+          "confidence": 50,
+          "evidence": [
+            "Mirror `ontokit/api/routes/duplicate_check.py` inside `SuggestionService._validate_submission_content`, with narrow catches and exception chaining (R1\u2013R3). This covers existing callers without route-specific duplication or a global exception handler.",
+            "Background restoration must remain effective despite the mapped exception type (R7)."
+          ]
+        }
+      ],
+      "residual_risks": [
+        "A retry after a 503 pricing failure re-runs paid duplicate checks for entities that were already charged before the refusal (R6 keeps no-refund semantics and retry is explicit), so the 'recoverable' label carries an unstated repeat cost per attempt for multi-entity drafts; the plan should not be read as making retry free.",
+        "The Objective is stated as a contributor outcome ('receive a recoverable response') but only API transport is verified; until the deferred frontend follow-up lands, contributors may still see a generic failure in the UI even though every acceptance example passes."
+      ],
+      "deferred_questions": [
+        "If U2's fresh-session assertions reveal that some pre-validation step (verification bookkeeping, branch lock, allowance accounting) is committed or persisted outside the request session, is repairing that ordering part of this deliverable or a separate B14 seam?"
+      ]
+    },
+    "whole-doc-claude": {
+      "reviewer": "whole-doc-claude",
+      "cross_model_route": "claude",
+      "cross_model_target": "claude",
+      "cross_model_harness": "claude",
+      "serving_family": "claude",
+      "independence_verified": true,
+      "model_requested": "claude-opus-5",
+      "model_actual": "claude-opus-5",
+      "effort_requested": "high",
+      "findings": [
+        {
+          "title": "No decision rule if U2 exposes existing partial-persistence defect",
+          "severity": "P2",
+          "section": "Planning Contract \u2014 Assumptions / KTD2 (Keep transaction ownership at existing boundaries) and U2 \u2014 Prove HTTP recovery and durable draft preservation",
+          "why_it_matters": "An implementer who finds that the existing interactive path durably persists partial submission state before validation (the plan itself suspects this: verification bookkeeping 'may autoflush') has no sanctioned move. KTD2 forbids adding rollback/commit to the mapper, U2 scenario 5 forbids adding a commit to make the fixture pass, the Definition of Done requires U2 to pass 'without weakening assertions', and the Stop conditions do not list this case \u2014 the Assumptions only say it 'remain[s] an implementation-time discovery'. The result is either silent scope creep into transaction restructuring or a stalled unit. Adding an explicit stop/report rule closes the gap without changing the agreed outcome.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Add to Goal Capsule Stop conditions and to U2's Approach: 'If U2's fresh-session assertions show the existing interactive path durably persists partial submission state (status, revision, or bookkeeping) before the duplicate check refuses, stop and report the defect with evidence rather than adding commit, rollback, or transaction-boundary changes; R4 recovery proof is then blocked pending a separate decision.'",
+          "confidence": 75,
+          "evidence": [
+            "tests must verify durable state from a fresh session because human-verification bookkeeping may autoflush",
+            "Exact fixture adaptation and any demonstrated persistence defect remain implementation-time discoveries.",
+            "Existing verification bookkeeping does not leave a partially submitted durable session when a later validation failure occurs; no commit is added merely to make the fixture pass.",
+            "The full suite and static checks pass without weakening assertions."
+          ]
+        },
+        {
+          "title": "Definition of Done requires roadmap evidence link no unit owns",
+          "severity": "P3",
+          "section": "Definition of Done",
+          "why_it_matters": "The completion contract requires 'verification evidence linked from the roadmap', but neither U1 nor U2 lists a roadmap file, and the Delivery owner line names only review, verification, publication and merge. An implementer finishing both units would believe the work is done while a DoD item remains unassigned and its target file unidentified. Naming the roadmap artifact and assigning the step to the delivery orchestrator makes the DoD checkable.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "In the Goal Capsule Delivery owner line, add 'and records the verification evidence link against roadmap requirement B14/D05 in the master web roadmap'; name the roadmap file path in Work Relationships.",
+          "confidence": 50,
+          "evidence": [
+            "The reviewed branch is published and merged through normal repository protections, with verification evidence linked from the roadmap.",
+            "**Delivery owner:** The delivery orchestrator completes review, verification, publication and authorized merge.",
+            "**Files:** `ontokit/services/suggestion_service.py`; `tests/unit/test_suggestion_submission_content.py`; `tests/unit/test_suggestion_service.py`."
+          ]
+        },
+        {
+          "title": "Unit requirement lists drift from their goals and scenarios",
+          "severity": "P3",
+          "section": "U1 \u2014 Translate known failures and protect submission ordering; U2 \u2014 Prove HTTP recovery and durable draft preservation",
+          "why_it_matters": "Readers tracing coverage will conclude U2 proves R7 (resubmit/background restoration) and R8 (unchanged policies) because its Requirements line says R1\u2013R8, yet its Goal names only R1/R2/R4/R5 and none of its five scenarios exercise resubmit or background paths \u2014 those live in U1. Conversely U1 scenario 4 explicitly asserts R4 (no allowance/PR/finalization on refusal) while U1's Requirements line omits R4. Aligning the lines with what each unit actually tests keeps the trace honest for the DoD check.",
+          "finding_type": "error",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "Change U1 Requirements to 'R1\u2013R4, R6\u2013R8; AE3/AE4' and U2 Requirements to 'R1, R2, R4, R5; AE1/AE2' to match each unit's Goal and test scenarios.",
+          "confidence": 50,
+          "evidence": [
+            "**Requirements:** R1\u2013R3, R6\u2013R8; AE3/AE4.",
+            "4. Failures occur before allowance consumption, PR creation/binding, commit and finalization; relevant orchestration spies are not called (R4).",
+            "**Goal:** Demonstrate R1/R2/R4/R5 across the actual service and persisted workflow.",
+            "**Requirements:** R1\u2013R8; AE1/AE2."
+          ]
+        }
+      ],
+      "residual_risks": [
+        "KTD1 raises FastAPI HTTPException from inside SuggestionService, which background/stale-session callers also invoke (R7). If the existing worker or submit orchestration catches only domain exception types, the mapped HTTPException could bypass ACTIVE restoration; U1 scenario 7 would surface this, but the plan gives no guidance on whether widening that catch is in scope.",
+        "KTD1 says to mirror ontokit/api/routes/duplicate_check.py while KTD3 says to omit Retry-After; if the existing route already emits Retry-After on 503, the two decisions conflict and the implementer must pick one without direction."
+      ],
+      "deferred_questions": [
+        "Which roadmap document and entry receives the verification evidence link required by the Definition of Done, and who performs that edit?"
+      ]
+    },
+    "security-lens-claude": {
+      "reviewer": "security-lens-claude",
+      "cross_model_route": "claude",
+      "cross_model_target": "claude",
+      "cross_model_harness": "claude",
+      "serving_family": "claude",
+      "independence_verified": true,
+      "model_requested": "claude-opus-5",
+      "model_actual": "claude-opus-5",
+      "effort_requested": "high",
+      "findings": [
+        {
+          "title": "Sanitized 503 path discards root cause from operator logs",
+          "severity": "P3",
+          "section": "KTD1 - Translate at the shared duplicate-check call / U1 - Translate known failures",
+          "why_it_matters": "Operators investigating a pricing outage will see only uvicorn access lines with 503 and the fixed public message, because FastAPI's HTTPException handler returns the response without logging the chained cause; R2 (the fixed 503 pricing message, raw details withheld) is deliberately opaque to the client, so the only place the raw `EmbeddingPricingUnavailable` detail can survive is a server-side log line at the catch site. The plan specifies exception chaining and a public-text test but never says the mapper must log the original exception, so the sanitization that protects the client also erases the incident-response signal. Adding a structured warning log at the catch (no client-facing change) keeps R2 intact while preserving diagnosability.",
+          "finding_type": "omission",
+          "autofix_class": "gated_auto",
+          "suggested_fix": "In KTD1 add: 'Before raising the mapped HTTPException, log the original exception at WARNING with the request/draft identifier so the sanitized 503/402 remains diagnosable server-side; logged text must not be returned to the client.' Add to U1 test scenario 2: 'and the raw pricing text is emitted to the server log.'",
+          "confidence": 50,
+          "evidence": [
+            "with narrow catches and exception chaining (R1\u2013R3)",
+            "raw pricing exception details are not returned",
+            "Pricing failure with sensitive-looking internal text returns only the R2 public detail and retains its cause."
+          ]
+        }
+      ],
+      "residual_risks": [
+        "R1 passes through `EmbeddingBudgetExceeded`'s 'existing application message' verbatim while R2 substitutes fixed text; if that message embeds budget figures, spend totals or project/org identifiers, the submit path now surfaces them to any contributor who can submit. This is parity with the existing duplicate-check endpoint (intentional, same audience), so it is not a finding, but U1 scenario 1 could cheaply assert the 402 detail contains no numeric budget/spend values.",
+        "KTD1 raises an HTTP-layer exception from a shared service method. If any non-HTTP caller (MCP tool, CLI, admin task) other than the characterized background worker reaches `_validate_submission_content`, it will now receive an HTTPException whose `detail` was written for contributors; the plan characterizes only resubmit and the background path under R7."
+      ],
+      "deferred_questions": [
+        "Does `EmbeddingBudgetExceeded.__str__` include budget/spend amounts or tenant identifiers, and is exposing those to contributors on the submit path acceptable (it already is on the duplicate-check endpoint)?"
+      ]
+    }
+  },
+  "resolved_findings": [
+    {
+      "reviewer": "coherence",
+      "original": {
+        "title": "U1 omits its accounting regression test file",
+        "severity": "P2",
+        "section": "U1 \u2014 Translate known failures and protect submission ordering",
+        "why_it_matters": "Implementers can miss the required paid-call accounting regression coverage because U1's Files list does not include the test file that its fifth scenario explicitly requires them to pair with. Adding the established file to the unit's file set makes the planned change and verification surface complete and removes that execution ambiguity.",
+        "finding_type": "omission",
+        "autofix_class": "safe_auto",
+        "suggested_fix": "Add `tests/unit/test_embedding_service.py` to U1's Files list.",
+        "confidence": 100,
+        "evidence": [
+          "**Files:** `ontokit/services/suggestion_service.py`; `tests/unit/test_suggestion_submission_content.py`; `tests/unit/test_suggestion_service.py`.",
+          "5. Covers AE3: a later check fails after an earlier successful call; validation stops, without adding rollback/refund or replay behavior (R6). Pair this ordering proof with the existing real embedding-accounting regressions in `tests/unit/test_embedding_service.py`; mocked checker calls alone do not prove durable receipt retention."
+        ]
+      },
+      "disposition": "applied",
+      "reason": "Added referenced metering-order test to verification file set."
+    },
+    {
+      "reviewer": "feasibility",
+      "original": {
+        "title": "Referenced accounting regressions do not verify durable receipts",
+        "severity": "P2",
+        "section": "U1 \u2014 Translate known failures and protect submission ordering",
+        "why_it_matters": "Following the proposed verification pairing cannot establish the promised durable accounting boundary: tests/unit/test_embedding_service.py replaces reserve_llm_call and finalize_llm_call with AsyncMocks, including its successful-call and failed-reservation tests. It verifies call ordering, not retained database records after a later submission refusal. The implementation needs a real persistence assertion to supply the evidence the plan explicitly requires.",
+        "finding_type": "error",
+        "autofix_class": "gated_auto",
+        "suggested_fix": "Describe the existing embedding-service tests as mocked metering-order regressions, and assign U2 a real PostgreSQL case that retains the production reservation/finalization functions, completes one mocked-provider paid call before a later validation refusal, then verifies its audit record from a fresh session after the failed request closes.",
+        "confidence": 100,
+        "evidence": [
+          "Pair this ordering proof with the existing real embedding-accounting regressions in `tests/unit/test_embedding_service.py`; mocked checker calls alone do not prove durable receipt retention."
+        ]
+      },
+      "disposition": "applied",
+      "reason": "Corrected mocked accounting evidence and assigned real PostgreSQL audit-retention assertion under existing R6."
+    },
+    {
+      "reviewer": "adversarial-claude",
+      "original": {
+        "title": "No decision path if persisted-state tests expose a commit-before-validate defect",
+        "severity": "P1",
+        "section": "Goal Capsule (Stop conditions) and KTD2 - Keep transaction ownership at existing boundaries",
+        "why_it_matters": "An implementer who runs U2 scenario 5 (verification bookkeeping must not leave a partially submitted durable session) and finds that something already commits before the duplicate check has nowhere to go: KTD2 forbids adding an inner commit or blanket rollback, the Assumptions section says a demonstrated persistence defect is an 'implementation-time discovery' without saying whether repairing it is in scope, and the Stop conditions list billing policy, resubmit validation, authorization, and destructive data changes but not transaction restructuring. The result is either an unauthorized widening of a 'bounded API repair' into transaction-boundary changes, or a weakened R4 assertion, both of which the Definition of Done prohibits. Adding an explicit stop condition for this case resolves it by routing the discovery to the user rather than leaving it to the implementer.",
+        "finding_type": "omission",
+        "autofix_class": "gated_auto",
+        "suggested_fix": "Add to Stop conditions: 'Stop for evidence that a persisted-state assertion in U2 (draft status, revision, feedback, PR linkage, branch head) fails because existing code commits or externally persists state before duplicate validation; repairing that ordering is a separate decision, not part of this mapping repair.' Mirror the same sentence in the Assumptions paragraph where persistence defects are called implementation-time discoveries.",
+        "confidence": 75,
+        "evidence": [
+          "Stop for evidence that requires changed billing policy, added resubmit validation, weakened authorization, or destructive data changes.",
+          "Do not add an inner commit or blanket rollback to the mapper (R4\u2013R6).",
+          "Exact fixture adaptation and any demonstrated persistence defect remain implementation-time discoveries.",
+          "Existing verification bookkeeping does not leave a partially submitted durable session when a later validation failure occurs; no commit is added merely to make the fixture pass."
+        ]
+      },
+      "disposition": "dismissed",
+      "reason": "No demonstrated pre-validation commit defect: submit validates before allowance and PR claim; get_db closes the request transaction. KTD2 explicitly preserves transaction ownership and U2 proves persistent recovery. Ordinary ce-work scope/blocker rules already govern a real contradiction, so another hypothetical stop procedure adds no necessary instruction."
+    },
+    {
+      "reviewer": "adversarial-claude",
+      "original": {
+        "title": "KTD1 mirrors the route mapping, creating the duplication it claims to avoid",
+        "severity": "P2",
+        "section": "KTD1 - Translate at the shared duplicate-check call",
+        "why_it_matters": "Two hand-maintained copies of the same translation (in `duplicate_check.py` and in `SuggestionService._validate_submission_content`) means R2's exact public detail string and the 402/503 status choices can drift independently, and the service layer starts raising HTTP-shaped exceptions into non-HTTP callers, which is exactly why the plan has to add a separate risk note that background restoration 'must remain effective despite the mapped exception type.' KTD1 dismisses an app-level FastAPI exception handler in a subordinate clause without stating why; a single shared translator (a function both the route and the service call, or a registered handler for the two domain exceptions) would give one source of truth for the R2 string and keep the worker path free of HTTPException. Concrete benefit: R2's message becomes a single constant that both tests and the existing route assert against.",
+        "finding_type": "omission",
+        "autofix_class": "gated_auto",
+        "suggested_fix": "Amend KTD1 to: 'Extract the existing mapping in `ontokit/api/routes/duplicate_check.py` into one shared translator (single R2 message constant) and call it from both the route and `SuggestionService._validate_submission_content`, so the two seams cannot drift.' Record the rejected alternative (app-wide exception handler) with its reason in the KTD text.",
+        "confidence": 50,
+        "evidence": [
+          "Mirror `ontokit/api/routes/duplicate_check.py` inside `SuggestionService._validate_submission_content`, with narrow catches and exception chaining (R1\u2013R3). This covers existing callers without route-specific duplication or a global exception handler.",
+          "Background restoration must remain effective despite the mapped exception type (R7)."
+        ]
+      },
+      "disposition": "dismissed",
+      "reason": "KTD1 avoids one mapping per submission route by catching at their shared call. Matching the existing dedicated duplicate route is deliberate compatibility, not a claim of zero repeated lines. A global translator or handler adds scope without demonstrated benefit."
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "original": {
+        "title": "No decision rule if U2 exposes existing partial-persistence defect",
+        "severity": "P2",
+        "section": "Planning Contract \u2014 Assumptions / KTD2 (Keep transaction ownership at existing boundaries) and U2 \u2014 Prove HTTP recovery and durable draft preservation",
+        "why_it_matters": "An implementer who finds that the existing interactive path durably persists partial submission state before validation (the plan itself suspects this: verification bookkeeping 'may autoflush') has no sanctioned move. KTD2 forbids adding rollback/commit to the mapper, U2 scenario 5 forbids adding a commit to make the fixture pass, the Definition of Done requires U2 to pass 'without weakening assertions', and the Stop conditions do not list this case \u2014 the Assumptions only say it 'remain[s] an implementation-time discovery'. The result is either silent scope creep into transaction restructuring or a stalled unit. Adding an explicit stop/report rule closes the gap without changing the agreed outcome.",
+        "finding_type": "omission",
+        "autofix_class": "gated_auto",
+        "suggested_fix": "Add to Goal Capsule Stop conditions and to U2's Approach: 'If U2's fresh-session assertions show the existing interactive path durably persists partial submission state (status, revision, or bookkeeping) before the duplicate check refuses, stop and report the defect with evidence rather than adding commit, rollback, or transaction-boundary changes; R4 recovery proof is then blocked pending a separate decision.'",
+        "confidence": 75,
+        "evidence": [
+          "tests must verify durable state from a fresh session because human-verification bookkeeping may autoflush",
+          "Exact fixture adaptation and any demonstrated persistence defect remain implementation-time discoveries.",
+          "Existing verification bookkeeping does not leave a partially submitted durable session when a later validation failure occurs; no commit is added merely to make the fixture pass.",
+          "The full suite and static checks pass without weakening assertions."
+        ]
+      },
+      "disposition": "dismissed",
+      "reason": "No demonstrated pre-validation commit defect: submit validates before allowance and PR claim; get_db closes the request transaction. KTD2 explicitly preserves transaction ownership and U2 proves persistent recovery. Ordinary ce-work scope/blocker rules already govern a real contradiction, so another hypothetical stop procedure adds no necessary instruction."
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "original": {
+        "title": "Definition of Done requires roadmap evidence link no unit owns",
+        "severity": "P3",
+        "section": "Definition of Done",
+        "why_it_matters": "The completion contract requires 'verification evidence linked from the roadmap', but neither U1 nor U2 lists a roadmap file, and the Delivery owner line names only review, verification, publication and merge. An implementer finishing both units would believe the work is done while a DoD item remains unassigned and its target file unidentified. Naming the roadmap artifact and assigning the step to the delivery orchestrator makes the DoD checkable.",
+        "finding_type": "omission",
+        "autofix_class": "gated_auto",
+        "suggested_fix": "In the Goal Capsule Delivery owner line, add 'and records the verification evidence link against roadmap requirement B14/D05 in the master web roadmap'; name the roadmap file path in Work Relationships.",
+        "confidence": 50,
+        "evidence": [
+          "The reviewed branch is published and merged through normal repository protections, with verification evidence linked from the roadmap.",
+          "**Delivery owner:** The delivery orchestrator completes review, verification, publication and authorized merge.",
+          "**Files:** `ontokit/services/suggestion_service.py`; `tests/unit/test_suggestion_submission_content.py`; `tests/unit/test_suggestion_service.py`."
+        ]
+      },
+      "disposition": "dismissed",
+      "reason": "Goal Capsule explicitly assigns delivery evidence to the orchestrator; Work Relationships identifies the master web roadmap. The active session resolves its exact path docs/plans/2026-09-20-0649-requirements-delivery-roadmap.md. No owner or source is missing."
+    },
+    {
+      "reviewer": "whole-doc-claude",
+      "original": {
+        "title": "Unit requirement lists drift from their goals and scenarios",
+        "severity": "P3",
+        "section": "U1 \u2014 Translate known failures and protect submission ordering; U2 \u2014 Prove HTTP recovery and durable draft preservation",
+        "why_it_matters": "Readers tracing coverage will conclude U2 proves R7 (resubmit/background restoration) and R8 (unchanged policies) because its Requirements line says R1\u2013R8, yet its Goal names only R1/R2/R4/R5 and none of its five scenarios exercise resubmit or background paths \u2014 those live in U1. Conversely U1 scenario 4 explicitly asserts R4 (no allowance/PR/finalization on refusal) while U1's Requirements line omits R4. Aligning the lines with what each unit actually tests keeps the trace honest for the DoD check.",
+        "finding_type": "error",
+        "autofix_class": "gated_auto",
+        "suggested_fix": "Change U1 Requirements to 'R1\u2013R4, R6\u2013R8; AE3/AE4' and U2 Requirements to 'R1, R2, R4, R5; AE1/AE2' to match each unit's Goal and test scenarios.",
+        "confidence": 50,
+        "evidence": [
+          "**Requirements:** R1\u2013R3, R6\u2013R8; AE3/AE4.",
+          "4. Failures occur before allowance consumption, PR creation/binding, commit and finalization; relevant orchestration spies are not called (R4).",
+          "**Goal:** Demonstrate R1/R2/R4/R5 across the actual service and persisted workflow.",
+          "**Requirements:** R1\u2013R8; AE1/AE2."
+        ]
+      },
+      "disposition": "dismissed",
+      "reason": "Requirements are defined once and U1 scenario4 explicitly cites R4; U2 intentionally verifies the full preserved workflow contract. A shorter unit goal does not contradict the explicit scenarios or produce omitted verification."
+    },
+    {
+      "reviewer": "security-lens-claude",
+      "original": {
+        "title": "Sanitized 503 path discards root cause from operator logs",
+        "severity": "P3",
+        "section": "KTD1 - Translate at the shared duplicate-check call / U1 - Translate known failures",
+        "why_it_matters": "Operators investigating a pricing outage will see only uvicorn access lines with 503 and the fixed public message, because FastAPI's HTTPException handler returns the response without logging the chained cause; R2 (the fixed 503 pricing message, raw details withheld) is deliberately opaque to the client, so the only place the raw `EmbeddingPricingUnavailable` detail can survive is a server-side log line at the catch site. The plan specifies exception chaining and a public-text test but never says the mapper must log the original exception, so the sanitization that protects the client also erases the incident-response signal. Adding a structured warning log at the catch (no client-facing change) keeps R2 intact while preserving diagnosability.",
+        "finding_type": "omission",
+        "autofix_class": "gated_auto",
+        "suggested_fix": "In KTD1 add: 'Before raising the mapped HTTPException, log the original exception at WARNING with the request/draft identifier so the sanitized 503/402 remains diagnosable server-side; logged text must not be returned to the client.' Add to U1 test scenario 2: 'and the raw pricing text is emitted to the server log.'",
+        "confidence": 50,
+        "evidence": [
+          "with narrow catches and exception chaining (R1\u2013R3)",
+          "raw pricing exception details are not returned",
+          "Pricing failure with sensitive-looking internal text returns only the R2 public detail and retains its cause."
+        ]
+      },
+      "disposition": "dismissed",
+      "reason": "The public response intentionally matches the existing safe 503 contract; exception chaining preserves cause. No demonstrated diagnostic incident requires adding raw pricing logging, which could expose internals. Logging redesign is outside this bounded repair."
+    }
+  ],
+  "edit_authority": "Corrections to implementation and verification necessary for established R1\u2013R8; product contract unchanged.",
+  "actual_edits": [
+    "U1 includes metering-order test verification file.",
+    "U1 calls existing accounting tests mocked; U2 proves retained receipt using production reservation/finalization and fresh PostgreSQL session."
+  ],
+  "resolved_residuals_and_questions": [
+    {
+      "disposition": "dismissed",
+      "claim_group": "Retry may incur repeated paid checks and UI may display generic errors",
+      "reason": "Explicitly covered by R6 no refund/replay promise and Scope Boundaries deferred frontend parsed-message work; neither is hidden acceptance."
+    },
+    {
+      "disposition": "dismissed",
+      "claim_group": "Background may catch only domain failures",
+      "reason": "auto_submit_stale_sessions catches Exception and restores ACTIVE; U1 exercises both actual mapped failures."
+    },
+    {
+      "disposition": "dismissed",
+      "claim_group": "Dedicated endpoint may specify Retry-After",
+      "reason": "Inspected duplicate_check.py: no Retry-After header; no decision conflict."
+    },
+    {
+      "disposition": "dismissed",
+      "claim_group": "Additional callers or budget-message exposure",
+      "reason": "Existing mapper parity is R1; inventory covers all shared submission paths, and no additional unknown caller is evidenced. Changing known application messages would contradict scope."
+    },
+    {
+      "disposition": "dismissed",
+      "claim_group": "Unknown repair scope or roadmap owner",
+      "reason": "Resolved by existing transaction constraint, standard execution blocker contract and explicit orchestrator ownership, as detailed in the corresponding findings."
+    }
+  ]
+}
