@@ -1,0 +1,78 @@
+{
+  "unit": "U1",
+  "status": "complete",
+  "checkout": "/home/damienriehl/Coding Projects/ontokit-web/.worktrees/api-d05-errors",
+  "baseline": "64e81b94",
+  "changed_paths": [
+    "ontokit/services/suggestion_service.py",
+    "tests/unit/test_suggestion_submission_content.py",
+    "tests/unit/test_suggestion_service.py"
+  ],
+  "verification_evidence": {
+    "behavior_changed": "Shared suggestion duplicate validation translates EmbeddingBudgetExceeded to HTTP 402 with original message and EmbeddingPricingUnavailable to HTTP 503 with the fixed public detail. Both retain exception chaining. No other production behavior changed.",
+    "existing_tests_inspected": [
+      "submission content distinct-label, semantic distinction, property fingerprint, individual exclusion tests",
+      "suggestion service submit success and idempotency, resubmit success, stale submission PR failure restoration fixtures",
+      "embedding service metering reservation/finalization tests (mocked accounting; not durable evidence)"
+    ],
+    "tests_added": [
+      "mapping budget and pricing cases, observed red before production changes",
+      "unknown RuntimeError identity preservation",
+      "later-check refusal for both exception classes, two calls only and no commit/rollback",
+      "interactive refusal before allowance, PR claim/bind/finalize, notifications, commit/rollback and index refresh for both failures",
+      "stale worker through actual validator restores ACTIVE with rollback and restoration commit, zero successes for both failures"
+    ],
+    "tests_changed": [
+      "resubmit success now starts with feedback/review date and asserts no validator or duplicate-check call while preserving existing response/revision assertions"
+    ],
+    "unchanged_tests": [
+      "tests/unit/test_embedding_service.py (all 51 cases executed unchanged)"
+    ],
+    "observed_red": {
+      "command": "python3 /tmp/d05-run-tests.py tests/unit/test_suggestion_submission_content.py -k maps_embedding_failure -q",
+      "exit_code": 1,
+      "result": "2 failed, 4 deselected, 1 warning in 3.04s",
+      "failures": [
+        "test_submission_maps_embedding_failure[budget]: unhandled EmbeddingBudgetExceeded: Project embedding budget exceeded",
+        "test_submission_maps_embedding_failure[pricing]: unhandled EmbeddingPricingUnavailable: internal model pricing credential reference"
+      ],
+      "log": "/tmp/d05-u1-red.log"
+    },
+    "focused_commands_results": [
+      {
+        "command": "python3 /tmp/d05-run-tests.py tests/unit/test_suggestion_submission_content.py tests/unit/test_suggestion_service.py tests/unit/test_embedding_service.py -q --no-cov",
+        "exit_code": 0,
+        "result": "157 passed, 1 warning in 16.02s",
+        "log": "/tmp/d05-u1-green.log"
+      },
+      {
+        "command": "/tmp/d04-api-python311/bin/ruff check ontokit/services/suggestion_service.py tests/unit/test_suggestion_submission_content.py tests/unit/test_suggestion_service.py",
+        "exit_code": 0,
+        "result": "All checks passed!"
+      },
+      {
+        "command": "git diff --check",
+        "exit_code": 0
+      }
+    ],
+    "exceptions": [
+      "Initial new orchestration fixtures assumed a two-call Git lookup order; ontology-path probing caused StopIteration. Replaced with branch-aware content lookup. Subsequent 157-case run passed.",
+      "Existing Pydantic class-config deprecation warning remains.",
+      "Unrelated pre-existing formatting in TestAnonymousWriteBudgets preserved after formatter touched it.",
+      "Real persistence and public HTTP proof belongs to U2; no such proof claimed by U1. Full suite/static type checks and authoritative commit belong to parent."
+    ]
+  },
+  "committed": false,
+  "staged": false,
+  "canonical_commit": "1e708049",
+  "authoritative_verification": {
+    "command": "python3 /tmp/d05-run-tests.py tests/unit/test_suggestion_submission_content.py tests/unit/test_suggestion_service.py tests/unit/test_embedding_service.py -q",
+    "result": "157 passed, 1 warning in 4.40s",
+    "checks": [
+      "ruff check ontokit/: passed",
+      "ruff format --check ontokit/: 194 unchanged",
+      "mypy ontokit/: no issues in 193 source files",
+      "pyright ontokit/: 0 errors, 0 warnings"
+    ]
+  }
+}

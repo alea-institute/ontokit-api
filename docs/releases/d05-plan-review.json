@@ -285,7 +285,7 @@
         ]
       },
       "disposition": "dismissed",
-      "reason": "Not admitted: existing service request teardown owns rollback, explicit scope forbids transaction redesign, orchestrator owns roadmap evidence, and existing narrow mapping preserves known error behavior. No demonstrated wrong outcome from the proposed omission; additional logging/abstraction/stop rules are unnecessary."
+      "reason": "No demonstrated pre-validation commit defect: submit validates before allowance and PR claim; get_db closes the request transaction. KTD2 explicitly preserves transaction ownership and U2 proves persistent recovery. Ordinary ce-work scope/blocker rules already govern a real contradiction, so another hypothetical stop procedure adds no necessary instruction."
     },
     {
       "reviewer": "adversarial-claude",
@@ -304,7 +304,7 @@
         ]
       },
       "disposition": "dismissed",
-      "reason": "Not admitted: existing service request teardown owns rollback, explicit scope forbids transaction redesign, orchestrator owns roadmap evidence, and existing narrow mapping preserves known error behavior. No demonstrated wrong outcome from the proposed omission; additional logging/abstraction/stop rules are unnecessary."
+      "reason": "KTD1 avoids one mapping per submission route by catching at their shared call. Matching the existing dedicated duplicate route is deliberate compatibility, not a claim of zero repeated lines. A global translator or handler adds scope without demonstrated benefit."
     },
     {
       "reviewer": "whole-doc-claude",
@@ -325,7 +325,7 @@
         ]
       },
       "disposition": "dismissed",
-      "reason": "Not admitted: existing service request teardown owns rollback, explicit scope forbids transaction redesign, orchestrator owns roadmap evidence, and existing narrow mapping preserves known error behavior. No demonstrated wrong outcome from the proposed omission; additional logging/abstraction/stop rules are unnecessary."
+      "reason": "No demonstrated pre-validation commit defect: submit validates before allowance and PR claim; get_db closes the request transaction. KTD2 explicitly preserves transaction ownership and U2 proves persistent recovery. Ordinary ce-work scope/blocker rules already govern a real contradiction, so another hypothetical stop procedure adds no necessary instruction."
     },
     {
       "reviewer": "whole-doc-claude",
@@ -345,7 +345,7 @@
         ]
       },
       "disposition": "dismissed",
-      "reason": "Not admitted: existing service request teardown owns rollback, explicit scope forbids transaction redesign, orchestrator owns roadmap evidence, and existing narrow mapping preserves known error behavior. No demonstrated wrong outcome from the proposed omission; additional logging/abstraction/stop rules are unnecessary."
+      "reason": "Goal Capsule explicitly assigns delivery evidence to the orchestrator; Work Relationships identifies the master web roadmap. The active session resolves its exact path docs/plans/2026-09-20-0649-requirements-delivery-roadmap.md. No owner or source is missing."
     },
     {
       "reviewer": "whole-doc-claude",
@@ -366,7 +366,7 @@
         ]
       },
       "disposition": "dismissed",
-      "reason": "Not admitted: existing service request teardown owns rollback, explicit scope forbids transaction redesign, orchestrator owns roadmap evidence, and existing narrow mapping preserves known error behavior. No demonstrated wrong outcome from the proposed omission; additional logging/abstraction/stop rules are unnecessary."
+      "reason": "Requirements are defined once and U1 scenario4 explicitly cites R4; U2 intentionally verifies the full preserved workflow contract. A shorter unit goal does not contradict the explicit scenarios or produce omitted verification."
     },
     {
       "reviewer": "security-lens-claude",
@@ -386,12 +386,39 @@
         ]
       },
       "disposition": "dismissed",
-      "reason": "Not admitted: existing service request teardown owns rollback, explicit scope forbids transaction redesign, orchestrator owns roadmap evidence, and existing narrow mapping preserves known error behavior. No demonstrated wrong outcome from the proposed omission; additional logging/abstraction/stop rules are unnecessary."
+      "reason": "The public response intentionally matches the existing safe 503 contract; exception chaining preserves cause. No demonstrated diagnostic incident requires adding raw pricing logging, which could expose internals. Logging redesign is outside this bounded repair."
     }
   ],
   "edit_authority": "Corrections to implementation and verification necessary for established R1\u2013R8; product contract unchanged.",
   "actual_edits": [
     "U1 includes metering-order test verification file.",
     "U1 calls existing accounting tests mocked; U2 proves retained receipt using production reservation/finalization and fresh PostgreSQL session."
+  ],
+  "resolved_residuals_and_questions": [
+    {
+      "disposition": "dismissed",
+      "claim_group": "Retry may incur repeated paid checks and UI may display generic errors",
+      "reason": "Explicitly covered by R6 no refund/replay promise and Scope Boundaries deferred frontend parsed-message work; neither is hidden acceptance."
+    },
+    {
+      "disposition": "dismissed",
+      "claim_group": "Background may catch only domain failures",
+      "reason": "auto_submit_stale_sessions catches Exception and restores ACTIVE; U1 exercises both actual mapped failures."
+    },
+    {
+      "disposition": "dismissed",
+      "claim_group": "Dedicated endpoint may specify Retry-After",
+      "reason": "Inspected duplicate_check.py: no Retry-After header; no decision conflict."
+    },
+    {
+      "disposition": "dismissed",
+      "claim_group": "Additional callers or budget-message exposure",
+      "reason": "Existing mapper parity is R1; inventory covers all shared submission paths, and no additional unknown caller is evidenced. Changing known application messages would contradict scope."
+    },
+    {
+      "disposition": "dismissed",
+      "claim_group": "Unknown repair scope or roadmap owner",
+      "reason": "Resolved by existing transaction constraint, standard execution blocker contract and explicit orchestrator ownership, as detailed in the corresponding findings."
+    }
   ]
 }
