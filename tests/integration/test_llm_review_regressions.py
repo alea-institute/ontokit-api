@@ -686,28 +686,28 @@ async def test_p1_1_unpriced_model_stops_before_provider_on_real_budget_rows(
     ],
 )
 @pytest.mark.parametrize(
-    ("declaration", "expected_status"),
+    ("declaration", "expected_status", "includes_existing_edit"),
     [
-        pytest.param("not valid turtle", 422, id="malformed"),
-        pytest.param("ex:Minted a owl:Class .", 403, id="class"),
+        pytest.param("not valid turtle", 422, False, id="malformed"),
+        pytest.param("ex:Minted a owl:Class .", 403, False, id="class"),
         *[
-            pytest.param(content, 403, id=f"{schema_type}-{case}")
+            pytest.param(
+                f"ex:Minted a {schema_type} .", 403, includes_edit, id=f"{schema_type}-{case}"
+            )
             for schema_type in (
                 "owl:DeprecatedClass",
                 "owl:DeprecatedProperty",
                 "rdfs:ContainerMembershipProperty",
             )
-            for case, content in [
-                ("new-schema", f"ex:Minted a {schema_type} ."),
-                ("mixed-denial", f'ex:Existing rdfs:label "edited" . ex:Minted a {schema_type} .'),
-            ]
+            for case, includes_edit in [("new-schema", False), ("mixed-denial", True)]
         ],
-        pytest.param("ex:Minted a owl:NamedIndividual .", 403, id="explicit-individual"),
-        pytest.param("ex:Minted a ex:ExternalClass .", 403, id="ordinary-individual"),
+        pytest.param("ex:Minted a owl:NamedIndividual .", 403, False, id="explicit-individual"),
+        pytest.param("ex:Minted a ex:ExternalClass .", 403, False, id="ordinary-individual"),
         pytest.param(
             "ex:Minted a [ a owl:Restriction ; owl:onProperty ex:p ; "
             "owl:someValuesFrom ex:ExternalClass ] .",
             403,
+            False,
             id="class-expression-instance",
         ),
     ],
@@ -719,6 +719,7 @@ async def test_p1_7_p1_12_server_gates_content_before_real_git_commit(
     hint: bool | None,
     declaration: str,
     expected_status: int,
+    includes_existing_edit: bool,
 ) -> None:
     """Every public writer refuses hidden minting before Git or session mutation."""
     project_id = uuid4()
@@ -760,10 +761,10 @@ async def test_p1_7_p1_12_server_gates_content_before_real_git_commit(
             "summary",
         )
         before = {field: getattr(session, field) for field in fields}
-        content = initial.decode() + declaration
-        if declaration.startswith('ex:Existing rdfs:label "edited" . '):
-            content = initial.decode().replace('rdfs:label "original"', 'rdfs:label "edited"')
-            content += declaration.removeprefix('ex:Existing rdfs:label "edited" . ')
+        content = initial.decode()
+        if includes_existing_edit:
+            content = content.replace('rdfs:label "original"', 'rdfs:label "edited"')
+        content += declaration
 
         service = SuggestionService(real_db_session, git)
 

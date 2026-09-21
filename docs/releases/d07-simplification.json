@@ -1,0 +1,30 @@
+{
+  "status": "complete",
+  "scope": "branch d9272cc8 to working tree; Python only",
+  "reviewers": [
+    "code-reuse",
+    "code-quality",
+    "efficiency"
+  ],
+  "applied": {
+    "reuse": 0,
+    "quality": 1,
+    "efficiency": 0
+  },
+  "skipped": 0,
+  "change": "Use explicit includes_existing_edit flag for pure versus mixed denial fixtures; preserve exact proposal bytes and existing safety assertions.",
+  "verification": {
+    "affected_integration_suite": "======================== 94 passed, 9 warnings in 5.15s ========================",
+    "ruff": "pass",
+    "format": "pass",
+    "mypy": "193 source files pass",
+    "pyright": "0 errors"
+  },
+  "cleanup": {
+    "containers": true,
+    "volumes": true,
+    "networks": true,
+    "owned_absent": true,
+    "no_new_volumes": true
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "status": "complete",
+  "plan_path": "docs/plans/2026-09-20-1820-fix-schema-mint-authorization-plan.md",
+  "changed_files": [
+    "tests/unit/test_suggestion_trust_integration.py",
+    "tests/integration/test_llm_review_regressions.py",
+    "docs/releases/d07-schema-mint-readiness.md"
+  ],
+  "u_ids_attempted": [
+    "U2"
+  ],
+  "u_ids_completed": [
+    "U2"
+  ],
+  "behavior_change": false,
+  "verification_results": [
+    {
+      "command": "python3 /tmp/d07-run.py pytest tests/unit/test_suggestion_trust_integration.py tests/integration/test_llm_review_regressions.py -q --no-cov",
+      "result": "298 passed, 9 warnings, no skips in 9.75s; exit 0; disposable migrated PostgreSQL/Redis, escalated loopback"
+    },
+    {
+      "command": "python3 /tmp/d07-run.py ruff check tests/unit/test_suggestion_trust_integration.py tests/integration/test_llm_review_regressions.py",
+      "result": "All checks passed"
+    },
+    {
+      "command": "python3 /tmp/d07-run.py ruff format --check tests/unit/test_suggestion_trust_integration.py tests/integration/test_llm_review_regressions.py",
+      "result": "2 files already formatted"
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    }
+  ],
+  "verification_evidence": [
+    {
+      "unit": "U2",
+      "behavior_changed": false,
+      "existing_tests_inspected": [
+        "TestIndividualSaveBoundaries",
+        "TestMintingGate",
+        "test_p1_7_p1_12_server_gates_content_before_real_git_commit"
+      ],
+      "tests_added_or_changed": [
+        "TestIndividualSaveBoundaries.test_branch_relative_identity_on_resumed_session",
+        "TestIndividualSaveBoundaries.test_trusted_and_reviewer_create_individuals",
+        "test_p1_7_p1_12_server_gates_content_before_real_git_commit",
+        "test_schema_identity_edit_persists_after_trust_loss"
+      ],
+      "tests_used_unchanged": [
+        "Existing other tests in both focused files, including malformed input, missing branch baseline, mint capability and submission controls"
+      ],
+      "characterization_observed": "298 cases pass against final U1 production contract; 66 persisted denial and 12 persisted positive cases execute without skips",
+      "exception_reason": "No production behavior change in U2; no fabricated red failures. Initial sandboxed run interrupted exit 130 after slow local-service retries; rerun escalated passed. Initial expanded matrix run passed 298 in 12.34s; final rerun after differentiating pure/mixed denial passed 298 in 9.75s."
+    }
+  ],
+  "implementation_engine_binding": null,
+  "requested_route": "parent-dispatched native worker",
+  "actual_route": "parent-dispatched native worker",
+  "requested_model": null,
+  "actual_model": "unverified",
+  "requested_effort": null,
+  "fallback_reason": null,
+  "run_id": null,
+  "source_kind": "plan",
+  "source_digest": "133eefd8733ff56d25ab0a71a1dbe42f5a4aa8162b5cf84df4b6227644a78476",
+  "unit_receipts": [
+    {
+      "unit": "U2",
+      "baseline": "d49a40243b821a5f95f9ceb204f467371ee96396",
+      "route": "native worker",
+      "model": "unverified",
+      "detached_process": false,
+      "integration": "working tree, caller owns integration",
+      "verification": "focused tests and changed-file lint pass",
+      "canonical_commit": "none; caller-owned",
+      "cleanup": "committed project finally cleanup before Git setup; removal assertions pass; pytest temporary Git paths; parent owns disposable services"
+    }
+  ],
+  "plan_checkpoint": null,
+  "blockers": [],
+  "recovery_path": null,
+  "settled_decision_conflicts": [],
+  "standalone_shipping_skipped": true
+}

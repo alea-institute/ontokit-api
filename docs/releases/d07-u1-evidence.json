@@ -1,0 +1,73 @@
+{
+  "unit": "U1",
+  "baseline": "e24864bc17c4ffc0b80a233e7c1818e4e10adbbd",
+  "behavior_changed": [
+    "Named owl:DeprecatedClass, owl:DeprecatedProperty and rdfs:ContainerMembershipProperty subjects now count as mint identities."
+  ],
+  "changed_paths": [
+    "ontokit/services/suggestion_service.py",
+    "tests/unit/test_suggestion_mint_entities.py",
+    "tests/unit/test_suggestion_submission_content.py"
+  ],
+  "existing_tests_inspected": [
+    "Both owned unit test files in full",
+    "test_suggestion_service.py missing baseline/path mismatch and empty-project controls",
+    "test_suggestion_trust_integration.py branch-relative identity matrix including missing branch baseline"
+  ],
+  "tests_changed": [
+    "Moved three structural-negative entries into explicit positive schema recognition; six text/alias-bytes cases",
+    "Expanded existing individual-only submission exclusion control to three schema types with None and anonymous billing"
+  ],
+  "tests_added": [
+    "Schema identity typing transitions and mixed recognized/structural deduplication",
+    "Blank schema subjects and object-only references",
+    "owl:deprecated annotation and rdf:_1 predicate negative controls",
+    "Separate mixed-schema 25-pass and 26-refusal class/property controls",
+    "Mixed-schema missing/anonymous billing refusal",
+    "Mixed-schema authenticated duplicate-label refusal",
+    "Default-branch schema/ordinary typing transitions for three schema types and class/property declarations"
+  ],
+  "tests_unchanged": [
+    "Ordinary class/property/individual recognition, remaining structural exclusions, malformed mint Turtle",
+    "Existing distinct, property fingerprint and embedding-error submission controls",
+    "Existing missing baseline controls"
+  ],
+  "red_command": "PYTHONPATH=\"$PWD\" /tmp/d04-api-python311/bin/python -m pytest tests/unit/test_suggestion_mint_entities.py -k named_schema_identity -q --no-cov",
+  "red_result": "6 failed, 58 deselected; expected empty-set vs schema IRI assertion for all three types in text and alias-bytes forms, before production modification",
+  "red_log": "/tmp/d07-u1-red.log",
+  "final_commands": [
+    {
+      "command": "PYTHONPATH=\"$PWD\" /tmp/d04-api-python311/bin/python -m pytest tests/unit/test_suggestion_mint_entities.py tests/unit/test_suggestion_submission_content.py -q --no-cov",
+      "result": "99 passed, 4 deprecation warnings"
+    },
+    {
+      "command": "PYTHONPATH=\"$PWD\" /tmp/d04-api-python311/bin/python -m pytest tests/unit/test_suggestion_service.py -k \"missing_baseline_reports_path_mismatch or no_ontology_files_allows_empty_baseline\" -q --no-cov",
+      "result": "3 passed, 94 deselected, 1 deprecation warning"
+    },
+    {
+      "command": "/tmp/d04-api-python311/bin/python -m ruff check <three owned paths>",
+      "result": "All checks passed"
+    },
+    {
+      "command": "/tmp/d04-api-python311/bin/python -m ruff format --check <three owned paths>",
+      "result": "3 files already formatted"
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    }
+  ],
+  "exceptions": [
+    "First edit attempt used unavailable python command; no edit occurred and its recognition selection collected zero tests. Repeated with required Python executable, observed six genuine failures before production change.",
+    "No full suite/database integration runs, commits, index writes or publication performed; parent owns authoritative verification and U2."
+  ],
+  "submission_classifier_unchanged": true,
+  "canonical_commit": "d49a4024",
+  "authoritative_verification": {
+    "command": "python3 /tmp/d07-run.py pytest tests/unit/test_suggestion_mint_entities.py tests/unit/test_suggestion_submission_content.py tests/unit/test_suggestion_trust_integration.py -q --no-cov",
+    "result": "171 passed, 0 skipped, 4 existing/deprecation warnings; isolated loopback storage accessible"
+  },
+  "environment_notes": [
+    "Initial sandboxed focused run also passed 171 in 59.10s; repeated without sandbox network restriction after slow Redis access, 171 passed in 0.69s. No code changes between runs."
+  ]
+}
