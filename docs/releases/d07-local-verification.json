@@ -1,0 +1,47 @@
+{
+  "status": "passed",
+  "full_suite": {
+    "command": "pytest tests/ -v --cov=ontokit",
+    "passed": 3478,
+    "skipped": 0,
+    "warnings": 37,
+    "coverage_percent": 90,
+    "duration_seconds": 50.96,
+    "source_state": "f44acb7cc53dddff8d858e325fd680add0f4a5be before the final test-only fixture simplification"
+  },
+  "ruff": "pass",
+  "format": "198 files already formatted",
+  "mypy": "193 source files pass",
+  "pyright": "0 errors, 0 warnings",
+  "environment": "Locked Python 3.11; RDFLib 7.6.0; newly migrated disposable PostgreSQL 17 and Redis 7; loopback access enabled",
+  "environment_repairs": [
+    "Ignored .venv symlink points at existing locked environment; initial pyright missing-import errors resolved without dependency changes."
+  ],
+  "cleanup": {
+    "containers": {
+      "all_preexisting_present": true
+    },
+    "volumes": {
+      "all_preexisting_present": true
+    },
+    "networks": {
+      "all_preexisting_present": true
+    },
+    "owned_containers_absent": true,
+    "new_volumes_remaining": []
+  },
+  "browser": "Skipped: API-only scope has no rendered page; d07-browser-applicability.json records applicability.",
+  "publication": "Focused branch published; final evidence commit and PR CI remain pending at receipt creation.",
+  "after_simplification": {
+    "affected_integration_tests_passed": 94,
+    "skipped": 0,
+    "duration_seconds": 5.15,
+    "checks": [
+      "Ruff",
+      "format",
+      "mypy",
+      "pyright"
+    ],
+    "evidence": "d07-simplification.json"
+  }
+}

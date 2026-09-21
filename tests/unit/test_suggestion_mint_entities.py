@@ -1,4 +1,4 @@
-"""Mint authorization recognizes named individuals independently of submission policy."""
+"""Mint authorization recognizes named identities independently of submission policy."""
 
 import pytest
 from fastapi import HTTPException
@@ -11,6 +11,39 @@ PREFIXES = """
 @prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
 @prefix rdfs: <http://www.w3.org/2000/01/rdf-schema#> .
 """
+
+
+SCHEMA_TYPES = ["owl:DeprecatedClass", "owl:DeprecatedProperty", "rdfs:ContainerMembershipProperty"]
+
+
+@pytest.mark.parametrize("schema_type", SCHEMA_TYPES)
+@pytest.mark.parametrize("as_bytes", [False, True], ids=["text", "alias-bytes"])
+def test_named_schema_identity(schema_type: str, as_bytes: bool) -> None:
+    content = PREFIXES + f"ex:schema a {schema_type} ."
+    if as_bytes:
+        content = content.replace("owl:", "o:").replace("rdfs:", "s:")
+    assert SuggestionService._declared_entity_iris(content.encode() if as_bytes else content) == {
+        "http://example.org/schema"
+    }
+
+
+@pytest.mark.parametrize("schema_type", SCHEMA_TYPES)
+def test_schema_identity_survives_typing_transitions(schema_type: str) -> None:
+    schema = PREFIXES + f"ex:schema a {schema_type} ."
+    ordinary = PREFIXES + 'ex:schema a owl:Class; rdfs:label "Edited" .'
+    mixed = schema + "ex:schema a owl:Class, owl:NamedIndividual, owl:Restriction ."
+    assert (
+        SuggestionService._declared_entity_iris(schema)
+        == SuggestionService._declared_entity_iris(ordinary)
+        == SuggestionService._declared_entity_iris(mixed)
+        == {"http://example.org/schema"}
+    )
+
+
+@pytest.mark.parametrize("schema_type", SCHEMA_TYPES)
+def test_schema_blank_subjects_and_references_do_not_mint(schema_type: str) -> None:
+    content = PREFIXES + f"[] a {schema_type} . ex:subject ex:ref {schema_type} ."
+    assert SuggestionService._declared_entity_iris(content) == set()
 
 
 @pytest.mark.parametrize(
@@ -45,11 +78,8 @@ def test_named_individual_identity(assertion: str) -> None:
         "owl:AllDisjointProperties",
         "owl:NegativePropertyAssertion",
         "owl:DataRange",
-        "owl:DeprecatedClass",
-        "owl:DeprecatedProperty",
         "rdfs:Datatype",
         "rdfs:Container",
-        "rdfs:ContainerMembershipProperty",
         "rdf:Statement",
         "rdf:List",
         "rdf:Bag",
@@ -102,6 +132,8 @@ def test_existing_identity_survives_edits_and_punning(declaration: str) -> None:
     "content",
     [
         "",
+        "ex:alice owl:deprecated true .",
+        "ex:container rdf:_1 ex:alice .",
         "ex:alice ex:knows ex:bob .",
         'ex:alice rdfs:label "Untyped" .',
         "[] a owl:NamedIndividual, ex:Person .",

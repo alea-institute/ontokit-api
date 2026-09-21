@@ -124,9 +124,9 @@ _ENTITY_DECLARATION_TYPES = frozenset(
 )
 
 
-# These types describe RDF/OWL schema or serialization structures, not ordinary
-# class membership. Keep this list explicit: owl:Thing, owl:Nothing and custom
-# classes (including classes not declared in this graph) must still count.
+# These types describe structural resources excluded from mint identity checks.
+# Named schema declarations, owl:Thing, owl:Nothing and custom class membership
+# (including classes not declared in this graph) must still count.
 # Submission duplicate validation deliberately retains _ENTITY_DECLARATION_TYPES.
 _MINT_STRUCTURAL_TYPES = frozenset(
     {
@@ -139,11 +139,8 @@ _MINT_STRUCTURAL_TYPES = frozenset(
         OWL.AllDisjointProperties,
         OWL.NegativePropertyAssertion,
         OWL.DataRange,
-        OWL.DeprecatedClass,
-        OWL.DeprecatedProperty,
         RDFS.Datatype,
         RDFS.Container,
-        RDFS.ContainerMembershipProperty,
         RDF.Statement,
         RDF.List,
         RDF.Bag,
@@ -286,7 +283,7 @@ class SuggestionService:
 
     @staticmethod
     def _declared_entity_iris(content: bytes | str) -> set[str]:
-        """Return named class, property and typed-individual IRIs for mint checks.
+        """Return named schema and typed-individual IRIs for mint checks.
 
         A named instance of an anonymous class expression counts too. Structural
         typing never masks an ordinary type on the same subject; set identity

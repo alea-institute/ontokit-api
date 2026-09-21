@@ -1,0 +1,231 @@
+{
+  "status": "complete",
+  "verdict": "Ready with fixes",
+  "verdict_reason": "Correct the P3 review-record rationale in #1. No runtime defect or missing local implementation requirement remains; publication, required CI, merge and outer roadmap closure remain caller-owned gates.",
+  "scope": {
+    "base": "d9272cc8",
+    "branch": "fix/d07-schema-mint-20260920",
+    "head_sha": "f44acb7cc53dddff8d858e325fd680add0f4a5be",
+    "pr_url": null,
+    "files_changed": 13
+  },
+  "intent": "Recognize three explicit named schema declarations in suggestion mint authorization while preserving edits to existing branch identities and existing submission billing, duplicate checks and caps. Verify all four save paths against real Git/database state, with isolated cleanup.",
+  "intent_confidence": "explicit",
+  "reviewers": [
+    "correctness",
+    "security",
+    "testing",
+    "project-standards",
+    "maintainability",
+    "adversarial-claude"
+  ],
+  "findings": [
+    {
+      "#": 1,
+      "autofix_class": "gated_auto",
+      "confidence": 75,
+      "evidence": [
+        "docs/releases/d07-plan-review.json:265-267: \"claim\": \"Is the branch-relative baseline computed live from branch content at each save, or persisted from an earlier detector version? ...\", \"disposition\": \"dismissed\", \"reason\": \"The lockfile and installed metadata were checked: RDFLib 7.6.0; no version uncertainty remains.\"",
+        "ontokit/services/suggestion_service.py:461 -- current_entities = self._declared_entity_iris(current_content), corroborating the live-baseline rationale already recorded at docs/releases/d07-plan-review.json:255."
+      ],
+      "file": "docs/releases/d07-plan-review.json",
+      "first_evidence": "docs/releases/d07-plan-review.json:265-267: \"claim\": \"Is the branch-relative baseline computed live from branch content at each save, or persisted from an earlier detector version? ...\", \"disposition\": \"dismissed\", \"reason\": \"The lockfile and installed metadata were checked: RDFLib 7.6.0; no version uncertainty remains.\"",
+      "independent_reviewers": [
+        "adversarial-claude"
+      ],
+      "line": 267,
+      "owner": "downstream-resolver",
+      "pre_existing": false,
+      "requires_verification": false,
+      "reviewers": [
+        "adversarial-claude"
+      ],
+      "severity": "P3",
+      "suggested_fix": "Replace the reason at line 267: KTD2 explicitly uses current suggestion-branch content; _assert_branch_content_can_mint parses the current branch file on each untrusted save. No stored detector-version snapshot exists.",
+      "title": "Baseline review question has an unrelated dismissal reason",
+      "why_it_matters": "A reader auditing the live-versus-persisted baseline decision sees it marked resolved using RDFLib version evidence. The correct live-content explanation exists in the adjacent entry but is missing from this disposition.",
+      "validation_status": "confirmed",
+      "validation_reason": "The diff newly adds docs/releases/d07-plan-review.json:265\u2013267 with an RDFLib-version dismissal that does not answer its live-versus-persisted baseline question, so a reader inspecting that resolution encounters an unrelated justification (reader incidence was not measured), despite the correct explanation at line 255 and live parsing in ontokit/services/suggestion_service.py:461; the alleged defect is review-record accuracy, not a runtime authorization failure.",
+      "protected_subject": null
+    }
+  ],
+  "actionable_findings": [
+    {
+      "#": 1,
+      "autofix_class": "gated_auto",
+      "confidence": 75,
+      "evidence": [
+        "docs/releases/d07-plan-review.json:265-267: \"claim\": \"Is the branch-relative baseline computed live from branch content at each save, or persisted from an earlier detector version? ...\", \"disposition\": \"dismissed\", \"reason\": \"The lockfile and installed metadata were checked: RDFLib 7.6.0; no version uncertainty remains.\"",
+        "ontokit/services/suggestion_service.py:461 -- current_entities = self._declared_entity_iris(current_content), corroborating the live-baseline rationale already recorded at docs/releases/d07-plan-review.json:255."
+      ],
+      "file": "docs/releases/d07-plan-review.json",
+      "first_evidence": "docs/releases/d07-plan-review.json:265-267: \"claim\": \"Is the branch-relative baseline computed live from branch content at each save, or persisted from an earlier detector version? ...\", \"disposition\": \"dismissed\", \"reason\": \"The lockfile and installed metadata were checked: RDFLib 7.6.0; no version uncertainty remains.\"",
+      "independent_reviewers": [
+        "adversarial-claude"
+      ],
+      "line": 267,
+      "owner": "downstream-resolver",
+      "pre_existing": false,
+      "requires_verification": false,
+      "reviewers": [
+        "adversarial-claude"
+      ],
+      "severity": "P3",
+      "suggested_fix": "Replace the reason at line 267: KTD2 explicitly uses current suggestion-branch content; _assert_branch_content_can_mint parses the current branch file on each untrusted save. No stored detector-version snapshot exists.",
+      "title": "Baseline review question has an unrelated dismissal reason",
+      "why_it_matters": "A reader auditing the live-versus-persisted baseline decision sees it marked resolved using RDFLib version evidence. The correct live-content explanation exists in the adjacent entry but is missing from this disposition.",
+      "validation_status": "confirmed",
+      "validation_reason": "The diff newly adds docs/releases/d07-plan-review.json:265\u2013267 with an RDFLib-version dismissal that does not answer its live-versus-persisted baseline question, so a reader inspecting that resolution encounters an unrelated justification (reader incidence was not measured), despite the correct explanation at line 255 and live parsing in ontokit/services/suggestion_service.py:461; the alleged defect is review-record accuracy, not a runtime authorization failure.",
+      "protected_subject": null
+    }
+  ],
+  "triage_groups": [],
+  "pre_existing_findings": [],
+  "requirements_completeness": {
+    "plan": "/home/damienriehl/Coding Projects/ontokit-web/.worktrees/api-d07-schema-mint/docs/plans/2026-09-20-1820-fix-schema-mint-authorization-plan.md",
+    "source": "explicit",
+    "items": [
+      {
+        "id": "R1",
+        "status": "met",
+        "evidence": "Three explicit schema types removed from mint exclusions; recognition regressions recorded red then green."
+      },
+      {
+        "id": "R2",
+        "status": "met",
+        "evidence": "66 persisted denial cases cover writer/hint forms, Git/session state and refresh refusal."
+      },
+      {
+        "id": "R3",
+        "status": "met",
+        "evidence": "Resumed-edit and trusted-creation unit matrices plus 12 persisted schema/writer edit cases."
+      },
+      {
+        "id": "R4",
+        "status": "met",
+        "evidence": "Submission classifier unchanged; billing, duplicate, 25/26 cap and default-branch transition controls added."
+      },
+      {
+        "id": "R5",
+        "status": "met",
+        "evidence": "Blank/reference/structural, malformed and missing-baseline controls preserved."
+      },
+      {
+        "id": "R6",
+        "status": "met",
+        "evidence": "Executed Git/database evidence, cleanup receipts and durable B14 remainder present; publication and outer roadmap closure intentionally remain subsequent delivery gates."
+      },
+      {
+        "id": "U1",
+        "status": "met",
+        "evidence": "Production recognition and submission compatibility tests implemented."
+      },
+      {
+        "id": "U2",
+        "status": "met",
+        "evidence": "All-writer persisted denial/edit proof and readiness record implemented."
+      }
+    ]
+  },
+  "learnings": [],
+  "agent_native_gaps": [],
+  "deployment_notes": [],
+  "residual_risks": [
+    "Historical branch reconciliation remains deferred: current suggestion-branch content is the identity baseline, so this repair does not remove identities introduced through the earlier schema gap. This is an explicitly retained B14 seam, not a new finding."
+  ],
+  "testing_gaps": [],
+  "coverage": {
+    "depth": "full",
+    "reviewer_selection": [
+      {
+        "reviewer": "correctness",
+        "tier": "session",
+        "reason": "Always-on"
+      },
+      {
+        "reviewer": "security",
+        "tier": "session",
+        "reason": "Mint authorization boundary"
+      },
+      {
+        "reviewer": "testing",
+        "tier": "mid-tier",
+        "reason": "Regression tests and persistence fixtures"
+      },
+      {
+        "reviewer": "project-standards",
+        "tier": "mid-tier",
+        "reason": "Root AGENTS criteria apply"
+      },
+      {
+        "reviewer": "maintainability",
+        "tier": "mid-tier",
+        "reason": "Over 200 executable changed lines"
+      },
+      {
+        "reviewer": "adversarial-claude",
+        "tier": "cross-model",
+        "reason": "Authorization adversarial review"
+      }
+    ],
+    "suppressed_by_confidence": {
+      "50": 1
+    },
+    "first_evidence_backfilled": 0,
+    "missing_quote_demotions": 0,
+    "mode_aware_demotions": 0,
+    "settlement_suppressed": 0,
+    "malformed_findings": 0,
+    "malformed_returns": 0,
+    "failed_reviewers": [],
+    "validator": {
+      "confirmed": 1,
+      "rejected": 0,
+      "unresolved": 0,
+      "malformed": 0,
+      "failed": 0,
+      "shortcut_skipped": 0,
+      "outcome": "Verdicts landed within the bound. Finding #1 confirmed; reader incidence was not measured. No protected-subject reclassification or degraded blocker. Confirmation preserves confidence 75 and the single-source reviewer attribution."
+    },
+    "cross_model": "Cross-model adversarial review completed: route claude; requested/actual model claude-opus-5; requested effort high, actual effort unverified; receipt_supported=true; independence_verified=true. Verified artifact collected and terminal job directory removed.",
+    "notes": [
+      "Full-depth review selected for authorization boundary despite 11 non-test executable changed lines.",
+      "Standards use root AGENTS.md as instruction-file fallback; no CODING_STANDARDS.md applies.",
+      "Local API implementation complete; publication/CI/merge and outer Web master roadmap closure remain subsequent LFG gates. Web roadmap at /home/damienriehl/Coding Projects/ontokit-web/docs/plans/2026-09-20-0649-requirements-delivery-roadmap.md already points at reviewed D07 plan and implementing status (root commit a8bac499).",
+      "Full suite 3478 passed/90% before final test-only fixture simplification; afterward 94 affected integration tests passed, production lint/mypy/pyright pass, isolated resources cleaned."
+    ],
+    "compound_packs": {
+      "roots": [],
+      "warnings": [],
+      "errors": []
+    },
+    "synthesis_dispositions": [
+      {
+        "claim": "Requirements tracker lacks D07 completion update",
+        "reason": "Outside API review ownership and premature before outer publication/merge gates; authoritative Web roadmap already contains plan link and implementing state."
+      },
+      {
+        "claim": "Persist both-direction schema type edits",
+        "reason": "Plan U2 verification 6 specifically requires compact all-type/all-writer coverage including a transition, not every Cartesian transition; unit tests cover both directions for all types."
+      },
+      {
+        "claim": "Committed evidence points at ephemeral /tmp artifacts and local home path",
+        "reason": "Below confidence threshold; persisted red_result already records six actual failures, baseline and canonical commit support reproduction, so temporary log is supplemental. No credential or unrelated private data identified."
+      },
+      {
+        "claim": "Missing main-seeded persisted edit case",
+        "reason": "No demonstrated defect or additional consequential gap in shared branch-content guard; plan expressly seeds suggestion-only identities and unit coverage tests default-branch submission transitions."
+      },
+      {
+        "claim": "Named schema comment excludes other structural types",
+        "reason": "Bounded three-type scope and explicit R5 exclusions are clear; widening taxonomy is out of scope and no material maintenance consequence is established."
+      },
+      {
+        "claim": "Full-suite evidence timing after simplification",
+        "reason": "Finish-input records full suite before final test-only cleanup and affected suite after it; preserve exact verification limits in coverage, not a new defect."
+      }
+    ]
+  },
+  "artifact_path": "/tmp/compound-engineering-1000/ce-code-review/d07-schema-mint-20260920",
+  "run_id": "d07-schema-mint-20260920"
+}

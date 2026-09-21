@@ -1,0 +1,20 @@
+{
+  "run_id": "d07-schema-mint-20260920",
+  "raw_review": "d07-code-review.json",
+  "ordinary_lfg_auto_apply_eligible": [],
+  "dispositions": [
+    {
+      "finding": 1,
+      "status": "fixed",
+      "authority": "Standing user instruction to resolve routine work autonomously; independently verified factual documentation correction. Ordinary LFG automatic threshold was not met (75, single reviewer).",
+      "change": "Replace unrelated RDFLib version reason with current-branch live parsing rationale.",
+      "verification": "Checked KTD2, source at _assert_branch_content_can_mint and adjacent accurate disposition; JSON parses; no runtime change.",
+      "original_confidence": 75,
+      "original_reviewers": [
+        "adversarial-claude"
+      ]
+    }
+  ],
+  "unapplied_actionable_findings": [],
+  "settled_conflicts": []
+}
