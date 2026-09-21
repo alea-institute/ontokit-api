@@ -258,6 +258,7 @@ write_previous_pair() {
 }
 
 record_previous_pair() {
+    local target_api_sha=$1 target_web_sha=$2
     local api_sha web_sha
 
     api_sha=$(repo_sha "$API_REPO")
@@ -270,6 +271,11 @@ record_previous_pair() {
         refuse 'current web checkout is not a full SHA'
         return
     }
+    # A rebuild/retry of the checked-out pair must retain the older rollback target.
+    # This also preserves that target after a failed attempt moved both checkouts.
+    if [[ $api_sha == "$target_api_sha" && $web_sha == "$target_web_sha" ]]; then
+        return 0
+    fi
     write_previous_pair "$api_sha" "$web_sha"
 }
 
@@ -286,7 +292,7 @@ deploy_pair() {
     fetch_and_verify "$API_REPO" "$api_sha" || return
     fetch_and_verify "$WEB_REPO" "$web_sha" || return
     if [[ $record_previous == true ]]; then
-        record_previous_pair || return
+        record_previous_pair "$api_sha" "$web_sha" || return
     fi
     ( umask 022; git -C "$API_REPO" checkout --detach "$api_sha" ) || return
     ( umask 022; git -C "$WEB_REPO" checkout --detach "$web_sha" ) || return

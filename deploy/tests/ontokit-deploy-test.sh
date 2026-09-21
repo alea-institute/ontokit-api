@@ -252,6 +252,66 @@ test_failed_rollback_preserves_retryable_pair() (
     pass 'failed rollback preserves the retryable pair'
 )
 
+test_same_pair_retry_preserves_previous() (
+    local outcome before result call_log="$TMP_ROOT/retry-calls.log"
+    source "$TEST_SCRIPT"
+    load_and_validate_config() { :; }
+    fetch_and_verify() { :; }
+    repo_sha() {
+        if [[ $1 == *ontokit-api ]]; then printf '%s\n' "$API_SHA";
+        else printf '%s\n' "$WEB_SHA"; fi
+    }
+    git() { :; }
+    docker() {
+        printf '%s\n' "$*" >>"$call_log"
+        [[ $outcome != build || $* != *'build api'* ]] || return 1
+        [[ $outcome != up || $* != *'up -d'* ]] || return 1
+    }
+    timeout() { shift; "$@"; }
+    compose_status() { [[ $outcome != health ]]; }
+    verify_runtime_pair() { [[ $outcome != revision ]]; }
+
+    for outcome in build up health revision success; do
+        printf '%s %s\n' "$OLD_API_SHA" "$OLD_WEB_SHA" >"$PREVIOUS_FILE"
+        before=$(<"$PREVIOUS_FILE")
+        : >"$call_log"
+        result=0
+        deploy_pair "$API_SHA" "$WEB_SHA" >/dev/null 2>&1 || result=$?
+        if [[ $outcome == success ]]; then
+            [[ $result == 0 ]] || { fail 'same-pair retry did not succeed'; return; }
+            assert_contains "$(<"$call_log")" 'build --no-cache web' 'same-pair retry skipped rebuilding' || return
+        else
+            [[ $result != 0 ]] || { fail "same-pair retry hid $outcome failure"; return; }
+        fi
+        [[ $(<"$PREVIOUS_FILE") == "$before" ]] || {
+            fail "same-pair $outcome retry replaced the saved rollback pair"
+            return
+        }
+    done
+    pass 'same-pair retries retain rollback through build, startup, health, revision and success outcomes'
+)
+
+test_previous_pair_recording_distinguishes_real_change() (
+    source "$TEST_SCRIPT"
+    repo_sha() {
+        if [[ $1 == *ontokit-api ]]; then printf '%s\n' "$API_SHA";
+        else printf '%s\n' "$WEB_SHA"; fi
+    }
+    rm -f -- "$PREVIOUS_FILE"
+    record_previous_pair "$API_SHA" "$WEB_SHA" || return
+    [[ ! -e $PREVIOUS_FILE ]] || { fail 'same-pair recording fabricated a rollback target'; return; }
+    record_previous_pair "$OLD_API_SHA" "$WEB_SHA" || return
+    [[ $(<"$PREVIOUS_FILE") == "$API_SHA $WEB_SHA" ]] || {
+        fail 'API-only change did not retain the previous complete pair'; return;
+    }
+    rm -f -- "$PREVIOUS_FILE"
+    record_previous_pair "$API_SHA" "$OLD_WEB_SHA" || return
+    [[ $(<"$PREVIOUS_FILE") == "$API_SHA $WEB_SHA" ]] || {
+        fail 'web-only change did not retain the previous complete pair'; return;
+    }
+    pass 'same-pair recording creates no fake history; either component change retains the prior pair'
+)
+
 test_matching_runtime_pair_has_no_drift() (
     local output rc
 
@@ -297,5 +357,7 @@ test_configured_zitadel_requires_full_server_set || failures=$((failures + 1))
 test_auth_secret_maps_to_nextauth_contract || failures=$((failures + 1))
 test_forced_command_rejects_hostile_input || failures=$((failures + 1))
 test_failed_rollback_preserves_retryable_pair || failures=$((failures + 1))
+test_same_pair_retry_preserves_previous || failures=$((failures + 1))
+test_previous_pair_recording_distinguishes_real_change || failures=$((failures + 1))
 test_matching_runtime_pair_has_no_drift || failures=$((failures + 1))
 exit "$failures"

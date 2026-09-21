@@ -1,6 +1,6 @@
 # Lives at /data/coolify/proxy/dynamic/ontokit-dev.yaml on the hetzner-dev proxy box.
 # The gate middleware was removed 2026-08-10, superseding KTD2; Zitadel is the sole auth.
-# The ClientIP router exempts CPX41 server-side OIDC calls.
+# The ClientIP router routes EU application-host server-side OIDC calls to Zitadel.
 # Edit only by validated rewrite, never by hand (F6 lesson).
 http:
   routers:
@@ -53,7 +53,7 @@ http:
       tls:
         certResolver: letsencrypt
     ontokit-auth-internal:
-      rule: Host(`ontokit-auth.dev.openlegalstandard.org`) && ClientIP(`178.156.208.239`)
+      rule: Host(`ontokit-auth.dev.openlegalstandard.org`) && ClientIP(`77.42.71.53`)
       priority: 50000
       entryPoints:
       - https
@@ -76,19 +76,19 @@ http:
     ontokit-dev-web:
       loadBalancer:
         servers:
-        - url: http://178.156.208.239:3000
+        - url: http://77.42.71.53:3000
     ontokit-dev-api:
       loadBalancer:
         servers:
-        - url: http://178.156.208.239:8000
+        - url: http://77.42.71.53:8000
     ontokit-dev-deadend:
       loadBalancer:
         servers: []
     ontokit-dev-zitadel:
       loadBalancer:
         servers:
-        - url: http://178.156.208.239:8080
+        - url: http://77.42.71.53:8080
     ontokit-dev-login:
       loadBalancer:
         servers:
-        - url: http://178.156.208.239:8081
+        - url: http://77.42.71.53:8081
