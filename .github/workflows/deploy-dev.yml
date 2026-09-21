@@ -38,8 +38,27 @@ jobs:
     runs-on: ubuntu-latest
     environment: dev-deploy
     env:
-      DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST || '178.156.208.239' }}
+      DEPLOY_HOST: ${{ vars.DEV_DEPLOY_HOST }}
     steps:
+      - name: Validate deployment host
+        run: |
+          python3 - <<'PYTHON'
+          import ipaddress
+          import os
+          import re
+          import sys
+
+          host = os.environ.get("DEPLOY_HOST", "")
+          try:
+              ipaddress.ip_address(host)
+              valid = "%" not in host
+          except ValueError:
+              label = r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+              valid = len(host) <= 253 and re.fullmatch(rf"{label}(?:\.{label})*\.?", host)
+          if not valid:
+              sys.exit("DEV_DEPLOY_HOST must explicitly name one IP address or DNS host; no fallback is allowed.")
+          PYTHON
+
       - name: Check out the deployment contract
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
