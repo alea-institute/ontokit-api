@@ -6,7 +6,8 @@
 > deployment tranche; paths absent from this branch must not be installed or
 > executed from this branch alone.
 
-This directory captures the post-auth-flip DEV environment on CPX41. The
+This directory captures the DEV deployment contract. The application host moved
+to EU CPX32 on 2026-09-21; hosted identity acceptance remains separate. The
 UAT-history companion is `ontokit-web/docs/roundup-2026-08/DEV-RUNBOOK.md`.
 The CI auto-deploy workflow and its host-side forced command are maintained in
 this repository; deployment credentials remain outside Git.
@@ -97,7 +98,7 @@ Run these steps in order:
 ## Deploy
 
 1. Push the intended API and web commits to their downstream forks.
-2. On CPX41, in each repository, run `git fetch`, verify the intended commit,
+2. On the explicitly selected DEV host, in each repository, run `git fetch`, verify the intended commit,
    and check out its exact SHA.
 3. From `/opt/ontokit`, load the deployment environment and export the exact
    checked-out revisions before rebuilding and restarting:
@@ -148,8 +149,10 @@ lowercase 40-character commit SHAs, and the workflow proves both commits are
 fetchable before the forced command sees them. Updating DEV therefore means
 reviewing and committing one matched API/web pair in the manifest.
 
-`feat/pr-party` no longer deploys from this workflow copy; its own frozen copy
-stays armed until gate B12 locks that branch.
+The `dev-deploy` Environment permits only the exact `dev` branch as of
+2026-09-21. The frozen `feat/pr-party` workflow also uses this Environment,
+so its deployment job is denied by the branch policy. Required reviewers and
+self-review protection were preserved.
 
 ### Explicit migration target
 
@@ -171,34 +174,54 @@ changing DEV and authorized autonomous migration work. Establish the target's
 restore and capacity evidence under that ownership; repairing the historical
 US deployment first is not a prerequisite. Retiring US resources still requires
 proof that their data is independently recoverable and their dependencies are
-no longer needed. Historical IP addresses in the bootstrap example below are
-not a migration target selection: use the explicitly approved destination and
-its independently verified host key instead.
+no longer needed. The US server has been retired; do not reuse its historical address. The current
+EU application host is `77.42.71.53`, behind the preserved proxy
+`204.168.246.227`. The tracked Traefik file includes all four backend URLs and
+the internal identity-call source condition. When changing hosts, update these
+together with `/etc/ontokit/firewall.env` (`ONTOKIT_HOST_IPV4` and, if the proxy
+moves, `ONTOKIT_PROXY_IPV4`), `DEV_DEPLOY_HOST`, and `DEV_DEPLOY_KNOWN_HOSTS`.
+Verify that the installed IPv4 rules match the new destination (`--ctorigdst`)
+and that ports 3000, 8000, 8080 and 8081 are unreachable from a non-proxy
+network. Keep the independent provider firewall while checking host rules.
 
-### One-time: mint the deploy key (Damien only)
+### Deployment key and host verification
 
-This is the only step an agent may not perform (credential material);
-everything else is already installed and verified.
+The existing restricted deployment public key was preserved on EU; migration did
+not require minting a replacement private key. Keep credential material outside
+Git. For a fresh bootstrap, generate a distinct key once without overwriting an
+existing key, and install its public half with both `restrict` and
+`command="/usr/local/sbin/ontokit-deploy"`. Publish the private key only through
+`DEV_DEPLOY_SSH_KEY`; use `DEV_DEPLOY_KNOWN_HOSTS` for the verified public host key.
+These secrets must be available to the workflow's repository-level preflight.
+
+Obtain the expected host key through the recorded host-verification process.
+An unverified `ssh-keyscan` response alone does not establish trust. Set the
+explicit destination and local paths to the restricted key and pinned known-hosts
+file, then verify the forced command from an allowed network:
 
 ```bash
-set -e; D=~/.config/ontokit-dev; mkdir -p $D; chmod 700 $D; if [ -f $D/deploy-key ]; then echo "REFUSED: $D/deploy-key already exists — rotate deliberately"; exit 1; fi; ssh-keygen -t ed25519 -N '' -C github-actions-deploy -f $D/deploy-key >/dev/null; chmod 600 $D/deploy-key; ssh-keyscan -t ed25519 178.156.208.239 2>/dev/null > $D/known_hosts; [ -s $D/known_hosts ] || { echo 'REFUSED: could not read box host key'; exit 1; }; ssh -i ~/.ssh/hetzner_dev root@178.156.208.239 "grep -q github-actions-deploy /root/.ssh/authorized_keys || echo 'restrict,command=\"/usr/local/sbin/ontokit-deploy\" $(cat $D/deploy-key.pub)' >> /root/.ssh/authorized_keys"; for r in ontokit-api ontokit-web; do gh secret set DEV_DEPLOY_SSH_KEY --repo alea-institute/$r < $D/deploy-key; gh secret set DEV_DEPLOY_KNOWN_HOSTS --repo alea-institute/$r < $D/known_hosts; done; ssh -i $D/deploy-key -o IdentitiesOnly=yes -o UserKnownHostsFile=$D/known_hosts -o StrictHostKeyChecking=yes root@178.156.208.239 status && echo 'SELF-CHECK OK — key works and is locked to the deploy command' || echo 'SELF-CHECK FAILED — key installed but deploy command did not answer; tell the session'
+: "${DEV_DEPLOY_HOST:?Set the explicitly approved destination}"
+: "${ONTOKIT_DEPLOY_KEY:?Set the restricted deployment key path}"
+: "${ONTOKIT_KNOWN_HOSTS:?Set the verified known-hosts path}"
+ssh -F /dev/null -i "$ONTOKIT_DEPLOY_KEY" \
+  -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes \
+  -o GlobalKnownHostsFile=/dev/null -o UserKnownHostsFile="$ONTOKIT_KNOWN_HOSTS" \
+  "root@$DEV_DEPLOY_HOST" status
 ```
 
-Setting `IdentitiesOnly` to `yes` is load-bearing here: `-i` only adds an identity, so without it an agent key can satisfy authentication and silently bypass the forced command, making the self-check prove nothing. This was found live on 2026-08-10.
+`status` output can report unhealthy services or revision drift with a nonzero
+exit status even when SSH authentication and command dispatch worked. Diagnose
+that output separately from SSH transport, host-key or authentication errors
+(commonly exit 255); do not rotate credentials solely because health is red.
+Using the operator credential, separately verify that the installed deployment
+public-key entry retains both `restrict` and the forced-command option.
 
-It:
-
-- generates an ed25519 key at `~/.config/ontokit-dev/deploy-key` (mode 600,
-  outside every git tree)
-- installs the public half into root's `authorized_keys` wrapped in `restrict`
-  + `command="/usr/local/sbin/ontokit-deploy"`
-- publishes `DEV_DEPLOY_SSH_KEY` and `DEV_DEPLOY_KNOWN_HOSTS` to both
-  alea-institute forks
-- ends with a self-check that prints OK without revealing key material
-- refuses rather than overwrites an existing key
-
-Until this runs, the Deploy DEV workflow's `preflight` job skips every push
-cleanly, so no approval tap is consumed and nothing fails noisily.
+`IdentitiesOnly=yes` prevents a different agent key from silently satisfying
+authentication and making the forced-command check misleading. A successful
+operator-side connection does not establish GitHub runner reachability. Before
+re-enabling DEV deployment, verify runner ingress, the matched manifest, healthy
+services and rollback behavior under the protected environment. During EU
+recovery the workflow remains disabled and Login acceptance is still open.
 
 The settled posture is a root key locked to one forced command. This was chosen
 over a deploy-user account because the `deploy` account is in the **docker
@@ -219,7 +242,18 @@ checkout revisions separately, and returns nonzero when either pair drifts. The
 status path queries Docker's Compose labels directly, so missing or invalid
 deployment auth configuration cannot hide the running revision truth.
 
-To restore the pair recorded immediately before the last deploy, invoke the
+A rebuild of the already checked-out pair preserves the older rollback target,
+including when the rebuild or health checks fail. If no saved pair exists,
+a same-pair rebuild creates no rollback history and `rollback` refuses with
+exit 64. This is expected on a fresh host or when unaccepted source history
+has been archived; independent restore evidence remains the recovery path.
+A different-pair deploy recording checkout history does not itself prove that
+the recorded pair was healthy or accepted.
+
+Partial checkout failure followed by retry, and retry after a failed rollback,
+still have pre-existing history limitations. Verify these recovery paths before
+normal deployment activation; the same-pair guard is not full rollback proof.
+To restore an accepted saved pair, invoke the
 same restricted key with the `rollback` verb. Each `status`, `deploy`, and
 `rollback` invocation appends its verb, SHA pair, and outcome to
 `/var/log/ontokit-deploy.log`; it never logs the server-side `.env` values.
@@ -437,5 +471,5 @@ system after the 2026-08-10 flip, superseding KTD2.
 - This workflow copy triggers on pushes to `dev` that change
   `deploy/release-manifest.json`; the API/web pair is manifest-declared.
   `workflow_dispatch` re-runs the manifest pair and consumes no inputs.
-- `feat/pr-party` no longer deploys from this workflow copy; its own frozen
-  `deploy-dev` copy stays armed until gate B12 locks that branch.
+- The `dev-deploy` Environment now permits only the exact `dev` branch. Its
+  branch policy blocks deployment from the frozen `feat/pr-party` workflow.
