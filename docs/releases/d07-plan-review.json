@@ -264,7 +264,7 @@
       "reviewer": "adversarial-claude",
       "claim": "Is the branch-relative baseline computed live from branch content at each save, or persisted from an earlier detector version? The answer determines whether AE2 passes on branches created before this fix.",
       "disposition": "dismissed",
-      "reason": "The lockfile and installed metadata were checked: RDFLib 7.6.0; no version uncertainty remains."
+      "reason": "KTD2 explicitly uses current suggestion-branch content; _assert_branch_content_can_mint parses the current content on each untrusted save. No stored detector-version snapshot exists."
     },
     {
       "reviewer": "adversarial-claude",
