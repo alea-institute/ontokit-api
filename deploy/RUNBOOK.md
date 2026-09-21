@@ -40,7 +40,13 @@ Run these steps in order:
    bootstrap and recovery commands only.
 4. Install `deploy/firewall/ontokit-firewall.sh` at
    `/usr/local/sbin/ontokit-firewall.sh` and the unit at
-   `/etc/systemd/system/ontokit-firewall.service`. Make the script executable,
+   `/etc/systemd/system/ontokit-firewall.service`. Before starting the unit,
+   create root-owned `/etc/ontokit/firewall.env` with `ONTOKIT_PROXY_IPV4` set
+   to the verified ingress proxy's IPv4 and `ONTOKIT_HOST_IPV4` set to this
+   application host's IPv4. Both must be canonical dotted-decimal addresses;
+   there are no defaults. Missing or invalid settings fail before any rule
+   changes. Preserve an independent provider firewall while installing and
+   verifying these host rules. Make the script executable,
    run `systemctl daemon-reload`, then `systemctl enable --now ontokit-firewall`.
 5. From `/opt/ontokit`, start the backing services, Zitadel, API, and worker,
    but do not build or start web yet. The API is expected to run with
@@ -144,6 +150,30 @@ reviewing and committing one matched API/web pair in the manifest.
 
 `feat/pr-party` no longer deploys from this workflow copy; its own frozen copy
 stays armed until gate B12 locks that branch.
+
+### Explicit migration target
+
+The deploy job requires `DEV_DEPLOY_HOST`, resolved inside the protected
+`dev-deploy` Environment. Set it to the approved destination's IP address or
+DNS hostname; there is no default or fallback to the historical US server.
+Missing, empty, whitespace, and malformed values fail before credentials are
+installed or SSH runs. Do not include a username, port, URL, or SSH options.
+IPv4, IPv6 without a zone identifier, and DNS names are accepted.
+
+Before moving this variable, verify the destination's host key independently
+and update `DEV_DEPLOY_KNOWN_HOSTS` for that same destination. Keep strict host
+key checking and the restricted forced-command deploy credential. A target
+change does not change the immutable API/web manifest pair, the protected
+Environment, or the dormant PROD gate; keep `PROD_ENABLED` disabled.
+
+For the EU migration, Damien confirmed on 2026-09-21 that no other operator is
+changing DEV and authorized autonomous migration work. Establish the target's
+restore and capacity evidence under that ownership; repairing the historical
+US deployment first is not a prerequisite. Retiring US resources still requires
+proof that their data is independently recoverable and their dependencies are
+no longer needed. Historical IP addresses in the bootstrap example below are
+not a migration target selection: use the explicitly approved destination and
+its independently verified host key instead.
 
 ### One-time: mint the deploy key (Damien only)
 
