@@ -24,6 +24,9 @@ Collaborative OWL ontology curation API built with FastAPI.
 
 ### Full Docker Mode
 
+The default `Dockerfile` installs runtime dependencies from `uv.lock` without the
+dev group and fails the build if the lockfile is out of sync with `pyproject.toml`.
+
 ```bash
 # Start all services
 docker compose up -d

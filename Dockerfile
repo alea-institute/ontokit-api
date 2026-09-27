@@ -20,14 +20,20 @@ RUN useradd --create-home --shell /bin/bash ontokit && \
     chown -R ontokit:ontokit /data/repos
 WORKDIR /home/ontokit/app
 
-# Install Python dependencies
+# Install locked runtime dependencies into the system Python environment.
+COPY --from=ghcr.io/astral-sh/uv:0.9.22 /uv /usr/local/bin/uv
 # Pre-create the package directory: a nested COPY --chmod=0644 would otherwise
 # create its parent without traversal permission for the runtime user.
 RUN mkdir -m 0755 ontokit
-COPY --chmod=0644 pyproject.toml README.md ./
+COPY --chmod=0644 pyproject.toml uv.lock README.md ./
 COPY --chmod=0644 ontokit/version.py ./ontokit/version.py
-RUN pip install --upgrade pip && \
-    pip install .
+# --frozen skips freshness validation, so check for manifest drift first.
+RUN uv lock --check --offline && \
+    uv export --frozen --no-dev --no-hashes --no-emit-project \
+        --output-file /tmp/requirements.txt && \
+    python -m pip install --no-deps -r /tmp/requirements.txt && \
+    python -m pip install --no-deps . && \
+    rm /tmp/requirements.txt
 
 # Copy application code
 COPY --chown=ontokit:ontokit ontokit/ ./ontokit/
