@@ -6,7 +6,7 @@ from typing import Annotated, Any
 
 import httpx
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jwt.exceptions import PyJWTError
 from pydantic import BaseModel, Field
@@ -90,6 +90,16 @@ def require_authenticated_identity(user: CurrentUser) -> None:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="An authenticated identity is required for this feature",
+        )
+
+
+def require_read_only_request(request: Request | None) -> None:
+    """Allow the shared disabled-auth identity only for safe HTTP methods."""
+    if request is None or request.method not in {"GET", "HEAD", "OPTIONS"}:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Authentication is disabled on this deployment, so it is read-only "
+            "apart from anonymous suggestions",
         )
 
 
@@ -278,6 +288,8 @@ async def fetch_userinfo(access_token: str) -> dict[str, Any] | None:
 
 async def get_current_user(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+    # FastAPI injects Request; the default preserves direct callers in authenticated modes.
+    request: Request = None,  # type: ignore[assignment]
 ) -> CurrentUser:
     """
     Get the current authenticated user from the JWT token.
@@ -285,6 +297,7 @@ async def get_current_user(
     Raises 401 if not authenticated.
     """
     if settings.auth_mode == "disabled":
+        require_read_only_request(request)
         return ANONYMOUS_USER
     # "optional" mode: still require auth for RequiredUser (401 if no credentials)
     # "required" mode: existing behavior (401 if no credentials)
@@ -344,6 +357,8 @@ async def get_current_user_optional(
 
 async def get_current_user_with_token(
     credentials: Annotated[HTTPAuthorizationCredentials | None, Depends(security)],
+    # FastAPI injects Request; the default preserves direct callers in authenticated modes.
+    request: Request = None,  # type: ignore[assignment]
 ) -> tuple[CurrentUser, str]:
     """
     Get the current authenticated user and their access token.
@@ -352,6 +367,7 @@ async def get_current_user_with_token(
     Returns tuple of (CurrentUser, access_token).
     """
     if settings.auth_mode == "disabled":
+        require_read_only_request(request)
         return ANONYMOUS_USER, "anonymous"
     # "optional" and "required" modes: existing behavior (401 if no credentials)
     if credentials is None:
