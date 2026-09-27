@@ -64,6 +64,11 @@ uvicorn ontokit.main:app --reload
 > all dev dependencies and sets up pre-commit hooks (ruff + mypy) so that code
 > quality checks run automatically on every commit.
 
+`AUTH_MODE=disabled` means **read and suggest only**: safe reads retain the shared
+anonymous identity, and anonymous suggestion sessions remain available. Routes
+using `RequiredUser` or `RequiredUserWithToken` return 403 for methods other than
+GET, HEAD, and OPTIONS. Use `required` or `optional` with sign-in for editing.
+
 ## Documentation
 
 See the [wiki](https://github.com/CatholicOS/ontokit-api/wiki) for full documentation.
