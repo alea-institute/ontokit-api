@@ -28,7 +28,9 @@ dependencies = [
     "pydantic>=2.13.4,<2.14",
     "pydantic-settings>=2.15.0,<2.16",
     "rdflib>=7.1.0",
-    "sqlalchemy>=2.0.52",
+    # [asyncio] pulls greenlet, which SQLAlchemy 2.1 no longer installs by default;
+    # the Docker image installs with pip (not uv.lock), so both must be explicit.
+    "sqlalchemy[asyncio]>=2.0.52,<2.1",
     "asyncpg>=0.30.0",
     "alembic>=1.19.1",
     "redis>=5.2.0",
