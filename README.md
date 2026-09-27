@@ -67,7 +67,11 @@ uvicorn ontokit.main:app --reload
 `AUTH_MODE=disabled` means **read and suggest only**: safe reads retain the shared
 anonymous identity, and anonymous suggestion sessions remain available. Routes
 using `RequiredUser` or `RequiredUserWithToken` return 403 for methods other than
-GET, HEAD, and OPTIONS. Use `required` or `optional` with sign-in for editing.
+GET, HEAD, and OPTIONS; normalization refresh is also refused. Documented exceptions
+are anonymous suggestions, token-authenticated beacons, signed webhooks, auth
+endpoints, and read-only SPARQL, plus pre-existing unauthenticated legacy routers
+tracked in [#55](https://github.com/alea-institute/ontokit-api/issues/55).
+Use `required` or `optional` with sign-in for editing.
 
 ## Documentation
 

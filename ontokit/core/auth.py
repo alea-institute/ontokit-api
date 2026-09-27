@@ -93,7 +93,7 @@ def require_authenticated_identity(user: CurrentUser) -> None:
         )
 
 
-def _require_read_only_request(request: Request | None) -> None:
+def require_read_only_request(request: Request | None) -> None:
     """Allow the shared disabled-auth identity only for safe HTTP methods."""
     if request is None or request.method not in {"GET", "HEAD", "OPTIONS"}:
         raise HTTPException(
@@ -297,7 +297,7 @@ async def get_current_user(
     Raises 401 if not authenticated.
     """
     if settings.auth_mode == "disabled":
-        _require_read_only_request(request)
+        require_read_only_request(request)
         return ANONYMOUS_USER
     # "optional" mode: still require auth for RequiredUser (401 if no credentials)
     # "required" mode: existing behavior (401 if no credentials)
@@ -367,7 +367,7 @@ async def get_current_user_with_token(
     Returns tuple of (CurrentUser, access_token).
     """
     if settings.auth_mode == "disabled":
-        _require_read_only_request(request)
+        require_read_only_request(request)
         return ANONYMOUS_USER, "anonymous"
     # "optional" and "required" modes: existing behavior (401 if no credentials)
     if credentials is None:
