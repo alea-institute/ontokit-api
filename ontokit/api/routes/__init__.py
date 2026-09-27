@@ -6,7 +6,6 @@ from ontokit.api.routes import (
     analytics,
     anonymous_suggestions,
     auth,
-    classes,
     duplicate_check,
     embeddings,
     generation,
@@ -14,12 +13,10 @@ from ontokit.api.routes import (
     lint,
     normalization,
     notifications,
-    ontologies,
     pr_party,
     pr_party_settings,
     pr_party_webhooks,
     projects,
-    properties,
     pull_requests,
     quality,
     remote_sync,
@@ -81,9 +78,6 @@ router.include_router(quality.router, prefix="/projects", tags=["Quality"])
 router.include_router(analytics.router, prefix="/projects", tags=["Analytics"])
 router.include_router(embeddings.router, prefix="/projects", tags=["Embeddings"])
 router.include_router(semantic_search.router, prefix="/projects", tags=["Semantic Search"])
-router.include_router(ontologies.router, prefix="/ontologies", tags=["Ontologies"])
-router.include_router(classes.router, tags=["Classes"])
-router.include_router(properties.router, tags=["Properties"])
 router.include_router(suggestions.router, prefix="/projects", tags=["Suggestions"])
 router.include_router(trust.router, prefix="/projects", tags=["Trust Ladder"])
 router.include_router(
