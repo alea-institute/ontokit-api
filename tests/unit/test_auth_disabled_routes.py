@@ -24,9 +24,6 @@ DETAIL = (
     "apart from anonymous suggestions"
 )
 SAFE_METHODS = {"GET", "HEAD", "OPTIONS"}
-LEGACY_REASON = (
-    "pre-existing unauthenticated legacy router, tracked in alea-institute/ontokit-api#55"
-)
 # Every exception is an exact mounted method/path pair with its reason.
 DISABLED_WRITE_ALLOWLIST = {
     ("POST", "/api/v1/search/sparql"): "Read-only query; SPARQL UPDATE is rejected",
@@ -61,17 +58,6 @@ DISABLED_WRITE_ALLOWLIST = {
     ("POST", "/api/v1/auth/device/code"): "Auth endpoint initiates device authorization",
     ("POST", "/api/v1/auth/device/token"): "Auth endpoint exchanges device code for tokens",
     ("POST", "/api/v1/auth/token/refresh"): "Auth endpoint refreshes tokens",
-    # Legacy writes are tracked separately; they are not read-and-suggest operations.
-    ("POST", "/api/v1/ontologies"): LEGACY_REASON,
-    ("PUT", "/api/v1/ontologies/{ontology_id}"): LEGACY_REASON,
-    ("DELETE", "/api/v1/ontologies/{ontology_id}"): LEGACY_REASON,
-    ("POST", "/api/v1/ontologies/{ontology_id}/import"): LEGACY_REASON,
-    ("POST", "/api/v1/ontologies/{ontology_id}/classes"): LEGACY_REASON,
-    ("PUT", "/api/v1/ontologies/{ontology_id}/classes/{class_iri:path}"): LEGACY_REASON,
-    ("DELETE", "/api/v1/ontologies/{ontology_id}/classes/{class_iri:path}"): LEGACY_REASON,
-    ("POST", "/api/v1/ontologies/{ontology_id}/properties"): LEGACY_REASON,
-    ("PUT", "/api/v1/ontologies/{ontology_id}/properties/{property_iri:path}"): LEGACY_REASON,
-    ("DELETE", "/api/v1/ontologies/{ontology_id}/properties/{property_iri:path}"): LEGACY_REASON,
 }
 
 
@@ -120,6 +106,41 @@ def test_disabled_mode_write_inventory_is_exhaustive() -> None:
     assert not uncovered, (
         f"Writes without a disabled-mode gate or documented exception: {uncovered}"
     )
+
+
+def test_disabled_mode_write_inventory_rejects_unmounted_allowlist_entries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setitem(DISABLED_WRITE_ALLOWLIST, ("POST", "/api/v1/unmounted"), "Stale exception")
+    with pytest.raises(AssertionError, match="Remove unmounted allowlist entries"):
+        test_disabled_mode_write_inventory_is_exhaustive()
+
+
+@pytest.mark.parametrize("auth_mode", ["required", "optional", "disabled"])
+@pytest.mark.parametrize(
+    "method,path",
+    [
+        ("POST", "/api/v1/ontologies"),
+        ("POST", f"/api/v1/ontologies/{PROJECT_ID}/classes"),
+        ("PUT", f"/api/v1/ontologies/{PROJECT_ID}/properties/x"),
+    ],
+)
+async def test_legacy_routes_are_absent(
+    monkeypatch: pytest.MonkeyPatch, auth_mode: str, method: str, path: str
+) -> None:
+    monkeypatch.setattr("ontokit.core.auth.settings.auth_mode", auth_mode)
+    monkeypatch.setattr(app, "dependency_overrides", {})
+    service = MagicMock()
+    # If a legacy route is reintroduced, prevent its dependencies from touching
+    # infrastructure while still exercising routing and request validation.
+    for route, _ in _all_write_routes():
+        if route.path.startswith("/api/v1/ontologies"):
+            _stub_unrelated_dependencies(route.dependant, monkeypatch, service)
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.request(method, path)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
+    assert service.mock_calls == []
 
 
 @pytest.fixture
