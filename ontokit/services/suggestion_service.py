@@ -221,10 +221,12 @@ class SuggestionService:
                 return member.role
         return None
 
-    def _can_suggest(self, role: str | None, user: CurrentUser) -> bool:
-        """Check if the user's role allows suggesting."""
+    def _can_suggest(self, role: str | None, user: CurrentUser, *, is_public: bool = False) -> bool:
+        """Allow suggest roles and signed-in non-members of public projects."""
         if user.is_superadmin:
             return True
+        if role is None:
+            return is_public and not user.is_anonymous and not is_anonymous_user_id(user.id)
         return role in ("owner", "admin", "editor", "suggester")
 
     async def _verify_project_access(self, project_id: UUID, user: CurrentUser) -> Project:
@@ -235,7 +237,7 @@ class SuggestionService:
         """
         project = await self._get_project(project_id)
         role = self._get_user_role(project, user)
-        if not self._can_suggest(role, user):
+        if not self._can_suggest(role, user, is_public=project.is_public):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You no longer have permission to suggest changes",
@@ -563,7 +565,7 @@ class SuggestionService:
         project = await self._get_project(project_id)
         role = self._get_user_role(project, user)
 
-        if not self._can_suggest(role, user):
+        if not self._can_suggest(role, user, is_public=project.is_public):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You do not have permission to suggest changes",
@@ -1376,7 +1378,9 @@ class SuggestionService:
             can_suggest = bool(project.is_public)
         else:
             assert user is not None
-            can_suggest = self._can_suggest(member.role if member is not None else None, user)
+            can_suggest = self._can_suggest(
+                member.role if member is not None else None, user, is_public=project.is_public
+            )
 
         accepted = 0
         verification_required = False

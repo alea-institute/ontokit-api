@@ -348,6 +348,23 @@ class TestCanSuggest:
         ):
             assert service._can_suggest(None, user) is True
 
+    @pytest.mark.parametrize("role", [None, "viewer"])
+    @pytest.mark.parametrize("is_public", [False, True])
+    def test_public_exception_only_for_nonmembers(
+        self, service: SuggestionService, role: str | None, is_public: bool
+    ) -> None:
+        assert service._can_suggest(role, _make_user(), is_public=is_public) is (
+            is_public and role is None
+        )
+
+    @pytest.mark.parametrize(
+        "user", [CurrentUser(id="anonymous-123"), CurrentUser(id="guest", is_anonymous=True)]
+    )
+    def test_public_exception_requires_signed_in_user(
+        self, service: SuggestionService, user: CurrentUser
+    ) -> None:
+        assert service._can_suggest(None, user, is_public=True) is False
+
 
 class TestGetUserRole:
     def test_returns_role_for_member(self, service: SuggestionService) -> None:
@@ -370,14 +387,18 @@ class TestGetUserRole:
 
 class TestCreateSession:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_member", [True, False], ids=["member", "nonmember"])
     async def test_creates_new_session(
         self,
         service: SuggestionService,
         mock_db: AsyncMock,
         mock_git: MagicMock,
+        is_member: bool,
     ) -> None:
-        """Creates a new session when no active session exists."""
+        """Members and signed-in public non-members can create a session."""
         project = _make_project()
+        if not is_member:
+            project.members = []
 
         # First execute: _get_project
         mock_project_result = MagicMock()
@@ -428,13 +449,13 @@ class TestCreateSession:
         assert result.session_id == existing.session_id
 
     @pytest.mark.asyncio
-    async def test_forbidden_for_non_member(
+    async def test_forbidden_for_private_nonmember(
         self,
         service: SuggestionService,
         mock_db: AsyncMock,
     ) -> None:
-        """Raises 403 when user has no suggest permission."""
-        project = _make_project()
+        """Private projects still require membership."""
+        project = _make_project(is_public=False)
         # Make user not a member
         project.members = []
 
@@ -747,8 +768,8 @@ class TestVerifyProjectAccess:
         mock_db: AsyncMock,
     ) -> None:
         """Raises 403 when user cannot suggest."""
-        project = _make_project()
-        project.members = []  # no members -> no role
+        project = _make_project(is_public=False)
+        project.members = []  # private projects require membership
 
         mock_result = MagicMock()
         mock_result.scalar_one_or_none.return_value = project
@@ -1259,11 +1280,13 @@ class TestSubmit:
         mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("is_member", [True, False], ids=["member", "nonmember"])
     async def test_submit_fallback_to_direct_pr_on_403(
         self,
         service: SuggestionService,
         mock_db: AsyncMock,
         mock_git: MagicMock,
+        is_member: bool,
     ) -> None:
         """Falls back to _create_pr_directly when PR service returns 403."""
         session = _make_session(
@@ -1272,6 +1295,14 @@ class TestSubmit:
             entities_modified=json.dumps(["Person"]),
         )
         project = _make_project()
+        if not is_member:
+            project.members = []
+        session.verification_passed = False
+
+        from ontokit.schemas.trust import TrustTier
+        from ontokit.services.trust_rate_limiter import TrustLimitDecision, TrustLimitStatus
+
+        provider = MagicMock(enabled=False)
 
         mock_session_result = MagicMock()
         mock_session_result.scalar_one_or_none.return_value = session
@@ -1310,6 +1341,14 @@ class TestSubmit:
 
         with (
             patch(
+                "ontokit.services.suggestion_service.get_verification_provider",
+                return_value=provider,
+            ),
+            patch(
+                "ontokit.services.suggestion_service.check_and_consume",
+                new=AsyncMock(return_value=TrustLimitDecision(TrustLimitStatus.ALLOWED, 2)),
+            ) as limiter,
+            patch(
                 "ontokit.services.suggestion_service.get_pull_request_service"
             ) as mock_pr_svc_factory,
             patch("ontokit.services.suggestion_service.NotificationService") as mock_notif_cls,
@@ -1332,6 +1371,13 @@ class TestSubmit:
 
         assert result.pr_number == 6
         assert result.status == "submitted"
+
+        if not is_member:
+            assert service.trust.resolve_tier(project, user) is TrustTier.UNTRUSTED
+            limiter.assert_awaited_once_with(None, str(PROJECT_ID), user.id)
+            assert session.verification_passed is True
+        else:
+            limiter.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -2323,8 +2369,8 @@ class TestAutoSubmitStaleSessionsExtended:
         mock_claim_result = MagicMock()
         mock_claim_result.rowcount = 1
 
-        # _verify_project_access -> project with no matching member
-        project = _make_project()
+        # _verify_project_access -> private project with no matching member
+        project = _make_project(is_public=False)
         project.members = []
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
@@ -3481,3 +3527,74 @@ async def test_bulk_self_approval_does_not_poison_following_item(
     assert [failure.session_id for failure in result.failed] == [lifecycle.session.session_id]
     assert "own suggestion" in result.failed[0].reason
     lifecycle.pr_service._merge_pull_request_for_suggestion.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    ("limit_status", "status_code", "reason"),
+    [
+        ("exhausted", 429, "daily_limit_reached"),
+        ("unavailable", 503, "submission_limiter_unavailable"),
+    ],
+)
+async def test_public_nonmember_submit_enforces_limiter(
+    service: SuggestionService,
+    mock_db: AsyncMock,
+    limit_status: str,
+    status_code: int,
+    reason: str,
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionSubmitRequest
+    from ontokit.services.trust_rate_limiter import TrustLimitDecision, TrustLimitStatus
+
+    project = _make_project()
+    project.members = []
+    session = _make_session(changes_count=1)
+    session.verification_passed = True
+    service._get_project = AsyncMock(return_value=project)
+    service._get_session = AsyncMock(return_value=session)
+    redis = AsyncMock()
+    with (
+        patch(
+            "ontokit.services.suggestion_service.check_and_consume",
+            new=AsyncMock(return_value=TrustLimitDecision(TrustLimitStatus(limit_status), 0)),
+        ) as limiter,
+        pytest.raises(HTTPException) as exc,
+    ):
+        await service.submit(
+            PROJECT_ID, session.session_id, SuggestionSubmitRequest(), _make_user(), redis=redis
+        )
+    assert exc.value.status_code == status_code
+    assert exc.value.detail["reason"] == reason
+    limiter.assert_awaited_once_with(redis, str(PROJECT_ID), session.user_id)
+    assert session.status == "active"
+    assert session.pr_id is None
+    mock_db.add.assert_not_called()
+    mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.parametrize("action", ["save", "submit"])
+async def test_private_nonmember_cannot_continue_session(
+    service: SuggestionService, mock_db: AsyncMock, action: str
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionSaveRequest, SuggestionSubmitRequest
+
+    project = _make_project(is_public=False)
+    project.members = []
+    session = _make_session(changes_count=1)
+    service._get_project = AsyncMock(return_value=project)
+    service._get_session = AsyncMock(return_value=session)
+    with pytest.raises(HTTPException) as exc:
+        if action == "save":
+            await service.save(
+                PROJECT_ID,
+                session.session_id,
+                SuggestionSaveRequest(content="", entity_iri="http://x#A", entity_label="A"),
+                _make_user(),
+            )
+        else:
+            await service.submit(
+                PROJECT_ID, session.session_id, SuggestionSubmitRequest(), _make_user()
+            )
+    assert exc.value.status_code == 403
+    service.git_service.commit_changes.assert_not_called()
+    mock_db.commit.assert_not_awaited()

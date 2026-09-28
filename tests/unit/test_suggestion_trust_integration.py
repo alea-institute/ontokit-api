@@ -450,11 +450,12 @@ class TestMintingGate:
             service._assert_can_mint(_project([]), None)
         assert exc.value.status_code == 403
 
+    @pytest.mark.parametrize("is_member", [True, False], ids=["member", "nonmember"])
     async def test_save_without_minting_is_allowed_for_untrusted(
-        self, service: SuggestionService, mock_db: AsyncMock
+        self, service: SuggestionService, mock_db: AsyncMock, is_member: bool
     ) -> None:
         """Propose-edit stays available at every rung (AE2's second half)."""
-        project = _project([_member("contributor-1")])
+        project = _project([_member("contributor-1")] if is_member else [])
         session = _session(status=SuggestionSessionStatus.ACTIVE.value, changes_count=0)
         mock_db.execute.side_effect = _results(
             _result_for(session), _result_for(project), _result_for(project), project=project
@@ -483,10 +484,11 @@ class TestMintingGate:
         )
         assert response.commit_hash == "abc123"
 
+    @pytest.mark.parametrize("is_member", [True, False], ids=["member", "nonmember"])
     async def test_save_with_minting_is_refused_for_untrusted(
-        self, service: SuggestionService, mock_db: AsyncMock
+        self, service: SuggestionService, mock_db: AsyncMock, is_member: bool
     ) -> None:
-        project = _project([_member("contributor-1")])
+        project = _project([_member("contributor-1")] if is_member else [])
         session = _session(status=SuggestionSessionStatus.ACTIVE.value, changes_count=0)
         mock_db.execute.side_effect = _results(
             _result_for(session), _result_for(project), _result_for(project), project=project
@@ -509,6 +511,7 @@ class TestMintingGate:
                 _user("contributor-1"),
             )
         assert exc.value.status_code == 403
+        assert exc.value.detail["reason"] == "trust_required_to_mint"
         service.git_service.commit_changes.assert_not_called()
 
     async def test_anonymous_save_derives_minting_without_client_hint(
@@ -844,15 +847,20 @@ class TestCapabilities:
         assert exc.value.status_code == 403
         assert mock_db.execute.await_count == 1
 
-    async def test_public_nonmember_is_not_advertised_as_able_to_suggest(
+    async def test_public_nonmember_can_suggest_as_untrusted(
         self, service: SuggestionService, mock_db: AsyncMock
     ) -> None:
         project = _project([])
-        mock_db.execute.return_value = _capability_result(project, None)
+        mock_db.execute.side_effect = [
+            _capability_result(project, None),
+            _outcome_counts_result(0, 0),
+        ]
         caps = await service.get_capabilities(PROJECT_ID, _user("stranger"))
         assert caps.tier is TrustTier.UNTRUSTED
-        assert caps.can_suggest is False
-        assert mock_db.execute.await_count == 1
+        assert caps.can_suggest is True
+        assert caps.can_mint_entities is False
+        assert caps.verification_required is True
+        assert mock_db.execute.await_count == 2
 
     async def test_first_suggestion_flags_verification_required(
         self, service: SuggestionService, mock_db: AsyncMock
