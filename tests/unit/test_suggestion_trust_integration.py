@@ -169,8 +169,13 @@ def mock_db() -> AsyncMock:
 
 
 @pytest.fixture
-def service(mock_db: AsyncMock) -> SuggestionService:
-    return SuggestionService(db=mock_db, git_service=MagicMock())
+def service(mock_db: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> SuggestionService:
+    service = SuggestionService(db=mock_db, git_service=MagicMock())
+    monkeypatch.setattr(service, "_enqueue_branch_refresh", AsyncMock())
+    monkeypatch.setattr(
+        "ontokit.services.translation_jobs.enqueue_label_diff_after_commit", AsyncMock()
+    )
+    return service
 
 
 def _added_outcomes(mock_db: AsyncMock) -> list[SuggestionOutcome]:
@@ -289,8 +294,17 @@ class TestApproveRecordsOutcome:
 
 
 class TestRejectRecordsOutcome:
+    @pytest.fixture
+    def open_pr(self, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+        from ontokit.services.pull_request_service import PullRequestService
+
+        pr = MagicMock(status="open", source_branch="suggest/x/s_abc12345")
+        monkeypatch.setattr(PullRequestService, "_get_pr", AsyncMock(return_value=pr))
+        monkeypatch.setattr(PullRequestService, "_sync_pull_request_to_github", AsyncMock())
+        return pr
+
     async def test_reject_appends_rejected_outcome_and_no_promotion(
-        self, service: SuggestionService, mock_db: AsyncMock
+        self, service: SuggestionService, mock_db: AsyncMock, open_pr: MagicMock
     ) -> None:
         member = _member("contributor-1")
         project = _project([member, _member("reviewer-1", "admin")], threshold=1)
@@ -306,6 +320,7 @@ class TestRejectRecordsOutcome:
             _user("reviewer-1"),
         )
 
+        assert open_pr.status == "closed"
         outcomes = _added_outcomes(mock_db)
         assert len(outcomes) == 1
         assert outcomes[0].outcome == SuggestionOutcomeType.REJECTED.value
@@ -313,7 +328,7 @@ class TestRejectRecordsOutcome:
         assert member.is_trusted is False
 
     async def test_reject_halts_the_auto_accept_clock(
-        self, service: SuggestionService, mock_db: AsyncMock
+        self, service: SuggestionService, mock_db: AsyncMock, open_pr: MagicMock
     ) -> None:
         """R12."""
         project = _project([_member("reviewer-1", "admin")])
@@ -330,6 +345,7 @@ class TestRejectRecordsOutcome:
             _user("reviewer-1"),
         )
 
+        assert open_pr.status == "closed"
         assert session.auto_accept_after is None
         assert session.auto_accept_halted_at is not None
 

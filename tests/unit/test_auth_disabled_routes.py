@@ -208,6 +208,7 @@ def _stub_unrelated_dependencies(
         ("POST", "/api/v1/projects/import"),
         ("PUT", f"/api/v1/projects/{PROJECT_ID}/source"),
         ("POST", f"/api/v1/projects/{PROJECT_ID}/branches"),
+        ("POST", f"/api/v1/projects/{PROJECT_ID}/suggestions/sessions/s_test/reopen"),
     ],
 )
 async def test_project_writes_refused_before_validation_or_service(
@@ -363,3 +364,9 @@ async def test_pr_sync_still_rejects_anonymous_at_sensitive_boundary() -> None:
     assert exc.value.status_code == 403
     assert exc.value.detail == "An authenticated identity is required for this feature"
     assert service.mock_calls == []
+
+
+def test_reopen_is_in_protected_write_inventory() -> None:
+    assert ("POST", "/api/v1/projects/{project_id}/suggestions/sessions/{session_id}/reopen") in {
+        (method, route.path) for route, method in _write_routes()
+    }

@@ -2141,3 +2141,57 @@ class TestPRSettings:
 
         assert exc_info.value.status_code == 403
         mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["owner", "admin", "editor", "suggester"])
+@pytest.mark.parametrize("sync_fails", [False, True])
+async def test_suggestion_close_seam(
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    sync_fails: bool,
+) -> None:
+    """Reviewer policy authorizes the internal close; local success survives mirror failure."""
+    from ontokit.services.suggestion_service import SuggestionService
+
+    db = AsyncMock()
+    git = MagicMock()
+    service = PullRequestService(db, git)
+    project = _make_project(members=[_make_member("reviewer", role)])
+    pr = _make_pr(author_id="contributor")
+    user = CurrentUser(id="reviewer")
+    monkeypatch.setattr(SuggestionService, "_get_project", AsyncMock(return_value=project))
+    monkeypatch.setattr(service, "_get_project", AsyncMock(return_value=project))
+    monkeypatch.setattr(service, "_get_pr", AsyncMock(return_value=pr))
+    sync = AsyncMock(side_effect=RuntimeError("GitHub unavailable") if sync_fails else None)
+    monkeypatch.setattr(service, "_sync_pull_request_to_github", sync)
+    monkeypatch.setattr(service, "_to_pr_response", AsyncMock())
+
+    @asynccontextmanager
+    async def unlocked(*_args: object) -> AsyncIterator[None]:
+        yield
+
+    monkeypatch.setattr("ontokit.services.pull_request_service.branch_write_lock", unlocked)
+    if role in ("editor", "suggester"):
+        with pytest.raises(HTTPException) as direct:
+            await service.close_pull_request(PROJECT_ID, 1, user)
+        assert direct.value.status_code == 403
+        assert pr.status == "open"
+    if role == "suggester":
+        with pytest.raises(HTTPException) as internal:
+            await service._close_pull_request_for_suggestion(PROJECT_ID, 1, user)
+        assert internal.value.status_code == 403
+        db.commit.assert_not_awaited()
+    else:
+
+        async def check_committed(*_args: object) -> None:
+            assert pr.status == "closed"
+            db.commit.assert_awaited_once()
+            if sync_fails:
+                raise RuntimeError("GitHub unavailable")
+
+        sync.side_effect = check_committed
+        await service._close_pull_request_for_suggestion(PROJECT_ID, 1, user)
+        assert pr.status == "closed"
+        sync.assert_awaited_once()
+        assert db.rollback.await_count == int(sync_fails)

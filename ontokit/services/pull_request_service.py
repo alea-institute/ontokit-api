@@ -520,6 +520,31 @@ class PullRequestService:
 
         return await self._to_pr_response(pr, project_id)
 
+    async def _close_pull_request_for_suggestion(
+        self, project_id: UUID, pr_number: int, user: CurrentUser
+    ) -> None:
+        """Internal close authorized by the suggestion reviewer policy.
+
+        The interactive close endpoint retains its author/owner/admin rule.
+        A retry after a committed local close can finish the suggestion decision.
+        """
+        from ontokit.services.suggestion_service import SuggestionService
+
+        await SuggestionService(self.db, self.git_service)._verify_reviewer_access(project_id, user)
+        pr = await self._get_pr(project_id, pr_number)
+        async with branch_write_lock(self.db, project_id, pr.source_branch):
+            await self.db.refresh(pr)
+            if pr.status not in (PRStatus.OPEN.value, PRStatus.CLOSED.value):
+                raise HTTPException(status_code=400, detail="Pull request is already merged")
+            pr.status = PRStatus.CLOSED.value
+            await self.db.commit()
+        try:
+            await self._sync_pull_request_to_github(project_id, pr)
+        except Exception:
+            # The committed local close remains authoritative if its mirror fails.
+            await self.db.rollback()
+            logger.warning("Failed to sync rejected suggestion PR to GitHub", exc_info=True)
+
     async def reopen_pull_request(
         self, project_id: UUID, pr_number: int, user: CurrentUser
     ) -> PRResponse:

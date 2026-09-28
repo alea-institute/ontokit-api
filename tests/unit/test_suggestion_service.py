@@ -1348,6 +1348,7 @@ class TestApprove:
     ) -> None:
         """Approves a submitted session and merges the PR."""
         session = _make_session(
+            user_id="contributor",
             status=SuggestionSessionStatus.SUBMITTED.value,
             pr_number=5,
         )
@@ -1371,6 +1372,7 @@ class TestApprove:
         ) as mock_pr_svc_factory:
             mock_pr_svc = AsyncMock()
             mock_pr_svc.merge_pull_request = AsyncMock()
+            mock_pr_svc.merge_pull_request.return_value.merge_commit_hash = None
             mock_pr_svc_factory.return_value = mock_pr_svc
 
             await service.approve(PROJECT_ID, session.session_id, user)
@@ -1386,7 +1388,7 @@ class TestApprove:
         mock_db: AsyncMock,
     ) -> None:
         """Raises 400 when session is not submitted."""
-        session = _make_session(status=SuggestionSessionStatus.ACTIVE.value)
+        session = _make_session(user_id="contributor", status=SuggestionSessionStatus.ACTIVE.value)
         project = _make_project()
         project.members[0].role = "admin"
 
@@ -1410,6 +1412,7 @@ class TestApprove:
     ) -> None:
         """Can approve an auto-submitted session."""
         session = _make_session(
+            user_id="contributor",
             status=SuggestionSessionStatus.AUTO_SUBMITTED.value,
             pr_number=7,
         )
@@ -1432,6 +1435,7 @@ class TestApprove:
         ) as mock_pr_svc_factory:
             mock_pr_svc = AsyncMock()
             mock_pr_svc.merge_pull_request = AsyncMock()
+            mock_pr_svc.merge_pull_request.return_value.merge_commit_hash = None
             mock_pr_svc_factory.return_value = mock_pr_svc
 
             await service.approve(PROJECT_ID, session.session_id, user)
@@ -1446,6 +1450,7 @@ class TestApprove:
     ) -> None:
         """Approves a session that has no PR number (skips merge)."""
         session = _make_session(
+            user_id="contributor",
             status=SuggestionSessionStatus.SUBMITTED.value,
             pr_number=None,
         )
@@ -1474,6 +1479,7 @@ class TestApprove:
 
         pr_id = uuid.uuid4()
         session = _make_session(
+            user_id="contributor",
             status=SuggestionSessionStatus.SUBMITTED.value,
             pr_number=5,
             pr_id=pr_id,
@@ -1486,6 +1492,7 @@ class TestApprove:
         session_result.scalar_one_or_none.return_value = session
         linked_pr = MagicMock()
         linked_pr.status = PRStatus.MERGED.value
+        linked_pr.merge_commit_hash = None
         pr_result = MagicMock()
         pr_result.scalar_one_or_none.return_value = linked_pr
         mock_db.execute.side_effect = _padded(
@@ -1497,7 +1504,7 @@ class TestApprove:
 
         pr_factory.assert_not_called()
         assert session.status == SuggestionSessionStatus.MERGED.value
-        assert mock_db.add.call_count == 1
+        assert len(_outcomes(mock_db)) == 1
 
     @pytest.mark.asyncio
     async def test_approve_merge_failure_preserves_submitted_session(
@@ -1507,6 +1514,7 @@ class TestApprove:
     ) -> None:
         """Propagates a PR conflict without recording a terminal outcome."""
         session = _make_session(
+            user_id="contributor",
             status=SuggestionSessionStatus.SUBMITTED.value,
             pr_number=5,
         )
@@ -1830,7 +1838,9 @@ class TestResubmit:
     ) -> None:
         """Resubmits a session after changes were requested."""
         session = _make_session(
-            status=SuggestionSessionStatus.CHANGES_REQUESTED.value,
+            status=SuggestionSessionStatus.ACTIVE.value,
+            changes_count=1,
+            pr_id=uuid.uuid4(),
             pr_number=10,
         )
         project = _make_project()
@@ -1840,8 +1850,15 @@ class TestResubmit:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
+        pr = MagicMock(status="open", github_pr_url=None)
+        pr_result = MagicMock()
+        pr_result.scalar_one_or_none.return_value = pr
         mock_db.execute.side_effect = _padded(
-            mock_session_result, mock_project_result, project=project
+            mock_session_result,
+            mock_session_result,
+            mock_project_result,
+            pr_result,
+            project=project,
         )
 
         from ontokit.schemas.suggestion import SuggestionResubmitRequest
@@ -1859,7 +1876,7 @@ class TestResubmit:
             ) as duplicate_check,
         ):
             result = await service.resubmit(PROJECT_ID, session.session_id, data, user)
-        validate.assert_not_awaited()
+        validate.assert_awaited_once()
         duplicate_check.assert_not_awaited()
 
         assert result.pr_number == 10
@@ -2119,9 +2136,7 @@ class TestAnonymousWriteBudgets:
         project = _make_project()
         service._get_project = AsyncMock(return_value=project)  # type: ignore[method-assign]
         service.commit_identity.resolve = AsyncMock(return_value=("Anonymous", "anon@example"))
-        monkeypatch.setattr(
-            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_COMMITS", 2
-        )
+        monkeypatch.setattr("ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_COMMITS", 2)
 
         from ontokit.schemas.suggestion import SuggestionBeaconRequest
 
@@ -2152,9 +2167,7 @@ class TestAnonymousWriteBudgets:
         project_result = MagicMock()
         project_result.scalar_one_or_none.return_value = project
         mock_db.execute.side_effect = [session_result, project_result]
-        monkeypatch.setattr(
-            "ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_COMMITS", 2
-        )
+        monkeypatch.setattr("ontokit.services.suggestion_service.MAX_ANONYMOUS_SESSION_COMMITS", 2)
 
         from ontokit.schemas.suggestion import SuggestionSaveRequest
 
@@ -2164,9 +2177,7 @@ class TestAnonymousWriteBudgets:
             entity_label="Foo",
         )
         with pytest.raises(HTTPException) as exc:
-            await service.save_anonymous(
-                PROJECT_ID, session.session_id, data, session.session_id
-            )
+            await service.save_anonymous(PROJECT_ID, session.session_id, data, session.session_id)
 
         assert exc.value.status_code == 429
         mock_git.commit_changes.assert_not_called()
@@ -2217,13 +2228,9 @@ class TestAnonymousWriteBudgets:
             entity_label="Foo",
         )
 
-        await service.save_anonymous(
-            PROJECT_ID, session.session_id, first, session.session_id
-        )
+        await service.save_anonymous(PROJECT_ID, session.session_id, first, session.session_id)
         with pytest.raises(HTTPException) as exc:
-            await service.save_anonymous(
-                PROJECT_ID, session.session_id, second, session.session_id
-            )
+            await service.save_anonymous(PROJECT_ID, session.session_id, second, session.session_id)
 
         assert exc.value.status_code == 413
         assert session.anonymous_content_bytes == first_size
@@ -2922,3 +2929,464 @@ async def test_stale_submit_embedding_refusal_restores_active(
     pr_factory.assert_not_called()
     finalize.assert_not_awaited()
     service._enqueue_branch_refresh.assert_not_awaited()
+
+
+@pytest.fixture
+def lifecycle(service: SuggestionService, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """Mock infrastructure while exercising the lifecycle transitions themselves."""
+    ctx = MagicMock()
+    ctx.session = _make_session(
+        status="submitted", changes_count=1, pr_number=12, pr_id=uuid.uuid4()
+    )
+    ctx.project = _make_project()
+    ctx.user = _make_user()
+    ctx.reviewer = _make_user(user_id="reviewer")
+    reviewer_member = MagicMock(user_id="reviewer", role="owner")
+    ctx.project.members.append(reviewer_member)
+    ctx.pr = MagicMock(id=ctx.session.pr_id, pr_number=12, status="open", github_pr_url=None)
+    ctx.pr_service = AsyncMock()
+    ctx.pr_service.merge_pull_request.return_value.merge_commit_hash = None
+    ctx.notifications = AsyncMock()
+    monkeypatch.setattr(
+        "ontokit.services.suggestion_service.create_beacon_token", lambda _: "fresh-token"
+    )
+    monkeypatch.setattr(service, "_get_session", AsyncMock(return_value=ctx.session))
+    monkeypatch.setattr(service, "_get_project", AsyncMock(return_value=ctx.project))
+    monkeypatch.setattr(service, "_record_terminal_outcome", AsyncMock())
+    monkeypatch.setattr(service, "_schedule_auto_accept", AsyncMock())
+    monkeypatch.setattr(
+        service.commit_identity, "resolve", AsyncMock(return_value=("User", "alias"))
+    )
+    monkeypatch.setattr(
+        "ontokit.services.suggestion_service.get_pull_request_service", lambda _: ctx.pr_service
+    )
+    monkeypatch.setattr(
+        "ontokit.services.suggestion_service.NotificationService", lambda _: ctx.notifications
+    )
+    service.db.execute.return_value = MagicMock()  # type: ignore[attr-defined]
+    service.db.execute.return_value.scalar_one_or_none.return_value = ctx.pr  # type: ignore[attr-defined]
+    return ctx
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_save_requires_reopen(
+    service: SuggestionService, lifecycle: MagicMock
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionSaveRequest
+
+    session = lifecycle.session
+    session.status = "changes-requested"
+    data = SuggestionSaveRequest(content="", entity_iri="urn:class", entity_label="Class")
+    with pytest.raises(HTTPException) as exc:
+        await service.save(PROJECT_ID, session.session_id, data, lifecycle.user)
+    assert exc.value.status_code == 400
+    service.db.execute.return_value.scalar_one_or_none.return_value = None
+    await service.reopen(PROJECT_ID, session.session_id, lifecycle.user)
+    service.git_service.commit_changes.return_value.hash = "saved"
+    result = await service.save(PROJECT_ID, session.session_id, data, lifecycle.user)
+    assert result.branch == session.branch
+    assert result.commit_hash == "saved"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_resubmit_active(service: SuggestionService, lifecycle: MagicMock) -> None:
+    from ontokit.schemas.suggestion import SuggestionResubmitRequest
+
+    session = lifecycle.session
+    session.status = "active"
+    result = await service.resubmit(
+        PROJECT_ID, session.session_id, SuggestionResubmitRequest(summary="Revised"), lifecycle.user
+    )
+    assert result.pr_number == 12
+    assert session.revision == 2
+    lifecycle.notifications.notify_project_roles.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_reject_closes_pr(service: SuggestionService, lifecycle: MagicMock) -> None:
+    from ontokit.schemas.suggestion import SuggestionRejectRequest
+
+    await service.reject(
+        PROJECT_ID,
+        lifecycle.session.session_id,
+        SuggestionRejectRequest(reason="No"),
+        lifecycle.reviewer,
+    )
+    lifecycle.pr_service._close_pull_request_for_suggestion.assert_awaited_once_with(
+        PROJECT_ID, 12, lifecycle.reviewer
+    )
+    assert lifecycle.session.status == "rejected"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_self_approval_refused(
+    service: SuggestionService, lifecycle: MagicMock
+) -> None:
+    with pytest.raises(HTTPException) as exc:
+        await service.approve(PROJECT_ID, lifecycle.session.session_id, lifecycle.user)
+    assert exc.value.status_code == 403
+    lifecycle.pr_service.merge_pull_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["approve", "reject", "request_changes"])
+async def test_lifecycle_decision_notification(
+    service: SuggestionService,
+    lifecycle: MagicMock,
+    action: str,
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionRejectRequest, SuggestionRequestChangesRequest
+
+    session = lifecycle.session
+    if action == "approve":
+        await service.approve(PROJECT_ID, session.session_id, lifecycle.reviewer)
+        expected = "suggestion_approved"
+    elif action == "reject":
+        await service.reject(
+            PROJECT_ID, session.session_id, SuggestionRejectRequest(reason="No"), lifecycle.reviewer
+        )
+        expected = "suggestion_rejected"
+    else:
+        await service.request_changes(
+            PROJECT_ID,
+            session.session_id,
+            SuggestionRequestChangesRequest(feedback="Revise"),
+            lifecycle.reviewer,
+        )
+        expected = "suggestion_changes_requested"
+    lifecycle.notifications.create_notification.assert_awaited_once()
+    notification = lifecycle.notifications.create_notification.call_args.kwargs
+    assert notification["user_id"] == session.user_id
+    assert notification["notification_type"] == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("state", ["active", "submitted", "merged", "rejected", "discarded"])
+async def test_lifecycle_reopen_wrong_state(
+    service: SuggestionService,
+    lifecycle: MagicMock,
+    state: str,
+) -> None:
+    lifecycle.session.status = state
+    with pytest.raises(HTTPException) as exc:
+        await service.reopen(PROJECT_ID, lifecycle.session.session_id, lifecycle.user)
+    assert exc.value.status_code == 400
+    service.db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_reopen_owner_only(
+    service: SuggestionService, lifecycle: MagicMock
+) -> None:
+    lifecycle.session.status = "changes-requested"
+    for user in (lifecycle.reviewer, CurrentUser(id="superadmin", roles=["superadmin"])):
+        with pytest.raises(HTTPException) as exc:
+            await service.reopen(PROJECT_ID, lifecycle.session.session_id, user)
+        assert exc.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_reopen_conflict(service: SuggestionService, lifecycle: MagicMock) -> None:
+    session = lifecycle.session
+    session.status = "changes-requested"
+    active = _make_session(session_id="other-active")
+    service.db.execute.return_value.scalar_one_or_none.return_value = active
+    with pytest.raises(HTTPException) as exc:
+        await service.reopen(PROJECT_ID, session.session_id, lifecycle.user)
+    assert exc.value.status_code == 409
+    assert session.status == "changes-requested"
+    result = await service.create_session(PROJECT_ID, lifecycle.user)
+    assert result.session_id == active.session_id
+    service.git_service.create_branch.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_reopen_fresh_token_and_activity(
+    service: SuggestionService,
+    lifecycle: MagicMock,
+) -> None:
+    session = lifecycle.session
+    session.status = "changes-requested"
+    previous = session.last_activity = datetime.now(UTC) - timedelta(hours=3)
+    service.db.execute.return_value.scalar_one_or_none.return_value = None
+    result = await service.reopen(PROJECT_ID, session.session_id, lifecycle.user)
+    assert result.beacon_token == "fresh-token"
+    assert session.beacon_token == result.beacon_token
+    assert session.last_activity > previous
+    assert session.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_reopen_concurrent_conflict(
+    service: SuggestionService,
+    lifecycle: MagicMock,
+) -> None:
+    from sqlalchemy.exc import IntegrityError
+
+    lifecycle.session.status = "changes-requested"
+    service.db.execute.return_value.scalar_one_or_none.return_value = None
+    service.db.commit.side_effect = IntegrityError("duplicate active", {}, Exception())
+    with pytest.raises(HTTPException) as exc:
+        await service.reopen(PROJECT_ID, lifecycle.session.session_id, lifecycle.user)
+    assert exc.value.status_code == 409
+    service.db.rollback.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("method", ["submit", "resubmit"])
+@pytest.mark.parametrize("valid", [True, False])
+async def test_lifecycle_revision_submission_gates(
+    service: SuggestionService,
+    lifecycle: MagicMock,
+    method: str,
+    valid: bool,
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionResubmitRequest, SuggestionSubmitRequest
+
+    session = lifecycle.session
+    session.status = "active"
+    service.git_service.get_file_from_branch.return_value = b"" if valid else b"invalid turtle !!!"
+    data = (SuggestionSubmitRequest if method == "submit" else SuggestionResubmitRequest)(
+        summary="Fix"
+    )
+    call = getattr(service, method)(PROJECT_ID, session.session_id, data, lifecycle.user)
+    if valid:
+        result = await call
+        assert result.pr_number == 12
+        assert session.pr_id == lifecycle.pr.id
+        assert session.revision == 2
+        lifecycle.notifications.notify_project_roles.assert_awaited_once()
+        assert (
+            "resubmitted" in lifecycle.notifications.notify_project_roles.call_args.kwargs["title"]
+        )
+    else:
+        with pytest.raises(HTTPException) as exc:
+            await call
+        assert exc.value.status_code == 422
+        assert session.status == "active"
+        assert session.revision == 1
+        lifecycle.notifications.notify_project_roles.assert_not_awaited()
+        service.db.commit.assert_not_awaited()
+    lifecycle.pr_service._claim_pull_request_already_locked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_resubmit_without_pr(
+    service: SuggestionService, lifecycle: MagicMock
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionResubmitRequest
+
+    lifecycle.session.status = "active"
+    lifecycle.session.pr_id = lifecycle.session.pr_number = None
+    with pytest.raises(HTTPException) as exc:
+        await service.resubmit(
+            PROJECT_ID, lifecycle.session.session_id, SuggestionResubmitRequest(), lifecycle.user
+        )
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_stale_revision(service: SuggestionService, lifecycle: MagicMock) -> None:
+    session = lifecycle.session
+    session.status = "active"
+    session.last_activity = datetime.now(UTC) - timedelta(hours=1)
+    stale = MagicMock()
+    stale.scalars.return_value.all.return_value = [session]
+    linked = MagicMock()
+    linked.scalar_one_or_none.return_value = lifecycle.pr
+    service.db.execute.side_effect = [stale, linked]
+    assert await service.auto_submit_stale_sessions() == 1
+    assert session.revision == 2
+    assert session.pr_number == 12
+    assert session.status == "auto-submitted"
+    lifecycle.notifications.notify_project_roles.assert_awaited_once()
+    lifecycle.pr_service._claim_pull_request_already_locked.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_discard_revision(service: SuggestionService, lifecycle: MagicMock) -> None:
+    lifecycle.session.status = "active"
+    await service.discard(PROJECT_ID, lifecycle.session.session_id, lifecycle.user)
+    lifecycle.pr_service.close_pull_request.assert_awaited_once_with(PROJECT_ID, 12, lifecycle.user)
+    service.git_service.delete_branch.assert_called_once_with(
+        PROJECT_ID, lifecycle.session.branch, force=True
+    )
+    assert lifecycle.session.status == "discarded"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["owner", "editor"])
+async def test_lifecycle_reject_refused_close(
+    service: SuggestionService,
+    lifecycle: MagicMock,
+    role: str,
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionRejectRequest
+
+    lifecycle.project.members[-1].role = role
+    lifecycle.pr_service._close_pull_request_for_suggestion.side_effect = HTTPException(
+        400, "Merged"
+    )
+    with pytest.raises(HTTPException) as exc:
+        await service.reject(
+            PROJECT_ID,
+            lifecycle.session.session_id,
+            SuggestionRejectRequest(reason="No"),
+            lifecycle.reviewer,
+        )
+    assert exc.value.status_code == 400
+    assert lifecycle.session.status == "submitted"
+    service._record_terminal_outcome.assert_not_awaited()
+    lifecycle.notifications.create_notification.assert_not_awaited()
+    service.db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_bulk_self_approval(
+    service: SuggestionService, lifecycle: MagicMock
+) -> None:
+    from ontokit.schemas.suggestion import BulkReviewRequest
+
+    result = await service.bulk_review(
+        PROJECT_ID,
+        BulkReviewRequest(session_ids=[lifecycle.session.session_id], action="accept"),
+        lifecycle.user,
+    )
+    assert result.succeeded == []
+    assert len(result.failed) == 1
+    assert "own suggestion" in result.failed[0].reason
+    lifecycle.pr_service.merge_pull_request.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["approve", "reject", "request_changes", "dismiss"])
+@pytest.mark.parametrize("anonymous", [True, False])
+async def test_lifecycle_silent_decisions(
+    service: SuggestionService,
+    lifecycle: MagicMock,
+    action: str,
+    anonymous: bool,
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionRejectRequest, SuggestionRequestChangesRequest
+
+    lifecycle.session.is_anonymous = anonymous
+    args = [PROJECT_ID, lifecycle.session.session_id]
+    if action == "reject":
+        args.append(SuggestionRejectRequest(reason="No"))
+    if action == "request_changes":
+        args.append(SuggestionRequestChangesRequest(feedback="Revise"))
+    args.append(lifecycle.reviewer)
+    await getattr(service, action)(*args)
+    if anonymous or action == "dismiss":
+        lifecycle.notifications.create_notification.assert_not_awaited()
+    else:
+        lifecycle.notifications.create_notification.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("action", ["approve", "reject", "request_changes"])
+@pytest.mark.parametrize("state", ["active", "merged"])
+async def test_lifecycle_review_wrong_state(
+    service: SuggestionService,
+    lifecycle: MagicMock,
+    action: str,
+    state: str,
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionRejectRequest, SuggestionRequestChangesRequest
+
+    lifecycle.session.status = state
+    args = [PROJECT_ID, lifecycle.session.session_id]
+    if action == "reject":
+        args.append(SuggestionRejectRequest(reason="No"))
+    if action == "request_changes":
+        args.append(SuggestionRequestChangesRequest(feedback="Revise"))
+    args.append(lifecycle.reviewer)
+    with pytest.raises(HTTPException) as exc:
+        await getattr(service, action)(*args)
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.parametrize("changed_field", ["status", "last_activity"])
+async def test_stale_revision_skip_releases_database_locks(
+    service: SuggestionService,
+    lifecycle: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    changed_field: str,
+) -> None:
+    """A revision edited/submitted while waiting must release its transaction locks."""
+    session = lifecycle.session
+    session.status = "active"
+    session.last_activity = datetime.now(UTC) - timedelta(hours=1)
+    stale = MagicMock()
+    stale.scalars.return_value.all.return_value = [session]
+    service.db.execute.return_value = stale
+
+    async def refresh(_session: object) -> None:
+        if changed_field == "status":
+            session.status = "submitted"
+        else:
+            session.last_activity = datetime.now(UTC)
+
+    service.db.refresh.side_effect = refresh
+
+    unfinished_transactions = []
+
+    @asynccontextmanager
+    async def locked(*_args: object) -> AsyncIterator[None]:
+        yield
+        if service.db.commit.await_count + service.db.rollback.await_count == 0:
+            unfinished_transactions.append(session.session_id)
+
+    monkeypatch.setattr("ontokit.services.suggestion_service.pull_request_write_locks", locked)
+    assert await service.auto_submit_stale_sessions() == 0
+    assert unfinished_transactions == []
+    lifecycle.notifications.notify_project_roles.assert_not_awaited()
+    assert session.revision == 1
+
+
+async def test_bulk_self_approval_does_not_poison_following_item(
+    service: SuggestionService,
+    lifecycle: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Rollback expires the shared project; later items must still be reviewable."""
+    from unittest.mock import PropertyMock
+
+    from ontokit.schemas.suggestion import BulkReviewRequest
+
+    other = _make_session(
+        session_id="s_other", user_id="other-contributor", status="submitted", pr_number=13
+    )
+    service._get_session.side_effect = [lifecycle.session, other]
+    expired = False
+
+    def project_id() -> uuid.UUID:
+        if expired:
+            raise RuntimeError("Expired ORM attribute requires an asynchronous refresh")
+        return PROJECT_ID
+
+    async def rollback() -> None:
+        nonlocal expired
+        expired = True
+
+    async def refresh(project: object) -> None:
+        nonlocal expired
+        assert project is lifecycle.project
+        expired = False
+
+    monkeypatch.setattr(
+        type(lifecycle.project), "id", PropertyMock(side_effect=project_id), raising=False
+    )
+    service.db.rollback.side_effect = rollback
+    service.db.refresh.side_effect = refresh
+    result = await service.bulk_review(
+        PROJECT_ID,
+        BulkReviewRequest(
+            session_ids=[lifecycle.session.session_id, other.session_id], action="accept"
+        ),
+        lifecycle.user,
+    )
+    assert result.succeeded == [other.session_id]
+    assert [failure.session_id for failure in result.failed] == [lifecycle.session.session_id]
+    assert "own suggestion" in result.failed[0].reason
+    lifecycle.pr_service.merge_pull_request.assert_awaited_once()

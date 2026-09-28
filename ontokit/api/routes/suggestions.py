@@ -53,6 +53,20 @@ async def create_session(
     return await service.create_session(project_id, user)
 
 
+@router.post(
+    "/{project_id}/suggestions/sessions/{session_id}/reopen",
+    response_model=SuggestionSessionResponse,
+)
+async def reopen_session(
+    project_id: UUID,
+    session_id: str,
+    service: Annotated[SuggestionService, Depends(get_service)],
+    user: RequiredUser,
+) -> SuggestionSessionResponse:
+    """Reopen requested changes for editing and issue a fresh beacon token."""
+    return await service.reopen(project_id, session_id, user)
+
+
 @router.put(
     "/{project_id}/suggestions/sessions/{session_id}/save",
     response_model=SuggestionSaveResponse,
@@ -225,11 +239,26 @@ async def resubmit_session(
     project_id: UUID,
     session_id: str,
     data: SuggestionResubmitRequest,
+    request: Request,
     service: Annotated[SuggestionService, Depends(get_service)],
     user: RequiredUser,
+    x_verification_token: Annotated[str | None, Header()] = None,
 ) -> SuggestionSubmitResponse:
-    """Resubmit a suggestion session after addressing requested changes."""
-    return await service.resubmit(project_id, session_id, data, user)
+    """Resubmit a reopened suggestion through the normal submission gates."""
+    redis = None
+    try:
+        redis = await get_arq_pool()
+    except Exception:
+        logger.warning("Redis pool unavailable for the trust submission limiter")
+    return await service.resubmit(
+        project_id,
+        session_id,
+        data,
+        user,
+        verification_token=x_verification_token,
+        client_ip=request.client.host if request.client else None,
+        redis=cast("TrustLimiterRedis | None", redis),
+    )
 
 
 @router.get(

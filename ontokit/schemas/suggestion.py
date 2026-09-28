@@ -10,7 +10,7 @@ from ontokit.schemas.trust import TrustTier
 
 
 class SuggestionSessionResponse(BaseModel):
-    """Response when creating a suggestion session."""
+    """Response when creating or reopening a suggestion session."""
 
     session_id: str
     branch: str
