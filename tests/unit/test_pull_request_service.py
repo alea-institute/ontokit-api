@@ -863,7 +863,7 @@ class TestMergePullRequest:
 
     @pytest.mark.asyncio
     async def test_merge_pr_editor_forbidden(
-        self, service: PullRequestService, mock_db: AsyncMock
+        self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
     ) -> None:
         """Only owners and admins can merge PRs."""
         project = _make_project()
@@ -876,6 +876,10 @@ class TestMergePullRequest:
         with pytest.raises(HTTPException) as exc_info:
             await service.merge_pull_request(PROJECT_ID, 1, merge_req, user)
         assert exc_info.value.status_code == 403
+        assert pr.status == PRStatus.OPEN.value
+        mock_git_service.merge_branch.assert_not_called()
+        mock_git_service.delete_branch.assert_not_called()
+        mock_db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_system_auto_accept_uses_the_internal_merge_seam(
@@ -2141,3 +2145,67 @@ class TestPRSettings:
 
         assert exc_info.value.status_code == 403
         mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["owner", "admin", "editor", "suggester"])
+@pytest.mark.parametrize("sync_fails", [False, True])
+@pytest.mark.parametrize("pr_status", ["open", "merged"])
+async def test_suggestion_close_seam(
+    monkeypatch: pytest.MonkeyPatch,
+    role: str,
+    sync_fails: bool,
+    pr_status: str,
+) -> None:
+    """Reviewer policy authorizes the internal close; local success survives mirror failure."""
+    from ontokit.services.suggestion_service import SuggestionService
+
+    db = AsyncMock()
+    git = MagicMock()
+    service = PullRequestService(db, git)
+    project = _make_project(members=[_make_member("reviewer", role)])
+    pr = _make_pr(author_id="contributor", status=pr_status)
+    user = CurrentUser(id="reviewer")
+    monkeypatch.setattr(SuggestionService, "_get_project", AsyncMock(return_value=project))
+    monkeypatch.setattr(service, "_get_project", AsyncMock(return_value=project))
+    monkeypatch.setattr(service, "_get_pr", AsyncMock(return_value=pr))
+    sync = AsyncMock(side_effect=RuntimeError("GitHub unavailable") if sync_fails else None)
+    monkeypatch.setattr(service, "_sync_pull_request_to_github", sync)
+    monkeypatch.setattr(service, "_to_pr_response", AsyncMock())
+
+    @asynccontextmanager
+    async def unlocked(*_args: object) -> AsyncIterator[None]:
+        yield
+
+    monkeypatch.setattr("ontokit.services.pull_request_service.branch_write_lock", unlocked)
+    if role in ("editor", "suggester"):
+        with pytest.raises(HTTPException) as direct:
+            await service.close_pull_request(PROJECT_ID, 1, user)
+        assert direct.value.status_code == 403
+        assert pr.status == pr_status
+    if role == "suggester":
+        with pytest.raises(HTTPException) as internal:
+            await service._close_pull_request_for_suggestion(PROJECT_ID, 1, user)
+        assert internal.value.status_code == 403
+        db.commit.assert_not_awaited()
+    elif pr_status == "merged":
+        with pytest.raises(HTTPException) as merged:
+            await service._close_pull_request_for_suggestion(PROJECT_ID, 1, user)
+        assert merged.value.status_code == 400
+        assert merged.value.detail == "Pull request is already merged"
+        assert pr.status == "merged"
+        db.commit.assert_not_awaited()
+        sync.assert_not_awaited()
+    else:
+
+        async def check_committed(*_args: object) -> None:
+            assert pr.status == "closed"
+            db.commit.assert_awaited_once()
+            if sync_fails:
+                raise RuntimeError("GitHub unavailable")
+
+        sync.side_effect = check_committed
+        await service._close_pull_request_for_suggestion(PROJECT_ID, 1, user)
+        assert pr.status == "closed"
+        sync.assert_awaited_once()
+        assert db.rollback.await_count == int(sync_fails)

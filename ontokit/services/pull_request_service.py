@@ -520,6 +520,47 @@ class PullRequestService:
 
         return await self._to_pr_response(pr, project_id)
 
+    async def _close_pull_request_for_suggestion(
+        self, project_id: UUID, pr_number: int, user: CurrentUser
+    ) -> None:
+        """Internal close authorized by the suggestion reviewer policy.
+
+        The interactive close endpoint retains its author/owner/admin rule.
+        A retry after a committed local close can finish the suggestion decision.
+        """
+        from ontokit.services.suggestion_service import SuggestionService
+
+        await SuggestionService(self.db, self.git_service)._verify_reviewer_access(project_id, user)
+        pr = await self._get_pr(project_id, pr_number)
+        async with branch_write_lock(self.db, project_id, pr.source_branch):
+            await self.db.refresh(pr)
+            if pr.status not in (PRStatus.OPEN.value, PRStatus.CLOSED.value):
+                raise HTTPException(status_code=400, detail="Pull request is already merged")
+            pr.status = PRStatus.CLOSED.value
+            await self.db.commit()
+        try:
+            await self._sync_pull_request_to_github(project_id, pr)
+        except Exception:
+            # The committed local close remains authoritative if its mirror fails.
+            await self.db.rollback()
+            logger.warning("Failed to sync rejected suggestion PR to GitHub", exc_info=True)
+
+    async def _close_pull_request_for_discard_already_locked(
+        self, project_id: UUID, pr_number: int, source_branch: str
+    ) -> PullRequest:
+        """Close a discarded session's PR without changing a settled PR.
+
+        Internal only: SuggestionService authorizes the owner or system cleanup,
+        holds the session branch lock, and commits the PR and session together.
+        """
+        pr = await self._get_pr(project_id, pr_number)
+        await self.db.refresh(pr)
+        if pr.source_branch != source_branch:
+            raise HTTPException(status_code=409, detail="Suggestion pull request branch mismatch")
+        if pr.status == PRStatus.OPEN.value:
+            pr.status = PRStatus.CLOSED.value
+        return pr
+
     async def reopen_pull_request(
         self, project_id: UUID, pr_number: int, user: CurrentUser
     ) -> PRResponse:
@@ -1012,6 +1053,42 @@ class PullRequestService:
                     detail="Only admins and owners can merge pull requests",
                 )
 
+        return await self._merge_authorized_pull_request(
+            project, pr, merge_request, user, system_auto_accept=system_auto_accept
+        )
+
+    async def _merge_pull_request_for_suggestion(
+        self,
+        project_id: UUID,
+        pr_number: int,
+        merge_request: PRMergeRequest,
+        user: CurrentUser,
+    ) -> PRMergeResponse:
+        """Internal merge authorized by the suggestion reviewer policy.
+
+        Provisional editor approval policy: only the role gate differs from
+        interactive PR merge; recorded PR approvals are still required.
+        """
+        from ontokit.services.suggestion_service import SuggestionService
+
+        project = await SuggestionService(self.db, self.git_service)._verify_reviewer_access(
+            project_id, user
+        )
+        pr = await self._get_pr(project_id, pr_number)
+        return await self._merge_authorized_pull_request(project, pr, merge_request, user)
+
+    async def _merge_authorized_pull_request(
+        self,
+        project: Project,
+        pr: PullRequest,
+        merge_request: PRMergeRequest,
+        user: CurrentUser,
+        *,
+        system_auto_accept: bool = False,
+    ) -> PRMergeResponse:
+        """Apply the shared merge checks and effects after caller authorization."""
+        project_id = project.id
+        pr_number = pr.pr_number
         if pr.status != PRStatus.OPEN.value:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

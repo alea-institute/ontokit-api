@@ -169,8 +169,13 @@ def mock_db() -> AsyncMock:
 
 
 @pytest.fixture
-def service(mock_db: AsyncMock) -> SuggestionService:
-    return SuggestionService(db=mock_db, git_service=MagicMock())
+def service(mock_db: AsyncMock, monkeypatch: pytest.MonkeyPatch) -> SuggestionService:
+    service = SuggestionService(db=mock_db, git_service=MagicMock())
+    monkeypatch.setattr(service, "_enqueue_branch_refresh", AsyncMock())
+    monkeypatch.setattr(
+        "ontokit.services.translation_jobs.enqueue_label_diff_after_commit", AsyncMock()
+    )
+    return service
 
 
 def _added_outcomes(mock_db: AsyncMock) -> list[SuggestionOutcome]:
@@ -289,8 +294,17 @@ class TestApproveRecordsOutcome:
 
 
 class TestRejectRecordsOutcome:
+    @pytest.fixture
+    def open_pr(self, monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+        from ontokit.services.pull_request_service import PullRequestService
+
+        pr = MagicMock(status="open", source_branch="suggest/x/s_abc12345")
+        monkeypatch.setattr(PullRequestService, "_get_pr", AsyncMock(return_value=pr))
+        monkeypatch.setattr(PullRequestService, "_sync_pull_request_to_github", AsyncMock())
+        return pr
+
     async def test_reject_appends_rejected_outcome_and_no_promotion(
-        self, service: SuggestionService, mock_db: AsyncMock
+        self, service: SuggestionService, mock_db: AsyncMock, open_pr: MagicMock
     ) -> None:
         member = _member("contributor-1")
         project = _project([member, _member("reviewer-1", "admin")], threshold=1)
@@ -306,6 +320,7 @@ class TestRejectRecordsOutcome:
             _user("reviewer-1"),
         )
 
+        assert open_pr.status == "closed"
         outcomes = _added_outcomes(mock_db)
         assert len(outcomes) == 1
         assert outcomes[0].outcome == SuggestionOutcomeType.REJECTED.value
@@ -313,7 +328,7 @@ class TestRejectRecordsOutcome:
         assert member.is_trusted is False
 
     async def test_reject_halts_the_auto_accept_clock(
-        self, service: SuggestionService, mock_db: AsyncMock
+        self, service: SuggestionService, mock_db: AsyncMock, open_pr: MagicMock
     ) -> None:
         """R12."""
         project = _project([_member("reviewer-1", "admin")])
@@ -330,6 +345,7 @@ class TestRejectRecordsOutcome:
             _user("reviewer-1"),
         )
 
+        assert open_pr.status == "closed"
         assert session.auto_accept_after is None
         assert session.auto_accept_halted_at is not None
 
@@ -434,11 +450,12 @@ class TestMintingGate:
             service._assert_can_mint(_project([]), None)
         assert exc.value.status_code == 403
 
+    @pytest.mark.parametrize("is_member", [True, False], ids=["member", "nonmember"])
     async def test_save_without_minting_is_allowed_for_untrusted(
-        self, service: SuggestionService, mock_db: AsyncMock
+        self, service: SuggestionService, mock_db: AsyncMock, is_member: bool
     ) -> None:
         """Propose-edit stays available at every rung (AE2's second half)."""
-        project = _project([_member("contributor-1")])
+        project = _project([_member("contributor-1")] if is_member else [])
         session = _session(status=SuggestionSessionStatus.ACTIVE.value, changes_count=0)
         mock_db.execute.side_effect = _results(
             _result_for(session), _result_for(project), _result_for(project), project=project
@@ -467,10 +484,11 @@ class TestMintingGate:
         )
         assert response.commit_hash == "abc123"
 
+    @pytest.mark.parametrize("is_member", [True, False], ids=["member", "nonmember"])
     async def test_save_with_minting_is_refused_for_untrusted(
-        self, service: SuggestionService, mock_db: AsyncMock
+        self, service: SuggestionService, mock_db: AsyncMock, is_member: bool
     ) -> None:
-        project = _project([_member("contributor-1")])
+        project = _project([_member("contributor-1")] if is_member else [])
         session = _session(status=SuggestionSessionStatus.ACTIVE.value, changes_count=0)
         mock_db.execute.side_effect = _results(
             _result_for(session), _result_for(project), _result_for(project), project=project
@@ -493,6 +511,7 @@ class TestMintingGate:
                 _user("contributor-1"),
             )
         assert exc.value.status_code == 403
+        assert exc.value.detail["reason"] == "trust_required_to_mint"
         service.git_service.commit_changes.assert_not_called()
 
     async def test_anonymous_save_derives_minting_without_client_hint(
@@ -828,15 +847,20 @@ class TestCapabilities:
         assert exc.value.status_code == 403
         assert mock_db.execute.await_count == 1
 
-    async def test_public_nonmember_is_not_advertised_as_able_to_suggest(
+    async def test_public_nonmember_can_suggest_as_untrusted(
         self, service: SuggestionService, mock_db: AsyncMock
     ) -> None:
         project = _project([])
-        mock_db.execute.return_value = _capability_result(project, None)
+        mock_db.execute.side_effect = [
+            _capability_result(project, None),
+            _outcome_counts_result(0, 0),
+        ]
         caps = await service.get_capabilities(PROJECT_ID, _user("stranger"))
         assert caps.tier is TrustTier.UNTRUSTED
-        assert caps.can_suggest is False
-        assert mock_db.execute.await_count == 1
+        assert caps.can_suggest is True
+        assert caps.can_mint_entities is False
+        assert caps.verification_required is True
+        assert mock_db.execute.await_count == 2
 
     async def test_first_suggestion_flags_verification_required(
         self, service: SuggestionService, mock_db: AsyncMock

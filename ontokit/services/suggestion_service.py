@@ -27,7 +27,7 @@ from ontokit.core.limits import (
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.embedding import EmbeddingJob
 from ontokit.models.project import Project, ProjectMember, get_git_ontology_path
-from ontokit.models.pull_request import PRStatus, PullRequest
+from ontokit.models.pull_request import PRStatus, PullRequest, ReviewStatus
 from ontokit.models.suggestion_outcome import SuggestionOutcomeType
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.anonymous_suggestion import (
@@ -221,10 +221,12 @@ class SuggestionService:
                 return member.role
         return None
 
-    def _can_suggest(self, role: str | None, user: CurrentUser) -> bool:
-        """Check if the user's role allows suggesting."""
+    def _can_suggest(self, role: str | None, user: CurrentUser, *, is_public: bool = False) -> bool:
+        """Allow suggest roles and signed-in non-members of public projects."""
         if user.is_superadmin:
             return True
+        if role is None:
+            return is_public and not user.is_anonymous and not is_anonymous_user_id(user.id)
         return role in ("owner", "admin", "editor", "suggester")
 
     async def _verify_project_access(self, project_id: UUID, user: CurrentUser) -> Project:
@@ -235,7 +237,7 @@ class SuggestionService:
         """
         project = await self._get_project(project_id)
         role = self._get_user_role(project, user)
-        if not self._can_suggest(role, user):
+        if not self._can_suggest(role, user, is_public=project.is_public):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You no longer have permission to suggest changes",
@@ -563,7 +565,7 @@ class SuggestionService:
         project = await self._get_project(project_id)
         role = self._get_user_role(project, user)
 
-        if not self._can_suggest(role, user):
+        if not self._can_suggest(role, user, is_public=project.is_public):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You do not have permission to suggest changes",
@@ -670,6 +672,63 @@ class SuggestionService:
             branch=db_session.branch,
             created_at=db_session.created_at,
             beacon_token=db_session.beacon_token,
+        )
+
+    async def reopen(
+        self, project_id: UUID, session_id: str, user: CurrentUser
+    ) -> SuggestionSessionResponse:
+        """Return requested changes to the owner's single active editing session."""
+        session = await self._get_session(project_id, session_id)
+        if session.user_id != user.id:
+            raise HTTPException(status_code=403, detail="You do not own this suggestion session")
+        await self._verify_project_access(project_id, user)
+        async with branch_write_lock(self.db, project_id, session.branch):
+            await self.db.refresh(session)
+            if session.status != SuggestionSessionStatus.CHANGES_REQUESTED.value:
+                raise HTTPException(
+                    status_code=400, detail=f"Session is {session.status}, cannot reopen"
+                )
+            existing = await self.db.execute(
+                select(SuggestionSession).where(
+                    SuggestionSession.project_id == project_id,
+                    SuggestionSession.user_id == user.id,
+                    SuggestionSession.status == SuggestionSessionStatus.ACTIVE.value,
+                )
+            )
+            if existing.scalar_one_or_none() is not None:
+                raise HTTPException(
+                    status_code=409, detail="You already have an active suggestion session"
+                )
+            linked = await self.db.execute(
+                select(PullRequest).where(
+                    PullRequest.id == session.pr_id,
+                    PullRequest.project_id == project_id,
+                    PullRequest.pr_number == session.pr_number,
+                    PullRequest.source_branch == session.branch,
+                )
+            )
+            pr = linked.scalar_one_or_none()
+            if pr is None or pr.status != PRStatus.OPEN.value:
+                raise HTTPException(status_code=409, detail="Suggestion pull request is not open")
+            # Count saves in this revision, so both the summary consumed by the web
+            # and the stale sweep distinguish an untouched reopen from new work.
+            session.changes_count = 0
+            session.status = SuggestionSessionStatus.ACTIVE.value
+            session.last_activity = datetime.now(UTC)
+            session.beacon_token = create_beacon_token(session_id)
+            try:
+                await self.db.commit()
+            except IntegrityError as exc:
+                # The partial unique index also arbitrates concurrent create/reopen requests.
+                await self.db.rollback()
+                raise HTTPException(
+                    status_code=409, detail="You already have an active suggestion session"
+                ) from exc
+        return SuggestionSessionResponse(
+            session_id=session.session_id,
+            branch=session.branch,
+            created_at=session.created_at,
+            beacon_token=session.beacon_token,
         )
 
     async def save(
@@ -802,24 +861,32 @@ class SuggestionService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Session is {session.status}, cannot submit",
                 )
-            content = self.git_service.get_file_from_branch(project_id, session.branch, filename)
-            await self._validate_submission_content(
-                project_id,
-                session.branch,
-                filename,
-                content.decode("utf-8"),
-                str(user.id),
-            )
-            await self._consume_untrusted_submission(project, user, redis)
+            claimed_pr: SuggestionSubmitResponse | _PendingSuggestionPullRequest
+            if session.pr_id is not None or session.pr_number is not None:
+                claimed_pr = await self._resubmit_already_locked(
+                    project, session, user, data.summary, "submitted", redis=redis
+                )
+            else:
+                content = self.git_service.get_file_from_branch(
+                    project_id, session.branch, filename
+                )
+                await self._validate_submission_content(
+                    project_id,
+                    session.branch,
+                    filename,
+                    content.decode("utf-8"),
+                    str(user.id),
+                )
+                await self._consume_untrusted_submission(project, user, redis)
 
-            claimed_pr = await self._create_pr_for_session_already_locked(
-                project_id,
-                session,
-                user,
-                data.summary,
-                "submitted",
-                default_branch,
-            )
+                claimed_pr = await self._create_pr_for_session_already_locked(
+                    project_id,
+                    session,
+                    user,
+                    data.summary,
+                    "submitted",
+                    default_branch,
+                )
         result = await self._finalize_pr_for_session(
             project_id, user, data.summary, "submitted", claimed_pr
         )
@@ -1325,7 +1392,9 @@ class SuggestionService:
             can_suggest = bool(project.is_public)
         else:
             assert user is not None
-            can_suggest = self._can_suggest(member.role if member is not None else None, user)
+            can_suggest = self._can_suggest(
+                member.role if member is not None else None, user, is_public=project.is_public
+            )
 
         accepted = 0
         verification_required = False
@@ -1538,8 +1607,13 @@ class SuggestionService:
 
         succeeded: list[str] = []
         failed: list[BulkReviewFailure] = []
+        project_needs_refresh = False
         for session_id in data.session_ids:
             try:
+                if project_needs_refresh:
+                    # A refused item rolls back and expires the shared ORM project.
+                    await self.db.refresh(project)
+                    project_needs_refresh = False
                 if data.action is BulkReviewAction.ACCEPT:
                     await self._approve_unchecked(session_id, user, project)
                 else:
@@ -1547,13 +1621,36 @@ class SuggestionService:
                 succeeded.append(session_id)
             except HTTPException as e:
                 await self.db.rollback()
+                project_needs_refresh = True
                 failed.append(BulkReviewFailure(session_id=session_id, reason=str(e.detail)))
             except Exception as e:  # noqa: BLE001 — one bad row must not abort the batch
                 await self.db.rollback()
+                project_needs_refresh = True
                 logger.warning("Bulk %s failed for session %s: %s", data.action, session_id, e)
                 failed.append(BulkReviewFailure(session_id=session_id, reason="Unexpected error"))
 
         return BulkReviewResponse(action=data.action, succeeded=succeeded, failed=failed)
+
+    async def _notify_decision(
+        self,
+        project: Project,
+        session: SuggestionSession,
+        decision: str,
+        title: str,
+        body: str | None = None,
+    ) -> None:
+        """Address review feedback to the authenticated account, never an email hint."""
+        if session.is_anonymous or is_anonymous_user_id(session.user_id):
+            return
+        await NotificationService(self.db).create_notification(
+            user_id=session.user_id,
+            notification_type=f"suggestion_{decision}",
+            title=title,
+            project_id=project.id,
+            project_name=project.name,
+            body=body,
+            target_id=str(session.pr_id) if session.pr_id else session.session_id,
+        )
 
     async def approve(
         self,
@@ -1597,6 +1694,9 @@ class SuggestionService:
                 detail=f"Session is {session.status}, cannot approve",
             )
 
+        if session.user_id == user.id and user.id != SYSTEM_AUTO_ACCEPT_ACTOR:
+            raise HTTPException(status_code=403, detail="You cannot approve your own suggestion")
+
         # The PR service commits its merge before returning. If a later session
         # finalization failed, a retry sees the already-merged PR and resumes
         # here without attempting a second external/local merge.
@@ -1623,16 +1723,18 @@ class SuggestionService:
                     merge_message=f"Merge suggestion: {session_id}",
                     delete_source_branch=True,
                 )
-                merge_response = await pr_service.merge_pull_request(
-                    project_id,
-                    session.pr_number,
-                    merge_req,
-                    user,
-                    system_auto_accept=(
-                        decided_by == SYSTEM_AUTO_ACCEPT_ACTOR
-                        and user.id == SYSTEM_AUTO_ACCEPT_ACTOR
-                    ),
-                )
+                if decided_by == SYSTEM_AUTO_ACCEPT_ACTOR and user.id == SYSTEM_AUTO_ACCEPT_ACTOR:
+                    merge_response = await pr_service.merge_pull_request(
+                        project_id,
+                        session.pr_number,
+                        merge_req,
+                        user,
+                        system_auto_accept=True,
+                    )
+                else:
+                    merge_response = await pr_service._merge_pull_request_for_suggestion(
+                        project_id, session.pr_number, merge_req, user
+                    )
                 merge_commit_hash = merge_response.merge_commit_hash
             except HTTPException:
                 logger.warning("PR merge failed for suggestion session %s", session_id)
@@ -1655,6 +1757,7 @@ class SuggestionService:
             outcome_actor,
             outcome_actor_name,
         )
+        await self._notify_decision(project, session, "approved", "Your suggestion was approved")
         await self.db.commit()
         default_branch = self.git_service.get_default_branch(project_id)
         if merge_commit_hash:
@@ -1737,6 +1840,14 @@ class SuggestionService:
                 detail=f"Session is {session.status}, cannot reject",
             )
 
+        if session.pr_number is not None:
+            await get_pull_request_service(self.db)._close_pull_request_for_suggestion(
+                project_id, session.pr_number, user
+            )
+            # A failed best-effort sync may have rolled back and expired ORM state.
+            await self.db.refresh(session)
+            await self.db.refresh(project)
+
         session.status = SuggestionSessionStatus.REJECTED.value
         session.reviewer_id = user.id
         session.reviewer_name = user.name
@@ -1754,6 +1865,9 @@ class SuggestionService:
             user.name,
             data.reason,
         )
+        await self._notify_decision(
+            project, session, "rejected", "Your suggestion was rejected", data.reason
+        )
         await self.db.commit()
 
     async def request_changes(
@@ -1764,7 +1878,7 @@ class SuggestionService:
         user: CurrentUser,
     ) -> None:
         """Request changes on a suggestion session with feedback."""
-        await self._verify_reviewer_access(project_id, user)
+        project = await self._verify_reviewer_access(project_id, user)
         session = await self._get_session(project_id, session_id)
 
         if session.status not in (
@@ -1786,6 +1900,13 @@ class SuggestionService:
         # An objection halts the quiet-period clock (R12). No outcome row: the
         # session has not reached a terminal state, it is being revised.
         self._halt_auto_accept(session)
+        await self._notify_decision(
+            project,
+            session,
+            "changes_requested",
+            "Changes requested on your suggestion",
+            data.feedback,
+        )
         await self.db.commit()
 
     async def resubmit(
@@ -1794,33 +1915,94 @@ class SuggestionService:
         session_id: str,
         data: SuggestionResubmitRequest,
         user: CurrentUser,
+        *,
+        verification_token: str | None = None,
+        client_ip: str | None = None,
+        redis: TrustLimiterRedis | None = None,
     ) -> SuggestionSubmitResponse:
-        """Resubmit a suggestion session after addressing requested changes."""
+        """Submit a reopened revision through the same gates as initial submission."""
         session = await self._get_session(project_id, session_id)
         self._verify_ownership(session, user)
-        await self._verify_project_access(project_id, user)
+        if session.pr_id is None or session.pr_number is None:
+            raise HTTPException(status_code=400, detail="Session has no pull request to resubmit")
+        return await self.submit(
+            project_id,
+            session_id,
+            SuggestionSubmitRequest(summary=data.summary),
+            user,
+            verification_token=verification_token,
+            client_ip=client_ip,
+            redis=redis,
+        )
 
-        if session.status != SuggestionSessionStatus.CHANGES_REQUESTED.value:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Session is {session.status}, cannot resubmit",
+    async def _resubmit_already_locked(
+        self,
+        project: Project,
+        session: SuggestionSession,
+        user: CurrentUser,
+        summary: str | None,
+        new_status: str,
+        *,
+        redis: TrustLimiterRedis | None = None,
+    ) -> SuggestionSubmitResponse:
+        """Validate and persist a revision on the same PR under the submission locks."""
+        if session.pr_id is None or session.pr_number is None:
+            raise HTTPException(status_code=400, detail="Session has no pull request to resubmit")
+        result = await self.db.execute(
+            select(PullRequest)
+            .where(
+                PullRequest.id == session.pr_id,
+                PullRequest.project_id == project.id,
+                PullRequest.pr_number == session.pr_number,
+                PullRequest.source_branch == session.branch,
             )
-
-        session.status = SuggestionSessionStatus.SUBMITTED.value
+            .options(selectinload(PullRequest.reviews))
+            .execution_options(populate_existing=True)
+        )
+        pr = result.scalar_one_or_none()
+        if pr is None or pr.status != PRStatus.OPEN.value:
+            raise HTTPException(status_code=400, detail="Suggestion pull request is not open")
+        filename = self._get_git_ontology_path(project)
+        content = self.git_service.get_file_from_branch(project.id, session.branch, filename)
+        await self._validate_submission_content(
+            project.id, session.branch, filename, content.decode("utf-8"), user.id
+        )
+        if new_status == SuggestionSessionStatus.SUBMITTED.value:
+            await self._consume_untrusted_submission(project, user, redis)
+        # Keep review history, but approvals of the previous content no longer
+        # authorize a merge of this revision. COMMENTED is the existing neutral status.
+        for review in pr.reviews:
+            if review.status == ReviewStatus.APPROVED.value:
+                review.status = ReviewStatus.COMMENTED.value
+        session.status = new_status
         session.revision = (session.revision or 1) + 1
-        session.summary = data.summary
+        session.summary = summary
         session.reviewer_feedback = None
         session.reviewed_at = None
+        session.reviewer_id = None
+        session.reviewer_name = None
+        session.reviewer_email = None
         session.last_activity = datetime.now(UTC)
-        # The objection is resolved: restart the quiet clock from zero (KTD11).
-        await self._schedule_auto_accept(project_id, session, user)
-        await self.db.commit()
-
-        return SuggestionSubmitResponse(
-            pr_number=session.pr_number or 0,
-            pr_url=None,
-            status="submitted",
+        if new_status == SuggestionSessionStatus.SUBMITTED.value:
+            await self._schedule_auto_accept(project.id, session, user)
+        else:
+            # Only an explicit resubmission may resolve a reviewer's objection.
+            session.auto_accept_after = None
+        await NotificationService(self.db).notify_project_roles(
+            project_id=project.id,
+            project_name=project.name,
+            roles=["owner", "admin", "editor"],
+            notification_type="suggestion_submitted",
+            title=f"Suggestion resubmitted (revision {session.revision})",
+            body=summary[:200] if summary else None,
+            target_id=str(session.pr_id),
+            exclude_user_id=user.id,
         )
+        response = SuggestionSubmitResponse(
+            pr_number=session.pr_number, pr_url=pr.github_pr_url, status=new_status
+        )
+        await self.db.commit()
+        return response
 
     async def discard(self, project_id: UUID, session_id: str, user: CurrentUser) -> None:
         """Discard a suggestion session and delete its branch."""
@@ -1828,21 +2010,39 @@ class SuggestionService:
         self._verify_ownership(session, user)
         await self._verify_project_access(project_id, user)
 
-        if session.status != SuggestionSessionStatus.ACTIVE.value:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Session is {session.status}, cannot discard",
-            )
+        await self._discard_session(session)
 
-        # Delete the git branch
-        try:
-            self.git_service.delete_branch(project_id, session.branch, force=True)
-        except Exception as e:
-            logger.warning(f"Failed to delete suggestion branch {session.branch}: {e}")
+    async def _discard_session(self, session: SuggestionSession) -> None:
+        """Discard after owner authorization or the sweep's system access-loss check."""
+        project_id = session.project_id
+        pr = None
+        pr_service = get_pull_request_service(self.db)
+        async with branch_write_lock(self.db, project_id, session.branch):
+            await self.db.refresh(session)
+            if session.status != SuggestionSessionStatus.ACTIVE.value:
+                raise HTTPException(
+                    status_code=400, detail=f"Session is {session.status}, cannot discard"
+                )
+            if session.pr_number is not None:
+                pr = await pr_service._close_pull_request_for_discard_already_locked(
+                    project_id, session.pr_number, session.branch
+                )
 
-        session.status = SuggestionSessionStatus.DISCARDED.value
-        session.last_activity = datetime.now(UTC)
-        await self.db.commit()
+            try:
+                self.git_service.delete_branch(project_id, session.branch, force=True)
+            except Exception as e:
+                logger.warning(f"Failed to delete suggestion branch {session.branch}: {e}")
+
+            session.status = SuggestionSessionStatus.DISCARDED.value
+            session.last_activity = datetime.now(UTC)
+            # Persist the local PR close and session discard together under the lock.
+            await self.db.commit()
+        if pr is not None:
+            try:
+                await pr_service._sync_pull_request_to_github(project_id, pr)
+            except Exception:
+                await self.db.rollback()
+                logger.warning("Failed to sync discarded suggestion PR to GitHub", exc_info=True)
 
     async def beacon_save(
         self, project_id: UUID, data: SuggestionBeaconRequest, token: str
@@ -2297,8 +2497,12 @@ class SuggestionService:
             try:
                 project = await self._verify_project_access(session.project_id, mock_user)
             except HTTPException:
-                session.status = SuggestionSessionStatus.DISCARDED.value
-                await self.db.commit()
+                try:
+                    await self._discard_session(session)
+                except Exception:
+                    await self.db.rollback()
+                    logger.warning("Failed to discard inaccessible suggestion", exc_info=True)
+                    continue
                 logger.warning(
                     "Discarded session %s: user %s lost project access",
                     session.session_id,
@@ -2310,6 +2514,36 @@ class SuggestionService:
                     "Skipped stale auto-submit for untrusted session %s",
                     session.session_id,
                 )
+                continue
+
+            if session.pr_id is not None or session.pr_number is not None:
+                try:
+                    default_branch = self.git_service.get_default_branch(session.project_id)
+                    async with pull_request_write_locks(
+                        self.db, session.project_id, {session.branch, default_branch}
+                    ):
+                        await self.db.refresh(session)
+                        if session.status != SuggestionSessionStatus.ACTIVE.value:
+                            await self.db.commit()
+                            continue
+                        if session.last_activity >= cutoff or session.changes_count == 0:
+                            # Release transaction-scoped locks before the next session.
+                            await self.db.commit()
+                            continue
+                        await self._resubmit_already_locked(
+                            project,
+                            session,
+                            mock_user,
+                            "Auto-resubmitted: session inactive for 30+ minutes.",
+                            SuggestionSessionStatus.AUTO_SUBMITTED.value,
+                        )
+                    await self._enqueue_branch_refresh(
+                        session.project_id, session.branch, full_embedding=True
+                    )
+                    count += 1
+                except Exception:
+                    await self.db.rollback()
+                    logger.warning("Failed to auto-resubmit suggestion", exc_info=True)
                 continue
 
             # Atomically claim the session to prevent concurrent workers from

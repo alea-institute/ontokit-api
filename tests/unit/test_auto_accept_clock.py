@@ -7,7 +7,8 @@ ontology, so these tests are mostly about when it must NOT start.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from itertools import chain, repeat
 from unittest.mock import AsyncMock, MagicMock, Mock
@@ -44,6 +45,8 @@ def _project(
     project = MagicMock()
     project.id = PROJECT_ID
     project.name = "P"
+    project.source_file_path = "ontology.ttl"
+    project.github_integration = None
     project.is_public = True
     project.members = members if members is not None else []
     project.auto_accept_enabled = auto_accept_enabled
@@ -71,6 +74,9 @@ def _session(
     session.changes_count = 1
     session.revision = 1
     session.pr_number = 3
+    session.pr_id = uuid.uuid4()
+    session.created_at = datetime.now(UTC)
+    session.verification_passed = True
     session.is_anonymous = is_anonymous
     session.is_llm_generated = is_llm_generated
     session.auto_accept_after = None
@@ -214,35 +220,128 @@ class TestHaltAutoAccept:
 
 
 class TestResubmitRestartsTheClock:
+    @pytest.fixture(autouse=True)
+    def revision_infrastructure(
+        self, service: SuggestionService, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        @asynccontextmanager
+        async def unlocked(*_args: object) -> AsyncIterator[None]:
+            yield
+
+        monkeypatch.setattr("ontokit.services.suggestion_service.branch_write_lock", unlocked)
+        monkeypatch.setattr(
+            "ontokit.services.suggestion_service.pull_request_write_locks", unlocked
+        )
+        service.git_service.get_default_branch.return_value = "main"
+        service.git_service.get_file_from_branch.return_value = b""
+        monkeypatch.setattr(service, "_enqueue_branch_refresh", AsyncMock())
+        monkeypatch.setattr(
+            "ontokit.services.suggestion_service.create_beacon_token", lambda _: "fresh-token"
+        )
+
+    async def _reopen(
+        self,
+        service: SuggestionService,
+        mock_db: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
+        project: MagicMock,
+        session: MagicMock,
+    ) -> None:
+        monkeypatch.setattr(service, "_get_session", AsyncMock(return_value=session))
+        monkeypatch.setattr(service, "_get_project", AsyncMock(return_value=project))
+        pr = MagicMock(
+            id=session.pr_id, pr_number=session.pr_number, status="open", github_pr_url=None
+        )
+        mock_db.execute.side_effect = [_result_for(None), _result_for(pr)]
+        response = await service.reopen(PROJECT_ID, session.session_id, _user())
+        assert session.status == SuggestionSessionStatus.ACTIVE.value
+        assert response.beacon_token == "fresh-token"
+        pr = MagicMock(
+            id=session.pr_id, pr_number=session.pr_number, status="open", github_pr_url=None
+        )
+        mock_db.execute.side_effect = None
+        mock_db.execute.return_value = _result_for(pr)
+
     async def test_resolved_objection_restarts_from_zero(
-        self, service: SuggestionService, mock_db: AsyncMock
+        self, service: SuggestionService, mock_db: AsyncMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Covers AE1 / KTD11 — a full fresh window, not the remainder."""
         project = _project([_member("contributor-1", is_trusted=True)], quiet_days=7)
         session = _session(status=SuggestionSessionStatus.CHANGES_REQUESTED.value)
         session.auto_accept_halted_at = datetime.now(UTC) - timedelta(days=3)
-        mock_db.execute.side_effect = _results(
-            _result_for(session), _result_for(project), _result_for(project), project=project
-        )
+        await self._reopen(service, mock_db, monkeypatch, project, session)
 
+        session.changes_count = 1  # A save after reopen enables resubmission.
         before = datetime.now(UTC)
         await service.resubmit(
             PROJECT_ID, session.session_id, SuggestionResubmitRequest(summary="fixed"), _user()
         )
 
         assert session.status == SuggestionSessionStatus.SUBMITTED.value
-        assert session.auto_accept_after - before > timedelta(days=6, hours=23)
+        assert session.revision == 2
+        assert (
+            timedelta(days=6, hours=23)
+            < session.auto_accept_after - before
+            < timedelta(days=7, minutes=1)
+        )
         assert session.auto_accept_halted_at is None
 
     async def test_resubmit_by_untrusted_does_not_restart(
-        self, service: SuggestionService, mock_db: AsyncMock
+        self, service: SuggestionService, mock_db: AsyncMock, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         project = _project([_member("contributor-1", is_trusted=False)])
         session = _session(status=SuggestionSessionStatus.CHANGES_REQUESTED.value)
-        mock_db.execute.side_effect = _results(
-            _result_for(session), _result_for(project), _result_for(project), project=project
-        )
+        await self._reopen(service, mock_db, monkeypatch, project, session)
+        session.changes_count = 1
+        redis = AsyncMock()
+        redis.incr.return_value = 1
         await service.resubmit(
-            PROJECT_ID, session.session_id, SuggestionResubmitRequest(summary="fixed"), _user()
+            PROJECT_ID,
+            session.session_id,
+            SuggestionResubmitRequest(summary="fixed"),
+            _user(),
+            redis=redis,
         )
+        assert session.status == SuggestionSessionStatus.SUBMITTED.value
+        assert session.revision == 2
+        redis.incr.assert_awaited_once()
         assert session.auto_accept_after is None
+
+    async def test_unchanged_reopened_revision_keeps_objection_halted(
+        self, service: SuggestionService, mock_db: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = _project([_member("contributor-1", is_trusted=True)])
+        session = _session()
+        halted_at = session.auto_accept_halted_at = datetime.now(UTC) - timedelta(days=1)
+        await self._reopen(service, mock_db, monkeypatch, project, session)
+        session.last_activity = datetime.now(UTC) - timedelta(hours=1)
+        # Simulate a stale candidate read before reopen committed its counter reset.
+        stale = MagicMock()
+        stale.scalars.return_value.all.return_value = [session]
+        linked = mock_db.execute.return_value
+        mock_db.execute.side_effect = chain([stale], repeat(linked))
+        mock_db.commit.reset_mock()
+        assert await service.auto_submit_stale_sessions() == 0
+        assert session.changes_count == 0
+        assert session.revision == 1
+        assert session.status == "active"
+        assert session.auto_accept_after is None
+        assert session.auto_accept_halted_at == halted_at
+
+    async def test_sweep_revision_preserves_objection_after_new_save(
+        self, service: SuggestionService, mock_db: AsyncMock, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        project = _project([_member("contributor-1", is_trusted=True)])
+        session = _session()
+        halted_at = session.auto_accept_halted_at = datetime.now(UTC) - timedelta(days=1)
+        await self._reopen(service, mock_db, monkeypatch, project, session)
+        session.changes_count = 1
+        session.last_activity = datetime.now(UTC) - timedelta(hours=1)
+        stale = MagicMock()
+        stale.scalars.return_value.all.return_value = [session]
+        linked = mock_db.execute.return_value
+        mock_db.execute.side_effect = chain([stale], repeat(linked))
+        assert await service.auto_submit_stale_sessions() == 1
+        assert session.revision == 2
+        assert session.auto_accept_after is None
+        assert session.auto_accept_halted_at == halted_at
