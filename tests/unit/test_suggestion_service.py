@@ -1939,8 +1939,13 @@ class TestResubmit:
         service: SuggestionService,
         mock_db: AsyncMock,
     ) -> None:
-        """Raises 400 when session is not in changes-requested state."""
-        session = _make_session(status=SuggestionSessionStatus.SUBMITTED.value)
+        """A changes-requested session must be reopened before resubmission."""
+        session = _make_session(
+            status=SuggestionSessionStatus.CHANGES_REQUESTED.value,
+            changes_count=1,
+            pr_id=uuid.uuid4(),
+            pr_number=10,
+        )
         project = _make_project()
 
         mock_session_result = MagicMock()
@@ -1948,7 +1953,14 @@ class TestResubmit:
         mock_project_result = MagicMock()
         mock_project_result.scalar_one_or_none.return_value = project
 
-        mock_db.execute.side_effect = [mock_session_result, mock_project_result]
+        pr_result = MagicMock()
+        pr_result.scalar_one_or_none.return_value = MagicMock(status="open")
+        mock_db.execute.side_effect = [
+            mock_session_result,
+            mock_session_result,
+            mock_project_result,
+            pr_result,
+        ]
 
         from ontokit.schemas.suggestion import SuggestionResubmitRequest
 
@@ -1958,6 +1970,8 @@ class TestResubmit:
         with pytest.raises(HTTPException) as exc_info:
             await service.resubmit(PROJECT_ID, session.session_id, data, user)
         assert exc_info.value.status_code == 400
+        assert exc_info.value.detail == "Session is changes-requested, cannot submit"
+        mock_db.commit.assert_not_awaited()
 
 
 # ---------------------------------------------------------------------------
@@ -3026,7 +3040,11 @@ async def test_lifecycle_save_requires_reopen(
     with pytest.raises(HTTPException) as exc:
         await service.save(PROJECT_ID, session.session_id, data, lifecycle.user)
     assert exc.value.status_code == 400
-    service.db.execute.return_value.scalar_one_or_none.return_value = None
+    no_active = MagicMock()
+    no_active.scalar_one_or_none.return_value = None
+    linked = MagicMock()
+    linked.scalar_one_or_none.return_value = lifecycle.pr
+    service.db.execute.side_effect = chain([no_active], repeat(linked))
     await service.reopen(PROJECT_ID, session.session_id, lifecycle.user)
     service.git_service.commit_changes.return_value.hash = "saved"
     result = await service.save(PROJECT_ID, session.session_id, data, lifecycle.user)
@@ -3245,7 +3263,11 @@ async def test_lifecycle_reopen_fresh_token_and_activity(
     session = lifecycle.session
     session.status = "changes-requested"
     previous = session.last_activity = datetime.now(UTC) - timedelta(hours=3)
-    service.db.execute.return_value.scalar_one_or_none.return_value = None
+    no_active = MagicMock()
+    no_active.scalar_one_or_none.return_value = None
+    linked = MagicMock()
+    linked.scalar_one_or_none.return_value = lifecycle.pr
+    service.db.execute.side_effect = chain([no_active], repeat(linked))
     result = await service.reopen(PROJECT_ID, session.session_id, lifecycle.user)
     assert result.beacon_token == "fresh-token"
     assert session.beacon_token == result.beacon_token
@@ -3261,7 +3283,11 @@ async def test_lifecycle_reopen_concurrent_conflict(
     from sqlalchemy.exc import IntegrityError
 
     lifecycle.session.status = "changes-requested"
-    service.db.execute.return_value.scalar_one_or_none.return_value = None
+    no_active = MagicMock()
+    no_active.scalar_one_or_none.return_value = None
+    linked = MagicMock()
+    linked.scalar_one_or_none.return_value = lifecycle.pr
+    service.db.execute.side_effect = chain([no_active], repeat(linked))
     service.db.commit.side_effect = IntegrityError("duplicate active", {}, Exception())
     with pytest.raises(HTTPException) as exc:
         await service.reopen(PROJECT_ID, lifecycle.session.session_id, lifecycle.user)
@@ -3344,7 +3370,9 @@ async def test_lifecycle_stale_revision(service: SuggestionService, lifecycle: M
 async def test_lifecycle_discard_revision(service: SuggestionService, lifecycle: MagicMock) -> None:
     lifecycle.session.status = "active"
     await service.discard(PROJECT_ID, lifecycle.session.session_id, lifecycle.user)
-    lifecycle.pr_service.close_pull_request.assert_awaited_once_with(PROJECT_ID, 12, lifecycle.user)
+    lifecycle.pr_service._close_pull_request_for_discard_already_locked.assert_awaited_once_with(
+        PROJECT_ID, 12, lifecycle.session.branch
+    )
     service.git_service.delete_branch.assert_called_once_with(
         PROJECT_ID, lifecycle.session.branch, force=True
     )
@@ -3598,3 +3626,262 @@ async def test_private_nonmember_cannot_continue_session(
     assert exc.value.status_code == 403
     service.git_service.commit_changes.assert_not_called()
     mock_db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pr_status", ["closed", "merged", None])
+@pytest.mark.parametrize("automatic", [False, True])
+async def test_revision_refuses_settled_or_missing_pr(
+    service: SuggestionService, lifecycle: MagicMock, pr_status: str | None, automatic: bool
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionResubmitRequest
+
+    ctx = lifecycle
+    ctx.session.status = "active"
+    ctx.pr.status = pr_status
+    service.db.execute.return_value.scalar_one_or_none.return_value = ctx.pr if pr_status else None
+    with pytest.raises(HTTPException) as exc:
+        if automatic:
+            await service._resubmit_already_locked(
+                ctx.project, ctx.session, ctx.user, None, "auto-submitted"
+            )
+        else:
+            await service.resubmit(
+                PROJECT_ID, ctx.session.session_id, SuggestionResubmitRequest(), ctx.user
+            )
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Suggestion pull request is not open"
+    assert ctx.session.revision == 1
+    assert ctx.session.status == "active"
+    service.db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pr_status", ["closed", "merged", None])
+async def test_reopen_refuses_settled_or_missing_pr(
+    service: SuggestionService, lifecycle: MagicMock, pr_status: str | None
+) -> None:
+    ctx = lifecycle
+    ctx.session.status = "changes-requested"
+    ctx.pr.status = pr_status
+    active = MagicMock()
+    active.scalar_one_or_none.return_value = None
+    linked = MagicMock()
+    linked.scalar_one_or_none.return_value = ctx.pr if pr_status else None
+    service.db.execute.side_effect = [active, linked]
+    with pytest.raises(HTTPException) as exc:
+        await service.reopen(PROJECT_ID, ctx.session.session_id, ctx.user)
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Suggestion pull request is not open"
+    assert ctx.session.status == "changes-requested"
+    service.db.commit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pr_status", ["open", "closed", "merged"])
+@pytest.mark.parametrize("lost_access", [False, True])
+async def test_discard_revision_with_settled_pr_or_lost_access(
+    service: SuggestionService,
+    reviewer_merge: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+    pr_status: str,
+    lost_access: bool,
+) -> None:
+    ctx = reviewer_merge
+    ctx.session.status = "active"
+    ctx.session.last_activity = datetime.now(UTC) - timedelta(hours=1)
+    ctx.pr.status = pr_status
+    locked = False
+
+    @asynccontextmanager
+    async def lock(*_args: object) -> AsyncIterator[None]:
+        nonlocal locked
+        locked = True
+        try:
+            yield
+        finally:
+            locked = False
+
+    async def commit() -> None:
+        assert locked
+        assert ctx.pr.status == ("closed" if pr_status == "open" else pr_status)
+        assert ctx.session.status == "discarded"
+
+    monkeypatch.setattr("ontokit.services.suggestion_service.branch_write_lock", lock)
+    service.db.commit.side_effect = commit
+    if lost_access:
+        monkeypatch.setattr(
+            service,
+            "_verify_project_access",
+            AsyncMock(side_effect=HTTPException(status_code=403, detail="Access lost")),
+        )
+        service.db.execute.return_value.scalars.return_value.all.return_value = [ctx.session]
+        assert await service.auto_submit_stale_sessions() == 0
+    else:
+        await service.discard(PROJECT_ID, ctx.session.session_id, ctx.user)
+    assert ctx.session.status == "discarded"
+    assert ctx.pr.status == ("closed" if pr_status == "open" else pr_status)
+    service.db.commit.assert_awaited_once()
+    service.git_service.delete_branch.assert_called_once_with(
+        PROJECT_ID, ctx.session.branch, force=True
+    )
+
+
+@pytest.mark.asyncio
+async def test_revision_requires_fresh_owner_approval(
+    service: SuggestionService, reviewer_merge: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ontokit.models.pull_request import PullRequestReview
+    from ontokit.schemas.pull_request import ReviewCreate
+    from ontokit.schemas.suggestion import (
+        SuggestionRequestChangesRequest,
+        SuggestionResubmitRequest,
+        SuggestionSaveRequest,
+    )
+
+    ctx = reviewer_merge
+    ctx.project.pr_approval_required = 1
+    owner = _make_user(user_id="owner")
+    ctx.project.members.append(MagicMock(user_id=owner.id, role="owner"))
+    monkeypatch.setattr(ctx.pr_service, "_to_review_response", MagicMock())
+    await ctx.pr_service.create_review(
+        PROJECT_ID, 12, ReviewCreate(status="approved", body="Reviewed revision 1"), owner
+    )
+    old_approval = next(
+        call.args[0]
+        for call in service.db.add.call_args_list
+        if isinstance(call.args[0], PullRequestReview)
+    )
+    objection = MagicMock(reviewer_id="reviewer", status="changes_requested")
+    ctx.pr.reviews = [old_approval, objection]
+    await service.request_changes(
+        PROJECT_ID,
+        ctx.session.session_id,
+        SuggestionRequestChangesRequest(feedback="Fix label"),
+        ctx.reviewer,
+    )
+    no_active = MagicMock()
+    no_active.scalar_one_or_none.return_value = None
+    linked = MagicMock()
+    linked.scalar_one_or_none.return_value = ctx.pr
+    service.db.execute.side_effect = [no_active, linked]
+    await service.reopen(PROJECT_ID, ctx.session.session_id, ctx.user)
+    assert ctx.session.changes_count == 0
+    service.db.execute.side_effect = None
+    service.db.execute.return_value = linked
+    service.git_service.commit_changes.return_value.hash = "revised"
+    await service.save(
+        PROJECT_ID,
+        ctx.session.session_id,
+        SuggestionSaveRequest(content="", entity_iri="urn:class", entity_label="Fixed"),
+        ctx.user,
+    )
+    assert ctx.session.changes_count == 1
+    await service.resubmit(
+        PROJECT_ID, ctx.session.session_id, SuggestionResubmitRequest(), ctx.user
+    )
+    service.db.commit.reset_mock()
+    with pytest.raises(HTTPException) as exc:
+        await service.approve(PROJECT_ID, ctx.session.session_id, ctx.reviewer)
+    assert exc.value.detail == "Pull request requires 1 approvals, but has 0"
+    assert old_approval.status == "commented"
+    assert old_approval.body == "Reviewed revision 1"
+    assert objection.status == "changes_requested"
+    assert len(ctx.pr.reviews) == 2
+    service.db.commit.assert_not_awaited()
+    service.git_service.merge_branch.assert_not_called()
+    service.db.add.reset_mock()
+    await ctx.pr_service.create_review(
+        PROJECT_ID, 12, ReviewCreate(status="approved", body="Reviewed revision 2"), owner
+    )
+    fresh_approval = next(
+        call.args[0]
+        for call in service.db.add.call_args_list
+        if isinstance(call.args[0], PullRequestReview)
+    )
+    ctx.pr.reviews.append(fresh_approval)
+    await service.approve(PROJECT_ID, ctx.session.session_id, ctx.reviewer)
+    assert ctx.session.status == "merged"
+    service.git_service.merge_branch.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_pr_close_refuses_revision_but_allows_discard(
+    service: SuggestionService, reviewer_merge: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from ontokit.schemas.suggestion import SuggestionResubmitRequest
+
+    ctx = reviewer_merge
+    ctx.session.status = "changes-requested"
+    owner = _make_user(user_id="owner")
+    ctx.project.members.append(MagicMock(user_id=owner.id, role="owner"))
+    monkeypatch.setattr(ctx.pr_service, "_to_pr_response", AsyncMock())
+    await ctx.pr_service.close_pull_request(PROJECT_ID, 12, owner)
+    assert ctx.pr.status == "closed"
+    no_active = MagicMock()
+    no_active.scalar_one_or_none.return_value = None
+    linked = MagicMock()
+    linked.scalar_one_or_none.return_value = ctx.pr
+    service.db.execute.side_effect = [no_active, linked]
+    service.db.commit.reset_mock()
+    with pytest.raises(HTTPException) as exc:
+        await service.reopen(PROJECT_ID, ctx.session.session_id, ctx.user)
+    assert exc.value.status_code == 409
+    assert exc.value.detail == "Suggestion pull request is not open"
+    service.db.commit.assert_not_awaited()
+
+    # The direct close can also happen after reopen: that active draft has an exit.
+    ctx.session.status = "active"
+    service.db.execute.side_effect = None
+    service.db.execute.return_value = linked
+    with pytest.raises(HTTPException) as exc:
+        await service.resubmit(
+            PROJECT_ID, ctx.session.session_id, SuggestionResubmitRequest(), ctx.user
+        )
+    assert exc.value.status_code == 400
+    assert exc.value.detail == "Suggestion pull request is not open"
+    assert ctx.session.revision == 1
+    service.db.commit.assert_not_awaited()
+    await service.discard(PROJECT_ID, ctx.session.session_id, ctx.user)
+    assert ctx.session.status == "discarded"
+    assert ctx.pr.status == "closed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pr_status", ["closed", "merged", None])
+async def test_stale_revision_rolls_back_when_pr_not_open(
+    service: SuggestionService, lifecycle: MagicMock, pr_status: str | None
+) -> None:
+    ctx = lifecycle
+    ctx.session.status = "active"
+    ctx.session.last_activity = datetime.now(UTC) - timedelta(hours=1)
+    ctx.pr.status = pr_status
+    stale = MagicMock()
+    stale.scalars.return_value.all.return_value = [ctx.session]
+    linked = MagicMock()
+    linked.scalar_one_or_none.return_value = ctx.pr if pr_status else None
+    service.db.execute.side_effect = [stale, linked]
+    assert await service.auto_submit_stale_sessions() == 0
+    assert ctx.session.revision == 1
+    assert ctx.session.status == "active"
+    service.db.commit.assert_not_awaited()
+    service.db.rollback.assert_awaited_once()
+    ctx.notifications.notify_project_roles.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("new_status", ["submitted", "auto-submitted"])
+async def test_revision_dismisses_prior_approval_history(
+    service: SuggestionService, lifecycle: MagicMock, new_status: str
+) -> None:
+    ctx = lifecycle
+    ctx.session.status = "active"
+    approval = MagicMock(status="approved", body="Original review")
+    objection = MagicMock(status="changes_requested")
+    ctx.pr.reviews = [approval, objection]
+    await service._resubmit_already_locked(ctx.project, ctx.session, ctx.user, None, new_status)
+    assert ctx.pr.reviews == [approval, objection]
+    assert approval.status == "commented"
+    assert approval.body == "Original review"
+    assert objection.status == "changes_requested"
+    assert ctx.session.revision == 2

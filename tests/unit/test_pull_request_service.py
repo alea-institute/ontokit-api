@@ -2150,10 +2150,12 @@ class TestPRSettings:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("role", ["owner", "admin", "editor", "suggester"])
 @pytest.mark.parametrize("sync_fails", [False, True])
+@pytest.mark.parametrize("pr_status", ["open", "merged"])
 async def test_suggestion_close_seam(
     monkeypatch: pytest.MonkeyPatch,
     role: str,
     sync_fails: bool,
+    pr_status: str,
 ) -> None:
     """Reviewer policy authorizes the internal close; local success survives mirror failure."""
     from ontokit.services.suggestion_service import SuggestionService
@@ -2162,7 +2164,7 @@ async def test_suggestion_close_seam(
     git = MagicMock()
     service = PullRequestService(db, git)
     project = _make_project(members=[_make_member("reviewer", role)])
-    pr = _make_pr(author_id="contributor")
+    pr = _make_pr(author_id="contributor", status=pr_status)
     user = CurrentUser(id="reviewer")
     monkeypatch.setattr(SuggestionService, "_get_project", AsyncMock(return_value=project))
     monkeypatch.setattr(service, "_get_project", AsyncMock(return_value=project))
@@ -2180,12 +2182,20 @@ async def test_suggestion_close_seam(
         with pytest.raises(HTTPException) as direct:
             await service.close_pull_request(PROJECT_ID, 1, user)
         assert direct.value.status_code == 403
-        assert pr.status == "open"
+        assert pr.status == pr_status
     if role == "suggester":
         with pytest.raises(HTTPException) as internal:
             await service._close_pull_request_for_suggestion(PROJECT_ID, 1, user)
         assert internal.value.status_code == 403
         db.commit.assert_not_awaited()
+    elif pr_status == "merged":
+        with pytest.raises(HTTPException) as merged:
+            await service._close_pull_request_for_suggestion(PROJECT_ID, 1, user)
+        assert merged.value.status_code == 400
+        assert merged.value.detail == "Pull request is already merged"
+        assert pr.status == "merged"
+        db.commit.assert_not_awaited()
+        sync.assert_not_awaited()
     else:
 
         async def check_committed(*_args: object) -> None:

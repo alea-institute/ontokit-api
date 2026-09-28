@@ -545,6 +545,22 @@ class PullRequestService:
             await self.db.rollback()
             logger.warning("Failed to sync rejected suggestion PR to GitHub", exc_info=True)
 
+    async def _close_pull_request_for_discard_already_locked(
+        self, project_id: UUID, pr_number: int, source_branch: str
+    ) -> PullRequest:
+        """Close a discarded session's PR without changing a settled PR.
+
+        Internal only: SuggestionService authorizes the owner or system cleanup,
+        holds the session branch lock, and commits the PR and session together.
+        """
+        pr = await self._get_pr(project_id, pr_number)
+        await self.db.refresh(pr)
+        if pr.source_branch != source_branch:
+            raise HTTPException(status_code=409, detail="Suggestion pull request branch mismatch")
+        if pr.status == PRStatus.OPEN.value:
+            pr.status = PRStatus.CLOSED.value
+        return pr
+
     async def reopen_pull_request(
         self, project_id: UUID, pr_number: int, user: CurrentUser
     ) -> PRResponse:
