@@ -950,7 +950,7 @@ async def test_p0_4_failed_merge_keeps_real_session_and_trust_ledger_unchanged(
     await real_db_session.commit()
 
     pull_requests = MagicMock()
-    pull_requests.merge_pull_request = AsyncMock(
+    pull_requests._merge_pull_request_for_suggestion = AsyncMock(
         side_effect=HTTPException(status_code=409, detail="conflict")
     )
     try:

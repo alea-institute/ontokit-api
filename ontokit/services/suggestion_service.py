@@ -1705,16 +1705,18 @@ class SuggestionService:
                     merge_message=f"Merge suggestion: {session_id}",
                     delete_source_branch=True,
                 )
-                merge_response = await pr_service.merge_pull_request(
-                    project_id,
-                    session.pr_number,
-                    merge_req,
-                    user,
-                    system_auto_accept=(
-                        decided_by == SYSTEM_AUTO_ACCEPT_ACTOR
-                        and user.id == SYSTEM_AUTO_ACCEPT_ACTOR
-                    ),
-                )
+                if decided_by == SYSTEM_AUTO_ACCEPT_ACTOR and user.id == SYSTEM_AUTO_ACCEPT_ACTOR:
+                    merge_response = await pr_service.merge_pull_request(
+                        project_id,
+                        session.pr_number,
+                        merge_req,
+                        user,
+                        system_auto_accept=True,
+                    )
+                else:
+                    merge_response = await pr_service._merge_pull_request_for_suggestion(
+                        project_id, session.pr_number, merge_req, user
+                    )
                 merge_commit_hash = merge_response.merge_commit_hash
             except HTTPException:
                 logger.warning("PR merge failed for suggestion session %s", session_id)

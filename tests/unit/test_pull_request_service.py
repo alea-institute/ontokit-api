@@ -863,7 +863,7 @@ class TestMergePullRequest:
 
     @pytest.mark.asyncio
     async def test_merge_pr_editor_forbidden(
-        self, service: PullRequestService, mock_db: AsyncMock
+        self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
     ) -> None:
         """Only owners and admins can merge PRs."""
         project = _make_project()
@@ -876,6 +876,10 @@ class TestMergePullRequest:
         with pytest.raises(HTTPException) as exc_info:
             await service.merge_pull_request(PROJECT_ID, 1, merge_req, user)
         assert exc_info.value.status_code == 403
+        assert pr.status == PRStatus.OPEN.value
+        mock_git_service.merge_branch.assert_not_called()
+        mock_git_service.delete_branch.assert_not_called()
+        mock_db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_system_auto_accept_uses_the_internal_merge_seam(

@@ -1037,6 +1037,42 @@ class PullRequestService:
                     detail="Only admins and owners can merge pull requests",
                 )
 
+        return await self._merge_authorized_pull_request(
+            project, pr, merge_request, user, system_auto_accept=system_auto_accept
+        )
+
+    async def _merge_pull_request_for_suggestion(
+        self,
+        project_id: UUID,
+        pr_number: int,
+        merge_request: PRMergeRequest,
+        user: CurrentUser,
+    ) -> PRMergeResponse:
+        """Internal merge authorized by the suggestion reviewer policy.
+
+        Provisional editor approval policy: only the role gate differs from
+        interactive PR merge; recorded PR approvals are still required.
+        """
+        from ontokit.services.suggestion_service import SuggestionService
+
+        project = await SuggestionService(self.db, self.git_service)._verify_reviewer_access(
+            project_id, user
+        )
+        pr = await self._get_pr(project_id, pr_number)
+        return await self._merge_authorized_pull_request(project, pr, merge_request, user)
+
+    async def _merge_authorized_pull_request(
+        self,
+        project: Project,
+        pr: PullRequest,
+        merge_request: PRMergeRequest,
+        user: CurrentUser,
+        *,
+        system_auto_accept: bool = False,
+    ) -> PRMergeResponse:
+        """Apply the shared merge checks and effects after caller authorization."""
+        project_id = project.id
+        pr_number = pr.pr_number
         if pr.status != PRStatus.OPEN.value:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,

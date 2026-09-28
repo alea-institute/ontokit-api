@@ -1371,8 +1371,8 @@ class TestApprove:
             "ontokit.services.suggestion_service.get_pull_request_service"
         ) as mock_pr_svc_factory:
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.merge_pull_request = AsyncMock()
-            mock_pr_svc.merge_pull_request.return_value.merge_commit_hash = None
+            mock_pr_svc._merge_pull_request_for_suggestion = AsyncMock()
+            mock_pr_svc._merge_pull_request_for_suggestion.return_value.merge_commit_hash = None
             mock_pr_svc_factory.return_value = mock_pr_svc
 
             await service.approve(PROJECT_ID, session.session_id, user)
@@ -1434,8 +1434,8 @@ class TestApprove:
             "ontokit.services.suggestion_service.get_pull_request_service"
         ) as mock_pr_svc_factory:
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.merge_pull_request = AsyncMock()
-            mock_pr_svc.merge_pull_request.return_value.merge_commit_hash = None
+            mock_pr_svc._merge_pull_request_for_suggestion = AsyncMock()
+            mock_pr_svc._merge_pull_request_for_suggestion.return_value.merge_commit_hash = None
             mock_pr_svc_factory.return_value = mock_pr_svc
 
             await service.approve(PROJECT_ID, session.session_id, user)
@@ -1536,7 +1536,7 @@ class TestApprove:
             "ontokit.services.suggestion_service.get_pull_request_service"
         ) as mock_pr_svc_factory:
             mock_pr_svc = AsyncMock()
-            mock_pr_svc.merge_pull_request = AsyncMock(
+            mock_pr_svc._merge_pull_request_for_suggestion = AsyncMock(
                 side_effect=HTTPException(status_code=409, detail="conflict")
             )
             mock_pr_svc_factory.return_value = mock_pr_svc
@@ -2945,7 +2945,7 @@ def lifecycle(service: SuggestionService, monkeypatch: pytest.MonkeyPatch) -> Ma
     ctx.project.members.append(reviewer_member)
     ctx.pr = MagicMock(id=ctx.session.pr_id, pr_number=12, status="open", github_pr_url=None)
     ctx.pr_service = AsyncMock()
-    ctx.pr_service.merge_pull_request.return_value.merge_commit_hash = None
+    ctx.pr_service._merge_pull_request_for_suggestion.return_value.merge_commit_hash = None
     ctx.notifications = AsyncMock()
     monkeypatch.setattr(
         "ontokit.services.suggestion_service.create_beacon_token", lambda _: "fresh-token"
@@ -3025,7 +3025,98 @@ async def test_lifecycle_self_approval_refused(
     with pytest.raises(HTTPException) as exc:
         await service.approve(PROJECT_ID, lifecycle.session.session_id, lifecycle.user)
     assert exc.value.status_code == 403
+    assert "own suggestion" in exc.value.detail
+    assert lifecycle.project.members[0].role == "editor"
+    assert lifecycle.session.status == "submitted"
     lifecycle.pr_service.merge_pull_request.assert_not_awaited()
+    lifecycle.pr_service._merge_pull_request_for_suggestion.assert_not_awaited()
+    service.git_service.merge_branch.assert_not_called()
+    lifecycle.notifications.create_notification.assert_not_awaited()
+    service.db.commit.assert_not_awaited()
+
+
+@pytest.fixture
+def reviewer_merge(
+    service: SuggestionService, lifecycle: MagicMock, monkeypatch: pytest.MonkeyPatch
+) -> MagicMock:
+    """Exercise both real services, including their authorization and merge gates."""
+    from ontokit.services.pull_request_service import PullRequestService
+
+    lifecycle.project.members[-1].role = "editor"
+    lifecycle.project.pr_approval_required = 0
+    lifecycle.pr.author_id = lifecycle.session.user_id
+    lifecycle.pr.source_branch = lifecycle.session.branch
+    lifecycle.pr.target_branch = "main"
+    lifecycle.pr.reviews = []
+    lifecycle.pr.github_pr_number = None
+    lifecycle.pr_service = PullRequestService(service.db, service.git_service)
+    monkeypatch.setattr(
+        SuggestionService, "_get_project", AsyncMock(return_value=lifecycle.project)
+    )
+    monkeypatch.setattr(
+        lifecycle.pr_service, "_get_project", AsyncMock(return_value=lifecycle.project)
+    )
+    monkeypatch.setattr(lifecycle.pr_service, "_get_pr", AsyncMock(return_value=lifecycle.pr))
+    monkeypatch.setattr(lifecycle.pr_service, "_sync_pull_request_to_github", AsyncMock())
+    monkeypatch.setattr(
+        "ontokit.services.pull_request_service.NotificationService",
+        lambda _: lifecycle.notifications,
+    )
+    service.git_service.list_branches.return_value = []
+    service.git_service.merge_branch.return_value = MagicMock(success=True, merge_commit_hash=None)
+    return lifecycle
+
+
+@pytest.mark.asyncio
+async def test_editor_approve_merges_deletes_branch_and_notifies(
+    service: SuggestionService, reviewer_merge: MagicMock
+) -> None:
+    ctx = reviewer_merge
+    await service.approve(PROJECT_ID, ctx.session.session_id, ctx.reviewer)
+
+    assert ctx.session.status == "merged"
+    assert ctx.session.reviewer_id == ctx.reviewer.id
+    assert ctx.pr.status == "merged"
+    assert ctx.pr.merged_by == ctx.reviewer.id
+    service.git_service.merge_branch.assert_called_once_with(
+        project_id=PROJECT_ID,
+        source=ctx.session.branch,
+        target="main",
+        message=f"Merge suggestion: {ctx.session.session_id}",
+        author_name=ctx.reviewer.name,
+        author_email=ctx.reviewer.email,
+    )
+    service.git_service.delete_branch.assert_called_once_with(PROJECT_ID, ctx.session.branch)
+    decisions = [
+        call.kwargs
+        for call in ctx.notifications.create_notification.await_args_list
+        if call.kwargs["notification_type"] == "suggestion_approved"
+    ]
+    assert len(decisions) == 1
+    assert decisions[0]["user_id"] == ctx.session.user_id
+    service._record_terminal_outcome.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("required_approvals", [1, 2])
+async def test_editor_approve_requires_recorded_pr_approvals(
+    service: SuggestionService, reviewer_merge: MagicMock, required_approvals: int
+) -> None:
+    ctx = reviewer_merge
+    ctx.project.pr_approval_required = required_approvals
+    with pytest.raises(HTTPException) as exc:
+        await service.approve(PROJECT_ID, ctx.session.session_id, ctx.reviewer)
+
+    assert exc.value.status_code == 400
+    assert exc.value.detail == (f"Pull request requires {required_approvals} approvals, but has 0")
+    assert ctx.session.status == "submitted"
+    assert ctx.session.reviewer_id is None
+    assert ctx.pr.status == "open"
+    service.git_service.merge_branch.assert_not_called()
+    service.git_service.delete_branch.assert_not_called()
+    service._record_terminal_outcome.assert_not_awaited()
+    ctx.notifications.create_notification.assert_not_awaited()
+    service.db.commit.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3255,7 +3346,7 @@ async def test_lifecycle_bulk_self_approval(
     assert result.succeeded == []
     assert len(result.failed) == 1
     assert "own suggestion" in result.failed[0].reason
-    lifecycle.pr_service.merge_pull_request.assert_not_awaited()
+    lifecycle.pr_service._merge_pull_request_for_suggestion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -3389,4 +3480,4 @@ async def test_bulk_self_approval_does_not_poison_following_item(
     assert result.succeeded == [other.session_id]
     assert [failure.session_id for failure in result.failed] == [lifecycle.session.session_id]
     assert "own suggestion" in result.failed[0].reason
-    lifecycle.pr_service.merge_pull_request.assert_awaited_once()
+    lifecycle.pr_service._merge_pull_request_for_suggestion.assert_awaited_once()
