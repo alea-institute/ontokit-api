@@ -88,3 +88,39 @@ def _validate_dev_host(host: str | None) -> subprocess.CompletedProcess[str]:
         text=True,
         check=False,
     )
+
+
+def test_dev_publication_is_push_only_and_preserves_tag_releases() -> None:
+    workflow_path = Path(__file__).parents[2] / ".github" / "workflows" / "release.yml"
+    jobs = yaml.safe_load(workflow_path.read_text())["jobs"]
+    assert jobs["publish_docker"]["if"] == (
+        "github.event_name == 'push' && (github.ref == 'refs/heads/dev' || "
+        "startsWith(github.ref, 'refs/tags/ontokit-'))"
+    )
+    for publisher in ("publish_pypi", "publish_github"):
+        assert jobs[publisher]["if"] == (
+            "github.event_name == 'push' && "
+            "startsWith(github.event.ref, 'refs/tags/ontokit-')"
+        )
+    assert set(jobs["publish_docker"]["needs"]) == {"lint", "test", "docker_preflight"}
+    assert jobs["publish_docker"]["permissions"] == {"contents": "read", "packages": "write"}
+
+
+def test_dev_image_has_full_revision_and_cannot_replace_latest() -> None:
+    workflow_path = Path(__file__).parents[2] / ".github" / "workflows" / "release.yml"
+    steps = yaml.safe_load(workflow_path.read_text())["jobs"]["publish_docker"]["steps"]
+    meta = next(step for step in steps if step.get("id") == "meta")["with"]
+    assert "type=raw,value=sha-${{ github.sha }}" in meta["tags"].splitlines()
+    assert meta["flavor"] == "latest=false"
+    assert (
+        "type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/ontokit-') }}"
+        in meta["tags"].splitlines()
+    )
+    assert "org.opencontainers.image.revision=${{ github.sha }}" in meta["labels"]
+    build = next(step for step in steps if step.get("id") == "publish")
+    assert build["with"]["push"] is True
+    assert build["with"]["file"] == "Dockerfile.prod"
+    receipt = next(step for step in steps if step.get("name") == "Record published image")
+    assert receipt["env"]["IMAGE_DIGEST"] == "${{ steps.publish.outputs.digest }}"
+    assert receipt["env"]["SOURCE_REVISION"] == "${{ github.sha }}"
+    assert "$GITHUB_STEP_SUMMARY" in receipt["run"]
