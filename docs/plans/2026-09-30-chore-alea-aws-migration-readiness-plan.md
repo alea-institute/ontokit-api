@@ -18,11 +18,17 @@ now, still move to AWS later.” The preference is settled. A completed preferen
 answer does not retire the migration, grant a budget, or prove AWS access.
 No new hosting question or message to Mike is prepared for sending.
 
+Update, 2026-09-30 (Damien): Mike agrees the DEV server should move to an
+ALEA-controlled AWS account. This supersedes the earlier idea of a scoped IAM key
+in another account; the target is an ALEA-owned account. It still does not by
+itself grant access, approve a budget, or schedule the cutover.
+
 ## Planning Contract
 
 Read-only cached evidence: `44b6dfd3:deploy/RUNBOOK.md` records the EU CPX32 move
-on 2026-09-21. This branch is older (`773c51aa` baseline), so its deployment host
-fallback must not be interpreted as current host truth. The supplied card says
+on 2026-09-21. This plan was drafted on an older `773c51aa` baseline and delivered
+on top of `44b6dfd3`; runtime host truth still comes from the running host, not
+from repository fallbacks. The supplied card says
 Helsinki CPX32 is serving; runtime was not queried. No credential directories,
 credential values, env files or other repositories' credentials were inspected.
 
