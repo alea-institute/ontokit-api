@@ -161,7 +161,7 @@ jobs:
           generateReleaseNotes: true
 
   publish_docker:
-    if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/ontokit-')
+    if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/ontokit-'))
     needs: [lint, test, docker_preflight]
     runs-on: ubuntu-latest
     permissions:
@@ -179,11 +179,17 @@ jobs:
         uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6
         with:
           images: ghcr.io/${{ github.repository_owner }}/ontokit
+          flavor: latest=false
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           tags: |
+            type=raw,value=sha-${{ github.sha }}
             type=semver,pattern={{version}},value=${{ github.ref_name }},prefix=
             type=semver,pattern={{major}}.{{minor}},value=${{ github.ref_name }},prefix=
-            type=raw,value=latest
-      - uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/ontokit-') }}
+      - id: publish
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
         with:
           context: .
           file: Dockerfile.prod
@@ -192,3 +198,11 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Record published image
+        env:
+          IMAGE_REPOSITORY: ghcr.io/${{ github.repository_owner }}/ontokit
+          IMAGE_DIGEST: ${{ steps.publish.outputs.digest }}
+          SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          printf 'Image: `%s@%s`\nSource revision: `%s`\n' \
+            "$IMAGE_REPOSITORY" "$IMAGE_DIGEST" "$SOURCE_REVISION" >>"$GITHUB_STEP_SUMMARY"
