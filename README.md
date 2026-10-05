@@ -28,7 +28,8 @@ The default `Dockerfile` installs runtime dependencies from `uv.lock` without th
 dev group and fails the build if the lockfile is out of sync with `pyproject.toml`.
 
 The image bakes in dependencies, while the local compose stack mounts live source.
-After `uv.lock` changes, run `docker compose build api worker` to rebuild dependencies.
+After `uv.lock` changes, run `docker compose up -d --build api worker` to rebuild
+the image and recreate both containers.
 The API and worker containers refuse to start when the mounted lock differs from
 the image's recorded lock hash and print the rebuild command.
 Set `ONTOKIT_SKIP_LOCK_CHECK=1` in the container environment to skip this check.

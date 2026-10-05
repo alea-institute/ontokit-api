@@ -355,6 +355,9 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+      # api runs the migrations; wait until it is serving on the new schema.
+      api:
+        condition: service_healthy
 
 networks:
   ontokit:

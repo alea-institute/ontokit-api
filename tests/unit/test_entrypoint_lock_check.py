@@ -50,7 +50,7 @@ def test_mismatched_lock_stops_before_command(tmp_path: Path) -> None:
     result = run_entrypoint(tmp_path, image_hash=STALE_HASH)
 
     assert result.returncode != 0
-    assert "docker compose build api worker" in result.stderr
+    assert "docker compose up -d --build api worker" in result.stderr
     assert STALE_HASH in result.stderr
     assert LOCK_HASH in result.stderr
     assert "command ran" not in result.stdout
@@ -79,7 +79,7 @@ def test_missing_recorded_hash_stops_before_command(tmp_path: Path) -> None:
     result = run_entrypoint(tmp_path, image_hash=None)
 
     assert result.returncode != 0
-    assert "docker compose build api worker" in result.stderr
+    assert "docker compose up -d --build api worker" in result.stderr
     assert "predates dependency-lock recording" in result.stderr
     assert LOCK_HASH in result.stderr
     assert "command ran" not in result.stdout

@@ -11,7 +11,7 @@ elif [ -f "$LIVE_LOCK" ]; then
     if [ ! -f "$LOCK_HASH_FILE" ]; then
         echo "ERROR: Image predates dependency-lock recording; rebuild its dependencies." >&2
         echo "Live uv.lock SHA-256:  $LIVE_LOCK_HASH" >&2
-        echo "Rebuild dependencies with: docker compose build api worker" >&2
+        echo "Rebuild and recreate with: docker compose up -d --build api worker" >&2
         exit 1
     fi
     IMAGE_LOCK_HASH="$(cat "$LOCK_HASH_FILE")"
@@ -19,7 +19,7 @@ elif [ -f "$LIVE_LOCK" ]; then
         echo "ERROR: Image dependencies are stale: uv.lock differs from the checkout." >&2
         echo "Image uv.lock SHA-256: $IMAGE_LOCK_HASH" >&2
         echo "Live uv.lock SHA-256:  $LIVE_LOCK_HASH" >&2
-        echo "Rebuild dependencies with: docker compose build api worker" >&2
+        echo "Rebuild and recreate with: docker compose up -d --build api worker" >&2
         exit 1
     fi
 fi
