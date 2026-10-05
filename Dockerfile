@@ -33,6 +33,8 @@ RUN uv lock --check --offline && \
         --output-file /tmp/requirements.txt && \
     python -m pip install --no-deps -r /tmp/requirements.txt && \
     python -m pip install --no-deps . && \
+    sha256sum uv.lock | cut -d ' ' -f 1 > /home/ontokit/app/.uv-lock.sha256 && \
+    chmod 0644 /home/ontokit/app/.uv-lock.sha256 && \
     rm /tmp/requirements.txt
 
 # Copy application code

@@ -6,9 +6,12 @@ import re
 import shlex
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).parents[2]
 DOCKERFILE = ROOT / "Dockerfile"
 DEPLOY_SCRIPT = ROOT / "deploy" / "ontokit-deploy.sh"
+COMPOSE = ROOT / "compose.yaml"
 
 RUNTIME_FILES = {
     "pyproject.toml",
@@ -59,3 +62,24 @@ def test_detached_checkouts_run_with_world_readable_umask() -> None:
     }
 
     assert scoped_repositories == expected_repositories
+
+
+def test_dependency_layer_records_readable_lock_hash() -> None:
+    source = DOCKERFILE.read_text(encoding="utf-8").replace("\\\n", " ")
+    dependency_layers = [
+        line for line in source.splitlines() if line.startswith("RUN uv lock --check --offline")
+    ]
+
+    assert len(dependency_layers) == 1
+    layer = dependency_layers[0]
+    assert "sha256sum uv.lock | cut -d ' ' -f 1 > /home/ontokit/app/.uv-lock.sha256" in layer
+    assert "chmod 0644 /home/ontokit/app/.uv-lock.sha256" in layer
+
+
+def test_dev_services_mount_live_lock_and_entrypoint() -> None:
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+
+    for service in ("api", "worker"):
+        volumes = compose["services"][service]["volumes"]
+        assert "./uv.lock:/home/ontokit/app/uv.lock.live:ro" in volumes
+        assert "./scripts/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro" in volumes
