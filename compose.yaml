@@ -276,6 +276,8 @@ services:
       - ./alembic:/home/ontokit/app/alembic:ro
       # Mount entrypoint so migration changes are picked up without rebuild
       - ./scripts/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
+      # Compare the live lock with baked dependencies to catch stale images.
+      - ./uv.lock:/home/ontokit/app/uv.lock.live:ro
       # Git repositories for version control
       - git_repos:/data/repos
     healthcheck:
@@ -306,6 +308,8 @@ services:
     environment:
       APP_ENV: development
       DEBUG: "true"
+      # The api service is the migration leader; concurrent alembic runs race.
+      RUN_MIGRATIONS: "0"
       # Database - connects to shared postgres container
       DATABASE_URL: postgresql+asyncpg://ontokit:ontokit@postgres:5432/ontokit
       # Redis
@@ -327,6 +331,9 @@ services:
     volumes:
       # Mount source code for hot reload in development
       - ./ontokit:/home/ontokit/app/ontokit:ro
+      # Use the live entrypoint and lock to catch stale image dependencies.
+      - ./scripts/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro
+      - ./uv.lock:/home/ontokit/app/uv.lock.live:ro
       # Git repositories (shared with API)
       - git_repos:/data/repos
     # The worker shares the api image, which bakes in a `curl localhost:8000`
@@ -347,6 +354,9 @@ services:
       redis:
         condition: service_healthy
       minio:
+        condition: service_healthy
+      # api runs the migrations; wait until it is serving on the new schema.
+      api:
         condition: service_healthy
 
 networks:
