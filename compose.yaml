@@ -308,6 +308,8 @@ services:
     environment:
       APP_ENV: development
       DEBUG: "true"
+      # The api service is the migration leader; concurrent alembic runs race.
+      RUN_MIGRATIONS: "0"
       # Database - connects to shared postgres container
       DATABASE_URL: postgresql+asyncpg://ontokit:ontokit@postgres:5432/ontokit
       # Redis
