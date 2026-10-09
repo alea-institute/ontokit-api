@@ -14,6 +14,7 @@ import sys
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
+from unittest.mock import AsyncMock, Mock, call
 from uuid import uuid4
 
 import asyncpg
@@ -105,8 +106,36 @@ async def _current_revision(database: str) -> str | None:
 
 
 async def _finish(runner: subprocess.Popen[str]) -> str:
-    output, _ = await asyncio.to_thread(runner.communicate, timeout=_SUBPROCESS_TIMEOUT)
+    try:
+        output, _ = await asyncio.to_thread(runner.communicate, timeout=_SUBPROCESS_TIMEOUT)
+    finally:
+        if runner.poll() is None:
+            runner.kill()
+            await asyncio.to_thread(runner.communicate)
     return output
+
+
+@pytest.mark.asyncio
+async def test_upgrade_timeout_kills_and_reaps_runner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A timed-out upgrade must not outlive the scratch database fixture."""
+    runner = Mock(spec=subprocess.Popen)
+    to_thread = AsyncMock(
+        side_effect=[
+            subprocess.TimeoutExpired("alembic", _SUBPROCESS_TIMEOUT),
+            ("terminated", None),
+        ]
+    )
+    monkeypatch.setattr(asyncio, "to_thread", to_thread)
+    runner.poll.return_value = None
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        await _finish(runner)
+
+    runner.kill.assert_called_once_with()
+    assert to_thread.await_args_list == [
+        call(runner.communicate, timeout=_SUBPROCESS_TIMEOUT),
+        call(runner.communicate),
+    ]
 
 
 @pytest.mark.asyncio
@@ -133,20 +162,33 @@ async def test_upgrade_waits_for_the_migration_advisory_lock(
     """
     key = _load_lock_key()
     holder = await asyncpg.connect(_asyncpg_dsn(scratch_database))
+    runner = None
     try:
         assert await holder.fetchval("SELECT pg_try_advisory_lock($1)", key) is True
         runner = _start_upgrade(scratch_database)
         try:
-            # Give the runner ample time to connect; it must still be waiting.
-            deadline = time.monotonic() + 8
-            while time.monotonic() < deadline:
+            # Observe a real acquisition attempt rather than relying on startup
+            # timing: a slow importer could otherwise pass without taking a lock.
+            deadline = time.monotonic() + 30
+            while True:
                 assert runner.poll() is None, runner.communicate()[0]
-                await asyncio.sleep(0.25)
+                attempted = await holder.fetchval(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+                    "WHERE datname = current_database() AND pid <> pg_backend_pid() "
+                    "AND query LIKE '%pg_try_advisory_lock%')"
+                )
+                if attempted:
+                    break
+                assert time.monotonic() < deadline, "runner never attempted the migration lock"
+                await asyncio.sleep(0.1)
             assert await _current_revision(scratch_database) is None
         finally:
             assert await holder.fetchval("SELECT pg_advisory_unlock($1)", key) is True
         output = await _finish(runner)
     finally:
+        if runner is not None and runner.poll() is None:
+            runner.kill()
+            await asyncio.to_thread(runner.communicate)
         await holder.close()
 
     assert runner.returncode == 0, output

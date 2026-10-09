@@ -131,8 +131,9 @@ The host's `/opt/ontokit/compose.yaml` is also a separate copy of
 `deploy/compose.dev.yaml`; neither the forced command nor a checkout refreshes
 it. Copy it again after any change to `deploy/compose.dev.yaml`, then run
 `docker compose config -q` from `/opt/ontokit` before the next deploy. As of
-2026-10-09 the source makes the api the only migration runner: the worker sets
-`RUN_MIGRATIONS: "0"` and waits for a healthy api. Until the host copy is
+2026-10-09 the source makes the api the only migration runner: the api sets
+`RUN_MIGRATIONS: "1"` explicitly, overriding any host env-file value, and the
+worker sets `RUN_MIGRATIONS: "0"` and waits for a healthy api. Until the host copy is
 refreshed, both containers still run `alembic upgrade head` at startup. They
 no longer collide, because `alembic/env.py` holds a PostgreSQL advisory lock for
 the whole run, so the second runner waits and then finds the schema at head.
