@@ -63,6 +63,8 @@ services:
       DEBUG: "false"
       HOST: 0.0.0.0
       PORT: 8000
+      # Override any host env_file value: api is the migration leader.
+      RUN_MIGRATIONS: "1"
       DATABASE_URL: postgresql+asyncpg://ontokit:${ONTOKIT_DB_PASSWORD}@postgres:5432/ontokit
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
