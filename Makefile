@@ -19,4 +19,4 @@ typecheck:
 
 ## Run tests with coverage
 test:
-	uv run pytest tests/ -v --cov=ontokit
+	bash scripts/memory-cap.sh uv run pytest tests/ -v --cov=ontokit $(PYTEST_ARGS)
