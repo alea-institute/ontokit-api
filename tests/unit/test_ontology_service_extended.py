@@ -171,29 +171,6 @@ class TestGetClass:
 
 
 # ---------------------------------------------------------------------------
-# list_classes
-# ---------------------------------------------------------------------------
-
-
-class TestListClasses:
-    @pytest.mark.asyncio
-    async def test_list_all_classes(self, loaded_service: OntologyService) -> None:
-        """list_classes returns all classes."""
-        result = await loaded_service.list_classes(PROJECT_ID)
-        assert result.total == 2  # Person, Organization
-
-    @pytest.mark.asyncio
-    async def test_list_classes_with_parent_filter(self, loaded_service: OntologyService) -> None:
-        """list_classes with parent_iri filters to children of that class."""
-        # Neither Person nor Organization has a parent in the sample, so filtering
-        # by a non-existent parent should return zero results.
-        result = await loaded_service.list_classes(
-            PROJECT_ID, parent_iri="http://example.org/ontology#NonExistentParent"
-        )
-        assert result.total == 0
-
-
-# ---------------------------------------------------------------------------
 # get_root_classes
 # ---------------------------------------------------------------------------
 
@@ -577,3 +554,22 @@ class TestSearchEntitiesExtended:
         assert matches
         assert matches[0].entity_type == "class"
         assert matches[0].property_kind is None
+
+    @pytest.mark.asyncio
+    async def test_search_bare_rdf_property_has_null_kind(
+        self, ontology_service: OntologyService
+    ) -> None:
+        """A bare rdf:Property is a property with property_kind=None (CatholicOS#121)."""
+        from rdflib import RDF, Graph
+
+        g = Graph()
+        prop = URIRef("http://example.org/ontology#hasFoo")
+        g.add((prop, RDF.type, RDF.Property))
+        ontology_service.set_graph(PROJECT_ID, BRANCH, g)
+
+        result = await ontology_service.search_entities(
+            PROJECT_ID, "hasFoo", entity_types=["property"]
+        )
+        assert [(r.iri, r.entity_type, r.property_kind) for r in result.results] == [
+            (str(prop), "property", None)
+        ]

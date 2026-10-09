@@ -37,7 +37,7 @@ from ontokit.models.pull_request import GitHubIntegration
 from ontokit.services.demo_project_provisioning import demo_generation_attempt_lease
 from ontokit.services.demo_retention import DemoRetentionService
 from ontokit.services.demo_target_authorizer import DemoTargetDenied, integration_target_load
-from ontokit.services.github_sync import sync_github_project
+from ontokit.services.github_sync import GITHUB_PROJECT_SYNC_TASK, sync_github_project
 from ontokit.services.linter import LintResult, get_linter
 from ontokit.services.normalization_service import NormalizationService
 from ontokit.services.ontology import get_ontology_service
@@ -1045,6 +1045,97 @@ async def run_translation_entity_task(
     )
 
 
+GITHUB_SYNC_SYNCED = "synced"
+GITHUB_SYNC_ERROR = "error"
+GITHUB_SYNC_SKIPPED = "skipped"
+
+
+async def sync_github_integration(
+    db: AsyncSession,
+    integration: GitHubIntegration,
+    git_service: BareGitRepositoryService,
+) -> str:
+    """Sync one GitHub integration; shared by the cron sweep and the push-webhook task.
+
+    Returns ``GITHUB_SYNC_SYNCED`` when the sync ran (its own status lands on the
+    integration), ``GITHUB_SYNC_ERROR`` for a refusal or failure, and
+    ``GITHUB_SYNC_SKIPPED`` when there is nothing to do. Operational failures
+    (target refusal, a database error during credential lookup, a sync error)
+    are logged with project and branch context and never raised, and the
+    session is rolled back so the caller can keep using it. A programming error
+    in the credential resolver propagates so it stays visible.
+    """
+    project_id = integration.project_id
+    branch = integration.default_branch or "main"
+
+    # A conflicted integration needs an operator; syncing again cannot help.
+    if not integration.sync_enabled or integration.sync_status == "conflict":
+        return GITHUB_SYNC_SKIPPED
+
+    # One system-owned identity pushes every mirror (KD6). The per-user PAT
+    # remains a deprecated fallback for one release so an in-flight deployment
+    # keeps syncing.
+    from ontokit.services.mirror_credential import resolve_mirror_credential
+
+    try:
+        pat = await resolve_mirror_credential(db, integration)
+    except DemoTargetDenied as exc:
+        integration.sync_status = "error"
+        integration.sync_error = str(exc)
+        logger.warning(
+            "GitHub mirror target refused for project %s branch %s: %s",
+            project_id,
+            branch,
+            exc,
+        )
+        try:
+            await db.commit()
+        except SQLAlchemyError:
+            logger.exception(
+                "Failed to persist GitHub mirror target refusal for project %s branch %s",
+                project_id,
+                branch,
+            )
+            await db.rollback()
+        return GITHUB_SYNC_ERROR
+    except SQLAlchemyError:
+        # No exception text: a driver error can carry connection details.
+        # Anything else (a resolver bug) propagates so it stays visible.
+        logger.error(
+            "GitHub mirror identity lookup failed for project %s branch %s",
+            project_id,
+            branch,
+        )
+        await db.rollback()
+        return GITHUB_SYNC_ERROR
+
+    if pat is None:
+        logger.info(
+            "GitHub sync for project %s branch %s skipped: no mirror credential",
+            project_id,
+            branch,
+        )
+        return GITHUB_SYNC_SKIPPED
+
+    try:
+        sync_result = await sync_github_project(integration, pat, git_service, db)
+    except Exception:
+        logger.exception("GitHub sync failed for project %s branch %s", project_id, branch)
+        await db.rollback()
+        return GITHUB_SYNC_ERROR
+
+    if sync_result.get("status") in {"error", "conflict", "diverged"}:
+        logger.warning(
+            "GitHub sync for project %s branch %s did not complete: %s",
+            project_id,
+            branch,
+            sync_result,
+        )
+    else:
+        logger.info("GitHub sync for project %s branch %s: %s", project_id, branch, sync_result)
+    return GITHUB_SYNC_SYNCED
+
+
 async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
     """Periodic task: pull from remote + push local commits for all GitHub-connected projects."""
     db: AsyncSession = ctx["db"]
@@ -1066,49 +1157,10 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
         errors = 0
 
         for integration in integrations:
-            # One system-owned identity pushes every mirror (KD6). The
-            # per-user PAT remains a deprecated fallback for one release so an
-            # in-flight deployment keeps syncing.
-            from ontokit.services.mirror_credential import resolve_mirror_credential
-
-            try:
-                pat = await resolve_mirror_credential(db, integration)
-            except DemoTargetDenied as exc:
-                integration.sync_status = "error"
-                integration.sync_error = str(exc)
-                errors += 1
-                logger.warning(
-                    "GitHub mirror target refused for project %s: %s",
-                    integration.project_id,
-                    exc,
-                )
-                try:
-                    await db.commit()
-                except SQLAlchemyError:
-                    logger.exception(
-                        "Failed to persist GitHub mirror target refusal for project %s",
-                        integration.project_id,
-                    )
-                    await db.rollback()
-                continue
-            except SQLAlchemyError:
-                logger.error(
-                    "GitHub mirror identity lookup failed for project %s",
-                    integration.project_id,
-                )
-                errors += 1
-                await db.rollback()
-                continue
-
-            if pat is None:
-                continue
-
-            try:
-                sync_result = await sync_github_project(integration, pat, git_service, db)
-                logger.info(f"Synced project {integration.project_id}: {sync_result}")
+            outcome = await sync_github_integration(db, integration, git_service)
+            if outcome == GITHUB_SYNC_SYNCED:
                 synced += 1
-            except Exception as e:
-                logger.exception(f"Failed to sync project {integration.project_id}: {e}")
+            elif outcome == GITHUB_SYNC_ERROR:
                 errors += 1
 
         logger.info(
@@ -1124,6 +1176,29 @@ async def sync_github_projects(ctx: dict[str, Any]) -> dict[str, Any]:
     except Exception as e:
         logger.exception(f"GitHub sync cron job failed: {e}")
         raise
+
+
+async def sync_github_project_task(ctx: dict[str, Any], project_id: str) -> dict[str, Any]:
+    """Background task: sync one project with GitHub after a default-branch push webhook.
+
+    Runs the same per-integration logic as the ``sync_github_projects`` cron
+    (conflict skip, credential resolution, target refusal persistence,
+    outbound-only direction) off the API's event loop.
+    """
+    db: AsyncSession = ctx["db"]
+    pid = UUID(project_id)
+    result = await db.execute(
+        select(GitHubIntegration)
+        .options(integration_target_load())
+        .where(GitHubIntegration.project_id == pid)
+    )
+    integration = result.scalar_one_or_none()
+    if integration is None:
+        logger.info("GitHub push sync for project %s skipped: no integration", project_id)
+        return {"project_id": project_id, "status": GITHUB_SYNC_SKIPPED}
+
+    outcome = await sync_github_integration(db, integration, BareGitRepositoryService())
+    return {"project_id": project_id, "status": outcome}
 
 
 async def sweep_pr_party_prs(ctx: dict[str, Any]) -> dict[str, Any]:
@@ -1526,6 +1601,10 @@ class WorkerSettings:
         run_normalization_task,
         check_all_projects_normalization,
         sync_github_projects,
+        # Push-webhook sync: one queued-or-running job per project (fixed job
+        # id), no stored result so the id frees on completion, no arq retry
+        # (the 5-minute cron is the retry).
+        func(sync_github_project_task, keep_result=0, max_tries=1),
         auto_submit_stale_suggestions,
         auto_accept_suggestions,
         run_embedding_generation_task,
@@ -1615,3 +1694,4 @@ class WorkerSettings:
 
 
 assert run_pr_party_credential_rewrap_task.__name__ == PR_PARTY_CREDENTIAL_REWRAP_TASK
+assert sync_github_project_task.__name__ == GITHUB_PROJECT_SYNC_TASK

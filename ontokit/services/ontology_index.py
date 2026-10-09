@@ -46,6 +46,9 @@ ENTITY_TYPE_OBJECT_PROPERTY = "object_property"
 ENTITY_TYPE_DATATYPE_PROPERTY = "datatype_property"
 ENTITY_TYPE_ANNOTATION_PROPERTY = "annotation_property"
 ENTITY_TYPE_INDIVIDUAL = "individual"
+# A bare rdf:Property with no OWL property type. It is a property, but carries
+# no OWL kind (object/data/annotation), so search reports property_kind None.
+ENTITY_TYPE_RDF_PROPERTY = "rdf_property"
 
 # RDF type to entity_type mapping (includes both OWL and RDFS base types)
 RDF_TYPE_MAP: list[tuple[URIRef, str]] = [
@@ -54,7 +57,8 @@ RDF_TYPE_MAP: list[tuple[URIRef, str]] = [
     (OWL.ObjectProperty, ENTITY_TYPE_OBJECT_PROPERTY),
     (OWL.DatatypeProperty, ENTITY_TYPE_DATATYPE_PROPERTY),
     (OWL.AnnotationProperty, ENTITY_TYPE_ANNOTATION_PROPERTY),
-    (RDF.Property, ENTITY_TYPE_OBJECT_PROPERTY),
+    # After the OWL property types so a dual-typed entity keeps its OWL kind.
+    (RDF.Property, ENTITY_TYPE_RDF_PROPERTY),
     (OWL.NamedIndividual, ENTITY_TYPE_INDIVIDUAL),
 ]
 
@@ -947,6 +951,7 @@ class OntologyIndexService:
                 ENTITY_TYPE_OBJECT_PROPERTY,
                 ENTITY_TYPE_DATATYPE_PROPERTY,
                 ENTITY_TYPE_ANNOTATION_PROPERTY,
+                ENTITY_TYPE_RDF_PROPERTY,
             ],
             "individual": [ENTITY_TYPE_INDIVIDUAL],
         }
@@ -1026,12 +1031,14 @@ class OntologyIndexService:
             ENTITY_TYPE_OBJECT_PROPERTY: "property",
             ENTITY_TYPE_DATATYPE_PROPERTY: "property",
             ENTITY_TYPE_ANNOTATION_PROPERTY: "property",
+            ENTITY_TYPE_RDF_PROPERTY: "property",
             ENTITY_TYPE_INDIVIDUAL: "individual",
         }
         property_kind_map = {
             ENTITY_TYPE_OBJECT_PROPERTY: "object",
             ENTITY_TYPE_DATATYPE_PROPERTY: "data",
             ENTITY_TYPE_ANNOTATION_PROPERTY: "annotation",
+            # ENTITY_TYPE_RDF_PROPERTY deliberately absent: no OWL kind.
         }
 
         prefs = label_preferences or DEFAULT_LABEL_PREFERENCES

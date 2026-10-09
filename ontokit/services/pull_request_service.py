@@ -2186,31 +2186,40 @@ class PullRequestService:
         project_id: UUID,
         ref: str,
         commits: list[dict[str, Any]],  # noqa: ARG002
-    ) -> None:
-        """Handle GitHub push webhook events."""
+    ) -> bool:
+        """Decide whether a GitHub push webhook should sync the project.
+
+        Returns True for a push to the integration's default branch on an
+        enabled, non-conflicted, bidirectional mirror. The caller then enqueues
+        the ``sync_github_project_task`` worker job, which runs the same
+        per-integration sync as the periodic cron off the request's event loop.
+        The handler itself performs no git or network I/O.
+        """
         integration = await self._get_github_integration(project_id)
         if not integration or not integration.sync_enabled:
-            return
+            return False
 
-        # Only sync pushes to main branch
-        if ref != f"refs/heads/{integration.default_branch}":
-            return
+        branch = integration.default_branch or "main"
+        # Only sync pushes to the default branch
+        if ref != f"refs/heads/{branch}":
+            return False
 
         if settings.github_mirror_outbound_only:
             logger.info(
                 "Ignoring inbound GitHub push for outbound-only mirror on project %s",
                 project_id,
             )
-            return
+            return False
 
-        # Pull latest changes
-        try:
-            # TODO: implement pull_branch on BareGitRepositoryService
-            self.git_service.pull_branch(project_id, integration.default_branch, "origin")  # type: ignore[attr-defined]
-            integration.last_sync_at = datetime.now(UTC)
-            await self.db.commit()
-        except Exception as e:
-            logger.warning(f"Failed to pull from GitHub: {e}")
+        if integration.sync_status == "conflict":
+            logger.info(
+                "Ignoring GitHub push for project %s branch %s: integration is in conflict",
+                project_id,
+                branch,
+            )
+            return False
+
+        return True
 
     # Open PR Summary (for notification bell)
 

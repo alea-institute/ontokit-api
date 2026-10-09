@@ -379,6 +379,8 @@ class TestSearchEntities:
             ("object_property", "object"),
             ("datatype_property", "data"),
             ("annotation_property", "annotation"),
+            # Bare rdf:Property: a property with no OWL kind (CatholicOS#121).
+            ("rdf_property", None),
             ("class", None),
             ("individual", None),
         ]
@@ -406,6 +408,8 @@ class TestSearchEntities:
             ]
 
             result = await service.search_entities(PROJECT_ID, BRANCH, stored_type)
+            if stored_type.endswith("_property"):
+                assert result["results"][0]["entity_type"] == "property"
             assert result["results"][0]["property_kind"] == expected_kind, (
                 f"{stored_type} should map to property_kind={expected_kind!r}"
             )

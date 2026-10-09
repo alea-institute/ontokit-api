@@ -1,6 +1,7 @@
 """Alembic environment configuration for async SQLAlchemy."""
 
 import asyncio
+import logging
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -17,6 +18,8 @@ config = context.config
 # This line sets up loggers basically.
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
+
+logger = logging.getLogger("alembic.env")
 
 # Import all models so they are registered with Base.metadata
 from ontokit.core.database import Base  # noqa: E402
@@ -38,6 +41,7 @@ target_metadata = Base.metadata
 
 # Get database URL from app settings
 from ontokit.core.config import settings  # noqa: E402
+from ontokit.core.migration_lock import run_with_migration_lock  # noqa: E402
 
 # Convert asyncpg URL to use psycopg2 for sync operations if needed
 database_url = str(settings.database_url)
@@ -67,11 +71,20 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    """Run migrations with the given connection."""
-    context.configure(connection=connection, target_metadata=target_metadata)
+    """Run migrations with the given connection.
 
-    with context.begin_transaction():
-        context.run_migrations()
+    On PostgreSQL, a session-level advisory lock is held on this same
+    connection for the whole run, so a second concurrent runner waits and then
+    sees the schema already at head instead of colliding on DDL (see
+    ``ontokit.core.migration_lock``).
+    """
+
+    def _run() -> None:
+        context.configure(connection=connection, target_metadata=target_metadata)
+        with context.begin_transaction():
+            context.run_migrations()
+
+    run_with_migration_lock(connection, _run)
 
 
 async def run_async_migrations() -> None:

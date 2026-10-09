@@ -18,6 +18,20 @@ from ontokit.services.demo_target_authorizer import (
 
 logger = logging.getLogger(__name__)
 
+# arq task that syncs one project after a default-branch push webhook.
+GITHUB_PROJECT_SYNC_TASK = "sync_github_project_task"
+
+
+def github_project_sync_job_id(project_id: object) -> str:
+    """arq job id for a per-project push sync.
+
+    One queued-or-running sync per project: a burst of pushes collapses into one
+    job (the queued job fetches the latest remote state anyway), and two push
+    syncs of the same repository never run concurrently. The task keeps no
+    result, so the id frees as soon as the job finishes.
+    """
+    return f"github-push-sync:{project_id}"
+
 
 async def sync_github_project(
     integration: GitHubIntegration,

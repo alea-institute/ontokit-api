@@ -1456,88 +1456,85 @@ class TestHandleGitHubReviewWebhook:
 
 
 class TestHandleGitHubPushWebhook:
-    @pytest.mark.asyncio
-    async def test_push_to_main_pulls_changes(
-        self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
-    ) -> None:
-        """Pull latest changes when push is to the default branch."""
+    """The handler only decides; the route enqueues the worker sync task."""
+
+    @staticmethod
+    def _integration(**overrides: object) -> MagicMock:
         integration = MagicMock()
         integration.sync_enabled = True
         integration.default_branch = "main"
+        integration.sync_status = "idle"
         integration.last_sync_at = None
+        for name, value in overrides.items():
+            setattr(integration, name, value)
+        return integration
 
+    async def _decide(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+        integration: MagicMock | None,
+        *,
+        ref: str = "refs/heads/main",
+        outbound_only: bool = False,
+    ) -> bool:
         mock_db.execute.return_value = _scalar_result(integration)
-        mock_git_service.pull_branch = MagicMock()
-
         with patch("ontokit.services.pull_request_service.settings") as mock_settings:
-            mock_settings.github_mirror_outbound_only = False
-            await service.handle_github_push_webhook(
-                PROJECT_ID,
-                ref="refs/heads/main",
-                commits=[],
-            )
-
-        mock_git_service.pull_branch.assert_called_once_with(PROJECT_ID, "main", "origin")
-        mock_db.commit.assert_awaited()
+            mock_settings.github_mirror_outbound_only = outbound_only
+            return await service.handle_github_push_webhook(PROJECT_ID, ref=ref, commits=[])
 
     @pytest.mark.asyncio
-    async def test_outbound_only_push_never_pulls_canonical_state(
+    async def test_push_to_default_branch_requests_sync(
         self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
     ) -> None:
-        integration = MagicMock(sync_enabled=True, default_branch="main")
-        mock_db.execute.return_value = _scalar_result(integration)
-        mock_git_service.pull_branch = MagicMock()
-
-        with patch("ontokit.services.pull_request_service.settings") as mock_settings:
-            mock_settings.github_mirror_outbound_only = True
-            await service.handle_github_push_webhook(
-                PROJECT_ID,
-                ref="refs/heads/main",
-                commits=[],
-            )
-
-        mock_git_service.pull_branch.assert_not_called()
+        assert await self._decide(service, mock_db, self._integration()) is True
+        # No git or DB writes happen in the request.
         mock_db.commit.assert_not_awaited()
+        mock_git_service.get_repository.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_custom_default_branch_requests_sync(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        integration = self._integration(default_branch="develop")
+        assert await self._decide(service, mock_db, integration, ref="refs/heads/develop") is True
+        assert await self._decide(service, mock_db, integration, ref="refs/heads/main") is False
 
     @pytest.mark.asyncio
     async def test_push_to_non_default_branch_ignored(
         self, service: PullRequestService, mock_db: AsyncMock
     ) -> None:
-        """Pushes to non-default branches are ignored."""
-        integration = MagicMock()
-        integration.sync_enabled = True
-        integration.default_branch = "main"
+        integration = self._integration()
+        assert await self._decide(service, mock_db, integration, ref="refs/heads/feature") is False
+        assert await self._decide(service, mock_db, integration, ref="refs/tags/main") is False
 
-        mock_db.execute.return_value = _scalar_result(integration)
-
-        await service.handle_github_push_webhook(
-            PROJECT_ID,
-            ref="refs/heads/feature",
-            commits=[],
+    @pytest.mark.asyncio
+    async def test_outbound_only_push_never_syncs(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        assert (
+            await self._decide(service, mock_db, self._integration(), outbound_only=True) is False
         )
-
         mock_db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_push_pull_failure_logged(
-        self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
+    async def test_sync_disabled_ignored(
+        self, service: PullRequestService, mock_db: AsyncMock
     ) -> None:
-        """Git pull failure is caught and logged, not raised."""
-        integration = MagicMock()
-        integration.sync_enabled = True
-        integration.default_branch = "main"
+        assert await self._decide(service, mock_db, self._integration(sync_enabled=False)) is False
 
-        mock_db.execute.return_value = _scalar_result(integration)
-        mock_git_service.pull_branch = MagicMock(side_effect=RuntimeError("network error"))
+    @pytest.mark.asyncio
+    async def test_missing_integration_ignored(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        assert await self._decide(service, mock_db, None) is False
 
-        await service.handle_github_push_webhook(
-            PROJECT_ID,
-            ref="refs/heads/main",
-            commits=[],
-        )
-
-        # Should not raise, just log
-        mock_db.commit.assert_not_awaited()
+    @pytest.mark.asyncio
+    async def test_conflict_status_ignored(
+        self, service: PullRequestService, mock_db: AsyncMock
+    ) -> None:
+        integration = self._integration(sync_status="conflict")
+        assert await self._decide(service, mock_db, integration) is False
 
 
 # ---------------------------------------------------------------------------
