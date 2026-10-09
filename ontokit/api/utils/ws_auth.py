@@ -1,6 +1,9 @@
 """Shared WebSocket authentication and project access helper."""
 
+import base64
+import binascii
 import logging
+import re
 from uuid import UUID
 
 from fastapi import HTTPException, WebSocket
@@ -16,6 +19,32 @@ from ontokit.core.database import async_session_maker
 from ontokit.services.project_service import ProjectService
 
 logger = logging.getLogger(__name__)
+
+
+BEARER_SUBPROTOCOL = "ontokit.bearer.v1"
+TOKEN_SUBPROTOCOL_PREFIX = "ontokit.token."
+
+
+def _subprotocol_token(websocket: WebSocket) -> str | None:
+    """Decode the single credential offer, never selecting it as a protocol."""
+    protocols = websocket.scope.get("subprotocols", [])
+    if BEARER_SUBPROTOCOL not in protocols:
+        return None
+    offers = [p for p in protocols if p.startswith(TOKEN_SUBPROTOCOL_PREFIX)]
+    if len(offers) != 1:
+        return None
+    encoded = offers[0][len(TOKEN_SUBPROTOCOL_PREFIX) :]
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
+        return None
+    try:
+        return (
+            base64.b64decode(
+                encoded + "=" * (-len(encoded) % 4), altchars=b"-_", validate=True
+            ).decode("utf-8")
+            or None
+        )
+    except (binascii.Error, UnicodeDecodeError):
+        return None
 
 
 async def _build_user_from_token(token: str) -> CurrentUser:
@@ -47,6 +76,10 @@ async def authenticate_ws(
 ) -> bool:
     """Authenticate a WebSocket connection and verify project access.
 
+    Accepts a base64url credential offered with ``ontokit.bearer.v1`` in the
+    handshake subprotocols, preferring it to the legacy query ``token``. Only
+    the bearer version protocol is echoed back to the client.
+
     Resolves the caller identity **honoring ``settings.auth_mode``**, then checks
     project access via ``ProjectService.get``. Returns ``True`` if the caller
     should proceed, or ``False`` after closing the WebSocket with an appropriate
@@ -76,7 +109,13 @@ async def authenticate_ws(
     The WebSocket is accepted before any error close so that the client receives
     a proper close frame rather than a raw HTTP 403.
     """
-    await websocket.accept()
+    header_token = _subprotocol_token(websocket)
+    if header_token:
+        token = header_token
+        await websocket.accept(subprotocol=BEARER_SUBPROTOCOL)
+    else:
+        # Retain query-token compatibility for one deployment window.
+        await websocket.accept()
 
     # --- Resolve caller identity per auth_mode (parity with core.auth) ---
     user: CurrentUser
@@ -128,4 +167,8 @@ async def authenticate_ws(
         await websocket.close(code=1011, reason="Internal server error")
         return False
 
+    # The forwarder can re-check identity/access and validate the original token
+    # for expiry (CurrentUser does not expose the JWT expiry claim).
+    websocket.state.auth_user = user
+    websocket.state.auth_token = token
     return True

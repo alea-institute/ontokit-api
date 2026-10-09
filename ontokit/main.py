@@ -21,6 +21,7 @@ from ontokit.core.api_paths import API_V1_PREFIX
 from ontokit.core.config import settings
 from ontokit.core.database import engine
 from ontokit.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
+from ontokit.core.logging_filters import install_token_redaction
 from ontokit.core.middleware import (
     AccessLogMiddleware,
     AnonymousSuggestionBodyLimitMiddleware,
@@ -28,6 +29,8 @@ from ontokit.core.middleware import (
     SecurityHeadersMiddleware,
 )
 from ontokit.services.storage import StorageService
+
+install_token_redaction()
 
 logger = logging.getLogger(__name__)
 
