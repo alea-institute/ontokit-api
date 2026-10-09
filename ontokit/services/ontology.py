@@ -9,27 +9,12 @@ from rdflib import Graph, URIRef
 from rdflib import Literal as RDFLiteral
 from rdflib.namespace import OWL, RDF, RDFS, SKOS
 
-from ontokit.schemas.ontology import (
-    OntologyCreate,
-    OntologyListResponse,
-    OntologyResponse,
-    OntologyUpdate,
-)
 from ontokit.schemas.owl_class import (
     AnnotationProperty,
     EntitySearchResponse,
     EntitySearchResult,
-    OWLClassCreate,
-    OWLClassListResponse,
     OWLClassResponse,
     OWLClassTreeNode,
-    OWLClassUpdate,
-)
-from ontokit.schemas.owl_property import (
-    OWLPropertyCreate,
-    OWLPropertyListResponse,
-    OWLPropertyResponse,
-    OWLPropertyUpdate,
 )
 from ontokit.services.storage import StorageService
 
@@ -58,6 +43,28 @@ LABEL_PROPERTY_MAP = {
 
 # Default label preferences if none specified
 DEFAULT_LABEL_PREFERENCES = ["rdfs:label@en", "rdfs:label", "skos:prefLabel@en", "skos:prefLabel"]
+
+# RDF types that make a subject a class. Mirrors the index's RDF_TYPE_MAP so the
+# RDFLib (cold) path and the index (warm) path agree on which entities are classes.
+CLASS_TYPES: tuple[URIRef, ...] = (OWL.Class, RDFS.Class)
+
+
+def is_class(graph: Graph, subject: URIRef) -> bool:
+    """Return True when ``subject`` is typed as ``owl:Class`` or ``rdfs:Class``."""
+    return any((subject, RDF.type, class_type) in graph for class_type in CLASS_TYPES)
+
+
+def iter_class_subjects(graph: Graph) -> list[URIRef]:
+    """Return every class IRI (``owl:Class`` or ``rdfs:Class``) once, in first-seen order."""
+    seen: set[URIRef] = set()
+    classes: list[URIRef] = []
+    for class_type in CLASS_TYPES:
+        for subject in graph.subjects(RDF.type, class_type):
+            if isinstance(subject, URIRef) and subject not in seen:
+                seen.add(subject)
+                classes.append(subject)
+    return classes
+
 
 # Common annotation properties to extract for class details
 # (excludes rdfs:label and rdfs:comment which are handled separately)
@@ -237,31 +244,6 @@ class OntologyService:
         self._storage = storage
         self._graphs: dict[tuple[UUID, str], Graph] = {}
 
-    async def create(self, ontology: OntologyCreate) -> OntologyResponse:
-        """Create a new ontology."""
-        # TODO: Implement with database storage
-        raise NotImplementedError("Database integration pending")
-
-    async def list_all(self, skip: int = 0, limit: int = 20) -> OntologyListResponse:
-        """List all ontologies."""
-        # TODO: Implement with database query
-        raise NotImplementedError("Database integration pending")
-
-    async def get(self, ontology_id: UUID) -> OntologyResponse | None:
-        """Get an ontology by ID."""
-        # TODO: Implement with database query
-        raise NotImplementedError("Database integration pending")
-
-    async def update(self, ontology_id: UUID, ontology: OntologyUpdate) -> OntologyResponse | None:
-        """Update ontology metadata."""
-        # TODO: Implement with database update
-        raise NotImplementedError("Database integration pending")
-
-    async def delete(self, ontology_id: UUID) -> bool:
-        """Delete an ontology."""
-        # TODO: Implement with database delete
-        raise NotImplementedError("Database integration pending")
-
     async def serialize(
         self, ontology_id: UUID, format: str = "turtle", branch: str = "main"
     ) -> str:
@@ -278,86 +260,7 @@ class OntologyService:
                 return str(subject)
         return None
 
-    async def import_from_file(
-        self,
-        ontology_id: UUID,  # noqa: ARG002
-        content: bytes,
-        filename: str,
-    ) -> OntologyResponse:
-        """Import ontology content from file."""
-        # Detect format from filename
-        format_map = {
-            ".ttl": "turtle",
-            ".rdf": "xml",
-            ".owl": "xml",
-            ".xml": "xml",
-            ".nt": "nt",
-            ".n3": "n3",
-            ".jsonld": "json-ld",
-            ".json": "json-ld",
-        }
-        ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        rdf_format = format_map.get(ext, "turtle")
-
-        graph = Graph()
-        graph.parse(data=content.decode("utf-8"), format=rdf_format)
-
-        # TODO: Store graph and update database
-        raise NotImplementedError("Storage integration pending")
-
-    async def get_history(self, ontology_id: UUID, limit: int = 50) -> list[dict[str, Any]]:
-        """Get version history for an ontology."""
-        # TODO: Implement with Git integration
-        raise NotImplementedError("Git integration pending")
-
-    async def diff(self, ontology_id: UUID, from_version: str, to_version: str) -> dict[str, Any]:
-        """Compare two versions of an ontology."""
-        # TODO: Implement semantic diff
-        raise NotImplementedError("Diff implementation pending")
-
     # Class operations
-
-    async def list_classes(
-        self,
-        ontology_id: UUID,
-        parent_iri: str | None = None,
-        include_imported: bool = False,  # noqa: ARG002
-        branch: str = "main",
-    ) -> OWLClassListResponse:
-        """List classes in an ontology."""
-        graph = await self._get_graph(ontology_id, branch)
-        classes = []
-
-        for s in graph.subjects(RDF.type, OWL.Class):
-            if isinstance(s, URIRef):
-                # Filter by parent if specified
-                if parent_iri:
-                    parents = list(graph.objects(s, RDFS.subClassOf))
-                    if URIRef(parent_iri) not in parents:
-                        continue
-
-                classes.append(await self._class_to_response(graph, s))
-
-        return OWLClassListResponse(items=classes, total=len(classes))
-
-    async def create_class(self, ontology_id: UUID, owl_class: OWLClassCreate) -> OWLClassResponse:
-        """Create a new OWL class."""
-        graph = await self._get_graph(ontology_id)
-        class_uri = URIRef(str(owl_class.iri))
-
-        # Add class declaration
-        graph.add((class_uri, RDF.type, OWL.Class))
-
-        # Add parent classes
-        for parent_iri in owl_class.parent_iris:
-            graph.add((class_uri, RDFS.subClassOf, URIRef(str(parent_iri))))
-
-        # Add labels
-        for label in owl_class.labels:
-            graph.add((class_uri, RDFS.label, RDFLiteral(label.value, lang=label.lang)))
-
-        # TODO: Persist changes
-        return await self._class_to_response(graph, class_uri)
 
     async def get_class(
         self,
@@ -375,29 +278,6 @@ class OntologyService:
 
         return await self._class_to_response(graph, class_uri, label_preferences)
 
-    async def update_class(
-        self, ontology_id: UUID, class_iri: str, owl_class: OWLClassUpdate
-    ) -> OWLClassResponse | None:
-        """Update a class."""
-        # TODO: Implement class update
-        raise NotImplementedError("Class update pending")
-
-    async def delete_class(self, ontology_id: UUID, class_iri: str) -> bool:
-        """Delete a class."""
-        # TODO: Implement class deletion
-        raise NotImplementedError("Class deletion pending")
-
-    async def get_class_hierarchy(
-        self,
-        ontology_id: UUID,
-        class_iri: str,
-        direction: str = "both",
-        depth: int = 3,
-    ) -> dict[str, Any]:
-        """Get class hierarchy around a specific class."""
-        # TODO: Implement hierarchy traversal
-        raise NotImplementedError("Hierarchy implementation pending")
-
     async def get_root_classes(
         self,
         project_id: UUID,
@@ -414,10 +294,7 @@ class OntologyService:
 
         owl_thing = OWL.Thing
 
-        for class_uri in graph.subjects(RDF.type, OWL.Class):
-            if not isinstance(class_uri, URIRef):
-                continue
-
+        for class_uri in iter_class_subjects(graph):
             # Skip owl:Thing itself
             if class_uri == owl_thing:
                 continue
@@ -463,7 +340,7 @@ class OntologyService:
         for class_uri in graph.subjects(RDFS.subClassOf, parent_uri):
             if not isinstance(class_uri, URIRef):
                 continue
-            if (class_uri, RDF.type, OWL.Class) not in graph:
+            if not is_class(graph, class_uri):
                 continue
             children.append(await self._class_to_response(graph, class_uri, label_preferences))
 
@@ -479,11 +356,7 @@ class OntologyService:
     async def get_class_count(self, project_id: UUID, branch: str = "main") -> int:
         """Get total number of classes in the ontology."""
         graph = await self._get_graph(project_id, branch)
-        return sum(
-            1
-            for s in graph.subjects(RDF.type, OWL.Class)
-            if isinstance(s, URIRef) and s != OWL.Thing
-        )
+        return sum(1 for s in iter_class_subjects(graph) if s != OWL.Thing)
 
     async def search_entities(
         self,
@@ -504,13 +377,17 @@ class OntologyService:
 
         # Map entity type names to (RDF type, result entity_type, property_kind).
         # property_kind preserves the OWL subtype so clients can categorize
-        # properties without IRI-substring guesses (see issue #117).
+        # properties without IRI-substring guesses (see issue #117). A bare
+        # rdf:Property has no OWL kind, so its property_kind is None. The OWL
+        # types come first so a dual-typed entity is reported with its OWL kind;
+        # this order mirrors the index's RDF_TYPE_MAP.
         type_mapping: dict[str, list[tuple[URIRef, str, str | None]]] = {
-            "class": [(OWL.Class, "class", None)],
+            "class": [(OWL.Class, "class", None), (RDFS.Class, "class", None)],
             "property": [
                 (OWL.ObjectProperty, "property", "object"),
                 (OWL.DatatypeProperty, "property", "data"),
                 (OWL.AnnotationProperty, "property", "annotation"),
+                (RDF.Property, "property", None),
             ],
             "individual": [(OWL.NamedIndividual, "individual", None)],
         }
@@ -523,6 +400,10 @@ class OntologyService:
 
         owl_thing = OWL.Thing
         results: list[EntitySearchResult] = []
+        # An entity typed several ways within one result kind (e.g. owl:Class and
+        # rdfs:Class, or rdf:Property and owl:ObjectProperty) is reported once,
+        # with the first (OWL) type in type_mapping order.
+        seen: set[tuple[str, URIRef]] = set()
 
         for rdf_type, entity_type, property_kind in rdf_types:
             for subject in graph.subjects(RDF.type, rdf_type):
@@ -530,6 +411,9 @@ class OntologyService:
                     continue
                 if subject == owl_thing:
                     continue
+                if (entity_type, subject) in seen:
+                    continue
+                seen.add((entity_type, subject))
 
                 iri_str = str(subject)
 
@@ -618,7 +502,7 @@ class OntologyService:
         owl_thing = OWL.Thing
 
         # Check if target class exists
-        if (target_uri, RDF.type, OWL.Class) not in graph:
+        if not is_class(graph, target_uri):
             return []
 
         # Build ancestor path by traversing upward
@@ -703,44 +587,6 @@ class OntologyService:
             child_count=cls.child_count,
             deprecated=cls.deprecated,
         )
-
-    # Property operations
-
-    async def list_properties(
-        self,
-        ontology_id: UUID,
-        property_type: TypingLiteral["object", "data", "annotation"] | None = None,
-        include_imported: bool = False,
-    ) -> OWLPropertyListResponse:
-        """List properties in an ontology."""
-        # TODO: Implement property listing
-        raise NotImplementedError("Property listing pending")
-
-    async def create_property(
-        self, ontology_id: UUID, owl_property: OWLPropertyCreate
-    ) -> OWLPropertyResponse:
-        """Create a new OWL property."""
-        # TODO: Implement property creation
-        raise NotImplementedError("Property creation pending")
-
-    async def get_property(
-        self, ontology_id: UUID, property_iri: str
-    ) -> OWLPropertyResponse | None:
-        """Get a property by IRI."""
-        # TODO: Implement property retrieval
-        raise NotImplementedError("Property retrieval pending")
-
-    async def update_property(
-        self, ontology_id: UUID, property_iri: str, owl_property: OWLPropertyUpdate
-    ) -> OWLPropertyResponse | None:
-        """Update a property."""
-        # TODO: Implement property update
-        raise NotImplementedError("Property update pending")
-
-    async def delete_property(self, ontology_id: UUID, property_iri: str) -> bool:
-        """Delete a property."""
-        # TODO: Implement property deletion
-        raise NotImplementedError("Property deletion pending")
 
     # Helper methods
 
@@ -904,7 +750,7 @@ class OntologyService:
         child_count = sum(
             1
             for _ in graph.subjects(RDFS.subClassOf, class_uri)
-            if isinstance(_, URIRef) and (_, RDF.type, OWL.Class) in graph
+            if isinstance(_, URIRef) and is_class(graph, _)
         )
 
         # Check for deprecated annotation (owl:deprecated = true)

@@ -14,9 +14,7 @@ from ontokit.schemas.lint import (
     LintSummaryResponse,
     LintTriggerResponse,
 )
-from ontokit.schemas.ontology import OntologyCreate, OntologyResponse, OntologyUpdate
 from ontokit.schemas.owl_class import OWLClassCreate, OWLClassResponse, OWLClassUpdate
-from ontokit.schemas.owl_property import OWLPropertyCreate, OWLPropertyResponse, OWLPropertyUpdate
 from ontokit.schemas.pull_request import (
     BranchCreate,
     BranchDeleteRequest,
@@ -77,16 +75,10 @@ __all__ = [
     "LintRunResponse",
     "LintSummaryResponse",
     "LintTriggerResponse",
-    # Ontology schemas
-    "OntologyCreate",
-    "OntologyResponse",
-    "OntologyUpdate",
+    # OWL class schemas
     "OWLClassCreate",
     "OWLClassResponse",
     "OWLClassUpdate",
-    "OWLPropertyCreate",
-    "OWLPropertyResponse",
-    "OWLPropertyUpdate",
     # Pull request schemas
     "BranchCreate",
     "BranchDeleteRequest",
