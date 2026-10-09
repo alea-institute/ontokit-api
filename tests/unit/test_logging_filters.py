@@ -23,6 +23,11 @@ from ontokit.core.logging_filters import TokenQueryRedactionFilter, install_toke
         ('WebSocket /ws?token=secret" [accepted]', 'WebSocket /ws?token=REDACTED" [accepted]'),
         ("/ws?token=&other=kept", "/ws?token=REDACTED&other=kept"),
         ("/ws?other=kept", "/ws?other=kept"),
+        ("/ws?to%6ben=secret&other=kept", "/ws?to%6ben=REDACTED&other=kept"),
+        (
+            "Sec-WebSocket-Protocol: ontokit.bearer.v1, ontokit.token.c2VjcmV0",
+            "Sec-WebSocket-Protocol: ontokit.bearer.v1, ontokit.token.REDACTED",
+        ),
     ],
 )
 def test_query_redaction(value, expected) -> None:

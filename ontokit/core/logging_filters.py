@@ -4,11 +4,18 @@ import logging
 import re
 import traceback
 
-_TOKEN_QUERY = re.compile(r"([?&]token=)[^&\s\"'<>#]*", re.IGNORECASE)
+# Query parsing decodes parameter names; redact the equivalent encoded forms
+# too, while retaining the original path spelling in access records.
+_TOKEN_QUERY = re.compile(
+    r"([?&](?:t|%74)(?:o|%6f)(?:k|%6b)(?:e|%65)(?:n|%6e)=)[^&\s\"'<>#]*",
+    re.IGNORECASE,
+)
+_TOKEN_PROTOCOL = re.compile(r"ontokit\.token\.[A-Za-z0-9_-]+")
 
 
 def _redact(value: str) -> str:
-    return _TOKEN_QUERY.sub(r"\1REDACTED", value)
+    value = _TOKEN_QUERY.sub(r"\1REDACTED", value)
+    return _TOKEN_PROTOCOL.sub("ontokit.token.REDACTED", value)
 
 
 class TokenQueryRedactionFilter(logging.Filter):
