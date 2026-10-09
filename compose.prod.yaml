@@ -17,6 +17,8 @@ services:
     image: postgres:17-alpine
     container_name: ontokit-postgres
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
@@ -42,6 +44,8 @@ services:
     image: redis:7-alpine
     container_name: ontokit-redis
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     command: redis-server --appendonly yes ${REDIS_PASSWORD:+--requirepass $REDIS_PASSWORD}
     ports:
       - "${REDIS_PORT:-6379}:6379"
@@ -62,6 +66,8 @@ services:
     image: minio/minio:latest
     container_name: ontokit-minio
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minio}
@@ -86,6 +92,8 @@ services:
     image: ghcr.io/zitadel/zitadel:latest
     container_name: ontokit-zitadel
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     command: 'start-from-init --masterkey "${ZITADEL_MASTERKEY:-MasterkeyNeedsToHave32Characters}"'
     environment:
       ZITADEL_EXTERNALDOMAIN: ${ZITADEL_DOMAIN:-localhost}
@@ -155,6 +163,8 @@ services:
     image: ghcr.io/zitadel/zitadel-login:latest
     container_name: ontokit-zitadel-login
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     environment:
       ZITADEL_API_URL: ${ZITADEL_URL:-http://localhost:8080}
       NEXT_PUBLIC_BASE_PATH: /ui/v2/login

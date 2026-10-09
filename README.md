@@ -82,6 +82,31 @@ are anonymous suggestions, token-authenticated beacons, signed webhooks, auth
 endpoints, and read-only SPARQL.
 Use `required` or `optional` with sign-in for editing.
 
+## Testing and memory limits
+
+Run `make test` for the full suite, or
+`make test PYTEST_ARGS='-x --durations=20'` to investigate a failure.
+For a selected test, use `bash scripts/memory-cap.sh uv run pytest tests/ -k test_name`.
+The wrapper uses a Linux systemd user scope with `MemoryMax=6G` and
+`MemorySwapMax=0`, falling back to `prlimit --as` when the user scope is unavailable.
+The fallback limits virtual address space per process; it does not provide an
+aggregate process-tree or zero-swap limit. It fails closed if `prlimit` is unavailable.
+Root `conftest.py` also applies a hard Linux address-space limit before application
+fixtures load, protecting bare `pytest` runs. Set `ONTOKIT_TEST_MEMORY_MIB` to a
+positive MiB value to override the default 6144; inherited stricter hard limits
+remain in effect. Prefer serial tests on the shared development box: independent
+test runs and worker processes can each consume their own allowance.
+
+Both root Compose stacks cap every container with equal `mem_limit` and
+`memswap_limit` (no container swap): API 2 GiB, ARQ worker 3 GiB, PostgreSQL 2 GiB,
+Redis 512 MiB, MinIO 1 GiB, Zitadel 1 GiB, login 512 MiB, and Mailpit 256 MiB.
+The infrastructure-only production stack uses the same conservative service limits.
+The deployed development stack (`deploy/compose.dev.yaml`) also caps every service,
+with 1 GiB for its additional frontend container.
+Recreate containers with `docker compose up -d` to apply the limits.
+These limits cover these Compose stacks and test commands; host-run application
+processes and multiple concurrent stacks need their own aggregate budget.
+
 ## Documentation
 
 See the [wiki](https://github.com/CatholicOS/ontokit-api/wiki) for full documentation.

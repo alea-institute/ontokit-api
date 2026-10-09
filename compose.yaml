@@ -33,6 +33,8 @@ services:
     image: pgvector/pgvector:pg17
     container_name: ontokit-postgres
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
@@ -58,6 +60,8 @@ services:
     image: redis:7-alpine
     container_name: ontokit-redis
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     ports:
       - "6379:6379"
     volumes:
@@ -77,6 +81,8 @@ services:
     image: minio/minio:latest
     container_name: ontokit-minio
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: minio
@@ -101,6 +107,8 @@ services:
     image: axllent/mailpit:latest
     container_name: ontokit-mailpit
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
     ports:
       - "8025:8025"  # Web UI
     networks:
@@ -113,6 +121,8 @@ services:
     image: ghcr.io/zitadel/zitadel:latest
     container_name: ontokit-zitadel
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     command: ["start-from-init", "--masterkey", "${ZITADEL_MASTERKEY:-MasterkeyNeedsToHave32Characters}"]
     environment:
       ZITADEL_EXTERNALDOMAIN: ${ZITADEL_EXTERNALDOMAIN:-localhost}
@@ -191,6 +201,8 @@ services:
     image: ghcr.io/zitadel/zitadel-login:latest
     container_name: ontokit-zitadel-login
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     environment:
       ZITADEL_API_URL: http://localhost:8080
       NEXT_PUBLIC_BASE_PATH: /ui/v2/login
@@ -231,6 +243,8 @@ services:
     image: ontokit/api:latest
     container_name: ontokit-api
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
     environment:
       APP_ENV: development
       DEBUG: "true"
@@ -304,6 +318,8 @@ services:
     image: ontokit/api:latest
     container_name: ontokit-worker
     restart: unless-stopped
+    mem_limit: 3g
+    memswap_limit: 3g
     command: ["arq", "ontokit.worker.WorkerSettings"]
     environment:
       APP_ENV: development

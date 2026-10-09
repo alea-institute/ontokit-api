@@ -5,6 +5,8 @@ services:
   postgres:
     image: pgvector/pgvector@sha256:7ae6051efd0e60444282c27c7e141af07f322ce033300e727a49c3dd11075e38 # pgvector/pgvector:pg17
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -26,6 +28,8 @@ services:
   redis:
     image: redis@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2 # redis:7-alpine
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     volumes: [redis_data:/data]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -37,6 +41,8 @@ services:
   minio:
     image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e # minio/minio:latest
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
@@ -57,6 +63,8 @@ services:
         org.opencontainers.image.revision: ${ONTOKIT_API_REVISION:?ONTOKIT_API_REVISION must be set}
     image: ontokit/api:dev
     restart: unless-stopped
+    mem_limit: 2g
+    memswap_limit: 2g
     env_file: .env
     environment:
       APP_ENV: staging
@@ -90,6 +98,8 @@ services:
   worker:
     image: ontokit/api:dev
     restart: unless-stopped
+    mem_limit: 3g
+    memswap_limit: 3g
     command: ["arq", "ontokit.worker.WorkerSettings"]
     env_file: .env
     environment:
@@ -134,6 +144,8 @@ services:
         org.opencontainers.image.revision: ${ONTOKIT_WEB_REVISION:?ONTOKIT_WEB_REVISION must be set}
     image: ontokit/web:dev
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     env_file: .env
     environment:
       AUTH_MODE: ${AUTH_MODE:?AUTH_MODE must be set}
@@ -148,11 +160,15 @@ services:
   mailpit:
     image: axllent/mailpit@sha256:d5ecbb067db3705fa953d79e1b7f81ef84038df67aba6c52825d8c02a1ea748a # axllent/mailpit:latest
     restart: unless-stopped
+    mem_limit: 256m
+    memswap_limit: 256m
     networks: [ontokit]
 
   zitadel:
     image: ghcr.io/zitadel/zitadel@sha256:f3738fd984131d3f02e386d37fa480d1a30e42b7d4202e2b322f12f7cf556b64 # ghcr.io/zitadel/zitadel:latest
     restart: unless-stopped
+    mem_limit: 1g
+    memswap_limit: 1g
     command: 'start-from-init --masterkey "${ZITADEL_MASTERKEY}" --tlsMode external'
     environment:
       ZITADEL_EXTERNALDOMAIN: ontokit-auth.dev.openlegalstandard.org
@@ -207,6 +223,8 @@ services:
   login:
     image: ghcr.io/zitadel/zitadel-login@sha256:7c210b79ae78ae74d76092154fa664601852ce79675a747a1085c2656b195648 # ghcr.io/zitadel/zitadel-login:latest
     restart: unless-stopped
+    mem_limit: 512m
+    memswap_limit: 512m
     # zitadel-login:latest dropped ZITADEL_SERVICE_USER_TOKEN_FILE support; the
     # credential chain wants the token VALUE, so read the PAT at start.
     entrypoint: ["/bin/sh", "-c", "export ZITADEL_SERVICE_USER_TOKEN=$(cat /zitadel-data/login-client.pat) && exec /app/entrypoint.sh node apps/login/server.js"]
