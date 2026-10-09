@@ -2,11 +2,9 @@
 
 import asyncio
 import logging
-import os
-import time
 from logging.config import fileConfig
 
-from sqlalchemy import pool, text
+from sqlalchemy import pool
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -43,6 +41,7 @@ target_metadata = Base.metadata
 
 # Get database URL from app settings
 from ontokit.core.config import settings  # noqa: E402
+from ontokit.core.migration_lock import run_with_migration_lock  # noqa: E402
 
 # Convert asyncpg URL to use psycopg2 for sync operations if needed
 database_url = str(settings.database_url)
@@ -71,69 +70,21 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
-# Session-level advisory lock key that serializes concurrent ``alembic upgrade``
-# runners (e.g. api and worker containers starting from the same image). Fixed
-# signed 64-bit value derived from "ontokit:alembic:migrations"; keep it stable.
-MIGRATION_ADVISORY_LOCK_KEY = 0x6F6E746F6B697401
-MIGRATION_LOCK_POLL_SECONDS = 0.5
-MIGRATION_LOCK_TIMEOUT_SECONDS = float(os.environ.get("ONTOKIT_MIGRATION_LOCK_TIMEOUT", "900"))
-
-
-def _autocommit_scalar(connection: Connection, sql: str) -> object:
-    """Run one statement outside any transaction and return its scalar."""
-    if connection.in_transaction():
-        connection.rollback()
-    default_isolation = connection.default_isolation_level
-    connection.execution_options(isolation_level="AUTOCOMMIT")
-    try:
-        return connection.execute(text(sql), {"key": MIGRATION_ADVISORY_LOCK_KEY}).scalar()
-    finally:
-        # Under AUTOCOMMIT the DBAPI commits each statement, but SQLAlchemy still
-        # tracks a logical transaction that must end before isolation changes.
-        if connection.in_transaction():
-            connection.rollback()
-        connection.execution_options(isolation_level=default_isolation)
-
-
-def _acquire_migration_lock(connection: Connection) -> None:
-    """Take the session-level migration lock, polling without a transaction.
-
-    A blocking ``pg_advisory_lock`` would deadlock: the waiting statement keeps
-    a virtual transaction open, and the leader's ``CREATE INDEX CONCURRENTLY``
-    waits for every open transaction. Short ``pg_try_advisory_lock`` attempts in
-    autocommit mode never hold a transaction across the wait.
-    """
-    deadline = time.monotonic() + MIGRATION_LOCK_TIMEOUT_SECONDS
-    waiting_logged = False
-    while not _autocommit_scalar(connection, "SELECT pg_try_advisory_lock(:key)"):
-        if time.monotonic() >= deadline:
-            raise TimeoutError(
-                "Timed out waiting for the alembic migration advisory lock "
-                f"after {MIGRATION_LOCK_TIMEOUT_SECONDS:.0f}s"
-            )
-        if not waiting_logged:
-            logger.info("Another runner holds the migration lock; waiting for it")
-            waiting_logged = True
-        time.sleep(MIGRATION_LOCK_POLL_SECONDS)
-
-
 def do_run_migrations(connection: Connection) -> None:
     """Run migrations with the given connection.
 
     On PostgreSQL, a session-level advisory lock is held on this same
     connection for the whole run, so a second concurrent runner waits and then
-    sees the schema already at head instead of colliding on DDL.
+    sees the schema already at head instead of colliding on DDL (see
+    ``ontokit.core.migration_lock``).
     """
-    use_lock = connection.dialect.name == "postgresql"
-    if use_lock:
-        _acquire_migration_lock(connection)
-    try:
+
+    def _run() -> None:
         context.configure(connection=connection, target_metadata=target_metadata)
         with context.begin_transaction():
             context.run_migrations()
-    finally:
-        if use_lock:
-            _autocommit_scalar(connection, "SELECT pg_advisory_unlock(:key)")
+
+    run_with_migration_lock(connection, _run)
 
 
 async def run_async_migrations() -> None:

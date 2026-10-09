@@ -1,5 +1,6 @@
 """Every mounted method and path pair is registered exactly once."""
 
+import re
 from collections import Counter
 from typing import Any
 
@@ -41,8 +42,22 @@ def api_routes(target: Any) -> list[Any]:
     ]
 
 
+_PATH_PARAM = re.compile(r"\{[^}:]+(:[^}]+)?\}")
+
+
+def normalize_path(path: str) -> str:
+    """Collapse every path parameter (any name, any converter) to ``{}``.
+
+    ``/x/{a}`` and ``/x/{b:path}`` match the same request, so the first
+    registration shadows the second even though the raw strings differ.
+    """
+    return _PATH_PARAM.sub("{}", path)
+
+
 def duplicate_pairs(routes: list[Any]) -> dict[tuple[str, str], int]:
-    counts = Counter((method, route.path) for route in routes for method in sorted(route.methods))
+    counts = Counter(
+        (method, normalize_path(route.path)) for route in routes for method in sorted(route.methods)
+    )
     return {pair: n for pair, n in counts.items() if n > 1}
 
 
@@ -71,6 +86,30 @@ def test_duplicate_detection_flags_a_double_registration() -> None:
     async def second() -> None: ...
 
     assert duplicate_pairs(api_routes(probe)) == {("POST", "/things"): 2}
+
+
+def test_duplicate_detection_flags_differently_named_parameters() -> None:
+    probe = FastAPI()
+
+    @probe.get("/x/{a}")
+    async def first(a: str) -> None: ...
+
+    @probe.get("/x/{b:path}")
+    async def second(b: str) -> None: ...
+
+    assert duplicate_pairs(api_routes(probe)) == {("GET", "/x/{}"): 2}
+
+
+def test_distinct_literal_segments_are_not_duplicates() -> None:
+    probe = FastAPI()
+
+    @probe.get("/x/{a}/one")
+    async def first(a: str) -> None: ...
+
+    @probe.get("/x/{b}/two")
+    async def second(b: str) -> None: ...
+
+    assert duplicate_pairs(api_routes(probe)) == {}
 
 
 @pytest.mark.parametrize("method", ["GET", "POST"])

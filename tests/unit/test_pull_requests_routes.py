@@ -102,6 +102,8 @@ def svc_client(
     client, _mock_session = authed_client
     mock_svc = AsyncMock()
     mock_svc.db = AsyncMock()
+    # The push handler returns whether to enqueue a GitHub sync; default to no.
+    mock_svc.handle_github_push_webhook.return_value = False
     app.dependency_overrides[get_service] = lambda: mock_svc
     yield client, mock_svc
     app.dependency_overrides.pop(get_service, None)
@@ -546,6 +548,79 @@ class TestGitHubWebhook:
             "refs/heads/main",
             [{"id": "abc", "added": [], "modified": ["ontology.ttl"]}],
         )
+
+    @patch("ontokit.api.routes.pull_requests.get_arq_pool", new_callable=AsyncMock)
+    def test_default_branch_push_enqueues_one_github_sync_job(
+        self,
+        mock_pool_fn: AsyncMock,
+        svc_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        """A push the handler accepts enqueues exactly one per-project worker sync."""
+        client, svc = svc_client
+        svc.handle_github_push_webhook.return_value = True
+        integration = _make_integration()
+        result1 = MagicMock()
+        result1.scalar_one_or_none.return_value = integration
+        result2 = MagicMock()
+        result2.scalar_one_or_none.return_value = None  # no remote-sync config
+        svc.db.execute.side_effect = [result1, result2]
+        mock_pool = AsyncMock()
+        mock_pool_fn.return_value = mock_pool
+
+        resp = self._post_webhook(client, {"ref": "refs/heads/main", "commits": []}, event="push")
+
+        assert resp.status_code == 200
+        mock_pool.enqueue_job.assert_awaited_once_with(
+            "sync_github_project_task",
+            PROJECT_ID,
+            _job_id=f"github-push-sync:{PROJECT_ID}",
+        )
+
+    @pytest.mark.parametrize(
+        "ref",
+        ["refs/heads/main", "refs/heads/feature", "refs/tags/v1.0"],
+    )
+    @patch("ontokit.api.routes.pull_requests.get_arq_pool", new_callable=AsyncMock)
+    def test_declined_push_enqueues_no_github_sync_job(
+        self,
+        mock_pool_fn: AsyncMock,
+        svc_client: tuple[TestClient, AsyncMock],
+        ref: str,
+    ) -> None:
+        """Non-default refs, outbound-only and sync-disabled pushes (handler says no)."""
+        client, svc = svc_client
+        svc.handle_github_push_webhook.return_value = False
+        integration = _make_integration()
+        result1 = MagicMock()
+        result1.scalar_one_or_none.return_value = integration
+        result2 = MagicMock()
+        result2.scalar_one_or_none.return_value = None
+        svc.db.execute.side_effect = [result1, result2]
+        mock_pool = AsyncMock()
+        mock_pool_fn.return_value = mock_pool
+
+        resp = self._post_webhook(client, {"ref": ref, "commits": []}, event="push")
+
+        assert resp.status_code == 200
+        mock_pool.enqueue_job.assert_not_awaited()
+
+    @patch("ontokit.api.routes.pull_requests.get_arq_pool", new_callable=AsyncMock)
+    def test_github_sync_enqueue_failure_still_returns_ok(
+        self,
+        mock_pool_fn: AsyncMock,
+        svc_client: tuple[TestClient, AsyncMock],
+    ) -> None:
+        client, svc = svc_client
+        svc.handle_github_push_webhook.return_value = True
+        self._setup_integration(svc)
+        mock_pool = AsyncMock()
+        mock_pool.enqueue_job.side_effect = RuntimeError("redis down")
+        mock_pool_fn.return_value = mock_pool
+
+        resp = self._post_webhook(client, {"ref": "refs/tags/v1", "commits": []}, event="push")
+
+        assert resp.status_code == 200
+        mock_pool.enqueue_job.assert_awaited_once()
 
     @patch("ontokit.api.routes.pull_requests.get_arq_pool", new_callable=AsyncMock)
     def test_push_event_triggers_sync_when_configured(

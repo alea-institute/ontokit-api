@@ -273,7 +273,7 @@ class OntologyService:
         graph = await self._get_graph(ontology_id, branch)
         class_uri = URIRef(class_iri)
 
-        if (class_uri, RDF.type, OWL.Class) not in graph:
+        if not is_class(graph, class_uri):
             return None
 
         return await self._class_to_response(graph, class_uri, label_preferences)
@@ -749,8 +749,8 @@ class OntologyService:
         # Count direct children (classes that have this class as a parent)
         child_count = sum(
             1
-            for _ in graph.subjects(RDFS.subClassOf, class_uri)
-            if isinstance(_, URIRef) and is_class(graph, _)
+            for child in graph.subjects(RDFS.subClassOf, class_uri)
+            if isinstance(child, URIRef) and is_class(graph, child)
         )
 
         # Check for deprecated annotation (owl:deprecated = true)

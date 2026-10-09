@@ -204,6 +204,13 @@ async def test_entity_discovery_matches_in_warm_and_cold_paths(
         warm_children = await index.get_class_children(project_id, branch, str(agent))
         assert {n.iri for n in cold_children} == {n["iri"] for n in warm_children}
         assert {n.iri for n in cold_children} == {str(person), str(robot)}
+
+        # A bare rdfs:Class resolves on the cold get_class and warm detail paths.
+        cold_robot = await cold_service.get_class(project_id, str(robot), branch=branch)
+        warm_robot = await index.get_class_detail(project_id, branch, str(robot))
+        assert cold_robot is not None
+        assert warm_robot is not None
+        assert str(cold_robot.iri) == warm_robot["iri"] == str(robot)
     finally:
         await real_db_session.execute(delete(Project).where(Project.id == project_id))
         await real_db_session.commit()

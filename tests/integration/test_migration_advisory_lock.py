@@ -21,6 +21,8 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.engine import make_url
 
+from ontokit.core.migration_lock import MIGRATION_ADVISORY_LOCK_KEY
+
 pytestmark = pytest.mark.integration
 
 ROOT = Path(__file__).parents[2]
@@ -29,11 +31,10 @@ _SUBPROCESS_TIMEOUT = 240
 
 
 def _load_lock_key() -> int:
-    """Read the lock key from ``alembic/env.py`` without executing it."""
-    for line in (ROOT / "alembic" / "env.py").read_text(encoding="utf-8").splitlines():
-        if line.startswith("MIGRATION_ADVISORY_LOCK_KEY"):
-            return int(line.split("=", 1)[1].strip(), 0)
-    raise AssertionError("alembic/env.py must define MIGRATION_ADVISORY_LOCK_KEY")
+    """Return the lock key ``alembic/env.py`` takes (via ``ontokit.core.migration_lock``)."""
+    env_source = (ROOT / "alembic" / "env.py").read_text(encoding="utf-8")
+    assert "run_with_migration_lock" in env_source, "alembic/env.py must take the lock"
+    return MIGRATION_ADVISORY_LOCK_KEY
 
 
 def _asyncpg_dsn(database: str) -> str:

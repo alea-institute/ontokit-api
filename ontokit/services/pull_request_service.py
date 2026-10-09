@@ -70,7 +70,6 @@ from ontokit.services.branch_lock import (
     pull_request_write_locks,
 )
 from ontokit.services.github_service import GitHubPR, GitHubService, get_github_service
-from ontokit.services.github_sync import sync_github_project
 from ontokit.services.mirror_credential import resolve_mirror_credential
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.project_access_policy import (
@@ -2187,76 +2186,40 @@ class PullRequestService:
         project_id: UUID,
         ref: str,
         commits: list[dict[str, Any]],  # noqa: ARG002
-    ) -> None:
-        """Handle GitHub push webhook events.
+    ) -> bool:
+        """Decide whether a GitHub push webhook should sync the project.
 
-        A push to the integration's default branch syncs the canonical bare
-        repository with its GitHub remote through ``sync_github_project``, the
-        same fast-forward-or-merge policy the periodic worker sync uses. That
-        service records ``last_sync_at`` and the sync status. Failures are
-        logged with project and branch context and never raised, so the
-        webhook keeps its normal response.
+        Returns True for a push to the integration's default branch on an
+        enabled, non-conflicted, bidirectional mirror. The caller then enqueues
+        the ``sync_github_project_task`` worker job, which runs the same
+        per-integration sync as the periodic cron off the request's event loop.
+        The handler itself performs no git or network I/O.
         """
         integration = await self._get_github_integration(project_id)
         if not integration or not integration.sync_enabled:
-            return
+            return False
 
         branch = integration.default_branch or "main"
         # Only sync pushes to the default branch
         if ref != f"refs/heads/{branch}":
-            return
+            return False
 
         if settings.github_mirror_outbound_only:
             logger.info(
                 "Ignoring inbound GitHub push for outbound-only mirror on project %s",
                 project_id,
             )
-            return
+            return False
 
-        try:
-            pat = await resolve_mirror_credential(self.db, integration)
-        except Exception:
-            logger.warning(
-                "GitHub push sync for project %s branch %s: mirror credential resolution failed",
-                project_id,
-                branch,
-                exc_info=True,
-            )
-            return
-        if pat is None:
-            logger.warning(
-                "GitHub push sync for project %s branch %s skipped: no mirror credential",
+        if integration.sync_status == "conflict":
+            logger.info(
+                "Ignoring GitHub push for project %s branch %s: integration is in conflict",
                 project_id,
                 branch,
             )
-            return
+            return False
 
-        try:
-            result = await sync_github_project(
-                integration,
-                pat,
-                self.git_service,
-                self.db,
-                outbound_only=settings.github_mirror_outbound_only,
-            )
-        except Exception:
-            logger.warning(
-                "GitHub push sync failed for project %s branch %s",
-                project_id,
-                branch,
-                exc_info=True,
-            )
-            return
-
-        if result.get("status") in {"error", "conflict", "diverged"}:
-            logger.warning(
-                "GitHub push sync for project %s branch %s did not complete: %s",
-                project_id,
-                branch,
-                result,
-            )
-        else:
-            logger.info("GitHub push sync for project %s branch %s: %s", project_id, branch, result)
+        return True
 
     # Open PR Summary (for notification bell)
 

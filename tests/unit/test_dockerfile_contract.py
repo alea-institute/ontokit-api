@@ -88,6 +88,30 @@ def test_dev_deploy_worker_defers_migrations_to_healthy_api() -> None:
     assert api["healthcheck"]["test"][0] in {"CMD", "CMD-SHELL"}
 
 
+def _duration_seconds(value: str) -> float:
+    """Parse a compose duration such as ``180s``, ``3m`` or ``1m30s``."""
+    units = {"h": 3600, "m": 60, "s": 1, "ms": 0.001}
+    parts = re.findall(r"(\d+(?:\.\d+)?)(ms|h|m|s)", str(value))
+    assert parts and "".join(n + u for n, u in parts) == str(value), value
+    return sum(float(n) * units[u] for n, u in parts)
+
+
+def test_dev_deploy_api_healthcheck_allows_migration_time() -> None:
+    """The migration leader gets a start period long enough to run migrations.
+
+    The api runs migrations before serving and the worker waits on its health,
+    so a short start_period marks it unhealthy mid-migration. The deploy's
+    ``--wait-timeout 240`` must still exceed this grace period.
+    """
+    api = yaml.safe_load(COMPOSE_DEV.read_text(encoding="utf-8"))["services"]["api"]
+    start_period = _duration_seconds(api["healthcheck"]["start_period"])
+    assert start_period >= 120
+
+    wait = re.search(r"--wait-timeout (\d+)", DEPLOY_SCRIPT.read_text(encoding="utf-8"))
+    assert wait is not None
+    assert int(wait.group(1)) > start_period
+
+
 def test_local_compose_worker_defers_migrations_to_healthy_api() -> None:
     services = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
 

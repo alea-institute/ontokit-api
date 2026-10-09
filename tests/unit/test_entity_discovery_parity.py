@@ -126,6 +126,26 @@ class TestRdflibSearchRdfsClass:
         assert [r.iri for r in result.results] == [str(EX.Place)]
 
 
+class TestRdflibGetClassResolvesRdfsClass:
+    @pytest.mark.asyncio
+    async def test_get_class_resolves_rdfs_class_only_subject(self) -> None:
+        """A bare rdfs:Class listed by tree/search must also resolve via get_class."""
+        cls = await _service(rdfs_class_graph()).get_class(PROJECT_ID, str(EX.Robot), branch=BRANCH)
+        assert cls is not None
+        assert str(cls.iri) == str(EX.Robot)
+
+    @pytest.mark.asyncio
+    async def test_get_class_rdfs_class_root_children_counted(self) -> None:
+        cls = await _service(rdfs_class_graph()).get_class(PROJECT_ID, str(EX.Agent), branch=BRANCH)
+        assert cls is not None
+        assert cls.child_count == 2
+
+    @pytest.mark.asyncio
+    async def test_get_class_still_rejects_non_class(self) -> None:
+        cls = await _service(ae1_graph()).get_class(PROJECT_ID, str(EX.hasFoo), branch=BRANCH)
+        assert cls is None
+
+
 class TestRdflibClassTreeIncludesRdfsClass:
     @pytest.mark.asyncio
     async def test_rdfs_class_root_listed(self) -> None:

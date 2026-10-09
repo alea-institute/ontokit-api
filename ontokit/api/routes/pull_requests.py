@@ -35,6 +35,7 @@ from ontokit.schemas.pull_request import (
     ReviewListResponse,
     ReviewResponse,
 )
+from ontokit.services.github_sync import GITHUB_PROJECT_SYNC_TASK, github_project_sync_job_id
 from ontokit.services.pull_request_service import PullRequestService, get_pull_request_service
 
 logger = logging.getLogger(__name__)
@@ -606,11 +607,29 @@ async def github_webhook(
             payload.get("pull_request", {}),
         )
     elif x_github_event == "push":
-        await service.handle_github_push_webhook(
+        should_sync = await service.handle_github_push_webhook(
             project_id,
             payload.get("ref", ""),
             payload.get("commits", []),
         )
+        if should_sync:
+            # The git fetch/push runs in the worker, never on this request's loop.
+            try:
+                pool = await get_arq_pool()
+                if pool is not None:
+                    await pool.enqueue_job(
+                        GITHUB_PROJECT_SYNC_TASK,
+                        str(project_id),
+                        _job_id=github_project_sync_job_id(project_id),
+                    )
+                else:
+                    logger.warning(
+                        "ARQ pool is None; skipping GitHub push sync for project %s", project_id
+                    )
+            except Exception:
+                logger.warning(
+                    "Failed to queue GitHub push sync for project %s", project_id, exc_info=True
+                )
 
         # Trigger remote sync if configured for webhook frequency
         ref = payload.get("ref", "")
