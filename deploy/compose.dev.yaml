@@ -95,6 +95,8 @@ services:
     environment:
       APP_ENV: staging
       DEBUG: "false"
+      # The api service is the migration leader; concurrent alembic runs race.
+      RUN_MIGRATIONS: "0"
       DATABASE_URL: postgresql+asyncpg://ontokit:${ONTOKIT_DB_PASSWORD}@postgres:5432/ontokit
       REDIS_URL: redis://redis:6379/0
       MINIO_ENDPOINT: minio:9000
@@ -115,6 +117,8 @@ services:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
       minio: {condition: service_healthy}
+      # api runs the migrations; wait until it is serving on the new schema.
+      api: {condition: service_healthy}
 
   web:
     build:

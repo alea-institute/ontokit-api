@@ -6,12 +6,16 @@ import re
 import shlex
 from pathlib import Path
 
+import pytest
 import yaml
 
 ROOT = Path(__file__).parents[2]
 DOCKERFILE = ROOT / "Dockerfile"
+DOCKERFILE_PROD = ROOT / "Dockerfile.prod"
+DOCKERFILES = (DOCKERFILE, DOCKERFILE_PROD)
 DEPLOY_SCRIPT = ROOT / "deploy" / "ontokit-deploy.sh"
 COMPOSE = ROOT / "compose.yaml"
+COMPOSE_DEV = ROOT / "deploy" / "compose.dev.yaml"
 
 RUNTIME_FILES = {
     "pyproject.toml",
@@ -22,25 +26,73 @@ RUNTIME_FILES = {
 }
 
 
-def test_runtime_file_copies_have_explicit_readable_metadata() -> None:
-    copy_instructions = [
+def _copy_instructions(dockerfile: Path) -> list[list[str]]:
+    return [
         shlex.split(line)
-        for line in DOCKERFILE.read_text(encoding="utf-8").splitlines()
+        for line in dockerfile.read_text(encoding="utf-8").splitlines()
         if line.startswith("COPY ")
     ]
+
+
+@pytest.mark.parametrize("dockerfile", DOCKERFILES, ids=lambda path: path.name)
+def test_runtime_file_copies_have_explicit_readable_mode(dockerfile: Path) -> None:
+    """Plain runtime files get an explicit 0644 mode (alea#43), in both images.
+
+    Runtime-user ownership alone is not enough: a root-only host file mode
+    would still leave the file unreadable to other users of the image.
+    """
+    copy_instructions = _copy_instructions(dockerfile)
 
     for source in RUNTIME_FILES:
         matching_copies = [
             instruction for instruction in copy_instructions if source in instruction
         ]
-        assert len(matching_copies) == 1, f"expected exactly one COPY for {source}"
+        assert len(matching_copies) == 1, (
+            f"{dockerfile.name}: expected exactly one COPY for {source}"
+        )
 
         options = {token for token in matching_copies[0][1:] if token.startswith("--")}
-        has_readable_mode = "--chmod=0644" in options
-        owned_by_runtime_user = "--chown=ontokit:ontokit" in options
-        assert has_readable_mode or owned_by_runtime_user, (
-            f"COPY for {source} must set --chmod or runtime-user --chown"
+        assert "--chmod=0644" in options, (
+            f"{dockerfile.name}: COPY for {source} must set --chmod=0644"
         )
+
+
+@pytest.mark.parametrize("dockerfile", DOCKERFILES, ids=lambda path: path.name)
+def test_package_directory_is_traversable_before_nested_copy(dockerfile: Path) -> None:
+    """A nested ``COPY --chmod=0644`` must not create a non-traversable parent."""
+    lines = dockerfile.read_text(encoding="utf-8").splitlines()
+    mkdir_index = next(
+        (index for index, line in enumerate(lines) if line == "RUN mkdir -m 0755 ontokit"),
+        None,
+    )
+    nested_index = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("COPY ") and "./ontokit/version.py" in line
+    )
+
+    assert mkdir_index is not None, f"{dockerfile.name}: missing RUN mkdir -m 0755 ontokit"
+    assert mkdir_index < nested_index
+
+
+def test_dev_deploy_worker_defers_migrations_to_healthy_api() -> None:
+    """DEV api is the sole migration leader; the worker waits for it (R9)."""
+    services = yaml.safe_load(COMPOSE_DEV.read_text(encoding="utf-8"))["services"]
+
+    worker = services["worker"]
+    assert worker["environment"]["RUN_MIGRATIONS"] == "0"
+    assert worker["depends_on"]["api"] == {"condition": "service_healthy"}
+
+    api = services["api"]
+    assert str(api["environment"].get("RUN_MIGRATIONS", "1")) == "1"
+    assert api["healthcheck"]["test"][0] in {"CMD", "CMD-SHELL"}
+
+
+def test_local_compose_worker_defers_migrations_to_healthy_api() -> None:
+    services = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
+
+    assert services["worker"]["environment"]["RUN_MIGRATIONS"] == "0"
+    assert services["worker"]["depends_on"]["api"] == {"condition": "service_healthy"}
 
 
 def test_detached_checkouts_run_with_world_readable_umask() -> None:
