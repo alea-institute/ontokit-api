@@ -23,6 +23,7 @@ RUNTIME_FILES = {
     "alembic.ini",
     "ontokit/version.py",
     "scripts/entrypoint.sh",
+    "scripts/rewrap_pr_party_credentials.py",
 }
 
 
@@ -84,7 +85,7 @@ def test_dev_deploy_worker_defers_migrations_to_healthy_api() -> None:
     assert worker["depends_on"]["api"] == {"condition": "service_healthy"}
 
     api = services["api"]
-    assert str(api["environment"].get("RUN_MIGRATIONS", "1")) == "1"
+    assert api["environment"]["RUN_MIGRATIONS"] == "1"
     assert api["healthcheck"]["test"][0] in {"CMD", "CMD-SHELL"}
 
 
