@@ -251,6 +251,22 @@ class TestHeartbeat:
 class TestCleanupStale:
     """Tests for PresenceTracker.cleanup_stale()."""
 
+    def test_cleanup_removes_users_without_last_seen(self) -> None:
+        """Missing timestamps count as stale without breaking UTC comparisons."""
+        tracker = PresenceTracker()
+        tracker.join("room1", _make_user("missing", "Alice"))
+        tracker.join("room1", _make_user("active", "Bob"))
+        tracker.join("room2", _make_user("missing", "Alice"))
+        del tracker._last_seen["missing"]
+
+        removed = tracker.cleanup_stale()
+
+        assert set(removed) == {("room1", "missing"), ("room2", "missing")}
+        assert [user.user_id for user in tracker.get_users("room1")] == ["active"]
+        assert tracker.get_users("room2") == []
+        assert tracker.get_room_count() == 1
+        assert tracker.get_user_count() == 1
+
     def test_cleanup_removes_stale_users(self) -> None:
         """Users past the timeout are removed."""
         tracker = PresenceTracker()

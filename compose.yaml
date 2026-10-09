@@ -284,7 +284,7 @@ services:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
-      start_period: 5s
+      start_period: 180s # migrations run before serving; failures here do not count
       retries: 3
     networks:
       - ontokit
