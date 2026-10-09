@@ -70,6 +70,7 @@ from ontokit.services.branch_lock import (
     pull_request_write_locks,
 )
 from ontokit.services.github_service import GitHubPR, GitHubService, get_github_service
+from ontokit.services.github_sync import sync_github_project
 from ontokit.services.mirror_credential import resolve_mirror_credential
 from ontokit.services.notification_service import NotificationService
 from ontokit.services.project_access_policy import (
@@ -2187,13 +2188,22 @@ class PullRequestService:
         ref: str,
         commits: list[dict[str, Any]],  # noqa: ARG002
     ) -> None:
-        """Handle GitHub push webhook events."""
+        """Handle GitHub push webhook events.
+
+        A push to the integration's default branch syncs the canonical bare
+        repository with its GitHub remote through ``sync_github_project``, the
+        same fast-forward-or-merge policy the periodic worker sync uses. That
+        service records ``last_sync_at`` and the sync status. Failures are
+        logged with project and branch context and never raised, so the
+        webhook keeps its normal response.
+        """
         integration = await self._get_github_integration(project_id)
         if not integration or not integration.sync_enabled:
             return
 
-        # Only sync pushes to main branch
-        if ref != f"refs/heads/{integration.default_branch}":
+        branch = integration.default_branch or "main"
+        # Only sync pushes to the default branch
+        if ref != f"refs/heads/{branch}":
             return
 
         if settings.github_mirror_outbound_only:
@@ -2203,14 +2213,50 @@ class PullRequestService:
             )
             return
 
-        # Pull latest changes
         try:
-            # TODO: implement pull_branch on BareGitRepositoryService
-            self.git_service.pull_branch(project_id, integration.default_branch, "origin")  # type: ignore[attr-defined]
-            integration.last_sync_at = datetime.now(UTC)
-            await self.db.commit()
-        except Exception as e:
-            logger.warning(f"Failed to pull from GitHub: {e}")
+            pat = await resolve_mirror_credential(self.db, integration)
+        except Exception:
+            logger.warning(
+                "GitHub push sync for project %s branch %s: mirror credential resolution failed",
+                project_id,
+                branch,
+                exc_info=True,
+            )
+            return
+        if pat is None:
+            logger.warning(
+                "GitHub push sync for project %s branch %s skipped: no mirror credential",
+                project_id,
+                branch,
+            )
+            return
+
+        try:
+            result = await sync_github_project(
+                integration,
+                pat,
+                self.git_service,
+                self.db,
+                outbound_only=settings.github_mirror_outbound_only,
+            )
+        except Exception:
+            logger.warning(
+                "GitHub push sync failed for project %s branch %s",
+                project_id,
+                branch,
+                exc_info=True,
+            )
+            return
+
+        if result.get("status") in {"error", "conflict", "diverged"}:
+            logger.warning(
+                "GitHub push sync for project %s branch %s did not complete: %s",
+                project_id,
+                branch,
+                result,
+            )
+        else:
+            logger.info("GitHub push sync for project %s branch %s: %s", project_id, branch, result)
 
     # Open PR Summary (for notification bell)
 

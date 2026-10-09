@@ -1456,20 +1456,33 @@ class TestHandleGitHubReviewWebhook:
 
 
 class TestHandleGitHubPushWebhook:
-    @pytest.mark.asyncio
-    async def test_push_to_main_pulls_changes(
-        self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
-    ) -> None:
-        """Pull latest changes when push is to the default branch."""
+    @staticmethod
+    def _integration() -> MagicMock:
         integration = MagicMock()
         integration.sync_enabled = True
         integration.default_branch = "main"
         integration.last_sync_at = None
+        return integration
 
+    @pytest.mark.asyncio
+    async def test_push_to_main_runs_shared_sync(
+        self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
+    ) -> None:
+        """A default-branch push runs sync_github_project with the mirror credential."""
+        integration = self._integration()
         mock_db.execute.return_value = _scalar_result(integration)
-        mock_git_service.pull_branch = MagicMock()
 
-        with patch("ontokit.services.pull_request_service.settings") as mock_settings:
+        with (
+            patch("ontokit.services.pull_request_service.settings") as mock_settings,
+            patch(
+                "ontokit.services.pull_request_service.resolve_mirror_credential",
+                new=AsyncMock(return_value="tok"),
+            ),
+            patch(
+                "ontokit.services.pull_request_service.sync_github_project",
+                new=AsyncMock(return_value={"status": "pulled", "behind": 2}),
+            ) as sync,
+        ):
             mock_settings.github_mirror_outbound_only = False
             await service.handle_github_push_webhook(
                 PROJECT_ID,
@@ -1477,18 +1490,23 @@ class TestHandleGitHubPushWebhook:
                 commits=[],
             )
 
-        mock_git_service.pull_branch.assert_called_once_with(PROJECT_ID, "main", "origin")
-        mock_db.commit.assert_awaited()
+        sync.assert_awaited_once_with(
+            integration, "tok", mock_git_service, mock_db, outbound_only=False
+        )
 
     @pytest.mark.asyncio
     async def test_outbound_only_push_never_pulls_canonical_state(
-        self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
+        self, service: PullRequestService, mock_db: AsyncMock
     ) -> None:
-        integration = MagicMock(sync_enabled=True, default_branch="main")
-        mock_db.execute.return_value = _scalar_result(integration)
-        mock_git_service.pull_branch = MagicMock()
+        mock_db.execute.return_value = _scalar_result(self._integration())
 
-        with patch("ontokit.services.pull_request_service.settings") as mock_settings:
+        with (
+            patch("ontokit.services.pull_request_service.settings") as mock_settings,
+            patch(
+                "ontokit.services.pull_request_service.sync_github_project",
+                new=AsyncMock(),
+            ) as sync,
+        ):
             mock_settings.github_mirror_outbound_only = True
             await service.handle_github_push_webhook(
                 PROJECT_ID,
@@ -1496,7 +1514,7 @@ class TestHandleGitHubPushWebhook:
                 commits=[],
             )
 
-        mock_git_service.pull_branch.assert_not_called()
+        sync.assert_not_awaited()
         mock_db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1504,40 +1522,81 @@ class TestHandleGitHubPushWebhook:
         self, service: PullRequestService, mock_db: AsyncMock
     ) -> None:
         """Pushes to non-default branches are ignored."""
-        integration = MagicMock()
-        integration.sync_enabled = True
-        integration.default_branch = "main"
+        mock_db.execute.return_value = _scalar_result(self._integration())
 
-        mock_db.execute.return_value = _scalar_result(integration)
+        with patch(
+            "ontokit.services.pull_request_service.sync_github_project",
+            new=AsyncMock(),
+        ) as sync:
+            await service.handle_github_push_webhook(
+                PROJECT_ID,
+                ref="refs/heads/feature",
+                commits=[],
+            )
 
-        await service.handle_github_push_webhook(
-            PROJECT_ID,
-            ref="refs/heads/feature",
-            commits=[],
-        )
-
+        sync.assert_not_awaited()
         mock_db.commit.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_push_pull_failure_logged(
-        self, service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
+    async def test_missing_credential_logs_and_returns(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+        caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Git pull failure is caught and logged, not raised."""
-        integration = MagicMock()
-        integration.sync_enabled = True
-        integration.default_branch = "main"
+        mock_db.execute.return_value = _scalar_result(self._integration())
 
-        mock_db.execute.return_value = _scalar_result(integration)
-        mock_git_service.pull_branch = MagicMock(side_effect=RuntimeError("network error"))
+        with (
+            patch("ontokit.services.pull_request_service.settings") as mock_settings,
+            patch(
+                "ontokit.services.pull_request_service.resolve_mirror_credential",
+                new=AsyncMock(return_value=None),
+            ),
+            patch(
+                "ontokit.services.pull_request_service.sync_github_project",
+                new=AsyncMock(),
+            ) as sync,
+            caplog.at_level("WARNING", logger="ontokit.services.pull_request_service"),
+        ):
+            mock_settings.github_mirror_outbound_only = False
+            await service.handle_github_push_webhook(PROJECT_ID, "refs/heads/main", [])
 
-        await service.handle_github_push_webhook(
-            PROJECT_ID,
-            ref="refs/heads/main",
-            commits=[],
-        )
+        sync.assert_not_awaited()
+        assert "no mirror credential" in caplog.text
+        assert str(PROJECT_ID) in caplog.text
 
-        # Should not raise, just log
-        mock_db.commit.assert_not_awaited()
+    @pytest.mark.asyncio
+    async def test_push_sync_failure_logged(
+        self,
+        service: PullRequestService,
+        mock_db: AsyncMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A raising sync is caught and logged with project and branch, not raised."""
+        mock_db.execute.return_value = _scalar_result(self._integration())
+
+        with (
+            patch("ontokit.services.pull_request_service.settings") as mock_settings,
+            patch(
+                "ontokit.services.pull_request_service.resolve_mirror_credential",
+                new=AsyncMock(return_value="tok"),
+            ),
+            patch(
+                "ontokit.services.pull_request_service.sync_github_project",
+                new=AsyncMock(side_effect=RuntimeError("network error")),
+            ),
+            caplog.at_level("WARNING", logger="ontokit.services.pull_request_service"),
+        ):
+            mock_settings.github_mirror_outbound_only = False
+            await service.handle_github_push_webhook(
+                PROJECT_ID,
+                ref="refs/heads/main",
+                commits=[],
+            )
+
+        assert "GitHub push sync failed" in caplog.text
+        assert str(PROJECT_ID) in caplog.text
+        assert "branch main" in caplog.text
 
 
 # ---------------------------------------------------------------------------
