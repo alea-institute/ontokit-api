@@ -39,6 +39,16 @@ def _mock_pubsub(messages: list[Any]) -> tuple[AsyncMock, AsyncMock]:
     return mock_pool, mock_pubsub
 
 
+@pytest.fixture(autouse=True)
+def mock_periodic_authorization():
+    """Route tests isolate Redis forwarding; authorization is tested in ws_forward."""
+    with patch(
+        "ontokit.api.utils.ws_forward.project_reauthorizer",
+        return_value=AsyncMock(),
+    ):
+        yield
+
+
 class TestQualityWebSocketAuth:
     """Tests for quality_websocket authentication."""
 
@@ -137,4 +147,5 @@ class TestQualityWebSocketMessages:
         ):
             await quality_websocket(ws, PROJECT_UUID, token="t")
 
+        ws.close.assert_awaited_once_with(code=1011, reason="Internal server error")
         mock_pubsub.unsubscribe.assert_awaited()

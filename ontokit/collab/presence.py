@@ -78,7 +78,7 @@ class PresenceTracker:
 
         for room, users in list(self._rooms.items()):
             for user_id in list(users.keys()):
-                if self._last_seen.get(user_id, datetime.min) < cutoff:
+                if self._last_seen.get(user_id, datetime.min.replace(tzinfo=UTC)) < cutoff:
                     del users[user_id]
                     removed.append((room, user_id))
 

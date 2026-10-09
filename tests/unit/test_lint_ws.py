@@ -49,6 +49,16 @@ def _mock_pubsub(messages: list[Any]) -> tuple[AsyncMock, AsyncMock]:
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def mock_periodic_authorization():
+    """Route tests isolate Redis forwarding; authorization is tested in ws_forward."""
+    with patch(
+        "ontokit.api.utils.ws_forward.project_reauthorizer",
+        return_value=AsyncMock(),
+    ):
+        yield
+
+
 class TestLintWebSocketAuth:
     """Tests for lint_websocket authentication delegation."""
 
@@ -56,7 +66,7 @@ class TestLintWebSocketAuth:
     async def test_auth_failure_returns_early(self) -> None:
         """Returns without connecting when authenticate_ws returns False."""
         ws = AsyncMock(spec=WebSocket)
-        mock_mgr = AsyncMock()
+        mock_mgr = Mock(connect=AsyncMock(), disconnect=Mock())
 
         with (
             patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=False)),
@@ -77,7 +87,7 @@ class TestLintWebSocketMessages:
 
         lint_msg = {"type": "lint_complete", "project_id": PROJECT_ID, "run_id": "r1"}
         mock_pool, mock_pubsub = _mock_pubsub([lint_msg])
-        mock_mgr = AsyncMock()
+        mock_mgr = Mock(connect=AsyncMock(), disconnect=Mock())
 
         with (
             patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=True)),
@@ -102,7 +112,7 @@ class TestLintWebSocketMessages:
         with (
             patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=True)),
             patch("ontokit.api.routes.lint.get_arq_pool", return_value=mock_pool),
-            patch("ontokit.api.routes.lint.manager", AsyncMock()),
+            patch("ontokit.api.routes.lint.manager", Mock(connect=AsyncMock(), disconnect=Mock())),
         ):
             await lint_websocket(ws, PROJECT_UUID, token="t")
 
@@ -119,7 +129,7 @@ class TestLintWebSocketMessages:
         with (
             patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=True)),
             patch("ontokit.api.routes.lint.get_arq_pool", return_value=mock_pool),
-            patch("ontokit.api.routes.lint.manager", AsyncMock()),
+            patch("ontokit.api.routes.lint.manager", Mock(connect=AsyncMock(), disconnect=Mock())),
         ):
             await lint_websocket(ws, PROJECT_UUID, token="t")
 
@@ -133,7 +143,7 @@ class TestLintWebSocketMessages:
         mock_pubsub.get_message = AsyncMock(side_effect=RuntimeError("Redis down"))
         mock_pool = AsyncMock()
         mock_pool.pubsub = Mock(return_value=mock_pubsub)
-        mock_mgr = AsyncMock()
+        mock_mgr = Mock(connect=AsyncMock(), disconnect=Mock())
 
         with (
             patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=True)),
@@ -143,4 +153,18 @@ class TestLintWebSocketMessages:
             await lint_websocket(ws, PROJECT_UUID, token="t")
 
         mock_mgr.disconnect.assert_called_once()
+        ws.close.assert_awaited_once_with(code=1011, reason="Internal server error")
         mock_pubsub.unsubscribe.assert_awaited()
+
+
+async def test_manager_setup_error_closes_and_logs_traceback(caplog):
+    ws = AsyncMock(spec=WebSocket)
+    mock_mgr = Mock(connect=AsyncMock(side_effect=RuntimeError("setup failed")), disconnect=Mock())
+    with (
+        patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=True)),
+        patch("ontokit.api.routes.lint.manager", mock_mgr),
+    ):
+        await lint_websocket(ws, PROJECT_UUID, token="t")
+    ws.close.assert_awaited_once_with(code=1011, reason="Internal server error")
+    assert any(record.exc_info is not None for record in caplog.records)
+    mock_mgr.disconnect.assert_called_once()

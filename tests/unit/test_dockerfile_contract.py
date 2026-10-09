@@ -113,6 +113,15 @@ def test_dev_deploy_api_healthcheck_allows_migration_time() -> None:
     assert int(wait.group(1)) > start_period
 
 
+def test_local_compose_api_healthcheck_matches_deploy_migration_time() -> None:
+    """Local API startup gets the same 180s migration grace period as deploy."""
+    local_api = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]["api"]
+    deploy_api = yaml.safe_load(COMPOSE_DEV.read_text(encoding="utf-8"))["services"]["api"]
+
+    assert _duration_seconds(local_api["healthcheck"]["start_period"]) == 180
+    assert local_api["healthcheck"]["start_period"] == deploy_api["healthcheck"]["start_period"]
+
+
 def test_local_compose_worker_defers_migrations_to_healthy_api() -> None:
     services = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))["services"]
 
