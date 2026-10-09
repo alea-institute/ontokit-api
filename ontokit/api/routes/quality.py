@@ -9,7 +9,7 @@ from uuid import UUID
 
 import pydantic
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from starlette.responses import Response
@@ -358,53 +358,18 @@ async def quality_websocket(
     - Duplicate detection starts / completes / fails
 
     Messages are JSON objects with a "type" field indicating the event type.
-    Pass ``token`` as a query parameter for authentication.
+    Authenticate using the bearer subprotocol or the legacy ``token`` query parameter.
     """
-    import asyncio
-    import contextlib
-
     from ontokit.api.utils.ws_auth import authenticate_ws
-
-    project_id_str = str(project_id)
+    from ontokit.api.utils.ws_forward import forward_project_events, project_reauthorizer
 
     if not await authenticate_ws(websocket, project_id, token):
         return
 
-    pubsub = None
-    try:
-        pool = await get_arq_pool()
-        pubsub = pool.pubsub()
-        await pubsub.subscribe(QUALITY_UPDATES_CHANNEL)
-
-        # TODO: Replace this 0.1s poll loop with concurrent coroutines
-        # (blocking Redis listener + blocking WS receive) when tackling #78
-        # (per-project Redis pubsub channels). The lint WS uses the same
-        # pattern and both should be refactored together.
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
-            if message and message["type"] == "message":
-                try:
-                    data = json.loads(message["data"])
-                    if data.get("project_id") == project_id_str:
-                        await websocket.send_json(data)
-                except json.JSONDecodeError:
-                    pass
-
-            # Check for WebSocket messages (keepalive/close)
-            try:
-                await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
-            except TimeoutError:
-                pass
-            except WebSocketDisconnect:
-                break
-
-    except WebSocketDisconnect:
-        pass
-    except Exception as e:
-        logger.error("Quality WebSocket error for project %s: %s", project_id, e)
-    finally:
-        if pubsub:
-            with contextlib.suppress(Exception):
-                await pubsub.unsubscribe(QUALITY_UPDATES_CHANNEL)
-            with contextlib.suppress(Exception):
-                await pubsub.aclose()  # type: ignore[no-untyped-call]
+    await forward_project_events(
+        websocket,
+        QUALITY_UPDATES_CHANNEL,
+        project_id,
+        project_reauthorizer(websocket, project_id),
+        pool_factory=get_arq_pool,
+    )

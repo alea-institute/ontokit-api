@@ -1,8 +1,6 @@
 """Lint API endpoints for ontology health checking."""
 
-import asyncio
 import contextlib
-import json
 import logging
 from datetime import UTC, datetime
 from typing import Annotated, cast
@@ -732,61 +730,29 @@ async def lint_websocket(
     - Lint run fails
 
     Messages are JSON objects with a "type" field indicating the event type.
-    Pass ``token`` as a query parameter for authentication.
+    Authenticate using the bearer subprotocol or the legacy ``token`` query parameter.
     """
     from ontokit.api.utils.ws_auth import authenticate_ws
-
-    project_id_str = str(project_id)
+    from ontokit.api.utils.ws_forward import forward_project_events, project_reauthorizer
 
     if not await authenticate_ws(websocket, project_id, token):
         return
 
-    await manager.connect(websocket, project_id_str)
-
-    pubsub = None
+    project_id_str = str(project_id)
     try:
-        # Subscribe to Redis pubsub for lint updates
-        pool = await get_arq_pool()
-        pubsub = pool.pubsub()
-        await pubsub.subscribe(LINT_UPDATES_CHANNEL)
-
-        # Keep connection alive and forward relevant messages
-        while True:
-            # Check for Redis messages (non-blocking with short timeout)
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
-            if message and message["type"] == "message":
-                try:
-                    data = json.loads(message["data"])
-                    # Only forward messages for this project
-                    if data.get("project_id") == project_id_str:
-                        await websocket.send_json(data)
-                except json.JSONDecodeError:
-                    pass
-
-            # Check for WebSocket messages with timeout (keepalive/close)
-            try:
-                await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
-            except TimeoutError:
-                # No message received, continue loop
-                pass
-            except WebSocketDisconnect:
-                break
-
+        await manager.connect(websocket, project_id_str)
+        await forward_project_events(
+            websocket,
+            LINT_UPDATES_CHANNEL,
+            project_id,
+            project_reauthorizer(websocket, project_id),
+            pool_factory=get_arq_pool,
+        )
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        logger.exception(f"WebSocket error for project {project_id_str}: {e}")
+    except Exception:
+        logger.exception("WebSocket setup error for project %s", project_id_str)
         with contextlib.suppress(Exception):
             await websocket.close(code=1011, reason="Internal server error")
     finally:
         manager.disconnect(websocket, project_id_str)
-        if pubsub:
-            with contextlib.suppress(Exception):
-                await pubsub.unsubscribe(LINT_UPDATES_CHANNEL)
-            # aclose() can hang on a half-open connection; bound it so a stuck
-            # Redis socket does not leak the request task.
-            with contextlib.suppress(Exception, TimeoutError):
-                await asyncio.wait_for(
-                    pubsub.aclose(),  # type: ignore[no-untyped-call]
-                    timeout=5.0,
-                )

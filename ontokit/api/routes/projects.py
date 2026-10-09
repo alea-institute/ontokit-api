@@ -1,8 +1,6 @@
 """Project management endpoints."""
 
-import asyncio
 import contextlib
-import json
 import logging
 from typing import Annotated
 from uuid import UUID
@@ -1782,51 +1780,29 @@ async def ontology_index_websocket(
     Forwards index_started, index_complete, and index_failed events
     from the background worker to connected clients.
 
-    Pass ``token`` as a query parameter for authentication (WebSocket
-    connections cannot use HTTP Authorization headers from browsers).
+    Authenticate using the bearer subprotocol or the legacy ``token`` query parameter.
     """
     from ontokit.api.utils.ws_auth import authenticate_ws
-
-    project_id_str = str(project_id)
+    from ontokit.api.utils.ws_forward import forward_project_events, project_reauthorizer
 
     if not await authenticate_ws(websocket, project_id, token):
         return
 
-    await index_ws_manager.connect(websocket, project_id_str)
-
-    pubsub = None
+    project_id_str = str(project_id)
     try:
-        pool = await get_arq_pool()
-        pubsub = pool.pubsub()
-        await pubsub.subscribe(ONTOLOGY_INDEX_UPDATES_CHANNEL)
-
-        while True:
-            message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=0.1)
-            if message and message["type"] == "message":
-                try:
-                    data = json.loads(message["data"])
-                    if data.get("project_id") == project_id_str:
-                        await websocket.send_json(data)
-                except json.JSONDecodeError:
-                    pass
-
-            try:
-                await asyncio.wait_for(websocket.receive_text(), timeout=0.1)
-            except TimeoutError:
-                pass
-            except WebSocketDisconnect:
-                break
-
+        await index_ws_manager.connect(websocket, project_id_str)
+        await forward_project_events(
+            websocket,
+            ONTOLOGY_INDEX_UPDATES_CHANNEL,
+            project_id,
+            project_reauthorizer(websocket, project_id),
+            pool_factory=get_arq_pool,
+        )
     except WebSocketDisconnect:
         pass
-    except Exception as e:
-        logger.exception(f"Index WebSocket error for project {project_id_str}: {e}")
+    except Exception:
+        logger.exception("WebSocket setup error for project %s", project_id_str)
         with contextlib.suppress(Exception):
             await websocket.close(code=1011, reason="Internal server error")
     finally:
         index_ws_manager.disconnect(websocket, project_id_str)
-        if pubsub:
-            with contextlib.suppress(Exception):
-                await pubsub.unsubscribe(ONTOLOGY_INDEX_UPDATES_CHANNEL)
-            with contextlib.suppress(Exception):
-                await pubsub.aclose()  # type: ignore[no-untyped-call]

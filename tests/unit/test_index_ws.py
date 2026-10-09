@@ -25,6 +25,16 @@ PROJECT_UUID = UUID(PROJECT_ID)
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def mock_periodic_authorization():
+    """Route tests isolate Redis forwarding; authorization is tested in ws_forward."""
+    with patch(
+        "ontokit.api.utils.ws_forward.project_reauthorizer",
+        return_value=AsyncMock(),
+    ):
+        yield
+
+
 class TestIndexConnectionManager:
     """Tests for IndexConnectionManager connect/disconnect."""
 
@@ -113,7 +123,7 @@ class TestOntologyIndexWebSocketUnit:
         """Returns without connecting when authenticate_ws returns False."""
         ws = AsyncMock(spec=WebSocket)
         mock_auth = AsyncMock(return_value=False)
-        mock_mgr = AsyncMock()
+        mock_mgr = Mock(connect=AsyncMock(), disconnect=Mock())
 
         with (
             patch("ontokit.api.utils.ws_auth.authenticate_ws", mock_auth),
@@ -130,7 +140,7 @@ class TestOntologyIndexWebSocketUnit:
 
         index_msg = {"type": "index_complete", "project_id": PROJECT_ID, "entity_count": 100}
         mock_pool, mock_pubsub = _mock_pubsub([index_msg])
-        mock_mgr = AsyncMock()
+        mock_mgr = Mock(connect=AsyncMock(), disconnect=Mock())
 
         with (
             patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=True)),
@@ -155,7 +165,10 @@ class TestOntologyIndexWebSocketUnit:
         with (
             patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=True)),
             patch("ontokit.api.routes.projects.get_arq_pool", return_value=mock_pool),
-            patch("ontokit.api.routes.projects.index_ws_manager", AsyncMock()),
+            patch(
+                "ontokit.api.routes.projects.index_ws_manager",
+                Mock(connect=AsyncMock(), disconnect=Mock()),
+            ),
         ):
             await ontology_index_websocket(ws, PROJECT_UUID, token="t")
 
@@ -172,7 +185,10 @@ class TestOntologyIndexWebSocketUnit:
         with (
             patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=True)),
             patch("ontokit.api.routes.projects.get_arq_pool", return_value=mock_pool),
-            patch("ontokit.api.routes.projects.index_ws_manager", AsyncMock()),
+            patch(
+                "ontokit.api.routes.projects.index_ws_manager",
+                Mock(connect=AsyncMock(), disconnect=Mock()),
+            ),
         ):
             await ontology_index_websocket(ws, PROJECT_UUID, token="t")
 
@@ -186,7 +202,7 @@ class TestOntologyIndexWebSocketUnit:
         mock_pubsub.get_message = AsyncMock(side_effect=RuntimeError("Redis down"))
         mock_pool = AsyncMock()
         mock_pool.pubsub = Mock(return_value=mock_pubsub)
-        mock_mgr = AsyncMock()
+        mock_mgr = Mock(connect=AsyncMock(), disconnect=Mock())
 
         with (
             patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=True)),
@@ -196,4 +212,18 @@ class TestOntologyIndexWebSocketUnit:
             await ontology_index_websocket(ws, PROJECT_UUID, token="t")
 
         mock_mgr.disconnect.assert_called_once()
+        ws.close.assert_awaited_once_with(code=1011, reason="Internal server error")
         mock_pubsub.unsubscribe.assert_awaited()
+
+
+async def test_manager_setup_error_closes_and_logs_traceback(caplog):
+    ws = AsyncMock(spec=WebSocket)
+    mock_mgr = Mock(connect=AsyncMock(side_effect=RuntimeError("setup failed")), disconnect=Mock())
+    with (
+        patch("ontokit.api.utils.ws_auth.authenticate_ws", AsyncMock(return_value=True)),
+        patch("ontokit.api.routes.projects.index_ws_manager", mock_mgr),
+    ):
+        await ontology_index_websocket(ws, PROJECT_UUID, token="t")
+    ws.close.assert_awaited_once_with(code=1011, reason="Internal server error")
+    assert any(record.exc_info is not None for record in caplog.records)
+    mock_mgr.disconnect.assert_called_once()
