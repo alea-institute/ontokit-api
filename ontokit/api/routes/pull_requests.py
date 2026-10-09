@@ -13,9 +13,6 @@ from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
 from ontokit.schemas.pull_request import (
-    BranchCreate,
-    BranchInfo,
-    BranchListResponse,
     CommentCreate,
     CommentListResponse,
     CommentResponse,
@@ -390,60 +387,6 @@ async def get_pr_diff(
     Shows which files were added, modified, or deleted.
     """
     return await service.get_pr_diff(project_id, pr_number, user)
-
-
-# Branch Endpoints
-
-
-@router.get("/{project_id}/branches", response_model=BranchListResponse)
-async def list_branches(
-    project_id: UUID,
-    service: Annotated[PullRequestService, Depends(get_service)],
-    user: OptionalUser,
-) -> BranchListResponse:
-    """
-    List branches for a project.
-
-    Returns all branches with their current commit and ahead/behind counts.
-    """
-    return await service.list_branches(project_id, user)
-
-
-@router.post(
-    "/{project_id}/branches",
-    response_model=BranchInfo,
-    status_code=status.HTTP_201_CREATED,
-)
-async def create_branch(
-    project_id: UUID,
-    branch: BranchCreate,
-    service: Annotated[PullRequestService, Depends(get_service)],
-    user: RequiredUser,
-) -> BranchInfo:
-    """
-    Create a new branch.
-
-    - Editors and above can create branches
-    - Branch names must match pattern: letters, numbers, underscores, hyphens, slashes
-    - Optionally specify a base branch (defaults to current branch)
-    """
-    return await service.create_branch(project_id, branch, user)
-
-
-@router.post("/{project_id}/branches/{branch_name}/checkout", response_model=BranchInfo)
-async def switch_branch(
-    project_id: UUID,
-    branch_name: str,
-    service: Annotated[PullRequestService, Depends(get_service)],
-    user: RequiredUser,
-) -> BranchInfo:
-    """
-    Switch to a different branch.
-
-    - Editors and above can switch branches
-    - The working directory will be updated to reflect the branch contents
-    """
-    return await service.switch_branch(project_id, branch_name, user)
 
 
 # GitHub Integration Endpoints

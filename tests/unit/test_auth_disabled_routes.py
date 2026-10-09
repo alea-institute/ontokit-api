@@ -17,6 +17,7 @@ from ontokit.api.routes.normalization import get_service as get_normalization_pr
 from ontokit.api.routes.projects import get_service as get_project_service
 from ontokit.core.auth import ANONYMOUS_USER, get_current_user, get_current_user_with_token
 from ontokit.main import app
+from tests.unit.test_route_uniqueness import build_pr_party_app
 
 PROJECT_ID = "11111111-1111-1111-1111-111111111111"
 DETAIL = (
@@ -59,6 +60,11 @@ DISABLED_WRITE_ALLOWLIST = {
     ("POST", "/api/v1/auth/device/token"): "Auth endpoint exchanges device code for tokens",
     ("POST", "/api/v1/auth/token/refresh"): "Auth endpoint refreshes tokens",
 }
+# PR Party mounts only with authentication and a reviewer registry, so these
+# exceptions apply to the PR Party-enabled app alone.
+PR_PARTY_WRITE_ALLOWLIST = {
+    ("POST", "/api/v1/pr-party/webhooks/github"): "HMAC-signature-authenticated org webhook",
+}
 
 
 def _requires_user(dependency: Dependant) -> bool:
@@ -67,13 +73,13 @@ def _requires_user(dependency: Dependant) -> bool:
     )
 
 
-def _all_write_routes() -> list[tuple[Any, str]]:
+def _all_write_routes(target: Any = app) -> list[tuple[Any, str]]:
     # Newer FastAPI versions keep included routers lazy; their public iterator
     # resolves the same route/dependency tree with the full mounted path.
     iterator = getattr(routing, "iter_route_contexts", iter)
     cases = [
         (route, method)
-        for route in iterator(app.routes)
+        for route in iterator(target.routes)
         if isinstance(getattr(route, "original_route", route), APIRoute)
         for method in sorted(route.methods - SAFE_METHODS)
     ]
@@ -90,9 +96,29 @@ def _write_routes() -> list[tuple[Any, str]]:
 
 
 def test_disabled_mode_write_inventory_is_exhaustive() -> None:
-    routes = _all_write_routes()
+    _assert_write_inventory_exhaustive(app, DISABLED_WRITE_ALLOWLIST)
+
+
+def test_disabled_mode_write_inventory_covers_pr_party_routes() -> None:
+    """PR Party routes mount only when enabled, so the default app never sees them."""
+    pr_party_app = build_pr_party_app()
+    mounted = {(method, route.path) for route, method in _all_write_routes(pr_party_app)}
+    assert any("/pr-party/" in path for _, path in mounted), "PR Party must be mounted"
+    _assert_write_inventory_exhaustive(
+        pr_party_app, {**DISABLED_WRITE_ALLOWLIST, **PR_PARTY_WRITE_ALLOWLIST}
+    )
+
+
+def test_pr_party_inventory_flags_an_ungated_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delitem(PR_PARTY_WRITE_ALLOWLIST, ("POST", "/api/v1/pr-party/webhooks/github"))
+    with pytest.raises(AssertionError, match="Writes without a disabled-mode gate"):
+        test_disabled_mode_write_inventory_covers_pr_party_routes()
+
+
+def _assert_write_inventory_exhaustive(target: Any, allowlist: dict[tuple[str, str], str]) -> None:
+    routes = _all_write_routes(target)
     mounted = {(method, route.path) for route, method in routes}
-    assert DISABLED_WRITE_ALLOWLIST.keys() <= mounted, "Remove unmounted allowlist entries"
+    assert allowlist.keys() <= mounted, "Remove unmounted allowlist entries"
     # OptionalUser refresh has an explicit handler gate, covered behaviorally below.
     explicitly_gated = ("POST", "/api/v1/projects/{project_id}/normalization/refresh")
     assert explicitly_gated in mounted
@@ -101,7 +127,7 @@ def test_disabled_mode_write_inventory_is_exhaustive() -> None:
         for route, method in routes
         if not _requires_user(route.dependant)
         and (method, route.path) != explicitly_gated
-        and (method, route.path) not in DISABLED_WRITE_ALLOWLIST
+        and (method, route.path) not in allowlist
     }
     assert not uncovered, (
         f"Writes without a disabled-mode gate or documented exception: {uncovered}"
