@@ -15,9 +15,9 @@ Mandate: make the OntoKit API ready for FOLIO and Catholic OS work and the
 
 | PR | Content | State |
 |---|---|---|
-| #69 | mako 1.4.3 and virtualenv 21.14.11: clears 5 OSV advisories (3 High) that turned every `dev` push red | see GitHub |
-| #70 | Dormant image-based DEV deploy: lockfile-pinned `Dockerfile.prod`, schema 2 manifest, `deploy-images` forced-command verb, CI job for `deploy/tests` | see GitHub |
-| #71 | AWS migration readiness that needs no account access, plus this handoff | see GitHub |
+| #69 | mako 1.4.3 and virtualenv 21.14.11: clears 5 OSV advisories (3 High) that turned every `dev` push red | merged 2026-10-20 (`49ff0be`), CI green |
+| #70 | Dormant image-based DEV deploy: lockfile-pinned `Dockerfile.prod`, schema 2 manifest, `deploy-images` forced-command verb, CI job for `deploy/tests` | merged 2026-10-20 (`38fc130`), CI green including the prod-image smoke test |
+| #71 | AWS migration readiness that needs no account access, plus this handoff | merged after CI, which runs the Docker round-trip test |
 
 ## Receipts
 
