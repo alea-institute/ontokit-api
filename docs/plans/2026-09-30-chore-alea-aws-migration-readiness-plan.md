@@ -23,6 +23,14 @@ ALEA-controlled AWS account. This supersedes the earlier idea of a scoped IAM ke
 in another account; the target is an ALEA-owned account. It still does not by
 itself grant access, approve a budget, or schedule the cutover.
 
+Update, 2026-10-20 (sweep `sweep-2026-10-20`): the steps that need no AWS
+access are done in `deploy/MIGRATION.md`: a service, volume, port, variable and
+host-file inventory that a test keeps in sync with `deploy/compose.dev.yaml`,
+`deploy/backup-dev.sh` and `deploy/restore-dev.sh` with a CI round-trip test,
+and the rehearsal, cutover and return procedure. Unit 1 and everything from
+unit 2's EU backup run onward still wait on access, budget and a staging
+hostname.
+
 ## Planning Contract
 
 Read-only cached evidence: `44b6dfd3:deploy/RUNBOOK.md` records the EU CPX32 move
