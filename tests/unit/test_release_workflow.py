@@ -102,7 +102,12 @@ def test_dev_publication_is_push_only_and_preserves_tag_releases() -> None:
             "github.event_name == 'push' && "
             "startsWith(github.event.ref, 'refs/tags/ontokit-')"
         )
-    assert set(jobs["publish_docker"]["needs"]) == {"lint", "test", "docker_preflight"}
+    assert set(jobs["publish_docker"]["needs"]) == {
+        "lint",
+        "test",
+        "docker_preflight",
+        "deploy_contract",
+    }
     assert jobs["publish_docker"]["permissions"] == {"contents": "read", "packages": "write"}
 
 
@@ -124,3 +129,111 @@ def test_dev_image_has_full_revision_and_cannot_replace_latest() -> None:
     assert receipt["env"]["IMAGE_DIGEST"] == "${{ steps.publish.outputs.digest }}"
     assert receipt["env"]["SOURCE_REVISION"] == "${{ github.sha }}"
     assert "$GITHUB_STEP_SUMMARY" in receipt["run"]
+
+
+def _run_dev_deploy_step(tmp_path: Path, outputs: dict[str, str]) -> tuple[int, str]:
+    """Run the real deploy step with ssh replaced by a stub that records its command."""
+    workflow_path = Path(__file__).parents[2] / ".github" / "workflows" / "deploy-dev.yml"
+    workflow = yaml.safe_load(workflow_path.read_text())
+    step = next(
+        step
+        for step in workflow["jobs"]["deploy"]["steps"]
+        if step["name"] == "Deploy approved pair"
+    )
+    assert step["env"] == {
+        name: f"${{{{ steps.pair.outputs.{output} }}}}"
+        for name, output in (
+            ("SCHEMA_VERSION", "schema_version"),
+            ("API_SHA", "api_sha"),
+            ("WEB_SHA", "web_sha"),
+            ("API_DIGEST", "api_digest"),
+            ("WEB_DIGEST", "web_digest"),
+        )
+    }
+    record = tmp_path / "ssh-command"
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    ssh = stub_dir / "ssh"
+    ssh.write_text(f'#!/bin/sh\nfor arg; do last=$arg; done\nprintf %s "$last" >"{record}"\n')
+    ssh.chmod(0o755)
+    env = {
+        **os.environ,
+        "PATH": f"{stub_dir}{os.pathsep}{os.environ['PATH']}",
+        "DEPLOY_HOST": "dev.example.org",
+        "DEPLOY_KEY_FILE": str(tmp_path / "key"),
+        "DEPLOY_KNOWN_HOSTS_FILE": str(tmp_path / "known_hosts"),
+        **outputs,
+    }
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result.returncode, record.read_text() if record.exists() else ""
+
+
+DEPLOY_OUTPUTS = {
+    "API_SHA": "a" * 40,
+    "WEB_SHA": "b" * 40,
+    "API_DIGEST": "sha256:" + "c" * 64,
+    "WEB_DIGEST": "sha256:" + "d" * 64,
+}
+
+
+def test_dev_deploy_schema1_requests_a_source_build(tmp_path: Path) -> None:
+    code, command = _run_dev_deploy_step(
+        tmp_path, {**DEPLOY_OUTPUTS, "SCHEMA_VERSION": "1", "API_DIGEST": "", "WEB_DIGEST": ""}
+    )
+    assert code == 0
+    assert command == f"deploy {'a' * 40} {'b' * 40}"
+
+
+def test_dev_deploy_schema2_requests_the_published_digests(tmp_path: Path) -> None:
+    code, command = _run_dev_deploy_step(tmp_path, {**DEPLOY_OUTPUTS, "SCHEMA_VERSION": "2"})
+    assert code == 0
+    assert command == f"deploy-images {'a' * 40} {'b' * 40} sha256:{'c' * 64} sha256:{'d' * 64}"
+
+
+def test_dev_deploy_refuses_unknown_schema(tmp_path: Path) -> None:
+    code, command = _run_dev_deploy_step(tmp_path, {**DEPLOY_OUTPUTS, "SCHEMA_VERSION": "3"})
+    assert code != 0
+    assert command == ""
+
+
+def test_prod_promotion_accepts_only_source_manifests() -> None:
+    workflow_path = Path(__file__).parents[2] / ".github" / "workflows" / "promote-prod.yml"
+    steps = yaml.safe_load(workflow_path.read_text())["jobs"]["validate-release"]["steps"]
+    validation = next(step for step in steps if step.get("id") == "release")
+    # Validation must accept schema 2, or DEV smoke tests stop running for image deploys.
+    assert "--require-schema" not in validation["run"]
+    promote = yaml.safe_load(workflow_path.read_text())["jobs"]["promote"]
+    assert promote["env"]["SCHEMA_VERSION"] == "${{ needs.validate-release.outputs.schema_version }}"
+    guard = promote["steps"][0]
+    assert guard["name"] == "Require a source-build release"
+    for schema, expected in (("1", 0), ("2", 1)):
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", guard["run"]],
+            env={**os.environ, "SCHEMA_VERSION": schema},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == expected, schema
+
+
+def test_published_image_is_smoke_tested_and_deploy_contract_runs() -> None:
+    workflow_path = Path(__file__).parents[2] / ".github" / "workflows" / "release.yml"
+    jobs = yaml.safe_load(workflow_path.read_text())["jobs"]
+    preflight = jobs["docker_preflight"]["steps"]
+    prod_build = next(
+        step
+        for step in preflight
+        if str(step.get("uses", "")).startswith("docker/build-push-action@")
+        and step["with"]["file"] == "Dockerfile.prod"
+    )
+    assert prod_build["with"]["load"] is True
+    smoke_runs = [step.get("run", "") for step in preflight]
+    assert f"bash scripts/smoke-runtime-image.sh {prod_build['with']['tags']}" in smoke_runs
+    assert "deploy/tests/*.sh" in jobs["deploy_contract"]["steps"][-1]["run"]

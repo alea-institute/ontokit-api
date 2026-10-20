@@ -1,0 +1,19 @@
+# Image-based DEV overlay for deploy/compose.dev.yaml (installed on the host as
+# /opt/ontokit/compose.images.yaml). `ontokit-deploy deploy-images` applies it so
+# api, worker and web run the registry digests CI published, instead of images
+# built on the host. The forced command exports both variables from a validated
+# schema 2 release; never set them by hand to a tag.
+services:
+  api:
+    build: !reset null
+    image: ${ONTOKIT_API_IMAGE:?ONTOKIT_API_IMAGE must be a pinned image digest}
+    # Dockerfile.prod defaults to four workers; DEV keeps the single process its
+    # 2g memory limit was sized for, without the development image's --reload.
+    command: ["uvicorn", "ontokit.main:app", "--host", "0.0.0.0", "--port", "8000"]
+
+  worker:
+    image: ${ONTOKIT_API_IMAGE:?ONTOKIT_API_IMAGE must be a pinned image digest}
+
+  web:
+    build: !reset null
+    image: ${ONTOKIT_WEB_IMAGE:?ONTOKIT_WEB_IMAGE must be a pinned image digest}

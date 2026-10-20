@@ -104,16 +104,25 @@ jobs:
 
       - name: Deploy approved pair
         env:
+          SCHEMA_VERSION: ${{ steps.pair.outputs.schema_version }}
           API_SHA: ${{ steps.pair.outputs.api_sha }}
           WEB_SHA: ${{ steps.pair.outputs.web_sha }}
+          API_DIGEST: ${{ steps.pair.outputs.api_digest }}
+          WEB_DIGEST: ${{ steps.pair.outputs.web_digest }}
         run: |
           set -euo pipefail
+          # Schema 1 builds the pair on the host; schema 2 runs the published digests.
+          case "$SCHEMA_VERSION" in
+            1) request="deploy $API_SHA $WEB_SHA" ;;
+            2) request="deploy-images $API_SHA $WEB_SHA $API_DIGEST $WEB_DIGEST" ;;
+            *) echo "Unsupported release manifest schema: $SCHEMA_VERSION" >&2; exit 1 ;;
+          esac
           ssh \
             -i "$DEPLOY_KEY_FILE" \
             -o "UserKnownHostsFile=$DEPLOY_KNOWN_HOSTS_FILE" \
             -o StrictHostKeyChecking=yes \
             "root@$DEPLOY_HOST" \
-            "deploy $API_SHA $WEB_SHA"
+            "$request"
 
       - name: Remove SSH credentials
         if: always()
