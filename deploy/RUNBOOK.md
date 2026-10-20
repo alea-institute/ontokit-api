@@ -152,8 +152,9 @@ Rebuilding both images keeps the deployed pair internally consistent.
 
 CI publishes `ghcr.io/alea-institute/ontokit@sha256:<digest>` on every `dev` push
 (Distribution, `publish_docker`; the job summary records the digest and source SHA).
-`Dockerfile.prod` installs the exact `uv.lock` set and CI smoke-tests it before
-publication. A schema 2 `deploy/release-manifest.json` adds `api_image` and
+`Dockerfile.prod` installs the exact `uv.lock` set. Before publication, CI
+smoke-tests a build of the same Dockerfile and commit; `publish_docker` then
+rebuilds it from the shared layer cache. A schema 2 `deploy/release-manifest.json` adds `api_image` and
 `web_image`, each a `ghcr.io/alea-institute/<ontokit|ontokit-web>@sha256:<64 hex>`
 reference; `deploy/validate_release_manifest.py` refuses tags, other registries and
 half pairs. For schema 2, `deploy-dev.yml` sends the forced command

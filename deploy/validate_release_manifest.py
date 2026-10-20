@@ -73,8 +73,8 @@ def validate(
     allowed_schemas: tuple[int, ...] = SUPPORTED_SCHEMAS,
 ) -> dict[str, str]:
     schema = manifest.get("schema_version")
-    # bool is an int subclass; a JSON true must not pass as schema 1.
-    if isinstance(schema, bool) or schema not in allowed_schemas:
+    # Exact ints only: JSON true and 1.0 compare equal to 1 but are not schema 1.
+    if type(schema) is not int or schema not in allowed_schemas:
         allowed = " or ".join(str(version) for version in allowed_schemas)
         _refuse(f"release manifest schema_version must be {allowed}")
     expected_keys = EXPECTED_KEYS | IMAGE_KEYS if schema == 2 else EXPECTED_KEYS

@@ -183,7 +183,7 @@ jobs:
 
   publish_docker:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/dev' || startsWith(github.ref, 'refs/tags/ontokit-'))
-    needs: [lint, test, docker_preflight]
+    needs: [lint, test, docker_preflight, deploy_contract]
     runs-on: ubuntu-latest
     permissions:
       contents: read

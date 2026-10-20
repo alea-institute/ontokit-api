@@ -106,7 +106,7 @@ def test_schema2_refuses_non_string_image() -> None:
     _refused(manifest)
 
 
-@pytest.mark.parametrize("schema", [0, 3, "2", True, None])
+@pytest.mark.parametrize("schema", [0, 3, "2", True, None, 1.0, 2.0])
 def test_unknown_schema_versions_are_refused(schema: object) -> None:
     manifest = _schema2()
     manifest["schema_version"] = schema

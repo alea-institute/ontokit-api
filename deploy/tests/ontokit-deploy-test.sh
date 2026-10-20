@@ -583,6 +583,41 @@ test_deploy_images_refuses_env_image_override() (
     pass 'deploy-images refuses an .env that overrides the validated images'
 )
 
+test_legacy_host_image_retry_keeps_original_rollback() (
+    local call_log="$TMP_ROOT/legacy-retry.log" checkout=old
+
+    # shellcheck source=../ontokit-deploy.sh
+    source "$TEST_SCRIPT"
+    rm -f -- "$PREVIOUS_FILE" "$CURRENT_FILE"
+    stub_image_deploy "$call_log"
+    # No .deploy-current: the record falls back to checkouts, which the failed
+    # attempt moves to the target.
+    repo_sha() {
+        case "$checkout:$1" in
+            old:*ontokit-api) printf '%s\n' "$OLD_API_SHA" ;;
+            old:*) printf '%s\n' "$OLD_WEB_SHA" ;;
+            new:*ontokit-api) printf '%s\n' "$API_SHA" ;;
+            new:*) printf '%s\n' "$WEB_SHA" ;;
+        esac
+    }
+    verify_runtime_pair() { return 1; }
+
+    if deploy_images "$API_SHA" "$WEB_SHA" "$API_DIGEST" "$WEB_DIGEST" >/dev/null 2>&1; then
+        fail 'unhealthy first image deploy reported success'
+        return
+    fi
+    checkout=new
+    if deploy_images "$API_SHA" "$WEB_SHA" "$API_DIGEST" "$WEB_DIGEST" >/dev/null 2>&1; then
+        fail 'unhealthy retry reported success'
+        return
+    fi
+    [[ $(<"$PREVIOUS_FILE") == "$OLD_API_SHA $OLD_WEB_SHA" ]] || {
+        fail "legacy retry replaced the rollback target with: $(<"$PREVIOUS_FILE")"
+        return
+    }
+    pass 'a retried image deploy on a legacy host keeps the original rollback target'
+)
+
 prepare_test_script
 failures=0
 test_invalid_config_refuses_before_checkout || failures=$((failures + 1))
@@ -602,4 +637,5 @@ test_deploy_images_requires_overlay || failures=$((failures + 1))
 test_new_deploy_after_failure_keeps_accepted_rollback || failures=$((failures + 1))
 test_rollback_follows_recorded_mode || failures=$((failures + 1))
 test_deploy_images_refuses_env_image_override || failures=$((failures + 1))
+test_legacy_host_image_retry_keeps_original_rollback || failures=$((failures + 1))
 exit "$failures"

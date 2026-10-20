@@ -20,6 +20,8 @@ readonly DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
 LOG_VERB=refused
 LOG_API_SHA=-
 LOG_WEB_SHA=-
+LOG_API_DIGEST=-
+LOG_WEB_DIGEST=-
 EFFECTIVE_AUTH_MODE=
 # Source deploys use compose.yaml alone; image deploys add the image overlay.
 COMPOSE_ARGS=(--project-directory "$DEPLOY_ROOT")
@@ -32,9 +34,10 @@ log_outcome() {
         outcome="failure($exit_status)"
     fi
 
-    printf '%s verb=%s api=%s web=%s outcome=%s\n' \
+    printf '%s verb=%s api=%s web=%s api_digest=%s web_digest=%s outcome=%s\n' \
         "$(date --utc '+%Y-%m-%dT%H:%M:%SZ')" \
-        "$LOG_VERB" "$LOG_API_SHA" "$LOG_WEB_SHA" "$outcome" >>"$LOG_FILE"
+        "$LOG_VERB" "$LOG_API_SHA" "$LOG_WEB_SHA" "$LOG_API_DIGEST" "$LOG_WEB_DIGEST" \
+        "$outcome" >>"$LOG_FILE"
 }
 
 refuse() {
@@ -110,8 +113,7 @@ running_image_revision() {
         printf 'unable to read %s revision: container image is missing\n' "$service" >&2
         return 1
     }
-    revision=$(docker image inspect --format \
-        '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$image_id") || {
+    revision=$(image_revision "$image_id") || {
         printf 'unable to read %s revision: image inspection failed\n' "$service" >&2
         return 1
     }
@@ -310,12 +312,17 @@ current_release_record() {
 
 record_previous_pair() {
     local target_record=$*
-    local current_record
+    local current_record same_release=$target_record
 
     current_record=$(current_release_record) || return
+    # Without .deploy-current the fallback knows only the checked-out SHAs, which a
+    # failed attempt has already moved to the target: compare SHAs alone there.
+    if [[ ! -r $CURRENT_FILE ]]; then
+        same_release=${target_record%% sha256:*}
+    fi
     # A rebuild/retry of the current release must retain the older rollback target.
     # This also preserves that target after a failed attempt moved both checkouts.
-    if [[ $current_record == "$target_record" ]]; then
+    if [[ $current_record == "$same_release" ]]; then
         return 0
     fi
     write_release_record "$PREVIOUS_FILE" "$current_record"
@@ -398,6 +405,8 @@ deploy_images() {
 
     LOG_API_SHA=$api_sha
     LOG_WEB_SHA=$web_sha
+    LOG_API_DIGEST=$api_digest
+    LOG_WEB_DIGEST=$web_digest
 
     [[ -r $COMPOSE_IMAGES_FILE ]] || {
         refuse "$COMPOSE_IMAGES_FILE must exist and be readable"

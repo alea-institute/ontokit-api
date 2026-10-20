@@ -18,6 +18,7 @@ jobs:
     if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_branch == 'dev' && github.event.workflow_run.head_repository.full_name == github.repository
     runs-on: ubuntu-latest
     outputs:
+      schema_version: ${{ steps.release.outputs.schema_version }}
       api_sha: ${{ steps.release.outputs.api_sha }}
       web_sha: ${{ steps.release.outputs.web_sha }}
     env:
@@ -36,10 +37,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          # PROD still builds from source; it has no consumer for schema 2 images.
           python3 deploy/validate_release_manifest.py \
             deploy/release-manifest.json \
-            --require-schema 1 \
             --github-output "$GITHUB_OUTPUT"
 
           api_sha=$(jq -r '.api_sha' deploy/release-manifest.json)
@@ -113,6 +112,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     env:
+      SCHEMA_VERSION: ${{ needs.validate-release.outputs.schema_version }}
       API_SHA: ${{ needs.validate-release.outputs.api_sha }}
       WEB_SHA: ${{ needs.validate-release.outputs.web_sha }}
       PROD_ENABLED: ${{ vars.PROD_ENABLED }}
@@ -120,6 +120,14 @@ jobs:
       PROD_DEPLOY_HOST: ${{ vars.PROD_DEPLOY_HOST }}
       PROD_DEPLOY_USER: ${{ vars.PROD_DEPLOY_USER }}
     steps:
+      - name: Require a source-build release
+        run: |
+          # PROD still builds from source; it has no consumer for schema 2 images.
+          [[ "$SCHEMA_VERSION" == 1 ]] || {
+            echo "PROD promotion supports only schema 1 manifests, got $SCHEMA_VERSION" >&2
+            exit 1
+          }
+
       # nosemgrep: yaml.github-actions.security.workflow-run-target-code-checkout.workflow-run-target-code-checkout  Reason: head_sha is a same-repository push to dev that Deploy DEV already ran; guarded by the job if: above
       - name: Check out the exact protected promotion assets
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

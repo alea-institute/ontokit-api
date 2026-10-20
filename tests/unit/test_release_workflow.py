@@ -102,7 +102,12 @@ def test_dev_publication_is_push_only_and_preserves_tag_releases() -> None:
             "github.event_name == 'push' && "
             "startsWith(github.event.ref, 'refs/tags/ontokit-')"
         )
-    assert set(jobs["publish_docker"]["needs"]) == {"lint", "test", "docker_preflight"}
+    assert set(jobs["publish_docker"]["needs"]) == {
+        "lint",
+        "test",
+        "docker_preflight",
+        "deploy_contract",
+    }
     assert jobs["publish_docker"]["permissions"] == {"contents": "read", "packages": "write"}
 
 
@@ -201,7 +206,21 @@ def test_prod_promotion_accepts_only_source_manifests() -> None:
     workflow_path = Path(__file__).parents[2] / ".github" / "workflows" / "promote-prod.yml"
     steps = yaml.safe_load(workflow_path.read_text())["jobs"]["validate-release"]["steps"]
     validation = next(step for step in steps if step.get("id") == "release")
-    assert "--require-schema 1" in validation["run"]
+    # Validation must accept schema 2, or DEV smoke tests stop running for image deploys.
+    assert "--require-schema" not in validation["run"]
+    promote = yaml.safe_load(workflow_path.read_text())["jobs"]["promote"]
+    assert promote["env"]["SCHEMA_VERSION"] == "${{ needs.validate-release.outputs.schema_version }}"
+    guard = promote["steps"][0]
+    assert guard["name"] == "Require a source-build release"
+    for schema, expected in (("1", 0), ("2", 1)):
+        result = subprocess.run(
+            ["bash", "-e", "-o", "pipefail", "-c", guard["run"]],
+            env={**os.environ, "SCHEMA_VERSION": schema},
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert result.returncode == expected, schema
 
 
 def test_published_image_is_smoke_tested_and_deploy_contract_runs() -> None:
