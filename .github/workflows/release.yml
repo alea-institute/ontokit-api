@@ -113,8 +113,12 @@ jobs:
           context: .
           file: Dockerfile.prod
           push: false
+          load: true
+          tags: ontokit-prod-smoke:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      - name: Smoke test published image as its configured runtime user
+        run: bash scripts/smoke-runtime-image.sh ontokit-prod-smoke:ci
 
       - name: Build default development runtime image
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7
@@ -128,6 +132,23 @@ jobs:
           cache-to: type=gha,mode=max,scope=dev-runtime
       - name: Smoke test default image as its configured runtime user
         run: bash scripts/smoke-runtime-image.sh ontokit-runtime-smoke:ci
+
+  deploy_contract:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run deploy shell contract tests
+        run: |
+          set -euo pipefail
+          for test_script in deploy/tests/*.sh; do
+            echo "::group::$test_script"
+            bash "$test_script"
+            echo '::endgroup::'
+          done
 
   publish_pypi:
     if: github.event_name == 'push' && startsWith(github.event.ref, 'refs/tags/ontokit-')

@@ -7,14 +7,22 @@ readonly API_REPO="$DEPLOY_ROOT/ontokit-api"
 readonly WEB_REPO="$DEPLOY_ROOT/ontokit-web"
 readonly ENV_FILE="$DEPLOY_ROOT/.env"
 readonly PREVIOUS_FILE="$DEPLOY_ROOT/.deploy-previous"
+readonly CURRENT_FILE="$DEPLOY_ROOT/.deploy-current"
+readonly COMPOSE_FILE="$DEPLOY_ROOT/compose.yaml"
+readonly COMPOSE_IMAGES_FILE="$DEPLOY_ROOT/compose.images.yaml"
+readonly API_IMAGE_REPOSITORY=ghcr.io/alea-institute/ontokit
+readonly WEB_IMAGE_REPOSITORY=ghcr.io/alea-institute/ontokit-web
 readonly LOCK_FILE=/var/lock/ontokit-deploy.lock
 readonly LOG_FILE=/var/log/ontokit-deploy.log
 readonly SHA_PATTERN='^[0-9a-f]{40}$'
+readonly DIGEST_PATTERN='^sha256:[0-9a-f]{64}$'
 
 LOG_VERB=refused
 LOG_API_SHA=-
 LOG_WEB_SHA=-
 EFFECTIVE_AUTH_MODE=
+# Source deploys use compose.yaml alone; image deploys add the image overlay.
+COMPOSE_ARGS=(--project-directory "$DEPLOY_ROOT")
 
 log_outcome() {
     local exit_status=$?
@@ -36,6 +44,33 @@ refuse() {
 
 valid_sha() {
     [[ $1 =~ $SHA_PATTERN ]]
+}
+
+valid_digest() {
+    [[ $1 =~ $DIGEST_PATTERN ]]
+}
+
+compose() {
+    docker compose "${COMPOSE_ARGS[@]}" "$@"
+}
+
+# A release record is "<api-sha> <web-sha>" for a source build, or
+# "<api-sha> <web-sha> <api-digest> <web-digest>" for published images.
+valid_release_record() {
+    local api_sha web_sha api_digest web_digest extra
+    read -r api_sha web_sha api_digest web_digest extra <<<"$1"
+    [[ -z ${extra:-} ]] && valid_sha "${api_sha:-}" && valid_sha "${web_sha:-}" || return 1
+    [[ -z ${api_digest:-} && -z ${web_digest:-} ]] && return 0
+    valid_digest "${api_digest:-}" && valid_digest "${web_digest:-}"
+}
+
+write_release_record() {
+    local path=$1 record=$2
+    local record_tmp="$path.tmp.$$"
+
+    printf '%s\n' "$record" >"$record_tmp"
+    chmod 600 "$record_tmp"
+    mv "$record_tmp" "$path"
 }
 
 repo_sha() {
@@ -220,7 +255,7 @@ load_and_validate_config() {
     ONTOKIT_WEB_REVISION=$web_sha
     export AUTH_MODE NEXTAUTH_SECRET ONTOKIT_API_REVISION ONTOKIT_WEB_REVISION
 
-    if ! docker compose --project-directory "$DEPLOY_ROOT" config --quiet; then
+    if ! compose config --quiet; then
         refuse 'compose configuration is invalid'
         return
     fi
@@ -246,21 +281,20 @@ fetch_and_verify() {
     fi
 }
 
-write_previous_pair() {
-    local api_sha=$1
-    local web_sha=$2
-    local previous_tmp
+# The last release this script verified, falling back to the checkouts for hosts
+# that predate .deploy-current (always a source build there).
+current_release_record() {
+    local record api_sha web_sha
 
-    previous_tmp="$PREVIOUS_FILE.tmp.$$"
-    printf '%s %s\n' "$api_sha" "$web_sha" >"$previous_tmp"
-    chmod 600 "$previous_tmp"
-    mv "$previous_tmp" "$PREVIOUS_FILE"
-}
-
-record_previous_pair() {
-    local target_api_sha=$1 target_web_sha=$2
-    local api_sha web_sha
-
+    if [[ -r $CURRENT_FILE ]]; then
+        record=$(<"$CURRENT_FILE")
+        valid_release_record "$record" || {
+            refuse 'recorded current release is invalid'
+            return
+        }
+        printf '%s\n' "$record"
+        return 0
+    fi
     api_sha=$(repo_sha "$API_REPO")
     web_sha=$(repo_sha "$WEB_REPO")
     valid_sha "$api_sha" || {
@@ -271,12 +305,20 @@ record_previous_pair() {
         refuse 'current web checkout is not a full SHA'
         return
     }
-    # A rebuild/retry of the checked-out pair must retain the older rollback target.
+    printf '%s %s\n' "$api_sha" "$web_sha"
+}
+
+record_previous_pair() {
+    local target_record=$*
+    local current_record
+
+    current_record=$(current_release_record) || return
+    # A rebuild/retry of the current release must retain the older rollback target.
     # This also preserves that target after a failed attempt moved both checkouts.
-    if [[ $api_sha == "$target_api_sha" && $web_sha == "$target_web_sha" ]]; then
+    if [[ $current_record == "$target_record" ]]; then
         return 0
     fi
-    write_previous_pair "$api_sha" "$web_sha"
+    write_release_record "$PREVIOUS_FILE" "$current_record"
 }
 
 deploy_pair() {
@@ -297,12 +339,21 @@ deploy_pair() {
     ( umask 022; git -C "$API_REPO" checkout --detach "$api_sha" ) || return
     ( umask 022; git -C "$WEB_REPO" checkout --detach "$web_sha" ) || return
 
-    docker compose --project-directory "$DEPLOY_ROOT" build api || return
-    docker compose --project-directory "$DEPLOY_ROOT" build --no-cache web || return
+    compose build api || return
+    compose build --no-cache web || return
+
+    start_and_verify "$api_sha" "$web_sha" || return
+    write_release_record "$CURRENT_FILE" "$api_sha $web_sha"
+    printf 'deployed api=%s web=%s\n' "$api_sha" "$web_sha"
+}
+
+start_and_verify() {
+    local api_sha=$1
+    local web_sha=$2
 
     # Do not auto-rollback here: a transient healthcheck failure is safer held for inspection.
-    if ! timeout 300 docker compose --project-directory "$DEPLOY_ROOT" \
-        up -d --wait --wait-timeout 240; then
+    if ! timeout 300 docker compose "${COMPOSE_ARGS[@]}" \
+        up -d --no-build --wait --wait-timeout 240; then
         printf 'deploy failed: compose did not become ready; rollback was not automatic\n' >&2
         return 1
     fi
@@ -315,7 +366,73 @@ deploy_pair() {
         printf 'deploy failed: running images do not match the approved pair\n' >&2
         return 1
     fi
-    printf 'deployed api=%s web=%s\n' "$api_sha" "$web_sha"
+}
+
+image_revision() {
+    docker image inspect --format \
+        '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$1"
+}
+
+verify_image_revision() {
+    local image=$1
+    local expected_sha=$2
+    local revision
+
+    revision=$(image_revision "$image") || {
+        printf 'refused: cannot inspect pulled image %s\n' "$image" >&2
+        return 65
+    }
+    if [[ $revision != "$expected_sha" ]]; then
+        printf 'refused: image %s is labelled revision %s, expected %s\n' \
+            "$image" "${revision:-none}" "$expected_sha" >&2
+        return 65
+    fi
+}
+
+deploy_images() {
+    local api_sha=$1
+    local web_sha=$2
+    local api_digest=$3
+    local web_digest=$4
+    local record_previous=${5:-true}
+
+    LOG_API_SHA=$api_sha
+    LOG_WEB_SHA=$web_sha
+
+    [[ -r $COMPOSE_IMAGES_FILE ]] || {
+        refuse "$COMPOSE_IMAGES_FILE must exist and be readable"
+        return
+    }
+    COMPOSE_ARGS=(--project-directory "$DEPLOY_ROOT" -f "$COMPOSE_FILE" -f "$COMPOSE_IMAGES_FILE")
+    local api_image="$API_IMAGE_REPOSITORY@$api_digest"
+    local web_image="$WEB_IMAGE_REPOSITORY@$web_digest"
+    ONTOKIT_API_IMAGE=$api_image
+    ONTOKIT_WEB_IMAGE=$web_image
+    export ONTOKIT_API_IMAGE ONTOKIT_WEB_IMAGE
+
+    # Validate local configuration before fetch, checkout, rollback-record, or pull mutations.
+    load_and_validate_config "$api_sha" "$web_sha" || return
+    # .env is sourced with allexport; it must not swap the validated images.
+    [[ $ONTOKIT_API_IMAGE == "$api_image" && $ONTOKIT_WEB_IMAGE == "$web_image" ]] || {
+        refuse "$ENV_FILE must not set ONTOKIT_API_IMAGE or ONTOKIT_WEB_IMAGE"
+        return
+    }
+    # The checkouts still supply deploy-owned bootstrap files and the status baseline.
+    fetch_and_verify "$API_REPO" "$api_sha" || return
+    fetch_and_verify "$WEB_REPO" "$web_sha" || return
+    compose pull api worker web || return
+    verify_image_revision "$ONTOKIT_API_IMAGE" "$api_sha" || return
+    verify_image_revision "$ONTOKIT_WEB_IMAGE" "$web_sha" || return
+    if [[ $record_previous == true ]]; then
+        record_previous_pair "$api_sha" "$web_sha" "$api_digest" "$web_digest" || return
+    fi
+    ( umask 022; git -C "$API_REPO" checkout --detach "$api_sha" ) || return
+    ( umask 022; git -C "$WEB_REPO" checkout --detach "$web_sha" ) || return
+
+    start_and_verify "$api_sha" "$web_sha" || return
+    write_release_record "$CURRENT_FILE" "$api_sha $web_sha $api_digest $web_digest"
+    printf 'deployed api=%s web=%s api_image=%s web_image=%s\n' \
+        "$api_sha" "$web_sha" "$ONTOKIT_API_IMAGE" "$ONTOKIT_WEB_IMAGE"
 }
 
 verify_runtime_pair() {
@@ -336,32 +453,27 @@ verify_runtime_pair() {
 }
 
 rollback_pair() {
-    local api_sha web_sha extra current_api_sha current_web_sha
+    local previous_record current_record api_sha web_sha api_digest web_digest
 
     if [[ ! -r $PREVIOUS_FILE ]]; then
         refuse 'no previous deployment pair is recorded'
         return
     fi
-    read -r api_sha web_sha extra <"$PREVIOUS_FILE"
-    if [[ -n ${extra:-} ]] || ! valid_sha "${api_sha:-}" || ! valid_sha "${web_sha:-}"; then
+    previous_record=$(<"$PREVIOUS_FILE")
+    valid_release_record "$previous_record" || {
         refuse 'recorded previous deployment pair is invalid'
         return
-    fi
-
-    current_api_sha=$(repo_sha "$API_REPO")
-    current_web_sha=$(repo_sha "$WEB_REPO")
-    valid_sha "$current_api_sha" || {
-        refuse 'current API checkout is not a full SHA'
-        return
     }
-    valid_sha "$current_web_sha" || {
-        refuse 'current web checkout is not a full SHA'
-        return
-    }
+    read -r api_sha web_sha api_digest web_digest <<<"$previous_record"
+    current_record=$(current_release_record) || return
 
     # Preserve the known-good target if this rollback attempt fails so it remains retryable.
-    deploy_pair "$api_sha" "$web_sha" false || return
-    write_previous_pair "$current_api_sha" "$current_web_sha"
+    if [[ -n ${api_digest:-} ]]; then
+        deploy_images "$api_sha" "$web_sha" "$api_digest" "$web_digest" false || return
+    else
+        deploy_pair "$api_sha" "$web_sha" false || return
+    fi
+    write_release_record "$PREVIOUS_FILE" "$current_record"
 }
 
 dispatch_request() {
@@ -394,6 +506,22 @@ dispatch_request() {
             LOG_VERB=deploy
             deploy_pair "${request[1]}" "${request[2]}"
             ;;
+        deploy-images)
+            ((${#request[@]} == 5)) || {
+                refuse 'deploy-images requires two full SHAs and two sha256 digests'
+                return
+            }
+            valid_sha "${request[1]}" && valid_sha "${request[2]}" || {
+                refuse 'deploy SHAs must be 40 lowercase hexadecimal characters'
+                return
+            }
+            valid_digest "${request[3]}" && valid_digest "${request[4]}" || {
+                refuse 'image digests must be sha256: followed by 64 lowercase hexadecimal characters'
+                return
+            }
+            LOG_VERB=deploy-images
+            deploy_images "${request[1]}" "${request[2]}" "${request[3]}" "${request[4]}"
+            ;;
         rollback)
             ((${#request[@]} == 1)) || {
                 refuse 'rollback takes no arguments'
@@ -403,7 +531,7 @@ dispatch_request() {
             rollback_pair
             ;;
         *)
-            refuse 'allowed commands are status, deploy <api-sha> <web-sha>, and rollback'
+            refuse 'allowed commands are status, deploy <api-sha> <web-sha>, deploy-images <api-sha> <web-sha> <api-digest> <web-digest>, and rollback'
             ;;
     esac
 }

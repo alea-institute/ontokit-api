@@ -148,6 +148,48 @@ API and web SHA pair, export those two revisions as described above, then run
 `docker compose build` and `docker compose up -d --wait --wait-timeout 240`.
 Rebuilding both images keeps the deployed pair internally consistent.
 
+## Image-based deploy (prepared; not activated)
+
+CI publishes `ghcr.io/alea-institute/ontokit@sha256:<digest>` on every `dev` push
+(Distribution, `publish_docker`; the job summary records the digest and source SHA).
+`Dockerfile.prod` installs the exact `uv.lock` set and CI smoke-tests it before
+publication. A schema 2 `deploy/release-manifest.json` adds `api_image` and
+`web_image`, each a `ghcr.io/alea-institute/<ontokit|ontokit-web>@sha256:<64 hex>`
+reference; `deploy/validate_release_manifest.py` refuses tags, other registries and
+half pairs. For schema 2, `deploy-dev.yml` sends the forced command
+`deploy-images <api-sha> <web-sha> <api-digest> <web-digest>`. Schema 1 keeps the
+source build path, and PROD promotion accepts only schema 1.
+
+`deploy-images` loads and validates `.env`, verifies both SHAs are fetchable, pulls
+the API and web digests, and refuses any image whose
+`org.opencontainers.image.revision` label differs from its SHA. It then records
+the rollback target, checks out both SHAs (for deploy-owned bootstrap files and
+the status baseline), and runs `up -d --no-build` with
+`/opt/ontokit/compose.images.yaml` layered on `compose.yaml`. The API runs one
+uvicorn process without `--reload`.
+
+The forced command now keeps two release records, each `<api-sha> <web-sha>` for a
+source build or `<api-sha> <web-sha> <api-digest> <web-digest>` for images:
+`.deploy-current` holds the last release it verified, and `.deploy-previous` the
+rollback target. `rollback` restores whichever mode the record names. A failed
+attempt never becomes a rollback target. Hosts without `.deploy-current` fall
+back to the checked-out pair, as before.
+
+Activation needs, in order:
+
+1. A web DEV image with its DEV build arguments and revision label (ontokit-web).
+2. GHCR pull access for both packages on the host: public packages, or a
+   read-only `docker login ghcr.io` on the host.
+3. Refresh `/usr/local/sbin/ontokit-deploy` from `deploy/ontokit-deploy.sh`, copy
+   `deploy/compose.dev.yaml` to `/opt/ontokit/compose.yaml` and
+   `deploy/compose.dev.images.yaml` to `/opt/ontokit/compose.images.yaml`. Then,
+   from `/opt/ontokit` with `.env` loaded and test values for the four
+   `ONTOKIT_*` variables, run
+   `docker compose -f compose.yaml -f compose.images.yaml config -q`. The
+   overlay's `!reset` tag needs Docker Compose 2.24 or later.
+4. A reviewed schema 2 manifest naming both receipts' digests, through the normal
+   PR path and the `dev-deploy` approval.
+
 ## Automated deploy
 
 `.github/workflows/deploy-dev.yml` triggers on pushes to `dev` that change

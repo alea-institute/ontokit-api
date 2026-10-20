@@ -36,8 +36,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          # PROD still builds from source; it has no consumer for schema 2 images.
           python3 deploy/validate_release_manifest.py \
             deploy/release-manifest.json \
+            --require-schema 1 \
             --github-output "$GITHUB_OUTPUT"
 
           api_sha=$(jq -r '.api_sha' deploy/release-manifest.json)

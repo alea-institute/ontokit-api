@@ -8,6 +8,10 @@ readonly API_SHA=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 readonly WEB_SHA=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 readonly OLD_API_SHA=1111111111111111111111111111111111111111
 readonly OLD_WEB_SHA=2222222222222222222222222222222222222222
+readonly API_DIGEST=sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+readonly WEB_DIGEST=sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+readonly OLD_API_DIGEST=sha256:3333333333333333333333333333333333333333333333333333333333333333
+readonly OLD_WEB_DIGEST=sha256:4444444444444444444444444444444444444444444444444444444444444444
 readonly TMP_ROOT=$(mktemp -d)
 readonly TEST_DEPLOY_ROOT="$TMP_ROOT/ontokit"
 readonly TEST_SCRIPT="$TMP_ROOT/ontokit-deploy.sh"
@@ -348,6 +352,237 @@ test_matching_runtime_pair_has_no_drift() (
     pass 'matching runtime pair reports no drift without deployment config'
 )
 
+test_deploy_images_rejects_malformed_requests() (
+    local request mutated=0
+
+    # shellcheck source=../ontokit-deploy.sh
+    source "$TEST_SCRIPT"
+    deploy_images() { mutated=1; }
+    deploy_pair() { mutated=1; }
+
+    for request in \
+        "deploy-images $API_SHA $WEB_SHA $API_DIGEST" \
+        "deploy-images $API_SHA $WEB_SHA $API_DIGEST $WEB_DIGEST extra" \
+        "deploy-images $API_SHA $WEB_SHA ${API_DIGEST#sha256:} $WEB_DIGEST" \
+        "deploy-images $API_SHA $WEB_SHA ${API_DIGEST^^} $WEB_DIGEST" \
+        "deploy-images $API_SHA $WEB_SHA latest $WEB_DIGEST" \
+        "deploy-images $API_SHA $WEB_SHA $API_DIGEST;reboot $WEB_DIGEST" \
+        "deploy-images ${API_SHA:0:12} $WEB_SHA $API_DIGEST $WEB_DIGEST" \
+        "deploy $API_SHA $WEB_SHA $API_DIGEST $WEB_DIGEST"; do
+        if dispatch_request "$request" >/dev/null 2>&1; then
+            fail "malformed request was accepted: $request"
+            return
+        fi
+    done
+    [[ $mutated == 0 ]] || {
+        fail 'malformed image request reached deployment'
+        return
+    }
+    pass 'deploy-images refuses malformed SHAs, digests and argument counts'
+)
+
+# Stubs for an image deploy whose external effects are logged to $1.
+stub_image_deploy() {
+    local call_log=$1
+
+    : >"$call_log"
+    : >"$COMPOSE_IMAGES_FILE"
+    load_and_validate_config() { printf 'config %s\n' "${COMPOSE_ARGS[*]}" >>"$call_log"; }
+    fetch_and_verify() { :; }
+    repo_sha() {
+        if [[ $1 == *ontokit-api ]]; then printf '%s\n' "$OLD_API_SHA";
+        else printf '%s\n' "$OLD_WEB_SHA"; fi
+    }
+    git() { printf 'git %s\n' "$*" >>"$call_log"; }
+    docker() { printf 'docker %s\n' "$*" >>"$call_log"; }
+    image_revision() {
+        case "$1" in
+            ghcr.io/alea-institute/ontokit@*) printf '%s\n' "$API_SHA" ;;
+            ghcr.io/alea-institute/ontokit-web@*) printf '%s\n' "$WEB_SHA" ;;
+        esac
+    }
+    timeout() { shift; "$@"; }
+    compose_status() { :; }
+    verify_runtime_pair() { :; }
+}
+
+test_deploy_images_pulls_verifies_and_records() (
+    local call_log="$TMP_ROOT/images.log" calls
+
+    # shellcheck source=../ontokit-deploy.sh
+    source "$TEST_SCRIPT"
+    rm -f -- "$PREVIOUS_FILE" "$CURRENT_FILE"
+    stub_image_deploy "$call_log"
+
+    deploy_images "$API_SHA" "$WEB_SHA" "$API_DIGEST" "$WEB_DIGEST" >/dev/null || {
+        fail 'image deploy failed with healthy stubs'
+        return
+    }
+    calls=$(<"$call_log")
+    assert_contains "$calls" "-f $TEST_DEPLOY_ROOT/compose.yaml -f $COMPOSE_IMAGES_FILE" \
+        'image deploy did not apply the image overlay' || return
+    assert_contains "$calls" 'pull api worker web' 'image deploy did not pull its images' || return
+    assert_contains "$calls" 'up -d --no-build --wait' 'image deploy could build on the host' || return
+    [[ $calls != *' build '* ]] || {
+        fail 'image deploy invoked a host build'
+        return
+    }
+    [[ $ONTOKIT_API_IMAGE == "ghcr.io/alea-institute/ontokit@$API_DIGEST" ]] || {
+        fail 'API image reference was not pinned to the requested digest'
+        return
+    }
+    [[ $(<"$CURRENT_FILE") == "$API_SHA $WEB_SHA $API_DIGEST $WEB_DIGEST" ]] || {
+        fail 'image deploy did not record the accepted image release'
+        return
+    }
+    [[ $(<"$PREVIOUS_FILE") == "$OLD_API_SHA $OLD_WEB_SHA" ]] || {
+        fail 'first image deploy did not keep the source checkout pair as rollback'
+        return
+    }
+    pass 'deploy-images pulls, verifies, starts without building and records both pairs'
+)
+
+test_deploy_images_refuses_mislabelled_image_before_mutation() (
+    local call_log="$TMP_ROOT/mislabelled.log" calls
+
+    # shellcheck source=../ontokit-deploy.sh
+    source "$TEST_SCRIPT"
+    rm -f -- "$PREVIOUS_FILE" "$CURRENT_FILE"
+    stub_image_deploy "$call_log"
+    image_revision() { printf '%s\n' "$OLD_API_SHA"; }
+
+    if deploy_images "$API_SHA" "$WEB_SHA" "$API_DIGEST" "$WEB_DIGEST" >/dev/null 2>&1; then
+        fail 'image with a foreign revision label was deployed'
+        return
+    fi
+    calls=$(<"$call_log")
+    [[ $calls != *'git '* && $calls != *' up '* ]] || {
+        fail 'mislabelled image refusal happened after checkout or startup'
+        return
+    }
+    [[ ! -e $PREVIOUS_FILE && ! -e $CURRENT_FILE ]] || {
+        fail 'mislabelled image refusal changed the release records'
+        return
+    }
+    pass 'deploy-images refuses an image whose revision label differs before mutation'
+)
+
+test_deploy_images_requires_overlay() (
+    local call_log="$TMP_ROOT/overlay.log"
+
+    # shellcheck source=../ontokit-deploy.sh
+    source "$TEST_SCRIPT"
+    stub_image_deploy "$call_log"
+    rm -f -- "$COMPOSE_IMAGES_FILE"
+
+    if deploy_images "$API_SHA" "$WEB_SHA" "$API_DIGEST" "$WEB_DIGEST" >/dev/null 2>&1; then
+        fail 'image deploy ran without the image overlay'
+        return
+    fi
+    assert_empty_file "$call_log" 'missing overlay refusal happened after other work' || return
+    pass 'deploy-images refuses when the host lacks the image overlay'
+)
+
+test_new_deploy_after_failure_keeps_accepted_rollback() (
+    local call_log="$TMP_ROOT/accepted.log"
+
+    # shellcheck source=../ontokit-deploy.sh
+    source "$TEST_SCRIPT"
+    stub_image_deploy "$call_log"
+    printf '%s %s %s %s\n' "$OLD_API_SHA" "$OLD_WEB_SHA" "$OLD_API_DIGEST" "$OLD_WEB_DIGEST" \
+        >"$CURRENT_FILE"
+    rm -f -- "$PREVIOUS_FILE"
+
+    verify_runtime_pair() { return 1; }
+    if deploy_images "$API_SHA" "$WEB_SHA" "$API_DIGEST" "$WEB_DIGEST" >/dev/null 2>&1; then
+        fail 'unhealthy image deploy reported success'
+        return
+    fi
+    verify_runtime_pair() { :; }
+    image_revision() {
+        case "$1" in
+            *"@$OLD_WEB_DIGEST") printf '%s\n' "$OLD_WEB_SHA" ;;
+            *) printf '%s\n' "$API_SHA" ;;
+        esac
+    }
+    deploy_images "$API_SHA" "$OLD_WEB_SHA" "$API_DIGEST" "$OLD_WEB_DIGEST" >/dev/null || {
+        fail 'follow-up image deploy failed'
+        return
+    }
+    [[ $(<"$PREVIOUS_FILE") == "$OLD_API_SHA $OLD_WEB_SHA $OLD_API_DIGEST $OLD_WEB_DIGEST" ]] || {
+        fail "rollback target became a failed release: $(<"$PREVIOUS_FILE")"
+        return
+    }
+    pass 'a failed release never becomes the rollback target'
+)
+
+test_rollback_follows_recorded_mode() (
+    local mode_log="$TMP_ROOT/rollback-mode.log"
+
+    # shellcheck source=../ontokit-deploy.sh
+    source "$TEST_SCRIPT"
+    deploy_images() { printf 'images %s\n' "$*" >"$mode_log"; }
+    deploy_pair() { printf 'source %s\n' "$*" >"$mode_log"; }
+
+    printf '%s %s %s %s\n' "$OLD_API_SHA" "$OLD_WEB_SHA" "$OLD_API_DIGEST" "$OLD_WEB_DIGEST" \
+        >"$PREVIOUS_FILE"
+    printf '%s %s\n' "$API_SHA" "$WEB_SHA" >"$CURRENT_FILE"
+    rollback_pair >/dev/null || {
+        fail 'image rollback failed'
+        return
+    }
+    [[ $(<"$mode_log") == "images $OLD_API_SHA $OLD_WEB_SHA $OLD_API_DIGEST $OLD_WEB_DIGEST false" ]] || {
+        fail "image rollback used the wrong path: $(<"$mode_log")"
+        return
+    }
+    [[ $(<"$PREVIOUS_FILE") == "$API_SHA $WEB_SHA" ]] || {
+        fail 'image rollback did not keep the replaced release for roll-forward'
+        return
+    }
+
+    printf '%s %s\n' "$OLD_API_SHA" "$OLD_WEB_SHA" >"$PREVIOUS_FILE"
+    rollback_pair >/dev/null || {
+        fail 'source rollback failed'
+        return
+    }
+    [[ $(<"$mode_log") == "source $OLD_API_SHA $OLD_WEB_SHA false" ]] || {
+        fail "source rollback used the wrong path: $(<"$mode_log")"
+        return
+    }
+
+    printf '%s %s %s\n' "$OLD_API_SHA" "$OLD_WEB_SHA" "$OLD_API_DIGEST" >"$PREVIOUS_FILE"
+    : >"$mode_log"
+    if rollback_pair >/dev/null 2>&1; then
+        fail 'rollback accepted a half image record'
+        return
+    fi
+    assert_empty_file "$mode_log" 'half image record reached deployment' || return
+    pass 'rollback restores the recorded source or image release and refuses partial records'
+)
+
+test_deploy_images_refuses_env_image_override() (
+    local call_log="$TMP_ROOT/env-override.log" calls
+
+    # shellcheck source=../ontokit-deploy.sh
+    source "$TEST_SCRIPT"
+    rm -f -- "$PREVIOUS_FILE" "$CURRENT_FILE"
+    stub_image_deploy "$call_log"
+    load_and_validate_config() {
+        ONTOKIT_WEB_IMAGE=ghcr.io/alea-institute/ontokit-web:latest
+    }
+
+    if deploy_images "$API_SHA" "$WEB_SHA" "$API_DIGEST" "$WEB_DIGEST" >/dev/null 2>&1; then
+        fail 'an .env image override replaced the validated digest'
+        return
+    fi
+    calls=$(<"$call_log")
+    [[ $calls != *'pull'* && $calls != *'git '* ]] || {
+        fail 'image override refusal happened after pull or checkout'
+        return
+    }
+    pass 'deploy-images refuses an .env that overrides the validated images'
+)
+
 prepare_test_script
 failures=0
 test_invalid_config_refuses_before_checkout || failures=$((failures + 1))
@@ -360,4 +595,11 @@ test_failed_rollback_preserves_retryable_pair || failures=$((failures + 1))
 test_same_pair_retry_preserves_previous || failures=$((failures + 1))
 test_previous_pair_recording_distinguishes_real_change || failures=$((failures + 1))
 test_matching_runtime_pair_has_no_drift || failures=$((failures + 1))
+test_deploy_images_rejects_malformed_requests || failures=$((failures + 1))
+test_deploy_images_pulls_verifies_and_records || failures=$((failures + 1))
+test_deploy_images_refuses_mislabelled_image_before_mutation || failures=$((failures + 1))
+test_deploy_images_requires_overlay || failures=$((failures + 1))
+test_new_deploy_after_failure_keeps_accepted_rollback || failures=$((failures + 1))
+test_rollback_follows_recorded_mode || failures=$((failures + 1))
+test_deploy_images_refuses_env_image_override || failures=$((failures + 1))
 exit "$failures"
