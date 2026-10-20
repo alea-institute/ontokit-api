@@ -133,31 +133,46 @@ def test_detached_checkouts_run_with_world_readable_umask() -> None:
     source = DEPLOY_SCRIPT.read_text(encoding="utf-8")
     checkout_lines = [line.strip() for line in source.splitlines() if "checkout --detach" in line]
 
-    assert len(checkout_lines) == 2
-    expected_repositories = {"API_REPO", "WEB_REPO"}
-    scoped_repositories = {
-        match.group("repository")
-        for line in checkout_lines
-        if (
-            match := re.fullmatch(
-                r'\( umask 022; git -C "\$(?P<repository>API_REPO|WEB_REPO)" '
-                r'checkout --detach "\$(?:api_sha|web_sha)" \) \|\| return',
-                line,
-            )
+    # Source and image deploys each check out both repositories.
+    assert len(checkout_lines) == 4
+    matches = [
+        re.fullmatch(
+            r'\( umask 022; git -C "\$(?P<repository>API_REPO|WEB_REPO)" '
+            r'checkout --detach "\$(?:api_sha|web_sha)" \) \|\| return',
+            line,
         )
-    }
+        for line in checkout_lines
+    ]
 
-    assert scoped_repositories == expected_repositories
+    assert all(matches), checkout_lines
+    assert sorted(match.group("repository") for match in matches if match) == [
+        "API_REPO",
+        "API_REPO",
+        "WEB_REPO",
+        "WEB_REPO",
+    ]
 
 
-def test_dependency_layer_records_readable_lock_hash() -> None:
-    source = DOCKERFILE.read_text(encoding="utf-8").replace("\\\n", " ")
+@pytest.mark.parametrize("dockerfile", DOCKERFILES, ids=lambda path: path.name)
+def test_dependency_layer_records_readable_lock_hash(dockerfile: Path) -> None:
+    """Both images install the locked set; the published image must not resolve afresh."""
+    source = dockerfile.read_text(encoding="utf-8").replace("\\\n", " ")
     dependency_layers = [
         line for line in source.splitlines() if line.startswith("RUN uv lock --check --offline")
     ]
 
     assert len(dependency_layers) == 1
     layer = dependency_layers[0]
+    installs = [part.strip() for part in layer.split("&&") if "pip install" in part]
+    assert installs == [
+        "python -m pip install --no-deps -r /tmp/requirements.txt",
+        "python -m pip install --no-deps .",
+    ]
+    assert not [
+        line
+        for line in source.splitlines()
+        if "pip install" in line and not line.startswith("RUN uv lock --check --offline")
+    ]
     assert "sha256sum uv.lock | cut -d ' ' -f 1 > /home/ontokit/app/.uv-lock.sha256" in layer
     assert "chmod 0644 /home/ontokit/app/.uv-lock.sha256" in layer
 
