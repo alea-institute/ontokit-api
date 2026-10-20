@@ -124,9 +124,12 @@ main() {
 
     for volume in "${VOLUMES[@]}"; do
         source=$(volume_for "$project" "$volume")
-        docker run --rm --network none --user 0 --entrypoint tar \
-            -v "$source:/source:ro" -v "$target:/backup" "$helper_image" \
-            -C /source -czf "/backup/$volume.tar.gz" .
+        # The helper reads volumes as root; hand each archive to the caller.
+        docker run --rm --network none --user 0 --entrypoint sh \
+            -v "$source:/source:ro" -v "$target:/backup" "$helper_image" -c \
+            'tar -C /source -czf "/backup/$1.tar.gz" . && chown "$2" "/backup/$1.tar.gz" &&
+             chmod 0600 "/backup/$1.tar.gz"' \
+            sh "$volume" "$(id -u):$(id -g)"
     done
 
     (cd -- "$target" && sha256sum -- MANIFEST postgres.sql.gz ./*.tar.gz >SHA256SUMS)
