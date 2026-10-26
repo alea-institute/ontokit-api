@@ -88,6 +88,9 @@ required by the plan's configuration-only test strategy.
   `a258868211a57052da6bd323f758b8388dee02bb`.
 - `verification.json`: commands, exit codes, environments, test counts, skips,
   type-check output, and smoke results.
+- `review.json`: completed local correctness review with no findings. Its
+  `Not ready` acceptance verdict keeps the controller checks below open;
+  independent campaign reviews remain with the controller.
 
 Both security runs used:
 

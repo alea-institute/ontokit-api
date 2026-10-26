@@ -1,0 +1,76 @@
+{
+  "status": "complete",
+  "verdict": "Not ready",
+  "scope": {
+    "base": "51bd6f2802344d4e45b426e87684d0d2730be11a",
+    "branch": "drawdown/oa-0",
+    "head_sha": "7f9a5af9bf4c47c62b943190761c018e11271938",
+    "pr_url": null,
+    "files_changed": 11
+  },
+  "intent": "Clear the five currently vulnerable locked dependencies with a targeted update, preserve Python support and unrelated packages, and give the controller current scan and compatibility evidence.",
+  "intent_confidence": "explicit",
+  "reviewers": [
+    "correctness"
+  ],
+  "findings": [],
+  "actionable_findings": [],
+  "triage_groups": [],
+  "pre_existing_findings": [],
+  "requirements_completeness": {
+    "plan_source": "explicit",
+    "plan": "docs/plans/2026-10-26-1149-fix-oa-0-osv-lockfile-plan.md",
+    "R1": "verified",
+    "R2": "verified",
+    "R3": "local full-lock scan verified; controller recursive workflow pending",
+    "R4": "3935 passed; six existing Unix-socket tests unverified; mypy and pyright passed",
+    "R5": "lock/export/install evidence verified; real container build pending in controller environment",
+    "R6": "verified",
+    "R7": "verified within assigned local work",
+    "R8": "verified; no person-only blocker",
+    "units": {
+      "U1": "complete",
+      "U2": "complete local evidence with documented environment limits",
+      "U3": "complete controller handoff"
+    },
+    "unrequested_behavior_rules": []
+  },
+  "learnings": [],
+  "agent_native_gaps": [],
+  "deployment_notes": [],
+  "residual_risks": [
+    "Current upstream dev, unavailable chief authority excerpts and missing historical handoff require controller reconciliation.",
+    "Unchanged recursive OSV scan and normal CI/container checks remain controller gates; this is not unconditional acceptance."
+  ],
+  "testing_gaps": [
+    "Six B12 notification-socket cases require an environment permitting Unix-domain listeners."
+  ],
+  "coverage": {
+    "depth": "lite",
+    "rationale": "Generated dependency entries and evidence only; targeted versions, hashes, installation and findings checked directly. No application, test, workflow, schema, or manifest behavior changes.",
+    "criteria": [
+      "AGENTS.md"
+    ],
+    "instruction_file_fallback": true,
+    "compound_packs": "not applied",
+    "not_assessed": [
+      "independent reviewer agents",
+      "cross-model review",
+      "learnings",
+      "agent-native gaps",
+      "deployment notes"
+    ],
+    "verification": "Semantic lock comparison, scanner package/group counts and before/after hashes, command exit codes, full-suite counts, intended checker runtimes, and diff boundary checked."
+  },
+  "artifact_path": "docs/plans/evidence/oa-0/review.json",
+  "run_id": "20261026-192512-20f4f650",
+  "acceptance_note": "No code defects or actionable review fixes found. Not ready denotes outstanding controller verification, not a rejected dependency update.",
+  "browser_tests": {
+    "status": "not applicable",
+    "reason": "No frontend or rendered-page files changed; API behavior covered by existing tests."
+  },
+  "compound": {
+    "status": "not needed",
+    "reason": "Resolution reasoning and environment limitations are already recorded in the plan and evidence."
+  }
+}
