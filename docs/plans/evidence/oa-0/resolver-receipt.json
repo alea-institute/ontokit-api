@@ -1,0 +1,18 @@
+{
+  "target_packages_match_resolver": true,
+  "changed_packages": [
+    "certifi",
+    "filelock",
+    "gitpython",
+    "setuptools",
+    "virtualenv"
+  ],
+  "excluded_unrelated_marker_churn": [
+    "cuda-bindings",
+    "cuda-toolkit",
+    "scipy",
+    "scipy"
+  ],
+  "top_level_lock_metadata_unchanged": true,
+  "lock_sha256": "aa2adf74b9ceb0fbf00006338499ec10806ec1014bebf83fd13a3f962993c0a0"
+}

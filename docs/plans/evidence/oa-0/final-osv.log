@@ -1,0 +1,4 @@
+Starting filesystem walk for root: /
+Scanned uv.lock file and found 164 packages
+End status: 0 dirs visited, 1 inodes visited, 1 Extract calls, 23.279619ms elapsed, 23.279715ms wall time
+Filtered 1 local/unscannable package/s from the scan.
