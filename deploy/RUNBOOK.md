@@ -12,6 +12,18 @@ UAT-history companion is `ontokit-web/docs/roundup-2026-08/DEV-RUNBOOK.md`.
 The CI auto-deploy workflow and its host-side forced command are maintained in
 this repository; deployment credentials remain outside Git.
 
+### U9 acceptance evidence (reconciled 2026-10-26)
+
+The [oa-2 acceptance ledger](../docs/releases/oa-2-u9-acceptance.md) separates
+historical deployment claims from current DEV proof. Current deployment/CI,
+runtime permissions and health, FOLIO import/re-import, hosted identity, and
+recovery remain unverified pending controller receipts. The tracked manifest
+and passing local tests do not establish the running or accepted release pair.
+Use the ledger's collection checklist to close only missing obligations;
+do not replay a successful deployment merely to obtain evidence. Workflow-enabled
+state and Environment protections require current observations, not inference
+from the dated accounts below.
+
 ## Bootstrap from scratch
 
 Run these steps in order:
@@ -195,19 +207,23 @@ Activation needs, in order:
 
 `.github/workflows/deploy-dev.yml` triggers on pushes to `dev` that change
 `deploy/release-manifest.json`. `workflow_dispatch` re-runs the manifest-declared
-API/web pair and consumes no inputs. Every run targets the `dev-deploy` GitHub Environment,
-so GitHub pauses the deploy job until Damien approves it from the run's
-**Review deployments** prompt. Both trigger forms read
+API/web pair and consumes no inputs. When preflight finds the required deploy
+configuration, the deploy job targets the `dev-deploy` GitHub Environment;
+otherwise that job is skipped. The historical policy required Damien's approval
+from **Review deployments**. Verify the current Environment policy and the
+specific job result before treating approval as a remaining gate. An overall
+green workflow alone does not prove a deployment. Both trigger forms read
 `deploy/release-manifest.json`; there are no per-run SHA inputs and no branch-head
 fallback. The validator accepts only the declared ALEA repositories and full
 lowercase 40-character commit SHAs, and the workflow proves both commits are
 fetchable before the forced command sees them. Updating DEV therefore means
 reviewing and committing one matched API/web pair in the manifest.
 
-The `dev-deploy` Environment permits only the exact `dev` branch as of
-2026-09-21. The frozen `feat/pr-party` workflow also uses this Environment,
-so its deployment job is denied by the branch policy. Required reviewers and
-self-review protection were preserved.
+The 2026-09-21 record says the `dev-deploy` Environment permitted only the exact
+`dev` branch and preserved required reviewers and self-review protection.
+Under that policy, the frozen `feat/pr-party` workflow's deploy job was denied.
+These repository settings need current controller evidence; the workflow file
+does not establish their present state.
 
 ### Explicit migration target
 
@@ -275,8 +291,10 @@ public-key entry retains both `restrict` and the forced-command option.
 authentication and making the forced-command check misleading. A successful
 operator-side connection does not establish GitHub runner reachability. Before
 re-enabling DEV deployment, verify runner ingress, the matched manifest, healthy
-services and rollback behavior under the protected environment. During EU
-recovery the workflow remains disabled and Login acceptance is still open.
+services and rollback behavior under the protected environment. The September 21
+EU-recovery account recorded a disabled workflow and open Login acceptance.
+Current workflow-enabled state and hosted-identity UAT remain unverified in the
+oa-2 ledger; do not infer either from that historical account.
 
 The settled posture is a root key locked to one forced command. This was chosen
 over a deploy-user account because the `deploy` account is in the **docker
@@ -284,8 +302,9 @@ group, which is root-equivalent** — so a shell-capable deploy account would gr
 strictly MORE power than a key that can only invoke one validated script.
 Decision: ask `ontokit-web-2026-08-10-u12-deploy-prereqs`, 2026-08-10.
 
-The `dev-deploy` GitHub Environment with `damienriehl` as required reviewer
-already exists on both forks.
+The runbook revision merged on 2026-08-28 recorded a `dev-deploy` GitHub
+Environment with `damienriehl` as required reviewer on both forks. Current
+existence and reviewer policy require a fresh controller observation.
 
 `/usr/local/sbin/ontokit-deploy` was installed and verified on 2026-08-10: all
 nine containers were healthy, and hostile inputs (`deploy; rm -rf /`, unknown
