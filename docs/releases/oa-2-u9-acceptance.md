@@ -27,7 +27,7 @@ need reconciliation under G1. No personal approval requirement has been establis
 | R5 — recovery of data and functioning services | BLOCKED | No eligible accepted-prior-pair exercise or current-data isolated restore receipt. Historical synthetic tests are not DEV recovery proof. | Controller and operator: reuse eligible recovery evidence or establish G5 and collect restored-state/service/user proof. |
 | R6 — final authority and acceptance disposition | BLOCKED | G1 sources are unavailable and R1–R5 remain open. | Controller: resolve G1 and every mandatory row before recording U9 accepted. |
 
-R7–R8 local execution boundaries were observed: the branch contains only
+R7–R8 local execution boundaries were observed: this build changed only
 documentation and sanitized evidence. No deployment, data write, migration,
 credential discovery/change, service provisioning, external message, issue
 change, push, or PR action occurred. This local boundary check is not a DEV PASS.
