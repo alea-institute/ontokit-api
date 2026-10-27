@@ -20,6 +20,7 @@ from ontokit.schemas.anonymous_suggestion import (
     AnonymousSubmitRequest,
     AnonymousSubmitResponse,
 )
+from ontokit.schemas.errors import HTTPErrorResponse
 from ontokit.schemas.suggestion import (
     SuggestionBeaconRequest,
     SuggestionSaveRequest,
@@ -105,6 +106,7 @@ async def save_anonymous_session(
 @router.post(
     "/{project_id}/suggestions/anonymous/sessions/{session_id}/submit",
     response_model=AnonymousSubmitResponse,
+    responses={400: {"model": HTTPErrorResponse}},
 )
 async def submit_anonymous_session(
     project_id: UUID,

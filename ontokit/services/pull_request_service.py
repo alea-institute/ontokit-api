@@ -18,6 +18,7 @@ from sqlalchemy.orm import selectinload
 from ontokit.core.auth import CurrentUser
 from ontokit.core.config import settings
 from ontokit.core.encryption import decrypt_token
+from ontokit.core.exceptions import GuidedHTTPException
 from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.branch_metadata import BranchMetadata
 from ontokit.models.project import Project, ProjectMember
@@ -1098,9 +1099,12 @@ class PullRequestService:
         # Check approval requirements
         approval_count = sum(1 for r in pr.reviews if r.status == ReviewStatus.APPROVED.value)
         if not system_auto_accept and approval_count < project.pr_approval_required:
-            raise HTTPException(
+            raise GuidedHTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Pull request requires {project.pr_approval_required} approvals, but has {approval_count}",
+                code="approvals_required",
+                message="This pull request needs more approvals before it can be merged.",
+                recovery="Obtain the required reviews before attempting to merge.",
             )
 
         # Capture commit hashes before merge
@@ -1128,9 +1132,12 @@ class PullRequestService:
         )
 
         if not merge_result.success:
-            raise HTTPException(
+            raise GuidedHTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Merge failed: {merge_result.message}",
+                code="merge_failed",
+                message="The pull request could not be merged.",
+                recovery="Review the current branches and merge result, resolving any reported conflicts before trying again.",
             )
 
         # Update PR status and store commit hashes
@@ -1215,9 +1222,12 @@ class PullRequestService:
             )
 
         if pr.status != PRStatus.OPEN.value:
-            raise HTTPException(
+            raise GuidedHTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Cannot review a closed or merged pull request",
+                code="pull_request_not_open",
+                message="This pull request is no longer open for review.",
+                recovery="Refresh the pull request and check whether it is closed or merged.",
             )
 
         # Create review

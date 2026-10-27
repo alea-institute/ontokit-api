@@ -14,6 +14,7 @@ import pytest
 from fastapi import HTTPException
 
 from ontokit.core.auth import CurrentUser
+from ontokit.core.exceptions import GuidedHTTPException
 from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.anonymous_suggestion import AnonymousSubmitRequest
@@ -3229,6 +3230,8 @@ async def test_editor_approve_requires_recorded_pr_approvals(
 
     assert exc.value.status_code == 400
     assert exc.value.detail == (f"Pull request requires {required_approvals} approvals, but has 0")
+    assert isinstance(exc.value, GuidedHTTPException)
+    assert exc.value.code == "approvals_required"
     assert ctx.session.status == "submitted"
     assert ctx.session.reviewer_id is None
     assert ctx.pr.status == "open"

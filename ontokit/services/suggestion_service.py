@@ -20,6 +20,7 @@ from sqlalchemy.orm import selectinload
 from ontokit.core.anonymous_token import create_anonymous_token
 from ontokit.core.auth import ANONYMOUS_USER, CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
+from ontokit.core.exceptions import GuidedHTTPException
 from ontokit.core.limits import (
     MAX_ANONYMOUS_SESSION_BYTES,
     MAX_ANONYMOUS_SESSION_COMMITS,
@@ -833,15 +834,21 @@ class SuggestionService:
         project = await self._verify_project_access(project_id, user)
 
         if session.status != SuggestionSessionStatus.ACTIVE.value:
-            raise HTTPException(
+            raise GuidedHTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"Session is {session.status}, cannot submit",
+                code="suggestion_not_submittable",
+                message="This suggestion cannot be submitted in its current state.",
+                recovery="Refresh the suggestion and check its current state before submitting again.",
             )
 
         if session.changes_count == 0:
-            raise HTTPException(
+            raise GuidedHTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No changes to submit",
+                code="suggestion_no_changes",
+                message="This suggestion has no saved changes to submit.",
+                recovery="Make and save an edit before submitting.",
             )
 
         # Human verification may call a remote provider, so keep it outside the
@@ -857,9 +864,12 @@ class SuggestionService:
             if verification_passed:
                 session.verification_passed = True
             if session.status != SuggestionSessionStatus.ACTIVE.value:
-                raise HTTPException(
+                raise GuidedHTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Session is {session.status}, cannot submit",
+                    code="suggestion_not_submittable",
+                    message="This suggestion cannot be submitted in its current state.",
+                    recovery="Refresh the suggestion and check its current state before submitting again.",
                 )
             claimed_pr: SuggestionSubmitResponse | _PendingSuggestionPullRequest
             if session.pr_id is not None or session.pr_number is not None:
@@ -940,15 +950,18 @@ class SuggestionService:
         project_id = project.id
         decision = await check_and_consume(redis, str(project_id), user.id)
         if decision.status is TrustLimitStatus.UNAVAILABLE:
-            raise HTTPException(
+            raise GuidedHTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail={
                     "reason": "submission_limiter_unavailable",
                     "message": "Suggestion submissions are temporarily unavailable. Try again.",
                 },
+                code="submission_limiter_unavailable",
+                message="The submission allowance check is temporarily unavailable.",
+                recovery="Check the suggestion's current state and try submitting later.",
             )
         if decision.status is TrustLimitStatus.EXHAUSTED:
-            raise HTTPException(
+            raise GuidedHTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail={
                     "reason": "daily_limit_reached",
@@ -956,6 +969,9 @@ class SuggestionService:
                         "You have reached today's suggestion limit. It resets at midnight UTC."
                     ),
                 },
+                code="submission_limit_reached",
+                message="You have used today's suggestion submission allowance.",
+                recovery="Wait until the daily limit resets at midnight UTC before submitting again.",
             )
         logger.debug(
             "Untrusted submission allowed: project=%s user=%s remaining=%s",
@@ -2400,9 +2416,12 @@ class SuggestionService:
                 detail=f"Session is {session.status}, cannot submit",
             )
         if session.changes_count == 0:
-            raise HTTPException(
+            raise GuidedHTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No changes to submit",
+                code="suggestion_no_changes",
+                message="This suggestion has no saved changes to submit.",
+                recovery="Make and save an edit before submitting.",
             )
 
         # Store optional credit info
