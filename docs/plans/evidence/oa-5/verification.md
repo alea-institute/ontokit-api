@@ -31,6 +31,11 @@ Documentation followed in `fbe3a796`. Subsequent simplification and review
 corrections are described below; they preserve the response and permission
 contracts.
 
+The final checked code revision is
+`683ffc81abfb4536ca77900ee431dad093f9547b`. The full-suite result below was
+obtained from these same code/test bytes before committing; the final receipt
+commit changes only this document.
+
 | Unit | Change and proof |
 |---|---|
 | U1, `31c88c7a` | Opt-in `GuidedHTTPException`, optional OpenAPI schema, and dedicated HTTP handler. New tests first failed on the absent exception; subsequent full ASGI tests prove exact string/nested detail, headers, CORS, supplied/generated request correlation, and unchanged ordinary/domain/validation/204 bodies. Existing exception/main tests remain unchanged. |
@@ -109,9 +114,15 @@ reviews. Those reviews and required CI remain controller-owned. No separate
 learning document is needed because the rationale is captured here, in the
 consumer contract, and in the adapter tests.
 
-No frontend files changed. API request/response checks use ASGITransport; there
-is no changed-page screenshot. Actual `ontokit-web` parser/display checks and
-live dependency/driver acceptance are not claimed by these tests.
+`ce-test-browser` scope check: no frontend pages changed; zero pages exercised.
+API request/response checks use ASGITransport, so no changed-page screenshot is
+required. Companion browser/parser verification is **not run** because the web
+repository and application are absent. Live dependency/driver acceptance is
+also unverified. These remain G2/G3 evidence, not browser passes.
+
+Final artifact checks found no machine-local paths in the new consumer contract,
+build receipt, or adapter tests. An AST comparison confirmed that every
+pre-existing assertion in the two modified existing test files was retained.
 
 ## Controller release gates
 
@@ -126,3 +137,8 @@ outside service was introduced. No workflows, deployment policy, dependency
 versions, or credential/security settings changed. The controller owns scanning,
 push, PR creation, and merging; this lane delivers local commits only. The
 November 3–6 expansion merge freeze remains in force.
+
+All implementation, simplification, review corrections, and this receipt are
+committed locally. The worktree is clean at delivery. No push or PR was attempted
+because the checkout has no remote; publication and campaign CI/reviews remain
+with the controller.
