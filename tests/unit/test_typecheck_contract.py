@@ -40,6 +40,8 @@ def _run_checker(
         "    'environment': os.environ.get('UV_PROJECT_ENVIRONMENT'),\n"
         "    'no_sync': os.environ.get('UV_NO_SYNC'),\n"
         "    'frozen': os.environ.get('UV_FROZEN'),\n"
+        "    'no_dev': os.environ.get('UV_NO_DEV'),\n"
+        "    'no_group': os.environ.get('UV_NO_GROUP'),\n"
         "    'project': os.environ.get('UV_PROJECT'),\n"
         "    'working_dir': os.environ.get('UV_WORKING_DIR'),\n"
         "    'active': os.environ.get('VIRTUAL_ENV'),\n"
@@ -61,6 +63,8 @@ def _run_checker(
             VIRTUAL_ENV=str(project / ".venv"),
             UV_NO_SYNC="1",
             UV_FROZEN="1",
+            UV_NO_DEV="1",
+            UV_NO_GROUP="dev",
             UV_PROJECT=str(tmp_path / "another-project"),
             UV_WORKING_DIR=str(tmp_path / "another-directory"),
         )
@@ -91,7 +95,7 @@ def test_checker_uses_locked_python311_without_touching_runtime(
     assert args[args.index("--group") + 1] == "dev"
     assert "--locked" in args
     assert args[-2:] == ["mypy", "ontokit/"]
-    for override in ("no_sync", "frozen", "project", "working_dir", "active"):
+    for override in ("no_sync", "frozen", "no_dev", "no_group", "project", "working_dir", "active"):
         assert call[override] is None
     assert (checker_project / ".venv" / "runtime-marker").read_text() == "preserve runtime"
 
@@ -113,7 +117,7 @@ def test_checker_rejects_stale_lock_without_rewriting_it(checker_project: Path) 
         'requires-python = ">=3.11"\n[dependency-groups]\ndev = []\n'
     )
     locked = subprocess.run(
-        ["uv", "lock", "--python", "3.11", "--offline"],
+        ["uv", "lock", "--python", "3.11"],
         cwd=checker_project,
         env={**os.environ, "UV_PROJECT_ENVIRONMENT": str(checker_project / ".venv-mypy")},
         capture_output=True,

@@ -73,27 +73,51 @@ SHA-256 comparisons confirmed no changes to `uv.lock`, `pyproject.toml`,
 its Python 3.11 target and the Pydantic plugin remain unchanged. Other CI jobs
 retain their existing interpreter selection and gates.
 
-A disposable dependency-free project was locked offline with Python 3.11.
+A disposable dependency-free project was locked with Python 3.11.
 Changing its Python compatibility range made that lock stale. The real runner
 exited 2, reported that `--locked` prevented an update, and left the lock bytes
-unchanged. This is now a regression test, alongside stubbed failure propagation
-tests for uv, Make, the configured hook entry, and the CI shell step.
+unchanged. The stale-lock check runs offline; fixture setup permits uv to obtain
+Python 3.11 when it is absent. This is now a regression test, alongside stubbed
+failure propagation tests for uv, Make, the configured hook entry, and the CI
+shell step.
 
 ## Checks
 
 | Check | Result |
 |---|---|
-| Existing unit suite, using `scripts/memory-cap.sh` | 3,791 passed, 1 existing skip; 90% coverage |
-| Final runner, release-workflow and Docker contract tests | 53 passed, including the added real stale-lock case |
+| Final unit suite, using `scripts/memory-cap.sh` | 3,792 passed, 1 existing skip; 90% coverage |
+| Focused runner, release-workflow and Docker contract tests | 53 passed; also included in the final unit suite |
 | Ruff check: `ontokit/` and the new test file | Passed |
 | Ruff format check: same scope | 194 files already formatted |
 | `uv run --locked pyright ontokit/` | 0 errors, 0 warnings |
 | `git diff --check` | Passed |
 
-The unit-suite run preceded the final additional stale-lock case; the focused
-run includes it. No existing test was changed, removed or weakened. The memory
-wrapper used its existing `prlimit` fallback because systemd user scopes are
-unavailable in this sandbox.
+The final unit suite includes the stale-lock case and strengthened ambient
+settings assertions. No existing test was changed, removed or weakened. The
+memory wrapper used its existing `prlimit` fallback because systemd user scopes
+are unavailable in this sandbox.
+
+## Review and fixes
+
+The simplification pass removed one redundant runner comment. The correctness
+review and an independent same-family adversarial reviewer identified two
+issues; both were fixed and the reviewer confirmed their resolution:
+
+- The real stale-lock fixture originally required Python 3.11 while disabling
+  interpreter downloads. With an empty managed-interpreter directory, it failed
+  before exercising the lock check. Allowing acquisition during fixture setup
+  made that same cold-interpreter scenario pass; the actual stale-lock check
+  remains offline and retains every assertion.
+- `UV_NO_DEV=1` and `UV_NO_GROUP=dev` each overrode `--group dev`. Real `uv export`
+  runs confirmed that either setting omitted `mypy==2.3.1`. The runner now clears
+  both settings, and the strengthened ambient regression failed before that fix
+  and passes after it. A real uv resolver probe through the runner retained
+  `mypy==2.3.1` with both conflicting settings present, then the checker passed
+  over all 192 source files.
+
+No actionable review findings remain. Cross-model review was disabled by this
+checkout's configuration. The controller's campaign reviews remain required;
+the local same-family review does not substitute for Astra and Fable review.
 
 Full service-backed integration tests and hosted CI were not run here. The
 controller must obtain the required lint and full test checks before merge;
