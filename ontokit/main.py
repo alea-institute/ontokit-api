@@ -20,7 +20,13 @@ from ontokit.api.routes import router as api_router
 from ontokit.core.api_paths import API_V1_PREFIX
 from ontokit.core.config import settings
 from ontokit.core.database import engine
-from ontokit.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
+from ontokit.core.exceptions import (
+    ConflictError,
+    ForbiddenError,
+    GuidedHTTPException,
+    NotFoundError,
+    ValidationError,
+)
 from ontokit.core.logging_filters import install_token_redaction
 from ontokit.core.middleware import (
     AccessLogMiddleware,
@@ -28,6 +34,7 @@ from ontokit.core.middleware import (
     RequestIDMiddleware,
     SecurityHeadersMiddleware,
 )
+from ontokit.schemas.errors import ErrorGuidance
 from ontokit.services.storage import StorageService
 
 install_token_redaction()
@@ -376,6 +383,21 @@ app.add_middleware(RequestIDMiddleware)
 
 
 # --- Exception handlers ----------------------------------------------------
+
+
+@app.exception_handler(GuidedHTTPException)
+async def guided_http_exception_handler(request: Request, exc: GuidedHTTPException) -> JSONResponse:
+    guidance = ErrorGuidance(
+        code=exc.code,
+        message=exc.message,
+        recovery=exc.recovery,
+        request_id=request.state.request_id,
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "error": guidance.model_dump()},
+        headers=exc.headers,
+    )
 
 
 def _error_response(
