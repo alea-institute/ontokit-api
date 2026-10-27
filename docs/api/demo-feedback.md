@@ -123,10 +123,24 @@ otherwise it returns HTTP 503. Every response carries `Cache-Control: no-store`.
 
 Each check reports `ok`, `unavailable`, or `timeout` with a fixed safe message.
 Connection or cleanup failures are `unavailable`; an exceeded operation budget
-is `timeout`. Checks have a one-second operation budget and up to 250 ms cleanup
-allowance each. Cooperative-stall tests target completion within two seconds;
-this is not a hard timing guarantee for uncooperative drivers or a loaded host.
-Request cancellation propagates after cleanup.
+is `timeout`. Timers request cancellation after one second of operation and
+250 ms of cleanup. These are cancellation thresholds, not total response-time
+deadlines. The installed SQLAlchemy/asyncpg adapter can shield an additional
+two-second graceful shutdown before the service regains control.
+
+Tests through that adapter with synthetic query/transport stalls measured about
+three seconds for a query or pooled connection check, and 2.25 seconds for
+rollback cleanup. A second cancellation during shutdown propagates promptly,
+but library-owned cleanup and the synthetic transport can remain for about two
+more seconds. In the tested cases, pool checkouts were released and shutdown
+eventually finished. Application probe completion does not certify that all
+library cleanup has drained.
+
+The plan's two-second controlled-stall target is met only at injected cooperative
+probe boundaries. This documented timing limitation preserves the existing
+shared engine/pool behavior; it does not establish a strict total deadline or
+live PostgreSQL behavior. See `tests/unit/test_health_adapter.py` for the
+installed-adapter characterizations and the build receipt for release gates.
 
 Every request probes current connectivity with the existing database engine and
 a temporary Redis client. It neither relies on nor changes the startup Redis

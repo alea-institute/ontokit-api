@@ -1,5 +1,3 @@
-"""Current, read-only dependency probes with bounded operation and cleanup."""
-
 import asyncio
 import logging
 from collections.abc import Callable
@@ -52,7 +50,7 @@ class HealthService:
         self.redis_factory = redis_factory
 
     async def check(self) -> DependencyChecks:
-        """Retain both results; cancellation waits for both probes to release resources."""
+        """Collect both observations and await application-owned probe tasks."""
         async with asyncio.TaskGroup() as tasks:
             database = tasks.create_task(self._database())
             redis = tasks.create_task(self._redis())
@@ -62,16 +60,18 @@ class HealthService:
         status: Literal["ok", "unavailable", "timeout"] = "ok"
         connection: AsyncConnection | None = None
         raw: PoolProxiedConnection | None = None
+        # These timers request cancellation. SQLAlchemy/asyncpg may then shield
+        # a two-second shutdown, including pre_ping before we receive a handle.
+        # Library-owned cleanup can outlive a repeatedly cancelled probe.
         try:
-            try:
-                async with asyncio.timeout(OPERATION_TIMEOUT):
-                    connection = await self.database_engine.connect()
-                    raw = await connection.get_raw_connection()
-                    await connection.execute(text("SELECT 1"))
-            except TimeoutError:
-                status = "timeout"
-            except Exception:
-                status = "unavailable"
+            async with asyncio.timeout(OPERATION_TIMEOUT):
+                connection = await self.database_engine.connect()
+                raw = await connection.get_raw_connection()
+                await connection.execute(text("SELECT 1"))
+        except TimeoutError:
+            status = "timeout"
+        except Exception:
+            status = "unavailable"
         finally:
             if connection is not None:
                 try:
@@ -87,8 +87,6 @@ class HealthService:
                             raw.invalidate()
                         except Exception:
                             logger.warning("Database readiness connection cleanup failed.")
-                    if isinstance(exc, asyncio.CancelledError):
-                        raise
                     if not isinstance(exc, Exception):
                         raise
                     status = "unavailable"
@@ -98,15 +96,14 @@ class HealthService:
         status: Literal["ok", "unavailable", "timeout"] = "ok"
         client: Redis | None = None
         try:
-            try:
-                async with asyncio.timeout(OPERATION_TIMEOUT):
-                    client = self.redis_factory()
-                    if not await client.ping():
-                        status = "unavailable"
-            except (TimeoutError, RedisTimeoutError):
-                status = "timeout"
-            except Exception:
-                status = "unavailable"
+            async with asyncio.timeout(OPERATION_TIMEOUT):
+                client = self.redis_factory()
+                if not await client.ping():
+                    status = "unavailable"
+        except (TimeoutError, RedisTimeoutError):
+            status = "timeout"
+        except Exception:
+            status = "unavailable"
         finally:
             if client is not None:
                 try:
@@ -118,5 +115,4 @@ class HealthService:
 
 
 def get_health_service() -> HealthService:
-    """FastAPI dependency; never initializes ARQ or uses the startup Redis pool."""
     return HealthService()

@@ -1,5 +1,3 @@
-"""Public dependency connectivity results, separate from process liveness."""
-
 from typing import Literal
 
 from pydantic import BaseModel

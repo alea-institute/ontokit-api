@@ -26,8 +26,10 @@ and dependency files are unchanged.
 
 ## Implementation and proof
 
-The integrated implementation revision is `7533b92a` (U1–U4). API documentation
-and this receipt are subsequent documentation-only changes.
+The initial integrated implementation revision is `7533b92a` (U1–U4).
+Documentation followed in `fbe3a796`. Subsequent simplification and review
+corrections are described below; they preserve the response and permission
+contracts.
 
 | Unit | Change and proof |
 |---|---|
@@ -39,19 +41,20 @@ and this receipt are subsequent documentation-only changes.
 
 Readiness tests include controlled acquisition/query/ping stalls, cleanup stalls
 and failures, independent dependency results, fresh Redis recovery, cancellation,
-sanitized failure responses/logs, and no surviving application-owned tasks.
+sanitized failure responses/logs, and no surviving application-owned probe tasks.
 Tests using the installed Redis connection/pool and a synthetic stalled writer
 verify actual transport close/cancellation behavior. Database cleanup avoids
 SQLAlchemy's context-manager shielded close task and invalidates a failed pooled
-connection. If both graceful close and invalidation fail, the result is
-`unavailable` with a fixed safe warning; actual driver resource release in that
-exceptional case is not proved by mock tests.
+connection. This does not eliminate SQLAlchemy's separate shielded invalidation
+path, described in the review qualification below. If both graceful close and
+invalidation fail, the result is `unavailable` with a fixed safe warning; actual
+driver resource release in that exceptional case is not proved by mock tests.
 
 ## Verification results
 
 | Command/check | Observed outcome |
 |---|---|
-| `uv run --locked pytest tests/ -v --cov=ontokit -ra` | **3,862 passed, 148 skipped**, 20 warnings, 90% rounded coverage; 37.07 seconds. No existing test removed or weakened. |
+| `uv run --locked pytest tests/ -v --cov=ontokit -ra` | Initial implementation: **3,862 passed, 148 skipped**, 20 warnings, 90% rounded coverage; 37.07 seconds. Final reviewed tree: **3,866 passed, 148 skipped**, 20 warnings, 90% rounded coverage; 46.27 seconds. No existing test removed or weakened. |
 | `uv run --locked ruff check ontokit/ tests/` | Pass. |
 | `uv run --locked ruff format --check ontokit/ tests/` | Fails on the same **20 existing test files** present before implementation. Changed/new files pass scoped formatting. No unrelated reformat. |
 | `uv run --locked mypy ontokit/` | Blocked before checking application code: installed `numpy/__init__.pyi:737` uses a type statement requiring Python 3.12+, while the repository targets 3.11. Same failure before and after. This is the separate `oa-3` mandate; no target/dependency change here. |
@@ -66,9 +69,45 @@ were sought and no live DEV state or provider was contacted.
 
 ## Review and browser evidence
 
-Implementation is complete; simplification and code-review receipts will be
-recorded here before final delivery. Campaign Astra/Fable and required CI reviews
-remain controller-owned and are not inferred from a local review.
+`ce-simplify-code` completed all five lenses. It flattened nested exception
+handling, removed a redundant cancellation branch and redundant summaries, and
+preserved all proof tests. Its 86 focused tests, Ruff, scoped formatting, and
+Pyright passed; mypy retained the baseline blocker.
+
+`ce-code-review` run `20261027-100522-72e33b01` completed eight lenses:
+correctness, project standards, testing, maintainability, security, API contract,
+reliability, and adversarial review. Its verdict was **Ready with fixes**, with
+one confirmed P2 finding: qualify readiness timing/cleanup claims and add actual
+adapter characterization. Correctness, reliability, and adversarial reviewers
+independently identified it; a separate validator confirmed it. The fix adds
+`tests/unit/test_health_adapter.py` and corrects the service comment, consumer
+contract, and this receipt. No existing tests were removed or weakened.
+
+**KTD4/U4 timing qualification:** the one-second operation and 250 ms cleanup
+timers initiate cancellation; they do not bound the entire driver shutdown.
+On SQLAlchemy 2.0.52 and asyncpg 0.31.0, installed-adapter reproductions measured
+3.004 seconds for SELECT and pooled pre-ping, and 2.253 seconds for rollback
+cleanup. With a second cancellation during shielded termination, the probe
+returned at 1.002 seconds while a library task and synthetic transport remained
+until 3.005 seconds. Pool checkouts were zero; cleanup eventually completed.
+These are synthetic query/transport observations, not a live connection or
+production-incidence claim.
+
+The accepted implementation deviation retains the shared engine/pool and
+records those limits, instead of claiming the plan's two-second target for
+actual adapter cancellation or a complete driver-task drain before return.
+That target remains proved only for injected cooperative probe boundaries.
+Four added adapter tests cover SELECT, pre-ping, rollback, and repeated
+cancellation, preserving all previous lifecycle tests. The correction addresses
+the review's evidence/documentation finding; it does not repair a strict total
+deadline. Live-service timing and cancellation remain controller evidence gaps.
+
+No actionable review finding remains unapplied after this correction. No
+session-settled decision was changed. Cross-model review is disabled by checkout
+configuration; these were native review lenses, not the campaign Astra/Fable
+reviews. Those reviews and required CI remain controller-owned. No separate
+learning document is needed because the rationale is captured here, in the
+consumer contract, and in the adapter tests.
 
 No frontend files changed. API request/response checks use ASGITransport; there
 is no changed-page screenshot. Actual `ontokit-web` parser/display checks and

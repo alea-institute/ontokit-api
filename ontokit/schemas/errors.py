@@ -1,5 +1,3 @@
-"""Optional guidance for explicitly classified HTTP refusals."""
-
 from typing import Any
 
 from pydantic import BaseModel, Field
