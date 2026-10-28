@@ -1,0 +1,506 @@
+{
+  "ontokit/api/routes/suggestions.py": {
+    "summary": {
+      "covered_lines": 50,
+      "num_statements": 70,
+      "percent_covered": 71.42857142857143,
+      "percent_covered_display": "71",
+      "missing_lines": 20,
+      "excluded_lines": 0,
+      "percent_statements_covered": 71.42857142857143,
+      "percent_statements_covered_display": "71",
+      "num_branches": 0,
+      "num_partial_branches": 0,
+      "covered_branches": 0,
+      "missing_branches": 0,
+      "percent_branches_covered": 100.0,
+      "percent_branches_covered_display": "100"
+    },
+    "missing_lines": [
+      39,
+      53,
+      82,
+      104,
+      105,
+      106,
+      107,
+      108,
+      110,
+      133,
+      147,
+      187,
+      201,
+      216,
+      231,
+      251,
+      252,
+      279,
+      294,
+      312
+    ],
+    "missing_branches": []
+  },
+  "ontokit/api/routes/anonymous_suggestions.py": {
+    "summary": {
+      "covered_lines": 51,
+      "num_statements": 54,
+      "percent_covered": 93.33333333333333,
+      "percent_covered_display": "93",
+      "missing_lines": 3,
+      "excluded_lines": 0,
+      "percent_statements_covered": 94.44444444444444,
+      "percent_statements_covered_display": "94",
+      "num_branches": 6,
+      "num_partial_branches": 1,
+      "covered_branches": 5,
+      "missing_branches": 1,
+      "percent_branches_covered": 83.33333333333333,
+      "percent_branches_covered_display": "83"
+    },
+    "missing_lines": [
+      128,
+      147,
+      148
+    ],
+    "missing_branches": [
+      [
+        124,
+        128
+      ]
+    ]
+  },
+  "ontokit/api/routes/pull_requests.py": {
+    "summary": {
+      "covered_lines": 164,
+      "num_statements": 168,
+      "percent_covered": 97.02970297029702,
+      "percent_covered_display": "97",
+      "missing_lines": 4,
+      "excluded_lines": 0,
+      "percent_statements_covered": 97.61904761904762,
+      "percent_statements_covered_display": "98",
+      "num_branches": 34,
+      "num_partial_branches": 2,
+      "covered_branches": 32,
+      "missing_branches": 2,
+      "percent_branches_covered": 94.11764705882354,
+      "percent_branches_covered_display": "94"
+    },
+    "missing_lines": [
+      48,
+      225,
+      226,
+      626
+    ],
+    "missing_branches": [
+      [
+        218,
+        228
+      ],
+      [
+        619,
+        626
+      ]
+    ]
+  },
+  "ontokit/services/pull_request_service.py": {
+    "summary": {
+      "covered_lines": 816,
+      "num_statements": 914,
+      "percent_covered": 86.66666666666667,
+      "percent_covered_display": "87",
+      "missing_lines": 98,
+      "excluded_lines": 5,
+      "percent_statements_covered": 89.27789934354486,
+      "percent_statements_covered_display": "89",
+      "num_branches": 316,
+      "num_partial_branches": 44,
+      "covered_branches": 250,
+      "missing_branches": 66,
+      "percent_branches_covered": 79.11392405063292,
+      "percent_branches_covered_display": "79"
+    },
+    "missing_lines": [
+      297,
+      310,
+      350,
+      351,
+      352,
+      483,
+      559,
+      574,
+      589,
+      628,
+      647,
+      717,
+      826,
+      832,
+      840,
+      842,
+      971,
+      972,
+      975,
+      976,
+      977,
+      978,
+      1011,
+      1019,
+      1020,
+      1021,
+      1156,
+      1157,
+      1242,
+      1258,
+      1259,
+      1349,
+      1350,
+      1351,
+      1352,
+      1353,
+      1354,
+      1355,
+      1356,
+      1363,
+      1364,
+      1365,
+      1822,
+      1845,
+      1892,
+      1894,
+      1895,
+      1896,
+      1897,
+      1902,
+      1903,
+      1904,
+      1909,
+      1910,
+      1916,
+      1919,
+      1920,
+      1921,
+      1927,
+      1928,
+      1930,
+      1933,
+      1934,
+      1935,
+      1938,
+      1939,
+      1940,
+      1941,
+      1942,
+      1947,
+      1948,
+      1951,
+      1953,
+      1954,
+      1962,
+      1963,
+      1965,
+      1966,
+      1973,
+      1974,
+      1975,
+      1976,
+      1981,
+      1982,
+      1983,
+      1990,
+      1998,
+      2112,
+      2113,
+      2120,
+      2137,
+      2229,
+      2289,
+      2346,
+      2371,
+      2372,
+      2397,
+      2398
+    ],
+    "missing_branches": [
+      [
+        139,
+        138
+      ],
+      [
+        168,
+        162
+      ],
+      [
+        180,
+        182
+      ],
+      [
+        182,
+        184
+      ],
+      [
+        184,
+        188
+      ],
+      [
+        188,
+        190
+      ],
+      [
+        190,
+        193
+      ],
+      [
+        296,
+        297
+      ],
+      [
+        309,
+        310
+      ],
+      [
+        480,
+        482
+      ],
+      [
+        482,
+        483
+      ],
+      [
+        558,
+        559
+      ],
+      [
+        573,
+        574
+      ],
+      [
+        588,
+        589
+      ],
+      [
+        623,
+        628
+      ],
+      [
+        642,
+        647
+      ],
+      [
+        716,
+        717
+      ],
+      [
+        825,
+        826
+      ],
+      [
+        827,
+        832
+      ],
+      [
+        839,
+        840
+      ],
+      [
+        841,
+        842
+      ],
+      [
+        872,
+        890
+      ],
+      [
+        970,
+        971
+      ],
+      [
+        974,
+        975
+      ],
+      [
+        1010,
+        1011
+      ],
+      [
+        1237,
+        1261
+      ],
+      [
+        1241,
+        1242
+      ],
+      [
+        1325,
+        1332
+      ],
+      [
+        1348,
+        1349
+      ],
+      [
+        1350,
+        1351
+      ],
+      [
+        1350,
+        1367
+      ],
+      [
+        1354,
+        1355
+      ],
+      [
+        1354,
+        1356
+      ],
+      [
+        1749,
+        -1720
+      ],
+      [
+        1821,
+        1822
+      ],
+      [
+        1841,
+        1844
+      ],
+      [
+        1844,
+        1845
+      ],
+      [
+        1896,
+        1897
+      ],
+      [
+        1896,
+        1902
+      ],
+      [
+        1903,
+        1904
+      ],
+      [
+        1903,
+        1909
+      ],
+      [
+        1909,
+        1910
+      ],
+      [
+        1909,
+        1916
+      ],
+      [
+        1920,
+        1921
+      ],
+      [
+        1920,
+        1927
+      ],
+      [
+        1933,
+        1934
+      ],
+      [
+        1933,
+        1998
+      ],
+      [
+        1938,
+        1939
+      ],
+      [
+        1938,
+        1951
+      ],
+      [
+        1951,
+        1953
+      ],
+      [
+        1951,
+        1990
+      ],
+      [
+        1953,
+        1954
+      ],
+      [
+        1953,
+        1962
+      ],
+      [
+        1962,
+        1963
+      ],
+      [
+        1962,
+        1965
+      ],
+      [
+        2098,
+        -2078
+      ],
+      [
+        2107,
+        -2078
+      ],
+      [
+        2123,
+        -2078
+      ],
+      [
+        2136,
+        2137
+      ],
+      [
+        2228,
+        2229
+      ],
+      [
+        2288,
+        2289
+      ],
+      [
+        2345,
+        2346
+      ],
+      [
+        2386,
+        2400
+      ],
+      [
+        2390,
+        2400
+      ],
+      [
+        2391,
+        2393
+      ],
+      [
+        2393,
+        2395
+      ]
+    ]
+  },
+  "create_review": {
+    "covered_lines": 31,
+    "num_statements": 34,
+    "percent_covered": 89.58333333333333,
+    "percent_covered_display": "90",
+    "missing_lines": 3,
+    "excluded_lines": 0,
+    "percent_statements_covered": 91.17647058823529,
+    "percent_statements_covered_display": "91",
+    "num_branches": 14,
+    "num_partial_branches": 2,
+    "covered_branches": 12,
+    "missing_branches": 2,
+    "percent_branches_covered": 85.71428571428571,
+    "percent_branches_covered_display": "86"
+  }
+}
