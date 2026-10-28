@@ -1,0 +1,2 @@
+systemd user scope unavailable; using prlimit address-space cap (6144 MiB)
+Success: no issues found in 192 source files

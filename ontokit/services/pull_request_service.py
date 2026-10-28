@@ -1194,6 +1194,13 @@ class PullRequestService:
     ) -> ReviewResponse:
         """Create a review on a pull request."""
         project = await self._get_project(project_id)
+
+        if not self._can_view(project, user):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have access to this project",
+            )
+
         pr = await self._get_pr(project_id, pr_number)
 
         # Only admin or owner can approve or request changes

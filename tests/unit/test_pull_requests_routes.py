@@ -264,6 +264,63 @@ class TestReviews:
         assert resp.status_code == 201
         svc.create_review.assert_awaited_once()
 
+    @pytest.mark.parametrize("body", [{}, {"status": "pending"}, {"status": ""}, {"status": None}])
+    def test_invalid_review_status_never_calls_service(
+        self, svc_client: tuple[TestClient, AsyncMock], body: dict[str, object]
+    ) -> None:
+        client, svc = svc_client
+        response = client.post(f"{BASE}/{PROJECT_ID}/pull-requests/1/reviews", json=body)
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["loc"] == ["body", "status"]
+        svc.create_review.assert_not_awaited()
+
+    @pytest.mark.parametrize("method", ["get", "post"])
+    @pytest.mark.parametrize(
+        ("project_id", "pr_number", "field"),
+        [("not-a-uuid", "1", "project_id"), (PROJECT_ID, "not-an-integer", "pr_number")],
+    )
+    def test_malformed_review_identifier_never_calls_service(
+        self,
+        svc_client: tuple[TestClient, AsyncMock],
+        method: str,
+        project_id: str,
+        pr_number: str,
+        field: str,
+    ) -> None:
+        client, svc = svc_client
+        kwargs = {"json": {"status": "commented"}} if method == "post" else {}
+        response = client.request(
+            method, f"{BASE}/{project_id}/pull-requests/{pr_number}/reviews", **kwargs
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"][0]["loc"] == ["path", field]
+        svc.create_review.assert_not_awaited()
+        svc.list_reviews.assert_not_awaited()
+
+    def test_list_review_response_preserves_fields(
+        self, svc_client: tuple[TestClient, AsyncMock]
+    ) -> None:
+        client, svc = svc_client
+        svc.list_reviews.return_value = ReviewListResponse(items=[_REVIEW_RESP], total=1)
+        response = client.get(f"{BASE}/{PROJECT_ID}/pull-requests/1/reviews")
+        assert response.status_code == 200
+        assert response.json() == {
+            "items": [
+                {
+                    "id": PROJECT_ID,
+                    "pull_request_id": PROJECT_ID,
+                    "reviewer_id": "test-user-id",
+                    "reviewer": None,
+                    "status": "approved",
+                    "body": "LGTM",
+                    "github_review_id": None,
+                    "created_at": NOW.isoformat().replace("+00:00", "Z"),
+                }
+            ],
+            "total": 1,
+        }
+        assert svc.list_reviews.await_args.args[:2] == (PROJECT_UUID, 1)
+
 
 class TestComments:
     def test_list_comments(self, svc_client: tuple[TestClient, AsyncMock]) -> None:
