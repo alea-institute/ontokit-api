@@ -13,15 +13,22 @@ The lineage shipped these endpoints without tests. Coverage here pins:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 
+from ontokit.api.routes import anonymous_suggestions
 from ontokit.core.anonymous_token import create_anonymous_token
+from ontokit.main import app
+from ontokit.models.suggestion_session import SuggestionSession
 from ontokit.schemas.suggestion import SuggestionBeaconRequest
+from ontokit.services.suggestion_service import SuggestionService
 
 PROJECT_ID = "11111111-1111-1111-1111-111111111111"
 BASE = f"/api/v1/projects/{PROJECT_ID}/suggestions/anonymous"
@@ -45,15 +52,19 @@ def _secure_test_secret(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_all_endpoints_403_when_auth_mode_required(client: TestClient) -> None:
-    with patch(
-        "ontokit.api.routes.anonymous_suggestions.settings"
-    ) as settings_mock:
+    with patch("ontokit.api.routes.anonymous_suggestions.settings") as settings_mock:
         settings_mock.auth_mode = "required"
         token = "irrelevant"
         responses = [
             client.post(f"{BASE}/sessions"),
-            client.put(f"{BASE}/sessions/s_x/save", json=SAVE_BODY, headers={"X-Anonymous-Token": token}),
-            client.post(f"{BASE}/sessions/s_x/submit", json=SUBMIT_BODY, headers={"X-Anonymous-Token": token}),
+            client.put(
+                f"{BASE}/sessions/s_x/save", json=SAVE_BODY, headers={"X-Anonymous-Token": token}
+            ),
+            client.post(
+                f"{BASE}/sessions/s_x/submit",
+                json=SUBMIT_BODY,
+                headers={"X-Anonymous-Token": token},
+            ),
             client.post(f"{BASE}/sessions/s_x/discard", headers={"X-Anonymous-Token": token}),
             client.post(f"{BASE}/beacon?token={token}", json={"session_id": "s_x", "content": "x"}),
         ]
@@ -289,3 +300,151 @@ def test_openapi_does_not_disclose_honeypot_semantics() -> None:
         assert needle not in blob, f"OpenAPI leaks honeypot semantics via {needle!r}"
     # the field itself must still be present under its innocuous alias
     assert "website" in request_schema["properties"]
+
+
+@pytest.fixture
+def anonymous_route_service(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    service = AsyncMock()
+    monkeypatch.setattr(anonymous_suggestions, "settings", SimpleNamespace(auth_mode="optional"))
+    monkeypatch.setattr(
+        app, "dependency_overrides", {anonymous_suggestions.get_service: lambda: service}
+    )
+    return service
+
+
+async def test_normal_anonymous_submit_returns_pr(anonymous_route_service: AsyncMock) -> None:
+    anonymous_route_service.submit_anonymous.return_value = {
+        "pr_number": 42,
+        "pr_url": None,
+        "status": "submitted",
+    }
+    token = create_anonymous_token("s_abc")
+    body = {**SUBMIT_BODY, "submitter_name": "Synthetic contributor"}
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"{BASE}/sessions/s_abc/submit", json=body, headers={"X-Anonymous-Token": token}
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"pr_number": 42, "pr_url": None, "status": "submitted"}
+    anonymous_route_service.submit_anonymous.assert_awaited_once()
+    args = anonymous_route_service.submit_anonymous.await_args.args
+    assert args[:2] == (UUID(PROJECT_ID), "s_abc")
+    assert args[2].summary == "adds Foo"
+    assert args[2].submitter_name == "Synthetic contributor"
+    assert args[3] == "s_abc"
+
+
+async def test_normal_anonymous_discard_returns_empty_204(
+    anonymous_route_service: AsyncMock,
+) -> None:
+    token = create_anonymous_token("s_abc")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.post(
+            f"{BASE}/sessions/s_abc/discard", headers={"X-Anonymous-Token": token}
+        )
+
+    assert response.status_code == 204
+    assert response.content == b""
+    anonymous_route_service.discard_anonymous.assert_awaited_once_with(
+        UUID(PROJECT_ID), "s_abc", "s_abc"
+    )
+
+
+@pytest.mark.parametrize(
+    "action,method,body",
+    [("save", "PUT", SAVE_BODY), ("submit", "POST", SUBMIT_BODY), ("discard", "POST", None)],
+)
+@pytest.mark.parametrize("token_kind,expected_status", [("missing", 422), ("expired", 401)])
+async def test_anonymous_missing_or_expired_token_does_not_execute(
+    anonymous_route_service: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    method: str,
+    body: dict | None,
+    token_kind: str,
+    expected_status: int,
+) -> None:
+    headers = {}
+    if token_kind == "expired":
+        with patch("ontokit.core.anonymous_token.time.time", return_value=1000):
+            token = create_anonymous_token("s_abc", ttl=1)
+        monkeypatch.setattr("ontokit.core.anonymous_token.time.time", lambda: 1002)
+        headers["X-Anonymous-Token"] = token
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.request(
+            method, f"{BASE}/sessions/s_abc/{action}", json=body, headers=headers
+        )
+
+    assert response.status_code == expected_status
+    if token_kind == "missing":
+        assert response.json()["detail"][0]["loc"] == ["header", "x-anonymous-token"]
+    else:
+        assert response.json() == {"detail": "Invalid or expired anonymous token"}
+    assert anonymous_route_service.mock_calls == []
+
+
+@pytest.mark.parametrize(
+    "action,method,body",
+    [("save", "PUT", SAVE_BODY), ("submit", "POST", SUBMIT_BODY), ("discard", "POST", None)],
+)
+@pytest.mark.parametrize(
+    "refusal,expected_status",
+    [("different-session", 403), ("authenticated-session", 403), ("inactive-session", 400)],
+)
+async def test_anonymous_http_refusal_has_no_write_effects(
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    method: str,
+    body: dict | None,
+    refusal: str,
+    expected_status: int,
+) -> None:
+    """Real HMAC verification and service guards run before PR, Git, or DB writes."""
+    db = AsyncMock()
+    db.add = MagicMock()
+    git = MagicMock()
+    service = SuggestionService(db=db, git_service=git)
+    activity = datetime(2026, 10, 27, 12, tzinfo=UTC)
+    session = SuggestionSession(
+        project_id=UUID(PROJECT_ID),
+        session_id="s_abc",
+        branch="suggest/anonymous/s_abc",
+        user_id="anonymous-s_abc",
+        is_anonymous=refusal != "authenticated-session",
+        status="submitted" if refusal == "inactive-session" else "active",
+        changes_count=1,
+        beacon_token="synthetic-beacon",
+        last_activity=activity,
+    )
+    get_session = AsyncMock(return_value=session)
+    create_pr = AsyncMock()
+    monkeypatch.setattr(service, "_get_session", get_session)
+    monkeypatch.setattr(service, "_create_pr_for_session", create_pr)
+    monkeypatch.setattr(anonymous_suggestions, "settings", SimpleNamespace(auth_mode="optional"))
+    monkeypatch.setattr(
+        app, "dependency_overrides", {anonymous_suggestions.get_service: lambda: service}
+    )
+    before = (session.status, session.changes_count, session.last_activity, session.pr_id)
+    token = create_anonymous_token("s_other" if refusal == "different-session" else "s_abc")
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.request(
+            method,
+            f"{BASE}/sessions/s_abc/{action}",
+            json=body,
+            headers={"X-Anonymous-Token": token},
+        )
+
+    assert response.status_code == expected_status
+    expected_detail = {
+        "different-session": "Token does not match session",
+        "authenticated-session": "Session is not an anonymous session",
+        "inactive-session": f"Session is submitted, cannot {action}",
+    }[refusal]
+    assert response.json() == {"detail": expected_detail}
+    get_session.assert_awaited_once_with(UUID(PROJECT_ID), "s_abc")
+    assert (session.status, session.changes_count, session.last_activity, session.pr_id) == before
+    db.add.assert_not_called()
+    db.commit.assert_not_awaited()
+    assert git.method_calls == []
+    create_pr.assert_not_awaited()

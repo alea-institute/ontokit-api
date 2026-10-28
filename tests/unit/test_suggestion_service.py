@@ -16,6 +16,8 @@ from fastapi import HTTPException
 from ontokit.core.auth import CurrentUser
 from ontokit.models.suggestion_outcome import SuggestionOutcome
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
+from ontokit.schemas.anonymous_suggestion import AnonymousSubmitRequest
+from ontokit.schemas.suggestion import SuggestionSubmitResponse
 from ontokit.services.embedding_service import EmbeddingBudgetExceeded, EmbeddingPricingUnavailable
 from ontokit.services.suggestion_service import SuggestionService
 
@@ -195,6 +197,60 @@ def _outcomes(mock_db: AsyncMock) -> list[SuggestionOutcome]:
         for call in mock_db.add.call_args_list
         if isinstance(call.args[0], SuggestionOutcome)
     ]
+
+
+async def test_anonymous_discard_with_matching_token_changes_session(
+    service: SuggestionService,
+    mock_db: AsyncMock,
+    mock_git: MagicMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An allowed control observes the Git and state effects refused by HTTP guards."""
+    session = _make_session(is_anonymous=True)
+    monkeypatch.setattr(service, "_get_session", AsyncMock(return_value=session))
+
+    await service.discard_anonymous(PROJECT_ID, session.session_id, session.session_id)
+
+    assert session.status == "discarded"
+    mock_git.delete_branch.assert_called_once_with(PROJECT_ID, session.branch, force=True)
+    mock_db.commit.assert_awaited_once_with()
+
+
+async def test_anonymous_submit_with_matching_token_preserves_credit_and_pr_result(
+    service: SuggestionService,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _make_session(is_anonymous=True, changes_count=1)
+    monkeypatch.setattr(service, "_get_session", AsyncMock(return_value=session))
+    create_pr = AsyncMock(
+        return_value=SuggestionSubmitResponse(pr_number=42, pr_url=None, status="submitted")
+    )
+    monkeypatch.setattr(service, "_create_pr_for_session", create_pr)
+    data = AnonymousSubmitRequest(
+        summary="Clarify concept",
+        submitter_name="Synthetic contributor",
+        submitter_email="contributor@example.test",
+    )
+
+    result = await service.submit_anonymous(
+        PROJECT_ID, session.session_id, data, session.session_id
+    )
+
+    assert result.model_dump() == {"pr_number": 42, "pr_url": None, "status": "submitted"}
+    assert session.submitter_name == "Synthetic contributor"
+    assert session.user_name == "Synthetic contributor"
+    assert session.submitter_email == "contributor@example.test"
+    create_pr.assert_awaited_once_with(
+        PROJECT_ID,
+        session,
+        CurrentUser(
+            id=session.user_id,
+            name="Synthetic contributor",
+            email="contributor@example.test",
+        ),
+        "Clarify concept",
+        "submitted",
+    )
 
 
 # ---------------------------------------------------------------------------
