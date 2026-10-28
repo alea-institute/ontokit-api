@@ -1,0 +1,1167 @@
+{
+  "note": "Reachability is static and ignores environment markers; it is not a deployment attestation. Local ontokit root has no registry version.",
+  "packages": [
+    {
+      "name": "alembic",
+      "version": "1.19.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "annotated-doc",
+      "version": "0.0.5",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "annotated-types",
+      "version": "0.8.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "anthropic",
+      "version": "0.125.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "anyio",
+      "version": "4.14.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "argon2-cffi",
+      "version": "25.1.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "argon2-cffi-bindings",
+      "version": "26.1.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "arq",
+      "version": "0.28.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "ast-serialize",
+      "version": "0.8.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "async-timeout",
+      "version": "5.0.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "asyncpg",
+      "version": "0.31.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "bcrypt",
+      "version": "5.0.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "certifi",
+      "version": "2026.7.22",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "cffi",
+      "version": "2.1.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "cfgv",
+      "version": "3.5.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "charset-normalizer",
+      "version": "3.5.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "click",
+      "version": "8.4.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "cohere",
+      "version": "7.0.9",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "colorama",
+      "version": "0.4.6",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "coverage",
+      "version": "7.15.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "cryptography",
+      "version": "50.0.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "cuda-bindings",
+      "version": "13.3.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "cuda-pathfinder",
+      "version": "1.6.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "cuda-toolkit",
+      "version": "13.0.3.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "deprecated",
+      "version": "1.3.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "distlib",
+      "version": "0.4.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "distro",
+      "version": "1.9.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "docstring-parser",
+      "version": "0.18.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "fastapi",
+      "version": "0.141.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "fastavro",
+      "version": "1.12.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "filelock",
+      "version": "3.32.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "folio-python",
+      "version": "0.4.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "fsspec",
+      "version": "2026.7.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "gitdb",
+      "version": "4.0.12",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "gitpython",
+      "version": "3.2.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "google-ai-generativelanguage",
+      "version": "0.6.15",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "google-api-core",
+      "version": "2.25.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "google-api-python-client",
+      "version": "2.199.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "google-auth",
+      "version": "2.56.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "google-auth-httplib2",
+      "version": "0.4.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "google-generativeai",
+      "version": "0.8.6",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "googleapis-common-protos",
+      "version": "1.75.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "greenlet",
+      "version": "3.5.5",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "grpcio",
+      "version": "1.83.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "grpcio-status",
+      "version": "1.71.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "h11",
+      "version": "0.16.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "hf-xet",
+      "version": "1.6.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "hiredis",
+      "version": "3.4.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "httpcore",
+      "version": "1.0.9",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "httpcore2",
+      "version": "2.12.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "httplib2",
+      "version": "0.32.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "httptools",
+      "version": "0.8.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "httpx",
+      "version": "0.28.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "httpx2",
+      "version": "2.12.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "httpx2-jsfetch",
+      "version": "1.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "huggingface-hub",
+      "version": "1.28.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "identify",
+      "version": "2.6.19",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "idna",
+      "version": "3.19",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "iniconfig",
+      "version": "2.3.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "jinja2",
+      "version": "3.1.6",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "jiter",
+      "version": "0.16.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "joblib",
+      "version": "1.5.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "librt",
+      "version": "0.15.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "limits",
+      "version": "5.8.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "lxml",
+      "version": "6.1.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "mako",
+      "version": "1.4.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "markdown-it-py",
+      "version": "4.2.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "markupsafe",
+      "version": "3.0.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "mdurl",
+      "version": "0.1.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "minio",
+      "version": "7.2.20",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "mpmath",
+      "version": "1.3.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "mypy",
+      "version": "2.3.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "mypy-extensions",
+      "version": "1.1.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "narwhals",
+      "version": "2.25.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "networkx",
+      "version": "3.6.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nodeenv",
+      "version": "1.10.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "numpy",
+      "version": "2.4.6",
+      "resolution_markers": [
+        "python_full_version < '3.12'"
+      ],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "numpy",
+      "version": "2.5.2",
+      "resolution_markers": [
+        "python_full_version >= '3.15'",
+        "python_full_version == '3.14.*'",
+        "python_full_version == '3.13.*'",
+        "python_full_version == '3.12.*'"
+      ],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-cublas",
+      "version": "13.1.1.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-cuda-cupti",
+      "version": "13.0.85",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-cuda-nvrtc",
+      "version": "13.0.88",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-cuda-runtime",
+      "version": "13.0.96",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-cudnn-cu13",
+      "version": "9.20.0.48",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-cufft",
+      "version": "12.0.0.61",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-cufile",
+      "version": "1.15.1.6",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-curand",
+      "version": "10.4.0.35",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-cusolver",
+      "version": "12.0.4.66",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-cusparse",
+      "version": "12.6.3.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-cusparselt-cu13",
+      "version": "0.8.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-nccl-cu13",
+      "version": "2.29.7",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-nvjitlink",
+      "version": "13.3.33",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-nvshmem-cu13",
+      "version": "3.4.5",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "nvidia-nvtx",
+      "version": "13.0.85",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "ontokit",
+      "version": null,
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "openai",
+      "version": "1.109.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "packaging",
+      "version": "26.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "passlib",
+      "version": "1.7.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pathspec",
+      "version": "1.1.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "pgvector",
+      "version": "0.5.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "platformdirs",
+      "version": "4.11.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "pluggy",
+      "version": "1.6.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "pre-commit",
+      "version": "4.6.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "proto-plus",
+      "version": "1.28.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "protobuf",
+      "version": "5.29.6",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pyasn1",
+      "version": "0.6.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pyasn1-modules",
+      "version": "0.4.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pycparser",
+      "version": "3.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pycryptodome",
+      "version": "3.23.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pydantic",
+      "version": "2.13.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pydantic-core",
+      "version": "2.46.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pydantic-settings",
+      "version": "2.15.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pygit2",
+      "version": "1.20.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pygithub",
+      "version": "2.10.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pygments",
+      "version": "2.21.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "pyjwt",
+      "version": "2.15.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pynacl",
+      "version": "1.6.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pyparsing",
+      "version": "3.3.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pyright",
+      "version": "1.1.411",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "pytest",
+      "version": "9.1.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "pytest-asyncio",
+      "version": "1.4.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "pytest-cov",
+      "version": "7.1.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "python-discovery",
+      "version": "1.6.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "python-dotenv",
+      "version": "1.2.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "python-multipart",
+      "version": "0.0.32",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "pyyaml",
+      "version": "6.0.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "rdflib",
+      "version": "7.6.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "redis",
+      "version": "5.3.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "regex",
+      "version": "2026.7.19",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "requests",
+      "version": "2.34.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "rich",
+      "version": "15.0.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "ruff",
+      "version": "0.16.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "safetensors",
+      "version": "0.8.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "scikit-learn",
+      "version": "1.9.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "scipy",
+      "version": "1.17.1",
+      "resolution_markers": [
+        "python_full_version < '3.12'"
+      ],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "scipy",
+      "version": "1.18.1",
+      "resolution_markers": [
+        "python_full_version >= '3.15'",
+        "python_full_version == '3.14.*'",
+        "python_full_version == '3.13.*'",
+        "python_full_version == '3.12.*'"
+      ],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "sentence-transformers",
+      "version": "6.0.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "setuptools",
+      "version": "84.0.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "shellingham",
+      "version": "1.5.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "slowapi",
+      "version": "0.1.10",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "smmap",
+      "version": "5.0.3",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "sniffio",
+      "version": "1.3.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "sqlalchemy",
+      "version": "2.0.52",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "starlette",
+      "version": "1.6.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "sympy",
+      "version": "1.14.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "threadpoolctl",
+      "version": "3.6.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "tokenizers",
+      "version": "0.22.2",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "tomli",
+      "version": "2.4.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "torch",
+      "version": "2.13.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "tqdm",
+      "version": "4.70.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "transformers",
+      "version": "5.15.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "triton",
+      "version": "3.7.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "truststore",
+      "version": "0.10.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "typer",
+      "version": "0.27.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "types-requests",
+      "version": "2.33.0.20260712",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "typing-extensions",
+      "version": "4.16.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "typing-inspection",
+      "version": "0.4.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "uritemplate",
+      "version": "4.2.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "urllib3",
+      "version": "2.8.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "uvicorn",
+      "version": "0.52.4",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "uvloop",
+      "version": "0.22.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "virtualenv",
+      "version": "21.14.11",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": true
+    },
+    {
+      "name": "watchfiles",
+      "version": "1.2.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": false,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "websockets",
+      "version": "17.0.1",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    },
+    {
+      "name": "wrapt",
+      "version": "2.3.0",
+      "resolution_markers": [],
+      "runtime_reachable_ignoring_markers": true,
+      "dev_reachable_ignoring_markers": false
+    }
+  ]
+}
