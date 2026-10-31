@@ -40,7 +40,7 @@ def services(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
         pr_id=None,
         pr_number=None,
     )
-    project = SimpleNamespace(id=PROJECT_ID, pr_approval_required=1)
+    project = SimpleNamespace(id=PROJECT_ID, pr_approval_required=1, is_public=True, members=[])
     suggestion = SuggestionService(db, git)
     monkeypatch.setattr(suggestion, "_get_session", AsyncMock(return_value=session))
     monkeypatch.setattr(suggestion, "_verify_project_access", AsyncMock(return_value=project))
