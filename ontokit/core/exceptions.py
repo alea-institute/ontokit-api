@@ -2,6 +2,27 @@
 
 from typing import Any
 
+from fastapi import HTTPException
+
+
+class GuidedHTTPException(HTTPException):
+    """An HTTP refusal with curated guidance alongside its unchanged detail."""
+
+    def __init__(
+        self,
+        status_code: int,
+        detail: Any,
+        *,
+        code: str,
+        message: str,
+        recovery: str,
+        headers: dict[str, str] | None = None,
+    ) -> None:
+        super().__init__(status_code=status_code, detail=detail, headers=headers)
+        self.code = code
+        self.message = message
+        self.recovery = recovery
+
 
 class OntoKitError(Exception):
     """Base exception for all OntoKit domain errors."""

@@ -123,6 +123,8 @@ processes and multiple concurrent stacks need their own aggregate budget.
 ## Documentation
 
 See the [wiki](https://github.com/CatholicOS/ontokit-api/wiki) for full documentation.
+The [demo API feedback contract](docs/api/demo-feedback.md) describes optional
+error guidance, search validation, and dependency readiness for API consumers.
 
 ## Tech Stack
 

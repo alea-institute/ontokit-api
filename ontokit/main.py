@@ -5,9 +5,10 @@ import logging
 import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
+from typing import Annotated
 
 import redis.asyncio as aioredis
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
@@ -20,7 +21,13 @@ from ontokit.api.routes import router as api_router
 from ontokit.core.api_paths import API_V1_PREFIX
 from ontokit.core.config import settings
 from ontokit.core.database import engine
-from ontokit.core.exceptions import ConflictError, ForbiddenError, NotFoundError, ValidationError
+from ontokit.core.exceptions import (
+    ConflictError,
+    ForbiddenError,
+    GuidedHTTPException,
+    NotFoundError,
+    ValidationError,
+)
 from ontokit.core.logging_filters import install_token_redaction
 from ontokit.core.middleware import (
     AccessLogMiddleware,
@@ -28,6 +35,9 @@ from ontokit.core.middleware import (
     RequestIDMiddleware,
     SecurityHeadersMiddleware,
 )
+from ontokit.schemas.errors import ErrorGuidance
+from ontokit.schemas.health import ReadinessResponse
+from ontokit.services.health import HealthService, get_health_service
 from ontokit.services.storage import StorageService
 
 install_token_redaction()
@@ -378,6 +388,21 @@ app.add_middleware(RequestIDMiddleware)
 # --- Exception handlers ----------------------------------------------------
 
 
+@app.exception_handler(GuidedHTTPException)
+async def guided_http_exception_handler(request: Request, exc: GuidedHTTPException) -> JSONResponse:
+    guidance = ErrorGuidance(
+        code=exc.code,
+        message=exc.message,
+        recovery=exc.recovery,
+        request_id=request.state.request_id,
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail, "error": guidance.model_dump()},
+        headers=exc.headers,
+    )
+
+
 def _error_response(
     status_code: int, code: str, message: str, detail: object = None
 ) -> JSONResponse:
@@ -448,6 +473,27 @@ app.include_router(api_router, prefix=API_V1_PREFIX)
 async def health_check() -> dict[str, str]:
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+@app.get(
+    "/health/ready",
+    response_model=ReadinessResponse,
+    responses={503: {"model": ReadinessResponse, "description": "Dependencies unavailable"}},
+)
+async def readiness_check(
+    request: Request,
+    response: Response,
+    service: Annotated[HealthService, Depends(get_health_service)],
+) -> ReadinessResponse:
+    """Current database and Redis connectivity, separate from process liveness."""
+    checks = await service.check()
+    response.status_code = 200 if checks.ready else 503
+    response.headers["Cache-Control"] = "no-store"
+    return ReadinessResponse(
+        status="ready" if checks.ready else "not_ready",
+        request_id=request.state.request_id,
+        checks=checks,
+    )
 
 
 @app.get("/")

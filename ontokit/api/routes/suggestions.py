@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser
 from ontokit.core.database import get_db
+from ontokit.schemas.errors import HTTPErrorResponse
 from ontokit.schemas.suggestion import (
     BulkReviewRequest,
     BulkReviewResponse,
@@ -85,6 +86,11 @@ async def save_to_session(
 @router.post(
     "/{project_id}/suggestions/sessions/{session_id}/submit",
     response_model=SuggestionSubmitResponse,
+    responses={
+        400: {"model": HTTPErrorResponse},
+        429: {"model": HTTPErrorResponse},
+        503: {"model": HTTPErrorResponse},
+    },
 )
 async def submit_session(
     project_id: UUID,
@@ -98,8 +104,9 @@ async def submit_session(
     """Submit a suggestion session by creating a pull request.
 
     Untrusted contributors pass a human-verification challenge on their first
-    suggestion and are rate-limited per account thereafter (R10). Both gates run
-    before any git or PR work, so a refused submission leaves nothing behind.
+    suggestion and are rate-limited per account thereafter (R10). A limiter
+    refusal can follow duplicate validation; check the current suggestion state
+    before trying again.
     """
     redis = None
     try:
@@ -190,6 +197,10 @@ async def list_pending(
 @router.post(
     "/{project_id}/suggestions/sessions/{session_id}/approve",
     status_code=status.HTTP_204_NO_CONTENT,
+    responses={
+        400: {"model": HTTPErrorResponse},
+        409: {"model": HTTPErrorResponse},
+    },
 )
 async def approve_session(
     project_id: UUID,
@@ -234,6 +245,11 @@ async def request_changes(
 @router.post(
     "/{project_id}/suggestions/sessions/{session_id}/resubmit",
     response_model=SuggestionSubmitResponse,
+    responses={
+        400: {"model": HTTPErrorResponse},
+        429: {"model": HTTPErrorResponse},
+        503: {"model": HTTPErrorResponse},
+    },
 )
 async def resubmit_session(
     project_id: UUID,

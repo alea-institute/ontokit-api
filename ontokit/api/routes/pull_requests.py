@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser, require_authenticated_identity
 from ontokit.core.database import get_db
+from ontokit.schemas.errors import HTTPErrorResponse
 from ontokit.schemas.pull_request import (
     CommentCreate,
     CommentListResponse,
@@ -190,7 +191,11 @@ async def retry_pull_request_github_sync(
     return await service.retry_github_sync(project_id, pr_number, user)
 
 
-@router.post("/{project_id}/pull-requests/{pr_number}/merge", response_model=PRMergeResponse)
+@router.post(
+    "/{project_id}/pull-requests/{pr_number}/merge",
+    response_model=PRMergeResponse,
+    responses={400: {"model": HTTPErrorResponse}, 409: {"model": HTTPErrorResponse}},
+)
 async def merge_pull_request(
     project_id: UUID,
     pr_number: int,
@@ -251,6 +256,7 @@ async def list_reviews(
     "/{project_id}/pull-requests/{pr_number}/reviews",
     response_model=ReviewResponse,
     status_code=status.HTTP_201_CREATED,
+    responses={400: {"model": HTTPErrorResponse}},
 )
 async def create_review(
     project_id: UUID,
