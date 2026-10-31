@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def _redis_client() -> Redis:
-    return Redis.from_url(
+    client: Redis = Redis.from_url(
         str(settings.redis_url),
         socket_connect_timeout=OPERATION_TIMEOUT,
         socket_timeout=OPERATION_TIMEOUT,
@@ -29,6 +29,7 @@ def _redis_client() -> Redis:
         retry_on_timeout=False,
         retry_on_error=[],
     )
+    return client
 
 
 def _result(dependency: str, status: Literal["ok", "unavailable", "timeout"]) -> HealthCheck:
