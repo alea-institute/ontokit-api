@@ -1,0 +1,574 @@
+{
+  "baseline": {
+    "ontokit/api/routes/suggestions.py": {
+      "covered_lines": 50,
+      "num_statements": 70,
+      "percent_covered": 71.42857142857143,
+      "percent_covered_display": "71",
+      "missing_lines": 20,
+      "excluded_lines": 0,
+      "percent_statements_covered": 71.42857142857143,
+      "percent_statements_covered_display": "71",
+      "num_branches": 0,
+      "num_partial_branches": 0,
+      "covered_branches": 0,
+      "missing_branches": 0,
+      "percent_branches_covered": 100.0,
+      "percent_branches_covered_display": "100"
+    },
+    "ontokit/api/routes/anonymous_suggestions.py": {
+      "covered_lines": 51,
+      "num_statements": 54,
+      "percent_covered": 93.33333333333333,
+      "percent_covered_display": "93",
+      "missing_lines": 3,
+      "excluded_lines": 0,
+      "percent_statements_covered": 94.44444444444444,
+      "percent_statements_covered_display": "94",
+      "num_branches": 6,
+      "num_partial_branches": 1,
+      "covered_branches": 5,
+      "missing_branches": 1,
+      "percent_branches_covered": 83.33333333333333,
+      "percent_branches_covered_display": "83"
+    },
+    "ontokit/api/routes/pull_requests.py": {
+      "covered_lines": 164,
+      "num_statements": 168,
+      "percent_covered": 97.02970297029702,
+      "percent_covered_display": "97",
+      "missing_lines": 4,
+      "excluded_lines": 0,
+      "percent_statements_covered": 97.61904761904762,
+      "percent_statements_covered_display": "98",
+      "num_branches": 34,
+      "num_partial_branches": 2,
+      "covered_branches": 32,
+      "missing_branches": 2,
+      "percent_branches_covered": 94.11764705882354,
+      "percent_branches_covered_display": "94"
+    },
+    "ontokit/services/pull_request_service.py": {
+      "covered_lines": 816,
+      "num_statements": 914,
+      "percent_covered": 86.66666666666667,
+      "percent_covered_display": "87",
+      "missing_lines": 98,
+      "excluded_lines": 5,
+      "percent_statements_covered": 89.27789934354486,
+      "percent_statements_covered_display": "89",
+      "num_branches": 316,
+      "num_partial_branches": 44,
+      "covered_branches": 250,
+      "missing_branches": 66,
+      "percent_branches_covered": 79.11392405063292,
+      "percent_branches_covered_display": "79"
+    },
+    "PullRequestService.create_review": {
+      "executed_lines": [
+        1196,
+        1197,
+        1200,
+        1201,
+        1205,
+        1210,
+        1211,
+        1217,
+        1223,
+        1225,
+        1226,
+        1231,
+        1232,
+        1235,
+        1236,
+        1237,
+        1238,
+        1239,
+        1240,
+        1241,
+        1244,
+        1249,
+        1257,
+        1261,
+        1262,
+        1265,
+        1266,
+        1271,
+        1272,
+        1281,
+        1283
+      ],
+      "summary": {
+        "covered_lines": 31,
+        "num_statements": 34,
+        "percent_covered": 89.58333333333333,
+        "percent_covered_display": "90",
+        "missing_lines": 3,
+        "excluded_lines": 0,
+        "percent_statements_covered": 91.17647058823529,
+        "percent_statements_covered_display": "91",
+        "num_branches": 14,
+        "num_partial_branches": 2,
+        "covered_branches": 12,
+        "missing_branches": 2,
+        "percent_branches_covered": 85.71428571428571,
+        "percent_branches_covered_display": "86"
+      },
+      "missing_lines": [
+        1242,
+        1258,
+        1259
+      ],
+      "excluded_lines": [],
+      "start_line": 1192,
+      "executed_branches": [
+        [
+          1201,
+          1205
+        ],
+        [
+          1201,
+          1210
+        ],
+        [
+          1210,
+          1211
+        ],
+        [
+          1210,
+          1217
+        ],
+        [
+          1231,
+          1232
+        ],
+        [
+          1231,
+          1235
+        ],
+        [
+          1235,
+          1236
+        ],
+        [
+          1235,
+          1261
+        ],
+        [
+          1237,
+          1238
+        ],
+        [
+          1241,
+          1244
+        ],
+        [
+          1265,
+          1266
+        ],
+        [
+          1265,
+          1283
+        ]
+      ],
+      "missing_branches": [
+        [
+          1237,
+          1261
+        ],
+        [
+          1241,
+          1242
+        ]
+      ]
+    }
+  },
+  "final-comparable": {
+    "ontokit/api/routes/suggestions.py": {
+      "covered_lines": 66,
+      "num_statements": 70,
+      "percent_covered": 94.28571428571429,
+      "percent_covered_display": "94",
+      "missing_lines": 4,
+      "excluded_lines": 0,
+      "percent_statements_covered": 94.28571428571429,
+      "percent_statements_covered_display": "94",
+      "num_branches": 0,
+      "num_partial_branches": 0,
+      "covered_branches": 0,
+      "missing_branches": 0,
+      "percent_branches_covered": 100.0,
+      "percent_branches_covered_display": "100"
+    },
+    "ontokit/api/routes/anonymous_suggestions.py": {
+      "covered_lines": 54,
+      "num_statements": 54,
+      "percent_covered": 100.0,
+      "percent_covered_display": "100",
+      "missing_lines": 0,
+      "excluded_lines": 0,
+      "percent_statements_covered": 100.0,
+      "percent_statements_covered_display": "100",
+      "num_branches": 6,
+      "num_partial_branches": 0,
+      "covered_branches": 6,
+      "missing_branches": 0,
+      "percent_branches_covered": 100.0,
+      "percent_branches_covered_display": "100"
+    },
+    "ontokit/api/routes/pull_requests.py": {
+      "covered_lines": 164,
+      "num_statements": 168,
+      "percent_covered": 97.02970297029702,
+      "percent_covered_display": "97",
+      "missing_lines": 4,
+      "excluded_lines": 0,
+      "percent_statements_covered": 97.61904761904762,
+      "percent_statements_covered_display": "98",
+      "num_branches": 34,
+      "num_partial_branches": 2,
+      "covered_branches": 32,
+      "missing_branches": 2,
+      "percent_branches_covered": 94.11764705882354,
+      "percent_branches_covered_display": "94"
+    },
+    "ontokit/services/pull_request_service.py": {
+      "covered_lines": 818,
+      "num_statements": 916,
+      "percent_covered": 86.70988654781199,
+      "percent_covered_display": "87",
+      "missing_lines": 98,
+      "excluded_lines": 5,
+      "percent_statements_covered": 89.30131004366812,
+      "percent_statements_covered_display": "89",
+      "num_branches": 318,
+      "num_partial_branches": 44,
+      "covered_branches": 252,
+      "missing_branches": 66,
+      "percent_branches_covered": 79.24528301886792,
+      "percent_branches_covered_display": "79"
+    },
+    "PullRequestService.create_review": {
+      "executed_lines": [
+        1196,
+        1198,
+        1199,
+        1204,
+        1207,
+        1208,
+        1212,
+        1217,
+        1218,
+        1224,
+        1230,
+        1232,
+        1233,
+        1238,
+        1239,
+        1242,
+        1243,
+        1244,
+        1245,
+        1246,
+        1247,
+        1248,
+        1251,
+        1256,
+        1264,
+        1268,
+        1269,
+        1272,
+        1273,
+        1278,
+        1279,
+        1288,
+        1290
+      ],
+      "summary": {
+        "covered_lines": 33,
+        "num_statements": 36,
+        "percent_covered": 90.38461538461539,
+        "percent_covered_display": "90",
+        "missing_lines": 3,
+        "excluded_lines": 0,
+        "percent_statements_covered": 91.66666666666667,
+        "percent_statements_covered_display": "92",
+        "num_branches": 16,
+        "num_partial_branches": 2,
+        "covered_branches": 14,
+        "missing_branches": 2,
+        "percent_branches_covered": 87.5,
+        "percent_branches_covered_display": "88"
+      },
+      "missing_lines": [
+        1249,
+        1265,
+        1266
+      ],
+      "excluded_lines": [],
+      "start_line": 1192,
+      "executed_branches": [
+        [
+          1198,
+          1199
+        ],
+        [
+          1198,
+          1204
+        ],
+        [
+          1208,
+          1212
+        ],
+        [
+          1208,
+          1217
+        ],
+        [
+          1217,
+          1218
+        ],
+        [
+          1217,
+          1224
+        ],
+        [
+          1238,
+          1239
+        ],
+        [
+          1238,
+          1242
+        ],
+        [
+          1242,
+          1243
+        ],
+        [
+          1242,
+          1268
+        ],
+        [
+          1244,
+          1245
+        ],
+        [
+          1248,
+          1251
+        ],
+        [
+          1272,
+          1273
+        ],
+        [
+          1272,
+          1290
+        ]
+      ],
+      "missing_branches": [
+        [
+          1244,
+          1268
+        ],
+        [
+          1248,
+          1249
+        ]
+      ]
+    }
+  },
+  "final-services": {
+    "ontokit/api/routes/suggestions.py": {
+      "covered_lines": 66,
+      "num_statements": 70,
+      "percent_covered": 94.28571428571429,
+      "percent_covered_display": "94",
+      "missing_lines": 4,
+      "excluded_lines": 0,
+      "percent_statements_covered": 94.28571428571429,
+      "percent_statements_covered_display": "94",
+      "num_branches": 0,
+      "num_partial_branches": 0,
+      "covered_branches": 0,
+      "missing_branches": 0,
+      "percent_branches_covered": 100.0,
+      "percent_branches_covered_display": "100"
+    },
+    "ontokit/api/routes/anonymous_suggestions.py": {
+      "covered_lines": 54,
+      "num_statements": 54,
+      "percent_covered": 100.0,
+      "percent_covered_display": "100",
+      "missing_lines": 0,
+      "excluded_lines": 0,
+      "percent_statements_covered": 100.0,
+      "percent_statements_covered_display": "100",
+      "num_branches": 6,
+      "num_partial_branches": 0,
+      "covered_branches": 6,
+      "missing_branches": 0,
+      "percent_branches_covered": 100.0,
+      "percent_branches_covered_display": "100"
+    },
+    "ontokit/api/routes/pull_requests.py": {
+      "covered_lines": 164,
+      "num_statements": 168,
+      "percent_covered": 97.02970297029702,
+      "percent_covered_display": "97",
+      "missing_lines": 4,
+      "excluded_lines": 0,
+      "percent_statements_covered": 97.61904761904762,
+      "percent_statements_covered_display": "98",
+      "num_branches": 34,
+      "num_partial_branches": 2,
+      "covered_branches": 32,
+      "missing_branches": 2,
+      "percent_branches_covered": 94.11764705882354,
+      "percent_branches_covered_display": "94"
+    },
+    "ontokit/services/pull_request_service.py": {
+      "covered_lines": 826,
+      "num_statements": 916,
+      "percent_covered": 87.52025931928688,
+      "percent_covered_display": "88",
+      "missing_lines": 90,
+      "excluded_lines": 5,
+      "percent_statements_covered": 90.17467248908297,
+      "percent_statements_covered_display": "90",
+      "num_branches": 318,
+      "num_partial_branches": 42,
+      "covered_branches": 254,
+      "missing_branches": 64,
+      "percent_branches_covered": 79.87421383647799,
+      "percent_branches_covered_display": "80"
+    },
+    "PullRequestService.create_review": {
+      "executed_lines": [
+        1196,
+        1198,
+        1199,
+        1204,
+        1207,
+        1208,
+        1212,
+        1217,
+        1218,
+        1224,
+        1230,
+        1232,
+        1233,
+        1238,
+        1239,
+        1242,
+        1243,
+        1244,
+        1245,
+        1246,
+        1247,
+        1248,
+        1251,
+        1256,
+        1264,
+        1268,
+        1269,
+        1272,
+        1273,
+        1278,
+        1279,
+        1288,
+        1290
+      ],
+      "summary": {
+        "covered_lines": 33,
+        "num_statements": 36,
+        "percent_covered": 90.38461538461539,
+        "percent_covered_display": "90",
+        "missing_lines": 3,
+        "excluded_lines": 0,
+        "percent_statements_covered": 91.66666666666667,
+        "percent_statements_covered_display": "92",
+        "num_branches": 16,
+        "num_partial_branches": 2,
+        "covered_branches": 14,
+        "missing_branches": 2,
+        "percent_branches_covered": 87.5,
+        "percent_branches_covered_display": "88"
+      },
+      "missing_lines": [
+        1249,
+        1265,
+        1266
+      ],
+      "excluded_lines": [],
+      "start_line": 1192,
+      "executed_branches": [
+        [
+          1198,
+          1199
+        ],
+        [
+          1198,
+          1204
+        ],
+        [
+          1208,
+          1212
+        ],
+        [
+          1208,
+          1217
+        ],
+        [
+          1217,
+          1218
+        ],
+        [
+          1217,
+          1224
+        ],
+        [
+          1238,
+          1239
+        ],
+        [
+          1238,
+          1242
+        ],
+        [
+          1242,
+          1243
+        ],
+        [
+          1242,
+          1268
+        ],
+        [
+          1244,
+          1245
+        ],
+        [
+          1248,
+          1251
+        ],
+        [
+          1272,
+          1273
+        ],
+        [
+          1272,
+          1290
+        ]
+      ],
+      "missing_branches": [
+        [
+          1244,
+          1268
+        ],
+        [
+          1248,
+          1249
+        ]
+      ]
+    }
+  }
+}

@@ -1,0 +1,784 @@
+{
+  "observed_at": "2026-10-28T02:23:35.418291+00:00",
+  "source_revision": "fbb520e50eb877ce3b29e9f1dda23d5a7d1d1a57",
+  "target": "ontokit/",
+  "files": [
+    {
+      "path": "ontokit/__init__.py",
+      "sha256": "f25186b017789343268959ace31314b998ccac34d6f51dca9c1a910fce444786"
+    },
+    {
+      "path": "ontokit/api/__init__.py",
+      "sha256": "4516242fd34c6a1c113f29cc189cff261cc69b837a44fc6cbbb136b14d8dee80"
+    },
+    {
+      "path": "ontokit/api/dependencies.py",
+      "sha256": "d50fe50f6d424773676e394f31c140e7e53c2bb7b824ce7c7c68af6d142ec0e6"
+    },
+    {
+      "path": "ontokit/api/routes/__init__.py",
+      "sha256": "40eb545535fd32d1eec28bdf8bd6a211abf2a9aed18c7f7f8783cbb1d8f319b5"
+    },
+    {
+      "path": "ontokit/api/routes/analytics.py",
+      "sha256": "b860d6a1b4529d2eaeba1f1afe0550a9fea7b1ea51bb7daadb0256263b1d6199"
+    },
+    {
+      "path": "ontokit/api/routes/anonymous_suggestions.py",
+      "sha256": "6ce408abdb39435187e6184e4357dd1ed573ac42b66d9244c74c043c67acbf77"
+    },
+    {
+      "path": "ontokit/api/routes/auth.py",
+      "sha256": "d10ff3b0201f3535b4ecf841fd6546e50fbd6c06fb93164f78075142efd469b3"
+    },
+    {
+      "path": "ontokit/api/routes/duplicate_check.py",
+      "sha256": "52c28a570d47b1c9a32c130917f6bf0428c248cd85d5845e8933ced8fe3b1144"
+    },
+    {
+      "path": "ontokit/api/routes/embeddings.py",
+      "sha256": "5c2618cad9b5eec2cf5cbd8375cea5cb79e9da6d69fb8eaaf9845029e5622940"
+    },
+    {
+      "path": "ontokit/api/routes/generation.py",
+      "sha256": "d2577454cd109bd418c2ce7a55d9428c1161c55729192f740ff409420bf084d0"
+    },
+    {
+      "path": "ontokit/api/routes/join_requests.py",
+      "sha256": "f5d2b4c3a421bc8fd9db90b214945b351bbcb366bf1039bdc1a6f5a7db6c7dc1"
+    },
+    {
+      "path": "ontokit/api/routes/lint.py",
+      "sha256": "ca72bc6ee4fbcb35886c5e9b2446463293607bfc0dc6d9e81c960877c1b317cd"
+    },
+    {
+      "path": "ontokit/api/routes/llm.py",
+      "sha256": "b9b54f96ae79d03bec5ebdd4236ec367884d348a51c0b755123b9833020021ee"
+    },
+    {
+      "path": "ontokit/api/routes/normalization.py",
+      "sha256": "b3466f301faa0e1072188e27040212b8de361ec5f3a724de80da49fe21ed4527"
+    },
+    {
+      "path": "ontokit/api/routes/notifications.py",
+      "sha256": "36dddb7e17fb5518c142f289666d4f3b8e5582f89d4320c4d47995d1ba0708cf"
+    },
+    {
+      "path": "ontokit/api/routes/pr_party.py",
+      "sha256": "d341885a52eef221a788342e5b840ca3df3ff555e34e60cb7035ca63d62eabcf"
+    },
+    {
+      "path": "ontokit/api/routes/pr_party_settings.py",
+      "sha256": "e24649061de492f10deaec37a2f4b5ffe7c01fdba462277cd45f0820d0f4924e"
+    },
+    {
+      "path": "ontokit/api/routes/pr_party_webhooks.py",
+      "sha256": "8aba930c1d829fe8771baf073563c54e686e5a4c3f508f73bdcf45b75af5c6dd"
+    },
+    {
+      "path": "ontokit/api/routes/projects.py",
+      "sha256": "90cbd85f17e7b545daf3728cce040a87b91f49fc094d1802ba3162738f3c15e7"
+    },
+    {
+      "path": "ontokit/api/routes/pull_requests.py",
+      "sha256": "6e04ddb086892ff606a8eea4d569f7da9377fc445531f1778899030cace47e9e"
+    },
+    {
+      "path": "ontokit/api/routes/quality.py",
+      "sha256": "6aeafda91bb50c6bf945b57be79f3126ad998deefd7e1f9a9cd768b74ef69986"
+    },
+    {
+      "path": "ontokit/api/routes/remote_sync.py",
+      "sha256": "acbd49746f607eb93f247f22212dcafc54fedcfa5fb9b27dbd48c4537ef9fc65"
+    },
+    {
+      "path": "ontokit/api/routes/search.py",
+      "sha256": "adce33978e6cce6899736ccaccaa624042c5770bc741b3406cf3da23f8eddaef"
+    },
+    {
+      "path": "ontokit/api/routes/semantic_search.py",
+      "sha256": "a82e309d728dc81f7861f4c6ada31700a93ad2bcbeaa0a78581c4931444e8217"
+    },
+    {
+      "path": "ontokit/api/routes/suggestions.py",
+      "sha256": "178c51ae818fda76dc3ce73f300f7e5cdd3db3e654fe88d99f551c64ac0dc2d1"
+    },
+    {
+      "path": "ontokit/api/routes/translation.py",
+      "sha256": "87cdb8a52b1cecdd40afbf36595c5aaab59bd9ae529d4b4379dfb5b22a382f96"
+    },
+    {
+      "path": "ontokit/api/routes/trust.py",
+      "sha256": "9aa42470d19aa544c572c2563664ebddab2d0295f51b3937d260e3dbf7e7d6b2"
+    },
+    {
+      "path": "ontokit/api/routes/user_settings.py",
+      "sha256": "e4c31d7b16cd1a752dfe0f89607b609bbac3b4f1d94f6cb3b25ef2fcb00a8aac"
+    },
+    {
+      "path": "ontokit/api/utils/__init__.py",
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "path": "ontokit/api/utils/redis.py",
+      "sha256": "273ffb627eccaa5611bca9af2e929c3064de82365cd6d2fbd804e236e5e40c02"
+    },
+    {
+      "path": "ontokit/api/utils/ws_auth.py",
+      "sha256": "c703f3866bc92bb2ec6fd0444cccdb325cf05419f00c0982a2ea6322378675d1"
+    },
+    {
+      "path": "ontokit/api/utils/ws_forward.py",
+      "sha256": "fbbfe0f919b1364483e8ef55c426b1984ee5dce00c66cbb609c232466c848a4e"
+    },
+    {
+      "path": "ontokit/collab/__init__.py",
+      "sha256": "1c44ace594ca9327d6fafb07ec495437845f56a72bc6be010ad2001394896bbf"
+    },
+    {
+      "path": "ontokit/collab/presence.py",
+      "sha256": "3729791d10b33fbd5f977621041113c10818e5577c50c370902141723ff50cfb"
+    },
+    {
+      "path": "ontokit/collab/protocol.py",
+      "sha256": "747d94582d9201f210855aaccf63af8e2703a246da7f240afa272e18cb4c76c8"
+    },
+    {
+      "path": "ontokit/collab/transform.py",
+      "sha256": "51c2bfd4f32b457793b2dea300f381c80125694cd0cf0d3984a5c248cb30e2e1"
+    },
+    {
+      "path": "ontokit/core/__init__.py",
+      "sha256": "1c9b54b9a44a6706b5562d59bbbd99f0e4db898fcabeb6e7046a06568e6d5a99"
+    },
+    {
+      "path": "ontokit/core/anonymous_token.py",
+      "sha256": "11b590271393c13772fff75cd9ac7d55443ae79c28ac863b7e881bbf72991506"
+    },
+    {
+      "path": "ontokit/core/api_paths.py",
+      "sha256": "b2c6f114d8fcbd7efc52ccaeafcec2d2076be9691db674152cc3f169bc7d1247"
+    },
+    {
+      "path": "ontokit/core/auth.py",
+      "sha256": "1cc1bbf199384d63a9b0acec98beb98fac37796f048f8a0d0c5930704c8f5a38"
+    },
+    {
+      "path": "ontokit/core/beacon_token.py",
+      "sha256": "df597de4e99930a4b3bae0c80b29d0fa350219a498b59ac5b2eafffa4a9139d3"
+    },
+    {
+      "path": "ontokit/core/config.py",
+      "sha256": "88a4bed1e04dfce7afcf208a84dc72913baa60f89b16a9e092d5f7785f6e4d01"
+    },
+    {
+      "path": "ontokit/core/constants.py",
+      "sha256": "00453a9171e14e9ce9ad32aab06c11fb091b2b8f700bbd22b2ec3a0bf46d9996"
+    },
+    {
+      "path": "ontokit/core/database.py",
+      "sha256": "c85fb6f77e419d395f9af06a65bde9d21c9190bdea1bf65adfc770bdcf0ab18a"
+    },
+    {
+      "path": "ontokit/core/demo_targets.py",
+      "sha256": "68fdca1e9346a5c18376d5d70893685e3b5ba93506f98043d327a7fe32f05e4c"
+    },
+    {
+      "path": "ontokit/core/encryption.py",
+      "sha256": "589cd902bc6dbdbaa98615564ffaff6edbcdc0d20db13fc90662536a7a24ed5e"
+    },
+    {
+      "path": "ontokit/core/exceptions.py",
+      "sha256": "54bc17727371297885e759ff891df418fb35fc31b7a755fe9edda37f5beac0c7"
+    },
+    {
+      "path": "ontokit/core/limits.py",
+      "sha256": "edeb101e9ae189eb9f6a3a65076f40dfa560ef04734441c4e8e103b96d392567"
+    },
+    {
+      "path": "ontokit/core/logging_filters.py",
+      "sha256": "c54e322b79dce9a99ef742dea6ac306a4d7e63cf6fce17c8ea93f4ccf8b1cfb3"
+    },
+    {
+      "path": "ontokit/core/middleware.py",
+      "sha256": "677fe2441f3df2ec95ed050525aed3fa2d579aee3dada6cd5f20902e3d56249b"
+    },
+    {
+      "path": "ontokit/core/migration_lock.py",
+      "sha256": "00df8147c1d9abfd1b1a0071116b73c5b107d59a17b616ded8c8404ff8dd6fbe"
+    },
+    {
+      "path": "ontokit/core/redis.py",
+      "sha256": "7e97411e0578b7196f201f9bfb9d0977da5c066bdf881c31aa3e95c373549345"
+    },
+    {
+      "path": "ontokit/git/__init__.py",
+      "sha256": "666c767a22131f29b557d862a3f3ad5f002785912af8b8dcdb3e9bc627c73641"
+    },
+    {
+      "path": "ontokit/git/bare_repository.py",
+      "sha256": "2eabcb934d2ade77bf70f92decd8073a3c2732ff1961e5fcf29058686a47f063"
+    },
+    {
+      "path": "ontokit/main.py",
+      "sha256": "75355a998c0ac68f36003a3d4acc4001f5ec6a47abffd66a0632bfbbd65506c0"
+    },
+    {
+      "path": "ontokit/models/__init__.py",
+      "sha256": "70af62c8d69ff83cbd4d9741dc9b4b946be4b8a9c344466c82ff00dc550d7bbf"
+    },
+    {
+      "path": "ontokit/models/branch_metadata.py",
+      "sha256": "b29eaa40cd31c5dd90bdac59c64626dcebd134e44a0a4881872dadfd26aa1761"
+    },
+    {
+      "path": "ontokit/models/change_event.py",
+      "sha256": "3db8593ccb80132799cbcb9a1656b4248e45fc47cea205ea8ec0e665a9d856cf"
+    },
+    {
+      "path": "ontokit/models/demo_generation.py",
+      "sha256": "627956f2f51304d6a6084480e5ad2e9968f114d5a34f40ee7c30c519bf265297"
+    },
+    {
+      "path": "ontokit/models/distinct_entity_decision.py",
+      "sha256": "536aa51e2f591dff8bdd466e35a07bddb3dbd5580250cd73cf60435100102df0"
+    },
+    {
+      "path": "ontokit/models/duplicate_rejection.py",
+      "sha256": "d30e69ecd26f497202c7b856bcd83f578baf0f25a893359ea1e1acb897a7fa64"
+    },
+    {
+      "path": "ontokit/models/embedding.py",
+      "sha256": "1d1a570827b3f000f6384ca0331962d16901548a6b5fb935351984f8dfc6e0ce"
+    },
+    {
+      "path": "ontokit/models/join_request.py",
+      "sha256": "f93d702b9b242d65af5e7dbf23b157b3a1b5018bde6cdb252fb21b3bf820b6d2"
+    },
+    {
+      "path": "ontokit/models/lint.py",
+      "sha256": "7500b9c2f844a10bc67fbe85ce5fd6502fe4c6b4041e90ed8f729d4802d02c6f"
+    },
+    {
+      "path": "ontokit/models/lint_config.py",
+      "sha256": "f16bdc5961baa04aa8d9a281ec3437aae393383abe99c458f6f90f4a60ed17ac"
+    },
+    {
+      "path": "ontokit/models/llm_config.py",
+      "sha256": "7750aef4010253a2540943b1027ec87094cc9e20985546925e96e270be01084c"
+    },
+    {
+      "path": "ontokit/models/normalization.py",
+      "sha256": "a1df308fcd8cb6508096c3ca3ca1d50aee6ec1ce9d87ff5a8d9855c8b33716b1"
+    },
+    {
+      "path": "ontokit/models/notification.py",
+      "sha256": "b861fc954d7108ad9936ad4d23682c751f4284873e3a431a9f3ec61b04afeca7"
+    },
+    {
+      "path": "ontokit/models/ontology_index.py",
+      "sha256": "08ed0841b1512bfb4d6bf5b7231a9bd1ed27ec0c699c60fc0679e65785a9eea9"
+    },
+    {
+      "path": "ontokit/models/pr_party.py",
+      "sha256": "bd02aa08d195ca4fed4af9b7a6d01f3f3d93b8110b3acd2035ec32edff6073d1"
+    },
+    {
+      "path": "ontokit/models/project.py",
+      "sha256": "799ead5c4db98c2ab704ac47bfd4d01d04528bee86292e52cce049fb18299f5a"
+    },
+    {
+      "path": "ontokit/models/pull_request.py",
+      "sha256": "fe5959c4940b7fd6a5fa14e8a1e8933fae5d0ef0f9dbfb2d258d234575af55bc"
+    },
+    {
+      "path": "ontokit/models/remote_sync.py",
+      "sha256": "28bce144b20e3a4b3d176e5cfc1ca3a0382a4ebe9d6c46c7b8f6c0236e1d5fdf"
+    },
+    {
+      "path": "ontokit/models/suggestion_outcome.py",
+      "sha256": "8bae7f15171bf2bb439895af62a18cff27c8145a3f34e7d59650ab9845b3c28c"
+    },
+    {
+      "path": "ontokit/models/suggestion_session.py",
+      "sha256": "c2dcede66a427c330f5fa1d22614efe3bbd9d42f039542b16f59f1b8a4b90066"
+    },
+    {
+      "path": "ontokit/models/translation.py",
+      "sha256": "2bfabdabd88a462d86d93dad1a15680462a4592096a9833869c3169b4e29190a"
+    },
+    {
+      "path": "ontokit/models/user_commit_identity.py",
+      "sha256": "da82e730965c68d46b18d11ca593a162acd59b4b78b8117d0db0160460e3ebc6"
+    },
+    {
+      "path": "ontokit/models/user_github_token.py",
+      "sha256": "7ecd3598bf9ea2de935a42e0983fa20ece063b235d19bf7ff0c133a9559b437f"
+    },
+    {
+      "path": "ontokit/runner.py",
+      "sha256": "6630de845ca7bcd800776d940794155f8aee2c077867241cde1c477bcec857c3"
+    },
+    {
+      "path": "ontokit/schemas/__init__.py",
+      "sha256": "bdae82e25ad164f91aa37d490cf5edc200b171050a311372bc2808d8f6fa947a"
+    },
+    {
+      "path": "ontokit/schemas/analytics.py",
+      "sha256": "5fefc7dd708fd9cdc741a1723a0e105ea0d740473bf507e05e598f7542f6b087"
+    },
+    {
+      "path": "ontokit/schemas/anonymous_suggestion.py",
+      "sha256": "ce439bcf06b9fec5ac914aca9801e9cb14ea14065513e053fc14169ee6307a18"
+    },
+    {
+      "path": "ontokit/schemas/auth.py",
+      "sha256": "330d7e38b8f30c5cf53eec695cafaa59be222768de8eeb1f148553eea2f18540"
+    },
+    {
+      "path": "ontokit/schemas/duplicate_check.py",
+      "sha256": "76ac5e80cf166c3d3fb953bb56b2f71ccc37f86a7756e468902506c8f20d4950"
+    },
+    {
+      "path": "ontokit/schemas/embeddings.py",
+      "sha256": "891092bb0fb163cdad1bbb2b7463d1709b73b83899fad8fee6a2caa9015fb928"
+    },
+    {
+      "path": "ontokit/schemas/generation.py",
+      "sha256": "78b218d4852046d77a9735eb434bb65660220f3c9b84c57508e67b2eafcb4e2f"
+    },
+    {
+      "path": "ontokit/schemas/join_request.py",
+      "sha256": "87c585af267a4c84757f94a72ec7de7d2b31f577814416f22b6c50fd670dfd53"
+    },
+    {
+      "path": "ontokit/schemas/lint.py",
+      "sha256": "b02fc9e1726fe566f904d0cd21e5b8feb43cef80aa28212d0b22d986a097f6e6"
+    },
+    {
+      "path": "ontokit/schemas/llm.py",
+      "sha256": "e3702773841a37edfc6b11f94127ed52e3228967d53a03918013442975bc97e5"
+    },
+    {
+      "path": "ontokit/schemas/notification.py",
+      "sha256": "68dd33c62e632e452e276b4226c9cb587fef0c60cdfa840640a2861d8a906aa6"
+    },
+    {
+      "path": "ontokit/schemas/ontology.py",
+      "sha256": "40d32f47009ab819fba9b579182076bdc0b32b66fff2ff24fb12916a9f25de54"
+    },
+    {
+      "path": "ontokit/schemas/owl_class.py",
+      "sha256": "885fa600cd0e79e71ca73dade3bb26aa03219f35d6237db2938a52d26c18f324"
+    },
+    {
+      "path": "ontokit/schemas/pr_party.py",
+      "sha256": "a6e0caa3992e0eeea875c2a7b739f0bec335b12fa0f7731b0d337d6459934861"
+    },
+    {
+      "path": "ontokit/schemas/project.py",
+      "sha256": "259cca30d8d39cfd9483e1719829962f199b4d5fd5d5ab68615bd50a26010d23"
+    },
+    {
+      "path": "ontokit/schemas/pull_request.py",
+      "sha256": "b8cc5dbbe9b40f9d73dcd8074c0d244bf7cc752dd781da5eef4281bf0210f377"
+    },
+    {
+      "path": "ontokit/schemas/quality.py",
+      "sha256": "80e45df9e6224c42b0a5670582d33cdcf206f99b85f048b23787fea986ab2c79"
+    },
+    {
+      "path": "ontokit/schemas/remote_sync.py",
+      "sha256": "899b56c84120e8582670987b21b12da377b35ca81b4486e1921aaefee50311b0"
+    },
+    {
+      "path": "ontokit/schemas/search.py",
+      "sha256": "7f14ce4e4378b19ca65a10cb3565c0d957995f243eabdfce4852828f51d94b61"
+    },
+    {
+      "path": "ontokit/schemas/suggestion.py",
+      "sha256": "3d035c6c6b9345b686dffecea1e235c19ce1ef7aeb27c94e5b795c74c3428845"
+    },
+    {
+      "path": "ontokit/schemas/translation.py",
+      "sha256": "6ff1041de4c5e9bde3f79393d5c39add6601054682847f65680dabd6381c4e8e"
+    },
+    {
+      "path": "ontokit/schemas/trust.py",
+      "sha256": "d9626ee98227b67d7d06bc7057139c8edfd505b4f77d9daf4bb37c64717e67a4"
+    },
+    {
+      "path": "ontokit/schemas/user_settings.py",
+      "sha256": "07de18751fd4edd8f4327b63a61a096bcae940eaf42c912fe6d2916d79522702"
+    },
+    {
+      "path": "ontokit/services/__init__.py",
+      "sha256": "bff31e49acd2fc695a250d30c6da2440bb488af8a48acc5d1c2a3aa162a4cdf9"
+    },
+    {
+      "path": "ontokit/services/branch_lock.py",
+      "sha256": "8683c98fe6fd1f6cf9aa4c6b175c5ac99fa47b21d63039d932a751ece4f58a12"
+    },
+    {
+      "path": "ontokit/services/change_event_service.py",
+      "sha256": "b76c936535a4084b1cfadef9d8c7289b5d454140ccffd3f08a120ebebf9cf0ad"
+    },
+    {
+      "path": "ontokit/services/commit_identity.py",
+      "sha256": "353ac87ef1f362fc09b3b19f2833048798782d01b20cb45f3df5e87c99e5615a"
+    },
+    {
+      "path": "ontokit/services/consistency_service.py",
+      "sha256": "d92261ba77fccb7348fb4fcd10934a54489cb70b997040039fdf6e646ef53e8f"
+    },
+    {
+      "path": "ontokit/services/context_assembler.py",
+      "sha256": "536902de95f17119c7ceafbec57a45a6e9396a48132487ea356d5a7658951a31"
+    },
+    {
+      "path": "ontokit/services/cross_reference_service.py",
+      "sha256": "1771d193fbca75342656062a4843dabb9874aebc1a8c4d3613eeb25396437c31"
+    },
+    {
+      "path": "ontokit/services/demo_project_provisioning.py",
+      "sha256": "f9b9a849caf86964c2d22e5a292ca695b9fac1a0e0651ced209772a573a6b7a0"
+    },
+    {
+      "path": "ontokit/services/demo_retention.py",
+      "sha256": "5542c47075a7ede098d11cc19970ab7e4c5b4d35d70aec761f4841d50d222ebb"
+    },
+    {
+      "path": "ontokit/services/demo_target_authorizer.py",
+      "sha256": "acabda2ab24fc0557897bc3169d18382a995dd53d4a31e2ee1f49455dbe541d0"
+    },
+    {
+      "path": "ontokit/services/duplicate_check_service.py",
+      "sha256": "78af52d0ecb702e54b05f0fe0f5f9cbaa18249912e8acc2ed2096f1bff03a094"
+    },
+    {
+      "path": "ontokit/services/duplicate_detection_service.py",
+      "sha256": "cfa22fcf8fae6099c1133286c7049025489797af4c07f3122f3b927da1ffc3a0"
+    },
+    {
+      "path": "ontokit/services/embedding_providers/__init__.py",
+      "sha256": "82afa5bab18937c883ec8bcb5011300b2a55b4e8b70732b53cb58dc742995566"
+    },
+    {
+      "path": "ontokit/services/embedding_providers/base.py",
+      "sha256": "739632bf24897744f948a2285514dea0b790f242a4875dbb487cf7b68901c971"
+    },
+    {
+      "path": "ontokit/services/embedding_providers/local_provider.py",
+      "sha256": "dbaca066a480b7d20f1afc685d3cd3a77c0320d8df3b39bf9512c40a62fdffb0"
+    },
+    {
+      "path": "ontokit/services/embedding_providers/openai_provider.py",
+      "sha256": "0663266b24edaf13999eaa7e000b191da3d2f723a40a978cdd1a4fdf23f61be0"
+    },
+    {
+      "path": "ontokit/services/embedding_providers/voyage_provider.py",
+      "sha256": "60632423cab5c3a8f6ccbd9750cba722fee1cfe327ec712425fee5a127ac7d00"
+    },
+    {
+      "path": "ontokit/services/embedding_service.py",
+      "sha256": "aa86a3eefd897b6bd7aaa8ded9eec1282a35352db2a6dffdb5ce2ce6c3473d6b"
+    },
+    {
+      "path": "ontokit/services/embedding_text_builder.py",
+      "sha256": "30c0b4fb61beab50269d99de1bb895b6b4174261b3806c5e26d4a645a182d192"
+    },
+    {
+      "path": "ontokit/services/github_service.py",
+      "sha256": "f5aca38ef15104e97e7d88cf3162e28b37a84a5571e18edb7bd2c3e23c78cfce"
+    },
+    {
+      "path": "ontokit/services/github_sync.py",
+      "sha256": "8c08a72f443f662c77c5b5c62164599ad611735207b938ded7aced4066d550e2"
+    },
+    {
+      "path": "ontokit/services/indexed_ontology.py",
+      "sha256": "f269a69e8db015f888c38711286165749e3e12be6a40ae7790308fc8197940d1"
+    },
+    {
+      "path": "ontokit/services/join_request_service.py",
+      "sha256": "4d5497a14837ad431a7f470e2bdcac77b9d99697e50717d396fdf0900b389759"
+    },
+    {
+      "path": "ontokit/services/language_palette.py",
+      "sha256": "6a69c04c6f4508156a84bab6b76ef31c4a2323c5ca999e866220f41de3dcfd93"
+    },
+    {
+      "path": "ontokit/services/linter.py",
+      "sha256": "c6ab254ff86f38ee609aacb3f3b8988248c2e6afe752c9bceee19a065c233d49"
+    },
+    {
+      "path": "ontokit/services/llm/__init__.py",
+      "sha256": "8fa742a5a0e484af24adaf9ea0680dab5537dbe98702a5956bb6b1d10b5e6bb8"
+    },
+    {
+      "path": "ontokit/services/llm/anthropic_provider.py",
+      "sha256": "9b3f1e024e8eb8fed862c2ebdaf0934a75abce18aa9692e261764372b7dde88d"
+    },
+    {
+      "path": "ontokit/services/llm/audit.py",
+      "sha256": "4c536ae94db7ac3af83a0c9fd0f01b2c64b4594dc7d87e9381f88235d7f63f62"
+    },
+    {
+      "path": "ontokit/services/llm/base.py",
+      "sha256": "3d3eddc3ae0beb10e11f3062d6247359d0b66e5bed9d72fd6ad2f32c77346f7c"
+    },
+    {
+      "path": "ontokit/services/llm/budget.py",
+      "sha256": "e1d9251397288af499d8b1c4c39f979d5d86f09d6edd68da722e497ddb644344"
+    },
+    {
+      "path": "ontokit/services/llm/cohere_provider.py",
+      "sha256": "a5b9caa644424dc96242412cffc2aa03afd2515cb841569691a81b6d5abcade9"
+    },
+    {
+      "path": "ontokit/services/llm/crypto.py",
+      "sha256": "869435063d311436358ae038990ba3e1b1955d9d826717a8a5bfe7db7db92ee4"
+    },
+    {
+      "path": "ontokit/services/llm/github_models_provider.py",
+      "sha256": "ee756469b1289a494823a69aa08977c8b0e05fc1e98960503cd5e2d91f13a50c"
+    },
+    {
+      "path": "ontokit/services/llm/google_provider.py",
+      "sha256": "58596009bfbe7e0ae4b917df6b8f469e76b1e20bbf33ffa2cd51275bfd5d326c"
+    },
+    {
+      "path": "ontokit/services/llm/metering.py",
+      "sha256": "de482735bb8916e91d65252836b3dc4e474b57b02fabddaceb7c61427f9fa904"
+    },
+    {
+      "path": "ontokit/services/llm/openai_compat.py",
+      "sha256": "8bec39460bd2584f49bcdec320928f1b03ed390fa7638c13f5f0c38ae7ca353c"
+    },
+    {
+      "path": "ontokit/services/llm/pricing.py",
+      "sha256": "4662f0c569f1df48ce0f84d6aaa08f7165a43f1493fc3044b152a9b0fc1ab3e1"
+    },
+    {
+      "path": "ontokit/services/llm/prompts/__init__.py",
+      "sha256": "5b3704d4d5c779556d03dafe33fe2411f00ed032d20772763468eea8d89b8a3d"
+    },
+    {
+      "path": "ontokit/services/llm/prompts/annotations.py",
+      "sha256": "464dcc1c8f443df9280f50ddc0fc9a5b0d622a676ee4cde54800359c3503c79a"
+    },
+    {
+      "path": "ontokit/services/llm/prompts/children.py",
+      "sha256": "acf5fc71dc9319cc8b62c18f1f2079be6bc110fc8b9a2a2f6b9679639560b08a"
+    },
+    {
+      "path": "ontokit/services/llm/prompts/edges.py",
+      "sha256": "86db8d5b5c73c803e1a5f9793e2d88e9986babb582fefe2327927457cea4ecf6"
+    },
+    {
+      "path": "ontokit/services/llm/prompts/parents.py",
+      "sha256": "94b7170211f6c4333d7a92cec36274318b3aca5f32bf6e4f4a394d0441c0da4f"
+    },
+    {
+      "path": "ontokit/services/llm/prompts/pr_party_brief.py",
+      "sha256": "01d9d28abbd2b331c85fdde7dd2a6884130449937915ec3f0e2c507f59cc069a"
+    },
+    {
+      "path": "ontokit/services/llm/prompts/siblings.py",
+      "sha256": "d4f3aba87bd8f6a55bdbd95c13c0b1be6fb164a36f521d13f7a555042ed5952e"
+    },
+    {
+      "path": "ontokit/services/llm/prompts/translation.py",
+      "sha256": "63aa7bd7a757a7cf5aa3eff86a1ff6d54caddce371e8e0aa4016bef27e0d2e0a"
+    },
+    {
+      "path": "ontokit/services/llm/rate_limiter.py",
+      "sha256": "b4c55a2d5f740a85298004e34ab58e5daf8d2b073a91f1aba620795399639f53"
+    },
+    {
+      "path": "ontokit/services/llm/registry.py",
+      "sha256": "2497b930bec07c98bf33b7a5e8ef6c0f21bf2baa602d3a06296ffad0e574b2e7"
+    },
+    {
+      "path": "ontokit/services/llm/role_gates.py",
+      "sha256": "8b3d7b1f09b47b7f801373608822efd7550e24754ce3efc1f5ca3ca55f330ddd"
+    },
+    {
+      "path": "ontokit/services/llm/ssrf.py",
+      "sha256": "837bb6881bf1fc48228d4e5fe24aca5bf05d2beaa4ee0de7a872f95aa595ba12"
+    },
+    {
+      "path": "ontokit/services/mirror_credential.py",
+      "sha256": "f95fa792224adf635f32908d9dcfa1973e0daa815655ad325f3382737c207de8"
+    },
+    {
+      "path": "ontokit/services/normalization_service.py",
+      "sha256": "9f993a6fe8bf00c833ca889836750067c2a07c11e7cffa35185d7fb493a10b99"
+    },
+    {
+      "path": "ontokit/services/notification_service.py",
+      "sha256": "c35f5b3ceb91b93f5f284ba49b379cb1c2bcb41fc4fd0d54a39b6a5263cd8b31"
+    },
+    {
+      "path": "ontokit/services/ontology.py",
+      "sha256": "5ce399dff4d34057d6ebf7da44d0fda0d840e87ad6af0cc5f0716328249deb2c"
+    },
+    {
+      "path": "ontokit/services/ontology_extractor.py",
+      "sha256": "925429d29c917a5337576f795506b41895080c6d722fc342a1afd66ce1c7196b"
+    },
+    {
+      "path": "ontokit/services/ontology_index.py",
+      "sha256": "60c8db1c91da91587a6a0fc8dafb6e32a38619d8884d485e024abfc4dadcbf98"
+    },
+    {
+      "path": "ontokit/services/pr_party_actions.py",
+      "sha256": "f293472521eba3ea39cb5b0ca7c86b33a7196e7b620f235b624731361ef9f370"
+    },
+    {
+      "path": "ontokit/services/pr_party_brief.py",
+      "sha256": "f3c55b4a57c2cada148fea743f88f011a629632d5fb5e905c645cae3c1f73438"
+    },
+    {
+      "path": "ontokit/services/pr_party_credentials.py",
+      "sha256": "4b3eeadea66718cdd4de120d692812487de11e05b8695d52659b8e43590909d4"
+    },
+    {
+      "path": "ontokit/services/pr_party_github.py",
+      "sha256": "97616acd336de5cb08c4ba36ed14c34bb91d0b01f89dd82fbf52ce7803367a99"
+    },
+    {
+      "path": "ontokit/services/pr_party_intake.py",
+      "sha256": "1b45a26ccdacb3ff65914a89a834f7cd1d471a39e4c784fd9ce39ef3610a32eb"
+    },
+    {
+      "path": "ontokit/services/pr_party_notifications.py",
+      "sha256": "ca64395a595ba69c373d37355e69115da43c2bd0b44e65707780d0878c53f2d9"
+    },
+    {
+      "path": "ontokit/services/pr_party_qa.py",
+      "sha256": "e31ae76c036a28ec882f0ca53ae31c752505acdbf0eaf0fcda16d67377489875"
+    },
+    {
+      "path": "ontokit/services/pr_party_rate_limiter.py",
+      "sha256": "9df5e89e406acc4a017ebaa021829415a143a43f35d84d7e8be687912ace0114"
+    },
+    {
+      "path": "ontokit/services/pr_party_reconcile.py",
+      "sha256": "f8ad78a01d49830528dd8266bef17b92d7e261165a4799468f50daca24d5b281"
+    },
+    {
+      "path": "ontokit/services/project_access_policy.py",
+      "sha256": "af343ce46ee3948ac3228ef15703171f519e3ccd7e00fae285f63b538ffca81c"
+    },
+    {
+      "path": "ontokit/services/project_service.py",
+      "sha256": "692202a007d3b793db4317d3fd6bd5a09a26422169e58e7846066e78633472c8"
+    },
+    {
+      "path": "ontokit/services/pull_request_github_sync.py",
+      "sha256": "8113f9ec26ba732d2053ea6a2de774b3816118353a2b32a233bae177bc1a910a"
+    },
+    {
+      "path": "ontokit/services/pull_request_service.py",
+      "sha256": "0efbd926ffd43bf12d8be592579d095177ee2930f5df3135ba2450a0bc360468"
+    },
+    {
+      "path": "ontokit/services/rdf_utils.py",
+      "sha256": "036001f60f50f7578a04d459d8c7fa66534e0413d42123bfb93f25c79932c1d6"
+    },
+    {
+      "path": "ontokit/services/remote_sync_service.py",
+      "sha256": "51ecc73f410dd6fe3ec8b75f86162877ee77ce882fc8ef58173b2d221f48e1f9"
+    },
+    {
+      "path": "ontokit/services/search.py",
+      "sha256": "8eb9990c76e7b698eb6ba51b51d5fdd932f1ef959b9398ef750131b8c27ebd1d"
+    },
+    {
+      "path": "ontokit/services/sitemap_notifier.py",
+      "sha256": "274eb883c717448913a0ad1b78fd58fd0a5583d2aaa6df81a2133645191d8b05"
+    },
+    {
+      "path": "ontokit/services/storage.py",
+      "sha256": "95f69e629568e6c3102f569d1d5651fbd3c8fc688866e67e76c3fafe89cbf329"
+    },
+    {
+      "path": "ontokit/services/structural_similarity_service.py",
+      "sha256": "2e5a2a73990aae0e229fd4f5bf326cb9953b72ed01a4254ddb6991fa463ac894"
+    },
+    {
+      "path": "ontokit/services/suggestion_generation_service.py",
+      "sha256": "35b26cad636fdf3b7264c96b57dc94e91cf8b1cee3815a85f8220125c6f146b7"
+    },
+    {
+      "path": "ontokit/services/suggestion_service.py",
+      "sha256": "ce8ed770dc3c84518b2eb43d3a763a22bea782fa9f21a1b1d72dd232a615ea26"
+    },
+    {
+      "path": "ontokit/services/translation_annotations.py",
+      "sha256": "66e99fb9c7915f91ced8baea9a6f2c9cf551742c8bc28d74046f05fc1926f480"
+    },
+    {
+      "path": "ontokit/services/translation_backfill.py",
+      "sha256": "c12beb032944c4016f8dd54ce4a707f0296244a9340427ccdf734b4e800630db"
+    },
+    {
+      "path": "ontokit/services/translation_coverage.py",
+      "sha256": "8a82307833ae88a4ccc3bfc80491ef6326238766a757fb7fa9ae9e03e18e7bce"
+    },
+    {
+      "path": "ontokit/services/translation_index.py",
+      "sha256": "67a68f654a2e406d8922d413e8828ce5012830ec53868174417a238585dc6393"
+    },
+    {
+      "path": "ontokit/services/translation_jobs.py",
+      "sha256": "06a4c270025b41fb77d125baec9193e422728c0bdaa04d90ec53666fdf8f47f9"
+    },
+    {
+      "path": "ontokit/services/translation_review.py",
+      "sha256": "903a66ceea9a3923d6aa3efc72fb229b406c941a554306386a86ebc3ea67512c"
+    },
+    {
+      "path": "ontokit/services/translation_service.py",
+      "sha256": "4713b4ba4bfa613858c0a302fb4e261a1a6d18743c7858438c2404d0165d5aff"
+    },
+    {
+      "path": "ontokit/services/trust_rate_limiter.py",
+      "sha256": "dab904148c80fffe010d8dd9eb8c67ca5aa0982c59157fe956d92db78e4f0a00"
+    },
+    {
+      "path": "ontokit/services/trust_service.py",
+      "sha256": "2334696a7bcd2539fa67e8deea4e4e7f22bd75daefd4db5cdd83b13950a53ee8"
+    },
+    {
+      "path": "ontokit/services/user_service.py",
+      "sha256": "9149f8c5d5a67b85874d5a1dc183e6e2730014f2a895a011bb226f65dc4377a5"
+    },
+    {
+      "path": "ontokit/services/validation_service.py",
+      "sha256": "7290652bc5de5a8e1f873b21d16281742a3582e901e1f2e84853a668042a1f14"
+    },
+    {
+      "path": "ontokit/services/verification.py",
+      "sha256": "9d6e2e54692d72af381889e8844e5dd9391fffb5b24d920944aef8ae0b6be484"
+    },
+    {
+      "path": "ontokit/version.py",
+      "sha256": "d8aac2b00522bd3805d193c1767291d60c8d4b6adef507c1d5d90fc774fb5ff9"
+    },
+    {
+      "path": "ontokit/worker.py",
+      "sha256": "b9dfe8e4fee83361bb406a0a29d995dc196e36b09e803f3b40c5a23a106a22c3"
+    },
+    {
+      "path": "ontokit/pr_party_org_assets/README.md",
+      "sha256": "90d13f1d3b65b0bd90b3dab3f86228bbabdf7eaa5fe02d46677aff96e81af24c"
+    },
+    {
+      "path": "ontokit/pr_party_org_assets/claude-pr-answers.yml",
+      "sha256": "018dd77bc145deb9b02a4e176d88ae6d5e1a8500c75a40df78454c58f5839bf5"
+    }
+  ],
+  "semgrepignore_sha256": "d9f097c003cf5e83035033252bbb02024047defc0b2033dc3c3ad04fca6ea569"
+}

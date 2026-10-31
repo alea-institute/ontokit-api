@@ -1,0 +1,5 @@
+Warning: plugin transitivedependency/pomxml can be risky when run on untrusted artifacts. Please ensure you trust the source code and artifacts before proceeding.
+Starting filesystem walk for root: /
+Scanned uv.lock file and found 164 packages
+End status: 0 dirs visited, 1 inodes visited, 1 Extract calls, 18.41476ms elapsed, 18.414808ms wall time
+Filtered 1 local/unscannable package/s from the scan.

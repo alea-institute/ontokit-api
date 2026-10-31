@@ -1,0 +1,20 @@
+ontokit/api/routes/auth.py:99:            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/api/routes/auth.py:114:                # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/api/routes/auth.py:116:                # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/api/routes/projects.py:317:        # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/services/github_service.py:105:            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/services/github_service.py:223:            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/services/github_service.py:225:                # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/services/github_service.py:228:                # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/services/github_service.py:236:                            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/services/github_service.py:268:            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/services/pr_party_github.py:566:                # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/core/auth.py:274:            # nosemgrep: python.fastapi.net.tainted-fastapi-http-request-httpx.tainted-fastapi-http-request-httpx
+ontokit/services/duplicate_detection_service.py:54:    # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+ontokit/api/routes/lint.py:260:        # nosemgrep: python.fastapi.db.generic-sql-fastapi.generic-sql-fastapi
+ontokit/api/routes/lint.py:429:    # nosemgrep: python.fastapi.db.generic-sql-fastapi.generic-sql-fastapi
+ontokit/api/routes/lint.py:623:        # nosemgrep: python.fastapi.db.sqlalchemy-fastapi.sqlalchemy-fastapi
+ontokit/api/routes/lint.py:627:    # nosemgrep: python.fastapi.db.generic-sql-fastapi.generic-sql-fastapi
+ontokit/services/embedding_service.py:791:        query_str = text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+ontokit/services/embedding_service.py:891:        query_str = text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text
+ontokit/services/embedding_service.py:946:        query_str = text(  # nosemgrep: python.sqlalchemy.security.audit.avoid-sqlalchemy-text.avoid-sqlalchemy-text

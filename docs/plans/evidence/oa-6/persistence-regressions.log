@@ -1,0 +1,56 @@
+systemd user scope unavailable; using prlimit address-space cap (6144 MiB)
+============================= test session starts ==============================
+platform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0
+rootdir: <toolchain>/worktrees/drawdown-ontokit-api-2
+configfile: pyproject.toml
+plugins: anyio-4.14.2, asyncio-1.4.0, cov-7.1.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 127 items
+
+tests/integration/test_suggestion_review_boundaries.py ......            [  4%]
+tests/integration/test_suggestion_submission_recovery.py ........        [ 11%]
+tests/integration/test_llm_review_regressions.py ....................... [ 29%]
+.......................................................................  [ 85%]
+tests/integration/test_pull_request_concurrency.py .......               [ 90%]
+tests/integration/test_outcome_audit.py ............                     [100%]
+
+=============================== warnings summary ===============================
+ontokit/schemas/anonymous_suggestion.py:8
+  ontokit/schemas/anonymous_suggestion.py:8: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class AnonymousSessionCreateResponse(BaseModel):
+
+tests/integration/test_suggestion_review_boundaries.py:34
+  tests/integration/test_suggestion_review_boundaries.py:34: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_suggestion_submission_recovery.py:33
+  tests/integration/test_suggestion_submission_recovery.py:33: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_llm_review_regressions.py:40
+  tests/integration/test_llm_review_regressions.py:40: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_outcome_audit.py:34
+  tests/integration/test_outcome_audit.py:34: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_llm_review_regressions.py::test_f5_submit_rejects_oversized_new_entity_sweep_before_duplicate_checks
+  tests/integration/test_llm_review_regressions.py:201: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    await suggestions._validate_submission_content(
+
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-save-None]
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-save-False]
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-save_anonymous-None]
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-save_anonymous-False]
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-beacon_save-None]
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-beacon_save_anonymous-None]
+  ontokit/services/suggestion_service.py:459: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    proposed_entities = self._declared_entity_iris(proposed_content)
+
+tests/integration/test_outcome_audit.py::test_outcome_cursor_cannot_be_replayed_across_projects
+  ontokit/api/routes/trust.py:191: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    cursor_created_at, cursor_id = _decode_outcome_cursor(cursor, project_id)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 127 passed, 13 warnings in 8.80s =======================

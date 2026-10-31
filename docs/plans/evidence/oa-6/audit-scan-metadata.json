@@ -1,0 +1,67 @@
+{
+  "lockfile": {
+    "path": "uv.lock",
+    "sha256": "430fec1e7523f4a4a034a290c45eb29c0e3a86978cc7154bf027951d3eb84d5c",
+    "entries": 164,
+    "published_versioned_entries": 163,
+    "unique_package_names": 162
+  },
+  "osv": {
+    "version": "2.3.5",
+    "scalibr_version": "0.4.5",
+    "source_revision": "c062f5bcf59f98e5313e9a1d3803a47289a57b42",
+    "completed_at": "2026-10-28T02:16:04.223906+00:00",
+    "command": "osv-scanner scan source --lockfile uv.lock --format json --all-packages --all-vulns",
+    "exit_status": 1,
+    "binary_sha256": "bb30c580afe5e757d3e959f4afd08a4795ea505ef84c46962b9a738aa573b41b",
+    "binary_source": "https://github.com/google/osv-scanner/releases/download/v2.3.5/osv-scanner_linux_amd64",
+    "checksum_source": "https://github.com/google/osv-scanner/releases/download/v2.3.5/osv-scanner_SHA256SUMS",
+    "checksum_match": true,
+    "inventory_matches_lockfile": true,
+    "advisory_records": 8,
+    "distinct_vulnerabilities_after_alias_grouping": 7,
+    "affected_packages": 5
+  },
+  "semgrep_current": {
+    "version": "1.182.1",
+    "status": "BLOCKED",
+    "exit_status": 2,
+    "reason": "semgrep-core rule validation RPC subprocess exited 1; no valid scan JSON produced",
+    "targets_attempted": [
+      "ontokit/"
+    ],
+    "scan_count": null,
+    "findings": null,
+    "parse_errors": null,
+    "core_binary_sha256": "86a0116d6aa89442cf12cf70a81342c6aa54a93704b035ed1e29567b7792ae60"
+  },
+  "semgrep_supplemental": {
+    "status": "PASS_FOR_RECORDED_OSS_SCOPE",
+    "version": "1.136.0",
+    "tooling_only_setuptools_version": "80.10.2",
+    "note": "Installed outside the project dependency graph. Older CLI requires pkg_resources; current setuptools removed it. Project lock unchanged.",
+    "engine_requested": "OSS",
+    "source_revision": "fbb520e50eb877ce3b29e9f1dda23d5a7d1d1a57",
+    "completed_at": "2026-10-28T02:24:03.764227+00:00",
+    "exit_status": 0,
+    "configured_unique_rules": 1144,
+    "cli_reported_rules_run": 361,
+    "timing_rule_ids": 421,
+    "scanned_targets": 194,
+    "skipped_targets": 0,
+    "skipped_rules": 0,
+    "parse_errors": 0,
+    "findings": 0,
+    "command": "semgrep scan --oss-only --jobs 1 --strict --error --metrics off --disable-version-check --json --verbose --time --no-rewrite-rule-ids --config <audit-cache>/semgrep-rules/default.yaml --config <audit-cache>/semgrep-rules/owasp-top-ten.yaml --config <audit-cache>/semgrep-rules/python.yaml --config <audit-cache>/semgrep-rules/fastapi.yaml --config <audit-cache>/semgrep-rules/jwt.yaml ontokit/",
+    "rules_require_newer_version": 0,
+    "prior_baseline_run": {
+      "source_revision": "c062f5bcf59f98e5313e9a1d3803a47289a57b42",
+      "exit_status": 0,
+      "findings": 0,
+      "targets": 194
+    },
+    "core_binary_sha256": "378706015677e86f951740d686bfb295ef5d0a635cb4bfa3a82bde04c97ce018"
+  },
+  "artifact_sanitization": "Machine-local paths replaced with repo-relative targets or <audit-cache>/<toolchain> placeholders. Gzip preserves complete sanitized diagnostics/results.",
+  "source_unchanged_after_scan": true
+}

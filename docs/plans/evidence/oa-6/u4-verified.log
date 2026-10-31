@@ -1,0 +1,22 @@
+systemd user scope unavailable; using prlimit address-space cap (6144 MiB)
+============================= test session starts ==============================
+platform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0
+rootdir: <toolchain>/worktrees/drawdown-ontokit-api-2
+configfile: pyproject.toml
+plugins: anyio-4.14.2, asyncio-1.4.0, cov-7.1.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 6 items
+
+tests/integration/test_suggestion_review_boundaries.py ......            [100%]
+
+=============================== warnings summary ===============================
+ontokit/schemas/anonymous_suggestion.py:8
+  ontokit/schemas/anonymous_suggestion.py:8: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class AnonymousSessionCreateResponse(BaseModel):
+
+tests/integration/test_suggestion_review_boundaries.py:34
+  tests/integration/test_suggestion_review_boundaries.py:34: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 6 passed, 2 warnings in 0.46s =========================

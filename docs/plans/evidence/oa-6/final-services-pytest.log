@@ -1,0 +1,1075 @@
+systemd user scope unavailable; using prlimit address-space cap (6144 MiB)
+============================= test session starts ==============================
+platform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0
+rootdir: <toolchain>/worktrees/drawdown-ontokit-api-2
+configfile: pyproject.toml
+plugins: anyio-4.14.2, asyncio-1.4.0, cov-7.1.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 4009 items
+
+tests/integration/test_annotation_classification_parity.py ...           [  0%]
+tests/integration/test_demo_project_provisioning.py ..                   [  0%]
+tests/integration/test_demo_retired_redirect_and_retention.py .          [  0%]
+tests/integration/test_distinct_decisions.py ..                          [  0%]
+tests/integration/test_embedding_integrity.py ..                         [  0%]
+tests/integration/test_git_operations.py ..........                      [  0%]
+tests/integration/test_llm_review_regressions.py ....................... [  1%]
+.......................................................................  [  2%]
+tests/integration/test_migration_advisory_lock.py ...                    [  2%]
+tests/integration/test_notification_sockets.py FFFFFF                    [  3%]
+tests/integration/test_outcome_audit.py ............                     [  3%]
+tests/integration/test_pr_party_credential_rewrap.py ..                  [  3%]
+tests/integration/test_project_workflow.py .....                         [  3%]
+tests/integration/test_pull_request_concurrency.py .......               [  3%]
+tests/integration/test_source_revision_advisory_lock.py .                [  3%]
+tests/integration/test_suggestion_review_boundaries.py ......            [  3%]
+tests/integration/test_suggestion_submission_recovery.py ........        [  4%]
+tests/integration/test_translation_lifecycle.py .....                    [  4%]
+tests/unit/test_alembic_env_lock.py ........                             [  4%]
+tests/unit/test_analytics_routes.py .....                                [  4%]
+tests/unit/test_anonymous_limit_migrations.py ..                         [  4%]
+tests/unit/test_anonymous_suggestions_routes.py ........................ [  5%]
+.......                                                                  [  5%]
+tests/unit/test_anonymous_token.py ............                          [  5%]
+tests/unit/test_anonymous_write_limits.py ...............                [  6%]
+tests/unit/test_auth.py ...........                                      [  6%]
+tests/unit/test_auth_core.py ....................                        [  6%]
+tests/unit/test_auth_disabled.py ....................................... [  7%]
+.....................                                                    [  8%]
+tests/unit/test_auth_disabled_routes.py ................................ [  9%]
+........................................................................ [ 10%]
+...                                                                      [ 10%]
+tests/unit/test_auth_routes.py ........                                  [ 11%]
+tests/unit/test_auto_accept_clock.py ..............                      [ 11%]
+tests/unit/test_auto_accept_worker.py .............                      [ 11%]
+tests/unit/test_bare_repository.py ..........................            [ 12%]
+tests/unit/test_bare_repository_service.py ............................. [ 13%]
+........................................                                 [ 14%]
+tests/unit/test_beacon_token.py ........                                 [ 14%]
+tests/unit/test_change_event_service.py ...........                      [ 14%]
+tests/unit/test_collab_presence.py .................................     [ 15%]
+tests/unit/test_collab_protocol.py ....................................  [ 16%]
+tests/unit/test_collab_transform.py ..........................           [ 17%]
+tests/unit/test_commit_identity.py ..................................... [ 17%]
+......                                                                   [ 18%]
+tests/unit/test_config.py ...................                            [ 18%]
+tests/unit/test_consistency_service.py ...................               [ 19%]
+tests/unit/test_context_assembler.py ......                              [ 19%]
+tests/unit/test_cross_reference.py ....                                  [ 19%]
+tests/unit/test_demo_generation.py ..                                    [ 19%]
+tests/unit/test_demo_generation_migration_contract.py ...........        [ 19%]
+tests/unit/test_demo_project_migration_contract.py ..                    [ 19%]
+tests/unit/test_demo_project_provisioning.py .....                       [ 19%]
+tests/unit/test_demo_project_route_visibility.py ....................... [ 20%]
+                                                                         [ 20%]
+tests/unit/test_demo_refresh.py ........                                 [ 20%]
+tests/unit/test_demo_resync.py ........                                  [ 20%]
+tests/unit/test_demo_retention.py ................                       [ 21%]
+tests/unit/test_demo_retention_cli.py ........                           [ 21%]
+tests/unit/test_demo_target_authorizer.py ............                   [ 21%]
+tests/unit/test_dependencies.py ..                                       [ 21%]
+tests/unit/test_di_factories.py ......                                   [ 21%]
+tests/unit/test_distinct_decision_migration_contract.py ....             [ 22%]
+tests/unit/test_distinct_decision_routes.py ....                         [ 22%]
+tests/unit/test_distinct_decision_service.py ......                      [ 22%]
+tests/unit/test_distinct_decision_submission_gate.py ....                [ 22%]
+tests/unit/test_dockerfile_contract.py ............                      [ 22%]
+tests/unit/test_duplicate_check.py .........                             [ 22%]
+tests/unit/test_duplicate_check_route.py ......                          [ 23%]
+tests/unit/test_duplicate_detection.py ............                      [ 23%]
+tests/unit/test_embedding_integrity.py .........                         [ 23%]
+tests/unit/test_embedding_service.py ................................... [ 24%]
+................                                                         [ 24%]
+tests/unit/test_embedding_text_builder.py ........                       [ 25%]
+tests/unit/test_embeddings_routes.py .............                       [ 25%]
+tests/unit/test_encryption.py ..........                                 [ 25%]
+tests/unit/test_entity_discovery_parity.py ...................           [ 26%]
+tests/unit/test_entity_validation.py ............                        [ 26%]
+tests/unit/test_entrypoint_lock_check.py .....                           [ 26%]
+tests/unit/test_exceptions.py ........                                   [ 26%]
+tests/unit/test_generation_provenance.py ..                              [ 26%]
+tests/unit/test_generation_routes.py ....................                [ 27%]
+tests/unit/test_generation_schemas.py ....................               [ 27%]
+tests/unit/test_get_git_ontology_path.py ......                          [ 27%]
+tests/unit/test_github_pr_sync.py ..................                     [ 28%]
+tests/unit/test_github_push_webhook_sync.py ............                 [ 28%]
+tests/unit/test_github_service.py ...................................... [ 29%]
+....                                                                     [ 29%]
+tests/unit/test_github_sync.py ...................                       [ 30%]
+tests/unit/test_github_sync_migration_contract.py ..                     [ 30%]
+tests/unit/test_github_sync_outbound.py ..............                   [ 30%]
+tests/unit/test_health.py ..                                             [ 30%]
+tests/unit/test_index_status_route.py .....                              [ 30%]
+tests/unit/test_index_ws.py ............                                 [ 31%]
+tests/unit/test_indexed_ontology.py ...............................      [ 31%]
+tests/unit/test_join_request_service.py .......................          [ 32%]
+tests/unit/test_lint_config.py ......................................... [ 33%]
+............                                                             [ 33%]
+tests/unit/test_lint_routes.py ................                          [ 34%]
+tests/unit/test_lint_routes_extended.py .................                [ 34%]
+tests/unit/test_lint_ws.py ......                                        [ 34%]
+tests/unit/test_linter.py .............................................. [ 35%]
+.                                                                        [ 35%]
+tests/unit/test_llm_audit.py .......                                     [ 36%]
+tests/unit/test_llm_budget.py .............                              [ 36%]
+tests/unit/test_llm_config.py ............                               [ 36%]
+tests/unit/test_llm_metering.py .....                                    [ 36%]
+tests/unit/test_llm_pricing.py ..                                        [ 36%]
+tests/unit/test_llm_prompt_safety.py ...                                 [ 36%]
+tests/unit/test_llm_providers.py ...........                             [ 37%]
+tests/unit/test_llm_rate_limiter.py ..................                   [ 37%]
+tests/unit/test_llm_role_gates.py ..................                     [ 38%]
+tests/unit/test_llm_routes.py .......                                    [ 38%]
+tests/unit/test_llm_ssrf.py ..........................                   [ 38%]
+tests/unit/test_llm_status_route.py .................                    [ 39%]
+tests/unit/test_local_provider.py ...                                    [ 39%]
+tests/unit/test_logging_filters.py ............                          [ 39%]
+tests/unit/test_main.py ...................                              [ 40%]
+tests/unit/test_memory_caps.py .....                                     [ 40%]
+tests/unit/test_native_reviewer.py ........................              [ 40%]
+tests/unit/test_normalization_routes.py .....................            [ 41%]
+tests/unit/test_normalization_service.py .................               [ 41%]
+tests/unit/test_notification_routes.py .......                           [ 42%]
+tests/unit/test_notification_service.py ............                     [ 42%]
+tests/unit/test_ontology_extractor.py .................................. [ 43%]
+..                                                                       [ 43%]
+tests/unit/test_ontology_index_service.py .............................. [ 43%]
+...................                                                      [ 44%]
+tests/unit/test_ontology_service.py ...................                  [ 44%]
+tests/unit/test_ontology_service_extended.py ........................... [ 45%]
+.................                                                        [ 45%]
+tests/unit/test_ontology_service_no_stubs.py .....................       [ 46%]
+tests/unit/test_pr_party_actions.py .................................... [ 47%]
+.....................................                                    [ 48%]
+tests/unit/test_pr_party_brief.py ...................................... [ 49%]
+...........                                                              [ 49%]
+tests/unit/test_pr_party_credential_rewrap.py .....                      [ 49%]
+tests/unit/test_pr_party_credentials.py ................................ [ 50%]
+........                                                                 [ 50%]
+tests/unit/test_pr_party_github.py ..................................... [ 51%]
+......................                                                   [ 52%]
+tests/unit/test_pr_party_intake.py ..................................... [ 53%]
+...................................                                      [ 53%]
+tests/unit/test_pr_party_models.py ..................................... [ 54%]
+.....                                                                    [ 55%]
+tests/unit/test_pr_party_notifications.py ...................            [ 55%]
+tests/unit/test_pr_party_qa.py ......................................... [ 56%]
+..............                                                           [ 56%]
+tests/unit/test_pr_party_read_api.py ................................... [ 57%]
+......................                                                   [ 58%]
+tests/unit/test_pr_party_reconcile.py .................................. [ 59%]
+..........                                                               [ 59%]
+tests/unit/test_pr_party_settings_routes.py ...........................  [ 60%]
+tests/unit/test_pr_party_webhooks.py ......................              [ 60%]
+tests/unit/test_pr_routes.py .........                                   [ 60%]
+tests/unit/test_project_service.py ..................................... [ 61%]
+....................................................................     [ 63%]
+tests/unit/test_projects_routes.py ...........                           [ 63%]
+tests/unit/test_projects_routes_coverage.py ............................ [ 64%]
+.............................................                            [ 65%]
+tests/unit/test_projects_routes_extended.py ...................          [ 66%]
+tests/unit/test_pull_request_idempotency.py ....                         [ 66%]
+tests/unit/test_pull_request_service.py ................................ [ 66%]
+.......................................................................  [ 68%]
+tests/unit/test_pull_request_service_extended.py ....................... [ 69%]
+...........................................................              [ 70%]
+tests/unit/test_pull_requests_routes.py ................................ [ 71%]
+......................                                                   [ 72%]
+tests/unit/test_quality_routes.py ...............................        [ 72%]
+tests/unit/test_quality_worker.py .......                                [ 73%]
+tests/unit/test_quality_ws.py ......                                     [ 73%]
+tests/unit/test_rdf_utils.py .............                               [ 73%]
+tests/unit/test_release_manifest.py ..........................           [ 74%]
+tests/unit/test_release_workflow.py ..........................           [ 74%]
+tests/unit/test_remote_sync_service.py ................                  [ 75%]
+tests/unit/test_rewrap_pr_party_credentials_script.py .........          [ 75%]
+tests/unit/test_route_uniqueness.py ........                             [ 75%]
+tests/unit/test_search.py ............                                   [ 75%]
+tests/unit/test_sitemap_notifier.py .....                                [ 76%]
+tests/unit/test_source_revision_cas.py ...................               [ 76%]
+tests/unit/test_storage.py ...........                                   [ 76%]
+tests/unit/test_structural_similarity_service.py ....                    [ 76%]
+tests/unit/test_suggestion_generation.py .................               [ 77%]
+tests/unit/test_suggestion_mint_entities.py ............................ [ 77%]
+....................................                                     [ 78%]
+tests/unit/test_suggestion_service.py .................................. [ 79%]
+........................................................................ [ 81%]
+........................................................................ [ 83%]
+.                                                                        [ 83%]
+tests/unit/test_suggestion_submission_content.py ....................... [ 83%]
+............                                                             [ 84%]
+tests/unit/test_suggestion_trust_integration.py ........................ [ 84%]
+........................................................................ [ 86%]
+........................................................................ [ 88%]
+......................................                                   [ 89%]
+tests/unit/test_suggestions_routes.py ...........................        [ 90%]
+tests/unit/test_translation_annotations.py .......                       [ 90%]
+tests/unit/test_translation_backfill.py ..........                       [ 90%]
+tests/unit/test_translation_commit.py .......                            [ 90%]
+tests/unit/test_translation_config.py ............                       [ 90%]
+tests/unit/test_translation_coverage.py ........                         [ 91%]
+tests/unit/test_translation_jobs.py ..................                   [ 91%]
+tests/unit/test_translation_models.py .....                              [ 91%]
+tests/unit/test_translation_service.py ..........                        [ 91%]
+tests/unit/test_trust_models.py .......................                  [ 92%]
+tests/unit/test_trust_rate_limiter.py ....................               [ 93%]
+tests/unit/test_trust_routes.py ........................................ [ 94%]
+                                                                         [ 94%]
+tests/unit/test_trust_service.py ....................................... [ 95%]
+..................                                                       [ 95%]
+tests/unit/test_upstream_loop_prevention.py ........                     [ 95%]
+tests/unit/test_user_service.py .................                        [ 96%]
+tests/unit/test_user_settings_routes.py ................                 [ 96%]
+tests/unit/test_verification.py .................                        [ 96%]
+tests/unit/test_worker.py .............................................. [ 98%]
+........................                                                 [ 98%]
+tests/unit/test_worker_redis_settings.py ...........                     [ 98%]
+tests/unit/test_ws_auth.py ........................                      [ 99%]
+tests/unit/test_ws_forward.py ...................                        [100%]
+
+=================================== FAILURES ===================================
+_ test_auth_fanout_restart_recovery_and_revocation[websockets-ontology/index-ws-ontology_index:updates-index_complete] _
+
+harness = (UUID('f3e44351-4871-44a0-a9bf-ee99b5114837'), UUID('8a4656e6-f23d-45a6-9fd7-ad4c55bebcb8'), async_sessionmaker(class_...)>)>)>, <function harness.<locals>.token at 0x7b103bfe2700>, <function harness.<locals>.server at 0x7b103bfe9080>, ...)
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7b1039f3f4d0>
+endpoint = 'ontology/index-ws', channel = 'ontology_index:updates'
+event_type = 'index_complete'
+
+    @pytest.mark.parametrize("endpoint,channel,event_type", CASES)
+    @pytest.mark.parametrize("harness", ["websockets", "websockets-sansio"], indirect=True)
+    async def test_auth_fanout_restart_recovery_and_revocation(
+        harness,
+        caplog,
+        endpoint,
+        channel,
+        event_type,
+    ):
+        pid, other, sessions, redis, token, server, connect, ready, socket_path = harness
+        owner_token, member_token = token(), token("member")
+        path = f"{pid}/{endpoint}"
+        event = {"project_id": str(pid), "type": event_type}
+        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.DEBUG, logger="uvicorn.error")
+>       async with server():
+                   ^^^^^^^^
+
+tests/integration/test_notification_sockets.py:209: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/contextlib.py:214: in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_notification_sockets.py:156: in server
+    await asyncio.wait_for(task, 5)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+fut = <Task finished name='Task-770' coro=<Server.serve() done, defined at .venv/lib/python3.13/site-packages/uvicorn/server.py:79> exception=PermissionError(13, 'Permission denied')>
+timeout = 5
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        If the task suppresses the cancellation and returns a value instead,
+        that value is returned.
+    
+        This function is a coroutine.
+        """
+        # The special case for timeout <= 0 is for the following case:
+        #
+        # async def test_waitfor():
+        #     func_started = False
+        #
+        #     async def func():
+        #         nonlocal func_started
+        #         func_started = True
+        #
+        #     try:
+        #         await asyncio.wait_for(func(), 0)
+        #     except asyncio.TimeoutError:
+        #         assert not func_started
+        #     else:
+        #         assert False
+        #
+        # asyncio.run(test_waitfor())
+    
+    
+        if timeout is not None and timeout <= 0:
+            fut = ensure_future(fut)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise TimeoutError from exc
+    
+        async with timeouts.timeout(timeout):
+>           return await fut
+                   ^^^^^^^^^
+E           PermissionError: [Errno 13] Permission denied
+
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/asyncio/tasks.py:507: PermissionError
+------------------------------ Captured log call -------------------------------
+INFO     uvicorn.error:server.py:94 Started server process [6792]
+_ test_auth_fanout_restart_recovery_and_revocation[websockets-lint/ws-lint:updates-lint_complete] _
+
+harness = (UUID('054f268c-fff0-435b-95b2-c2384ed37f16'), UUID('0b0ec180-6028-4e79-8184-e9e1ba65e7a5'), async_sessionmaker(class_...)>)>)>, <function harness.<locals>.token at 0x7b103c7285e0>, <function harness.<locals>.server at 0x7b103c580180>, ...)
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7b103ca57c50>
+endpoint = 'lint/ws', channel = 'lint:updates', event_type = 'lint_complete'
+
+    @pytest.mark.parametrize("endpoint,channel,event_type", CASES)
+    @pytest.mark.parametrize("harness", ["websockets", "websockets-sansio"], indirect=True)
+    async def test_auth_fanout_restart_recovery_and_revocation(
+        harness,
+        caplog,
+        endpoint,
+        channel,
+        event_type,
+    ):
+        pid, other, sessions, redis, token, server, connect, ready, socket_path = harness
+        owner_token, member_token = token(), token("member")
+        path = f"{pid}/{endpoint}"
+        event = {"project_id": str(pid), "type": event_type}
+        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.DEBUG, logger="uvicorn.error")
+>       async with server():
+                   ^^^^^^^^
+
+tests/integration/test_notification_sockets.py:209: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/contextlib.py:214: in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_notification_sockets.py:156: in server
+    await asyncio.wait_for(task, 5)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+fut = <Task finished name='Task-780' coro=<Server.serve() done, defined at .venv/lib/python3.13/site-packages/uvicorn/server.py:79> exception=PermissionError(13, 'Permission denied')>
+timeout = 5
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        If the task suppresses the cancellation and returns a value instead,
+        that value is returned.
+    
+        This function is a coroutine.
+        """
+        # The special case for timeout <= 0 is for the following case:
+        #
+        # async def test_waitfor():
+        #     func_started = False
+        #
+        #     async def func():
+        #         nonlocal func_started
+        #         func_started = True
+        #
+        #     try:
+        #         await asyncio.wait_for(func(), 0)
+        #     except asyncio.TimeoutError:
+        #         assert not func_started
+        #     else:
+        #         assert False
+        #
+        # asyncio.run(test_waitfor())
+    
+    
+        if timeout is not None and timeout <= 0:
+            fut = ensure_future(fut)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise TimeoutError from exc
+    
+        async with timeouts.timeout(timeout):
+>           return await fut
+                   ^^^^^^^^^
+E           PermissionError: [Errno 13] Permission denied
+
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/asyncio/tasks.py:507: PermissionError
+------------------------------ Captured log call -------------------------------
+INFO     uvicorn.error:server.py:94 Started server process [6792]
+_ test_auth_fanout_restart_recovery_and_revocation[websockets-quality/ws-quality:updates-duplicates_complete] _
+
+harness = (UUID('c91f1d51-6fc1-462d-8dde-f0f5965d0863'), UUID('dcbe0530-5eb8-4c87-bb9d-8eeb3f468cdf'), async_sessionmaker(class_...)>)>)>, <function harness.<locals>.token at 0x7b103c62d440>, <function harness.<locals>.server at 0x7b103c9ffa60>, ...)
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7b1039fe6850>
+endpoint = 'quality/ws', channel = 'quality:updates'
+event_type = 'duplicates_complete'
+
+    @pytest.mark.parametrize("endpoint,channel,event_type", CASES)
+    @pytest.mark.parametrize("harness", ["websockets", "websockets-sansio"], indirect=True)
+    async def test_auth_fanout_restart_recovery_and_revocation(
+        harness,
+        caplog,
+        endpoint,
+        channel,
+        event_type,
+    ):
+        pid, other, sessions, redis, token, server, connect, ready, socket_path = harness
+        owner_token, member_token = token(), token("member")
+        path = f"{pid}/{endpoint}"
+        event = {"project_id": str(pid), "type": event_type}
+        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.DEBUG, logger="uvicorn.error")
+>       async with server():
+                   ^^^^^^^^
+
+tests/integration/test_notification_sockets.py:209: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/contextlib.py:214: in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_notification_sockets.py:156: in server
+    await asyncio.wait_for(task, 5)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+fut = <Task finished name='Task-790' coro=<Server.serve() done, defined at .venv/lib/python3.13/site-packages/uvicorn/server.py:79> exception=PermissionError(13, 'Permission denied')>
+timeout = 5
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        If the task suppresses the cancellation and returns a value instead,
+        that value is returned.
+    
+        This function is a coroutine.
+        """
+        # The special case for timeout <= 0 is for the following case:
+        #
+        # async def test_waitfor():
+        #     func_started = False
+        #
+        #     async def func():
+        #         nonlocal func_started
+        #         func_started = True
+        #
+        #     try:
+        #         await asyncio.wait_for(func(), 0)
+        #     except asyncio.TimeoutError:
+        #         assert not func_started
+        #     else:
+        #         assert False
+        #
+        # asyncio.run(test_waitfor())
+    
+    
+        if timeout is not None and timeout <= 0:
+            fut = ensure_future(fut)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise TimeoutError from exc
+    
+        async with timeouts.timeout(timeout):
+>           return await fut
+                   ^^^^^^^^^
+E           PermissionError: [Errno 13] Permission denied
+
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/asyncio/tasks.py:507: PermissionError
+------------------------------ Captured log call -------------------------------
+INFO     uvicorn.error:server.py:94 Started server process [6792]
+_ test_auth_fanout_restart_recovery_and_revocation[websockets-sansio-ontology/index-ws-ontology_index:updates-index_complete] _
+
+harness = (UUID('b7f30f12-825c-402f-aa41-4ffed329d8b0'), UUID('8e003d2e-6813-4e67-a7ab-ff00021787ab'), async_sessionmaker(class_...)>)>)>, <function harness.<locals>.token at 0x7b103ca78c20>, <function harness.<locals>.server at 0x7b103c9c4cc0>, ...)
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7b103c8fc180>
+endpoint = 'ontology/index-ws', channel = 'ontology_index:updates'
+event_type = 'index_complete'
+
+    @pytest.mark.parametrize("endpoint,channel,event_type", CASES)
+    @pytest.mark.parametrize("harness", ["websockets", "websockets-sansio"], indirect=True)
+    async def test_auth_fanout_restart_recovery_and_revocation(
+        harness,
+        caplog,
+        endpoint,
+        channel,
+        event_type,
+    ):
+        pid, other, sessions, redis, token, server, connect, ready, socket_path = harness
+        owner_token, member_token = token(), token("member")
+        path = f"{pid}/{endpoint}"
+        event = {"project_id": str(pid), "type": event_type}
+        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.DEBUG, logger="uvicorn.error")
+>       async with server():
+                   ^^^^^^^^
+
+tests/integration/test_notification_sockets.py:209: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/contextlib.py:214: in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_notification_sockets.py:156: in server
+    await asyncio.wait_for(task, 5)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+fut = <Task finished name='Task-800' coro=<Server.serve() done, defined at .venv/lib/python3.13/site-packages/uvicorn/server.py:79> exception=PermissionError(13, 'Permission denied')>
+timeout = 5
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        If the task suppresses the cancellation and returns a value instead,
+        that value is returned.
+    
+        This function is a coroutine.
+        """
+        # The special case for timeout <= 0 is for the following case:
+        #
+        # async def test_waitfor():
+        #     func_started = False
+        #
+        #     async def func():
+        #         nonlocal func_started
+        #         func_started = True
+        #
+        #     try:
+        #         await asyncio.wait_for(func(), 0)
+        #     except asyncio.TimeoutError:
+        #         assert not func_started
+        #     else:
+        #         assert False
+        #
+        # asyncio.run(test_waitfor())
+    
+    
+        if timeout is not None and timeout <= 0:
+            fut = ensure_future(fut)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise TimeoutError from exc
+    
+        async with timeouts.timeout(timeout):
+>           return await fut
+                   ^^^^^^^^^
+E           PermissionError: [Errno 13] Permission denied
+
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/asyncio/tasks.py:507: PermissionError
+------------------------------ Captured log call -------------------------------
+INFO     uvicorn.error:server.py:94 Started server process [6792]
+_ test_auth_fanout_restart_recovery_and_revocation[websockets-sansio-lint/ws-lint:updates-lint_complete] _
+
+harness = (UUID('c55b0f2a-2809-43d2-8ef4-3d94332f4c6b'), UUID('77a66646-204d-4a13-8c6a-617f71c24c47'), async_sessionmaker(class_...)>)>)>, <function harness.<locals>.token at 0x7b103c5831a0>, <function harness.<locals>.server at 0x7b103c49fd80>, ...)
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7b103c8fc8a0>
+endpoint = 'lint/ws', channel = 'lint:updates', event_type = 'lint_complete'
+
+    @pytest.mark.parametrize("endpoint,channel,event_type", CASES)
+    @pytest.mark.parametrize("harness", ["websockets", "websockets-sansio"], indirect=True)
+    async def test_auth_fanout_restart_recovery_and_revocation(
+        harness,
+        caplog,
+        endpoint,
+        channel,
+        event_type,
+    ):
+        pid, other, sessions, redis, token, server, connect, ready, socket_path = harness
+        owner_token, member_token = token(), token("member")
+        path = f"{pid}/{endpoint}"
+        event = {"project_id": str(pid), "type": event_type}
+        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.DEBUG, logger="uvicorn.error")
+>       async with server():
+                   ^^^^^^^^
+
+tests/integration/test_notification_sockets.py:209: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/contextlib.py:214: in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_notification_sockets.py:156: in server
+    await asyncio.wait_for(task, 5)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+fut = <Task finished name='Task-810' coro=<Server.serve() done, defined at .venv/lib/python3.13/site-packages/uvicorn/server.py:79> exception=PermissionError(13, 'Permission denied')>
+timeout = 5
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        If the task suppresses the cancellation and returns a value instead,
+        that value is returned.
+    
+        This function is a coroutine.
+        """
+        # The special case for timeout <= 0 is for the following case:
+        #
+        # async def test_waitfor():
+        #     func_started = False
+        #
+        #     async def func():
+        #         nonlocal func_started
+        #         func_started = True
+        #
+        #     try:
+        #         await asyncio.wait_for(func(), 0)
+        #     except asyncio.TimeoutError:
+        #         assert not func_started
+        #     else:
+        #         assert False
+        #
+        # asyncio.run(test_waitfor())
+    
+    
+        if timeout is not None and timeout <= 0:
+            fut = ensure_future(fut)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise TimeoutError from exc
+    
+        async with timeouts.timeout(timeout):
+>           return await fut
+                   ^^^^^^^^^
+E           PermissionError: [Errno 13] Permission denied
+
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/asyncio/tasks.py:507: PermissionError
+------------------------------ Captured log call -------------------------------
+INFO     uvicorn.error:server.py:94 Started server process [6792]
+_ test_auth_fanout_restart_recovery_and_revocation[websockets-sansio-quality/ws-quality:updates-duplicates_complete] _
+
+harness = (UUID('86269edd-7a8c-4858-807c-fc5672513623'), UUID('9cfb0363-9cbd-4eef-a2d5-2a0dbf8e5d89'), async_sessionmaker(class_...)>)>)>, <function harness.<locals>.token at 0x7b103cbaec00>, <function harness.<locals>.server at 0x7b103cb5a480>, ...)
+caplog = <_pytest.logging.LogCaptureFixture object at 0x7b103cb4b530>
+endpoint = 'quality/ws', channel = 'quality:updates'
+event_type = 'duplicates_complete'
+
+    @pytest.mark.parametrize("endpoint,channel,event_type", CASES)
+    @pytest.mark.parametrize("harness", ["websockets", "websockets-sansio"], indirect=True)
+    async def test_auth_fanout_restart_recovery_and_revocation(
+        harness,
+        caplog,
+        endpoint,
+        channel,
+        event_type,
+    ):
+        pid, other, sessions, redis, token, server, connect, ready, socket_path = harness
+        owner_token, member_token = token(), token("member")
+        path = f"{pid}/{endpoint}"
+        event = {"project_id": str(pid), "type": event_type}
+        caplog.set_level(logging.INFO)
+        caplog.set_level(logging.DEBUG, logger="uvicorn.error")
+>       async with server():
+                   ^^^^^^^^
+
+tests/integration/test_notification_sockets.py:209: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/contextlib.py:214: in __aenter__
+    return await anext(self.gen)
+           ^^^^^^^^^^^^^^^^^^^^^
+tests/integration/test_notification_sockets.py:156: in server
+    await asyncio.wait_for(task, 5)
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+fut = <Task finished name='Task-820' coro=<Server.serve() done, defined at .venv/lib/python3.13/site-packages/uvicorn/server.py:79> exception=PermissionError(13, 'Permission denied')>
+timeout = 5
+
+    async def wait_for(fut, timeout):
+        """Wait for the single Future or coroutine to complete, with timeout.
+    
+        Coroutine will be wrapped in Task.
+    
+        Returns result of the Future or coroutine.  When a timeout occurs,
+        it cancels the task and raises TimeoutError.  To avoid the task
+        cancellation, wrap it in shield().
+    
+        If the wait is cancelled, the task is also cancelled.
+    
+        If the task suppresses the cancellation and returns a value instead,
+        that value is returned.
+    
+        This function is a coroutine.
+        """
+        # The special case for timeout <= 0 is for the following case:
+        #
+        # async def test_waitfor():
+        #     func_started = False
+        #
+        #     async def func():
+        #         nonlocal func_started
+        #         func_started = True
+        #
+        #     try:
+        #         await asyncio.wait_for(func(), 0)
+        #     except asyncio.TimeoutError:
+        #         assert not func_started
+        #     else:
+        #         assert False
+        #
+        # asyncio.run(test_waitfor())
+    
+    
+        if timeout is not None and timeout <= 0:
+            fut = ensure_future(fut)
+    
+            if fut.done():
+                return fut.result()
+    
+            await _cancel_and_wait(fut)
+            try:
+                return fut.result()
+            except exceptions.CancelledError as exc:
+                raise TimeoutError from exc
+    
+        async with timeouts.timeout(timeout):
+>           return await fut
+                   ^^^^^^^^^
+E           PermissionError: [Errno 13] Permission denied
+
+<toolchain>/share/uv/python/cpython-3.13.11-linux-x86_64-gnu/lib/python3.13/asyncio/tasks.py:507: PermissionError
+------------------------------ Captured log call -------------------------------
+INFO     uvicorn.error:server.py:94 Started server process [6792]
+=============================== warnings summary ===============================
+ontokit/schemas/anonymous_suggestion.py:8
+  ontokit/schemas/anonymous_suggestion.py:8: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class AnonymousSessionCreateResponse(BaseModel):
+
+tests/integration/test_llm_review_regressions.py:40
+  tests/integration/test_llm_review_regressions.py:40: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_migration_advisory_lock.py:27
+  tests/integration/test_migration_advisory_lock.py:27: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_outcome_audit.py:34
+  tests/integration/test_outcome_audit.py:34: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_pr_party_credential_rewrap.py:22
+  tests/integration/test_pr_party_credential_rewrap.py:22: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.integration
+
+tests/integration/test_pr_party_credential_rewrap.py:65
+  tests/integration/test_pr_party_credential_rewrap.py:65: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    @pytest.mark.integration
+
+tests/integration/test_source_revision_advisory_lock.py:13
+  tests/integration/test_source_revision_advisory_lock.py:13: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_suggestion_review_boundaries.py:34
+  tests/integration/test_suggestion_review_boundaries.py:34: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_suggestion_submission_recovery.py:33
+  tests/integration/test_suggestion_submission_recovery.py:33: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_translation_lifecycle.py:46
+  tests/integration/test_translation_lifecycle.py:46: PytestUnknownMarkWarning: Unknown pytest.mark.integration - is this a typo?  You can register custom marks to avoid this warning - for details, see https://docs.pytest.org/en/stable/how-to/mark.html
+    pytestmark = pytest.mark.integration
+
+tests/integration/test_llm_review_regressions.py::test_f5_submit_rejects_oversized_new_entity_sweep_before_duplicate_checks
+  tests/integration/test_llm_review_regressions.py:201: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    await suggestions._validate_submission_content(
+
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-save-None]
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-save-False]
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-save_anonymous-None]
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-save_anonymous-False]
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-beacon_save-None]
+tests/integration/test_llm_review_regressions.py::test_p1_7_p1_12_server_gates_content_before_real_git_commit[malformed-beacon_save_anonymous-None]
+  ontokit/services/suggestion_service.py:459: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    proposed_entities = self._declared_entity_iris(proposed_content)
+
+tests/integration/test_notification_sockets.py::test_auth_fanout_restart_recovery_and_revocation[websockets-ontology/index-ws-ontology_index:updates-index_complete]
+  .venv/lib/python3.13/site-packages/websockets/legacy/__init__.py:6: DeprecationWarning: websockets.legacy is deprecated; see https://websockets.readthedocs.io/en/stable/howto/upgrade.html for upgrade instructions
+    warnings.warn(  # deprecated in 14.0 - 2024-11-09
+
+tests/integration/test_notification_sockets.py::test_auth_fanout_restart_recovery_and_revocation[websockets-ontology/index-ws-ontology_index:updates-index_complete]
+  .venv/lib/python3.13/site-packages/uvicorn/protocols/websockets/websockets_impl.py:41: UvicornDeprecationWarning: The `websockets` implementation is deprecated, and `--ws websockets` will point at the `websockets-sansio` implementation in a future release. Use `--ws websockets-sansio` or `--ws auto` to switch now.
+    warnings.warn(
+
+tests/integration/test_outcome_audit.py::test_outcome_cursor_cannot_be_replayed_across_projects
+tests/unit/test_trust_routes.py::TestSuggestionOutcomeAudit::test_invalid_cursor_returns_typed_client_error[invalid-base64]
+tests/unit/test_trust_routes.py::TestSuggestionOutcomeAudit::test_invalid_cursor_returns_typed_client_error[invalid-utf8]
+tests/unit/test_trust_routes.py::TestSuggestionOutcomeAudit::test_cursor_cannot_be_replayed_across_projects
+tests/unit/test_trust_routes.py::TestSuggestionOutcomeAudit::test_malformed_cursor_deep_branches_are_rejected[naive-timestamp]
+tests/unit/test_trust_routes.py::TestSuggestionOutcomeAudit::test_malformed_cursor_deep_branches_are_rejected[bad-uuid]
+tests/unit/test_trust_routes.py::TestSuggestionOutcomeAudit::test_malformed_cursor_deep_branches_are_rejected[missing-separator]
+  ontokit/api/routes/trust.py:191: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    cursor_created_at, cursor_id = _decode_outcome_cursor(cursor, project_id)
+
+tests/unit/test_suggestion_mint_entities.py::test_malformed_turtle_retains_parse_error
+  tests/unit/test_suggestion_mint_entities.py:176: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    SuggestionService._declared_entity_iris(PREFIXES + "ex:alice a [")
+
+tests/unit/test_suggestion_service.py::test_lifecycle_revision_submission_gates[False-submit]
+tests/unit/test_suggestion_service.py::test_lifecycle_revision_submission_gates[False-resubmit]
+  ontokit/services/suggestion_service.py:1967: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    await self._validate_submission_content(
+
+tests/unit/test_suggestion_submission_content.py::test_mixed_submission_refuses_26_classified_subjects[owl:Class]
+tests/unit/test_suggestion_submission_content.py::test_mixed_submission_refuses_26_classified_subjects[owl:ObjectProperty]
+  tests/unit/test_suggestion_submission_content.py:307: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    await service._validate_submission_content(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+================================ tests coverage ================================
+_______________ coverage: platform linux, python 3.13.11-final-0 _______________
+
+Name                                                      Stmts   Miss Branch BrPart  Cover   Missing
+-----------------------------------------------------------------------------------------------------
+ontokit/__init__.py                                           2      0      0      0   100%
+ontokit/api/__init__.py                                       0      0      0      0   100%
+ontokit/api/dependencies.py                                  54     15     14      2    69%   38, 41, 62-74, 88-93, 104-107
+ontokit/api/routes/__init__.py                               37      0      2      0   100%
+ontokit/api/routes/analytics.py                              39      2      0      0    95%   33-34
+ontokit/api/routes/anonymous_suggestions.py                  54      0      6      0   100%
+ontokit/api/routes/auth.py                                   45      3      8      2    91%   68, 72, 84
+ontokit/api/routes/duplicate_check.py                        64     14      6      2    77%   65, 80-83, 128-137, 194
+ontokit/api/routes/embeddings.py                             77     11      6      0    84%   40-43, 136-138, 151-154
+ontokit/api/routes/generation.py                            130     18     34      8    83%   81-87, 209, 222, 239->263, 274, 276, 288-289, 352, 374-395, 400->403
+ontokit/api/routes/join_requests.py                          32      8      0      0    75%   26, 38, 53, 66, 80, 95, 112, 128
+ontokit/api/routes/lint.py                                  207      3     54      1    98%   74-75, 403->407, 752
+ontokit/api/routes/llm.py                                   197     58     58      5    65%   149, 184-193, 212-267, 290, 302-306, 310, 312, 329-331, 375, 389-393, 419-430, 455-458, 459->465
+ontokit/api/routes/normalization.py                         141      6     20      1    96%   99, 216, 290-295
+ontokit/api/routes/notifications.py                          22      1      2      0    96%   19
+ontokit/api/routes/pr_party.py                              254     24     66      3    88%   227, 235, 585-597, 660, 677, 821, 824-827, 904-905
+ontokit/api/routes/pr_party_settings.py                      72      5      6      1    92%   66, 84-86, 167
+ontokit/api/routes/pr_party_webhooks.py                      68      3     16      1    95%   111, 175-176
+ontokit/api/routes/projects.py                              527     35    124     12    92%   184->186, 312->321, 378-379, 447->451, 472->exit, 792->795, 840->839, 842-843, 988->992, 1275->1281, 1305-1306, 1395-1397, 1422-1423, 1437->1439, 1457->1459, 1477-1484, 1488-1498, 1510-1511, 1549-1550, 1613-1638, 1650-1651, 1802
+ontokit/api/routes/pull_requests.py                         168      4     34      2    97%   48, 218->228, 225-226, 626
+ontokit/api/routes/quality.py                               155      4     24      0    97%   39-43
+ontokit/api/routes/remote_sync.py                            35     12      0      0    66%   40-41, 59-60, 76-77, 96-97, 111-112, 126-127
+ontokit/api/routes/search.py                                 33      4      0      0    88%   81-82, 96-97
+ontokit/api/routes/semantic_search.py                        49     14      8      1    67%   66-68, 102-109, 124-129
+ontokit/api/routes/suggestions.py                            70      4      0      0    94%   39, 53, 82, 147
+ontokit/api/routes/translation.py                           271     59     72     15    76%   76, 114, 118, 165, 168, 189-194, 257, 316-318, 324, 333-337, 351-361, 379-380, 392-393, 424->431, 461, 467, 498->507, 533-547, 558-574, 591-592, 613, 620, 643-644, 683, 729
+ontokit/api/routes/trust.py                                 113      1     22      1    99%   76
+ontokit/api/routes/user_settings.py                          52      2      4      0    96%   100-101
+ontokit/api/utils/__init__.py                                 0      0      0      0   100%
+ontokit/api/utils/redis.py                                   11      3      4      0    67%   30-32
+ontokit/api/utils/ws_auth.py                                 86      5     22      1    93%   62-66
+ontokit/api/utils/ws_forward.py                             101      6     24      5    91%   42, 49, 83, 120->142, 134-136
+ontokit/collab/__init__.py                                    0      0      0      0   100%
+ontokit/collab/presence.py                                   45      0     16      0   100%
+ontokit/collab/protocol.py                                   80      0      0      0   100%
+ontokit/collab/transform.py                                  22      0     14      0   100%
+ontokit/core/__init__.py                                      2      0      0      0   100%
+ontokit/core/anonymous_token.py                              40      2     12      2    92%   76, 80
+ontokit/core/api_paths.py                                    12      0      0      0   100%
+ontokit/core/auth.py                                        199     28     64      9    83%   136, 141-144, 156, 196->195, 204->203, 234->237, 257-286, 321->328, 325->328, 389-395, 435
+ontokit/core/beacon_token.py                                 39      2     12      2    92%   68, 72
+ontokit/core/config.py                                      107      1     18      1    98%   46
+ontokit/core/constants.py                                    14      0      0      0   100%
+ontokit/core/database.py                                     13      0      0      0   100%
+ontokit/core/demo_targets.py                                 38      1      8      1    96%   47
+ontokit/core/encryption.py                                   17      0      2      0   100%
+ontokit/core/exceptions.py                                   13      0      0      0   100%
+ontokit/core/limits.py                                        4      0      0      0   100%
+ontokit/core/logging_filters.py                              28      1     16      3    91%   30->32, 36->41, 46
+ontokit/core/middleware.py                                  105     11     28      5    83%   43, 63, 104-106, 119-123, 185
+ontokit/core/migration_lock.py                               43      0     14      0   100%
+ontokit/core/redis.py                                         7      0      0      0   100%
+ontokit/git/__init__.py                                       5      0      0      0   100%
+ontokit/git/bare_repository.py                              553     69    156     27    84%   158-163, 177-178, 186-188, 203, 268, 340->342, 343-344, 369-370, 423, 444->443, 451->446, 475, 480-482, 519->526, 561->556, 575, 582-584, 596-609, 633, 636, 644-645, 656, 672-673, 680-686, 764-767, 822-829, 884-885, 900-901, 942->945, 955->958, 968-976, 1230->1229, 1242, 1421, 1439->1438
+ontokit/main.py                                             155     21     12      2    85%   122-136, 142-146, 413-418
+ontokit/models/__init__.py                                   23      0      0      0   100%
+ontokit/models/branch_metadata.py                            16      1      0      0    94%   29
+ontokit/models/change_event.py                               31      0      0      0   100%
+ontokit/models/demo_generation.py                            31      0      0      0   100%
+ontokit/models/distinct_entity_decision.py                   22      0      0      0   100%
+ontokit/models/duplicate_rejection.py                        17      0      0      0   100%
+ontokit/models/embedding.py                                  68      0      0      0   100%
+ontokit/models/join_request.py                               29      1      0      0    97%   47
+ontokit/models/lint.py                                       46      2      0      0    96%   54, 84
+ontokit/models/lint_config.py                                26      0      4      0   100%
+ontokit/models/llm_config.py                                 39      2      0      0    95%   42, 85
+ontokit/models/normalization.py                              27      1      0      0    96%   58
+ontokit/models/notification.py                               21      1      0      0    95%   56
+ontokit/models/ontology_index.py                             75      5      0      0    93%   67, 111, 140, 167, 189
+ontokit/models/pr_party.py                                  107      2      0      0    98%   279, 354
+ontokit/models/project.py                                    66      2      6      0    97%   109, 169
+ontokit/models/pull_request.py                              109      4      0      0    96%   147, 179, 224, 284
+ontokit/models/remote_sync.py                                42      2      0      0    95%   50, 79
+ontokit/models/suggestion_outcome.py                         33      0      0      0   100%
+ontokit/models/suggestion_session.py                         54      1      0      0    98%   131
+ontokit/models/translation.py                                91      1      2      1    98%   175
+ontokit/models/user_commit_identity.py                       16      1      0      0    94%   47
+ontokit/models/user_github_token.py                          16      1      0      0    94%   28
+ontokit/runner.py                                             6      6      2      0     0%   3-19
+ontokit/schemas/__init__.py                                   6      0      0      0   100%
+ontokit/schemas/analytics.py                                 48      0      0      0   100%
+ontokit/schemas/anonymous_suggestion.py                      19      0      0      0   100%
+ontokit/schemas/auth.py                                      19      0      0      0   100%
+ontokit/schemas/duplicate_check.py                           72      2      6      3    94%   97->101, 100, 106
+ontokit/schemas/embeddings.py                                63      0      0      0   100%
+ontokit/schemas/generation.py                                54      0      0      0   100%
+ontokit/schemas/join_request.py                              38      0      0      0   100%
+ontokit/schemas/lint.py                                     100      0      6      0   100%
+ontokit/schemas/llm.py                                       80      0      0      0   100%
+ontokit/schemas/notification.py                              19      0      0      0   100%
+ontokit/schemas/ontology.py                                   4      0      0      0   100%
+ontokit/schemas/owl_class.py                                 55      0      0      0   100%
+ontokit/schemas/pr_party.py                                 206      2     24      2    98%   115, 539
+ontokit/schemas/project.py                                  207      4      8      1    97%   19, 125-127
+ontokit/schemas/pull_request.py                             227      1      0      0    99%   281
+ontokit/schemas/quality.py                                   50      0      0      0   100%
+ontokit/schemas/remote_sync.py                               66      0      0      0   100%
+ontokit/schemas/search.py                                    39      0      0      0   100%
+ontokit/schemas/suggestion.py                                89      0      0      0   100%
+ontokit/schemas/translation.py                              117      3      8      1    97%   18, 123-124
+ontokit/schemas/trust.py                                     60      0      0      0   100%
+ontokit/schemas/user_settings.py                             33      0      0      0   100%
+ontokit/services/__init__.py                                  0      0      0      0   100%
+ontokit/services/branch_lock.py                              42      0      6      0   100%
+ontokit/services/change_event_service.py                    124     16     38      9    82%   44, 46->42, 153-155, 161-163, 175, 182, 190-195, 235, 272
+ontokit/services/commit_identity.py                          63      0     16      0   100%
+ontokit/services/consistency_service.py                     217     36    132     25    77%   24->23, 48, 91->102, 105, 110->109, 123, 145, 148, 168, 171, 190-199, 217-221, 238-242, 263, 266, 268->267, 278, 335-340, 349, 351, 357, 360, 362->347, 384, 390->382
+ontokit/services/context_assembler.py                        32      4      8      2    85%   58, 87-92
+ontokit/services/cross_reference_service.py                  55     11     32      7    72%   33-34, 46, 51-52, 72-74, 83-86, 92
+ontokit/services/demo_project_provisioning.py               239     29     88     27    83%   61, 89, 99-101, 134, 155, 171, 193, 209, 270, 274, 278, 280, 308, 339, 355, 365, 370, 372-373, 401, 415, 419, 425, 432, 439, 441, 484, 495->494, 509->508
+ontokit/services/demo_retention.py                          246     10     50      6    95%   120-121, 129, 131, 134, 171, 249->254, 251-253, 271-272, 273->280
+ontokit/services/demo_target_authorizer.py                   56      5     28      6    87%   50, 51->57, 87, 99, 111, 114
+ontokit/services/duplicate_check_service.py                 193     20     66     10    85%   175->180, 190->194, 250, 283, 317-324, 345->347, 365, 380, 402->404, 410-417, 504-515, 521-530
+ontokit/services/duplicate_detection_service.py             123      8     68     11    89%   111, 125->127, 127->123, 138, 147, 187, 190, 191->185, 192->191, 233-236, 237->228
+ontokit/services/embedding_providers/__init__.py             14      7      6      2    45%   12-14, 19-24
+ontokit/services/embedding_providers/base.py                  2      0      0      0   100%
+ontokit/services/embedding_providers/local_provider.py       39     14      6      0    64%   16-21, 43, 47, 50-51, 54-59
+ontokit/services/embedding_providers/openai_provider.py      47     28     10      1    35%   22->exit, 27, 31, 35, 38-39, 42-73
+ontokit/services/embedding_providers/voyage_provider.py      44     44      8      0     0%   3-73
+ontokit/services/embedding_service.py                       386     13    108     13    95%   118, 242, 253-254, 284-287, 354, 368->370, 370->373, 442, 555, 559, 624->627, 636, 639, 663->665, 1034
+ontokit/services/embedding_text_builder.py                   31      0     12      0   100%
+ontokit/services/github_service.py                          202     14     54      8    90%   222->240, 371, 395, 397, 415, 425, 462->465, 555-560, 610, 634, 647
+ontokit/services/github_sync.py                             144      9     32      1    94%   80-84, 86-89
+ontokit/services/indexed_ontology.py                         90      0     22      0   100%
+ontokit/services/join_request_service.py                    165     28     36      7    83%   69, 137-171, 190-191, 208-209, 234, 262-271, 313, 429
+ontokit/services/language_palette.py                          3      0      0      0   100%
+ontokit/services/linter.py                                  489     64    328     48    82%   301->298, 362, 364, 408, 413, 444->443, 446->445, 456, 505->504, 533->532, 535->532, 543->542, 592->591, 683->682, 695, 719->718, 721->720, 725-728, 745-746, 752-753, 755, 757->731, 782->781, 784->783, 800-801, 807-808, 810, 812->788, 837-908, 935-942, 947->946, 953, 963->961, 995->994, 1011->1000, 1013->1000, 1047->1046, 1053->1052, 1218->1217, 1227->1232, 1233, 1257, 1260->1254, 1262->1265, 1266, 1277, 1312, 1329->1328
+ontokit/services/llm/__init__.py                             11      0      0      0   100%
+ontokit/services/llm/anthropic_provider.py                   51     13     10      3    74%   53->55, 67, 77, 89-95, 98-105
+ontokit/services/llm/audit.py                                57     15     14      1    75%   102->113, 174-237
+ontokit/services/llm/base.py                                 19      0      0      0   100%
+ontokit/services/llm/budget.py                               70      0     16      1    99%   130->138
+ontokit/services/llm/cohere_provider.py                      54     20      6      3    62%   47->50, 67, 69, 74-84, 87-97
+ontokit/services/llm/crypto.py                               35      0      4      0   100%
+ontokit/services/llm/github_models_provider.py               23     23      4      0     0%   11-51
+ontokit/services/llm/google_provider.py                      86     42     24      6    47%   38, 47-65, 77, 84, 85->88, 94->99, 104, 106, 111-120, 123-139
+ontokit/services/llm/metering.py                             68      4      8      2    92%   129, 131, 180, 183
+ontokit/services/llm/openai_compat.py                        43     19      6      1    51%   45-56, 76-86, 89-95
+ontokit/services/llm/pricing.py                              63     13     22      2    78%   51-54, 59, 66-67, 99-101, 108-110
+ontokit/services/llm/prompts/__init__.py                     25      0      4      0   100%
+ontokit/services/llm/prompts/annotations.py                  23      6      8      1    65%   78-83
+ontokit/services/llm/prompts/children.py                     21      2      6      1    89%   53-54
+ontokit/services/llm/prompts/edges.py                        23      4     10      2    70%   83-85, 88
+ontokit/services/llm/prompts/parents.py                      23      4     10      1    73%   59-62
+ontokit/services/llm/prompts/pr_party_brief.py               28      0      4      0   100%
+ontokit/services/llm/prompts/siblings.py                     17      0      4      0   100%
+ontokit/services/llm/prompts/translation.py                  44      4     10      4    85%   91, 97, 100, 112
+ontokit/services/llm/rate_limiter.py                         92      5     26      4    92%   150, 218, 220, 233-238
+ontokit/services/llm/registry.py                             43     13     16      7    66%   223->234, 226, 229-231, 243-245, 248-250, 253-255, 258-260, 276
+ontokit/services/llm/role_gates.py                           11      0      2      0   100%
+ontokit/services/llm/ssrf.py                                197     56     58     13    65%   55, 75, 79, 102-103, 130, 133, 136, 147->145, 154, 160-180, 207, 209, 262->273, 283-287, 295, 300, 305-324, 329, 332-334, 337-339, 355-371, 409, 414-416
+ontokit/services/mirror_credential.py                        33      1      8      1    95%   45
+ontokit/services/normalization_service.py                   101      2     24      4    95%   237, 255->277, 262, 314->317
+ontokit/services/notification_service.py                     47      0      8      0   100%
+ontokit/services/ontology.py                                304     18    142     22    90%   137, 217, 220->219, 227, 234->233, 259->258, 300, 342, 344, 398->397, 411, 413, 424, 430->429, 452-454, 516, 620, 626, 747, 759->758, 776->773, 814-815
+ontokit/services/ontology_extractor.py                      257     10    110     15    93%   141, 195, 268, 273, 373->371, 381->379, 404->402, 412->410, 482, 515, 528->527, 538, 596, 621, 632
+ontokit/services/ontology_index.py                          356     13    132     15    94%   192-193, 296, 313->312, 333->332, 347->346, 361->360, 388->376, 409-412, 432, 841, 879, 896->895, 906, 962->961, 1098, 1160
+ontokit/services/pr_party_actions.py                        223     24     42      3    90%   262-263, 275, 292-305, 321-335, 339-345, 349-350, 353, 356-357, 360, 463, 469, 601, 784->exit
+ontokit/services/pr_party_brief.py                          424     51    122     18    87%   232, 258, 264, 266, 276, 289->291, 298, 318, 323-326, 373-380, 388-390, 425-428, 442, 480-481, 482->476, 491, 495-496, 500-501, 518, 569, 610-611, 617->619, 621-622, 668-671, 799-808, 845->858, 906-907, 984-985, 1038-1044
+ontokit/services/pr_party_credentials.py                    293      9     62      6    96%   167, 453, 486, 524, 565, 681, 726->729, 792, 799-800
+ontokit/services/pr_party_github.py                         405     30     92     19    90%   395, 402, 423, 437, 440, 497, 603, 607, 647->650, 717, 753, 792, 795-796, 798, 801-802, 897, 899, 927, 956-961, 1060-1063, 1072-1073, 1080, 1088->1090, 1106-1107
+ontokit/services/pr_party_intake.py                         422     30    142     27    89%   251, 288, 450, 455, 462, 511, 546->548, 548->550, 553->555, 557->560, 606, 608, 623, 678->684, 681-682, 777, 959->961, 962, 964, 978, 980, 983, 1004->999, 1068-1069, 1074, 1118, 1131, 1140-1141, 1147, 1165->1167, 1169-1173
+ontokit/services/pr_party_notifications.py                   91      5     28      2    94%   183-186, 215, 234
+ontokit/services/pr_party_qa.py                             190      9     44      5    94%   214, 228, 307, 388-389, 478->exit, 570-572, 577
+ontokit/services/pr_party_rate_limiter.py                    77      7     16      2    90%   159, 232-234, 238-244
+ontokit/services/pr_party_reconcile.py                      260     35     76     11    86%   262, 345, 348, 368, 387, 452, 520-523, 563->567, 615-618, 634-636, 656->655, 658, 667, 699-706, 714-722, 729-730, 748-751, 759-761
+ontokit/services/project_access_policy.py                    21      1      6      1    93%   32
+ontokit/services/project_service.py                         480     21    156     11    95%   216-218, 290-296, 384->428, 398-399, 421-422, 660, 662, 759, 769, 829-830, 838-843, 923->932, 988->995, 1061->1068, 1172, 1251
+ontokit/services/pull_request_github_sync.py                 51      6     18      6    83%   55, 67, 94, 102, 106, 153
+ontokit/services/pull_request_service.py                    916     90    318     42    88%   139->138, 168->162, 180->182, 182->184, 184->188, 188->190, 190->193, 297, 310, 350-352, 480->482, 483, 559, 574, 589, 628, 647, 826, 832, 840, 842, 872->890, 971-972, 975-978, 1019-1021, 1156-1157, 1244->1268, 1249, 1265-1266, 1332->1339, 1356-1372, 1756->exit, 1829, 1848->1851, 1852, 1899-1972, 1980-1982, 1988-1989, 1997-2005, 2105->exit, 2114->exit, 2130->exit, 2144, 2236, 2296, 2353, 2378-2379, 2393->2407, 2397->2407, 2398->2400, 2400->2402, 2404-2405
+ontokit/services/rdf_utils.py                                10      0      4      0   100%
+ontokit/services/remote_sync_service.py                     103     11     26      6    84%   77, 97-99, 108-110, 132-133, 210->222, 213->222, 219-220
+ontokit/services/search.py                                  100     17     34      7    79%   93-94, 122-125, 134, 157, 228-230, 245, 281, 305-308, 313
+ontokit/services/sitemap_notifier.py                         29      3      8      1    89%   58-60
+ontokit/services/storage.py                                  93     13     18      2    83%   162-163, 175->174, 189-192, 194-197, 203-206
+ontokit/services/structural_similarity_service.py            51     12     10      2    77%   30, 56-58, 67-78, 84
+ontokit/services/suggestion_generation_service.py           137     17     50     14    82%   114, 144, 151, 289, 315, 322, 337, 361-368, 384, 386, 400, 425-427, 448, 457
+ontokit/services/suggestion_service.py                     1091    100    302     25    91%   210, 275, 410, 412, 485->exit, 490-497, 502-507, 625-626, 651-652, 764, 860, 921, 1009, 1019-1023, 1090, 1100, 1213, 1239, 1242, 1247, 1265->1267, 1289->1295, 1376, 1626-1630, 1774-1775, 1950, 2043-2045, 2107, 2147, 2152, 2207-2274, 2326, 2346-2348, 2359-2366, 2403, 2409->2415, 2458-2459, 2502-2505, 2589-2590, 2712-2713, 2766
+ontokit/services/translation_annotations.py                  61      6     16      6    84%   43, 84, 86, 88, 90, 94
+ontokit/services/translation_backfill.py                     78      2     20      3    95%   92, 93->102, 101
+ontokit/services/translation_coverage.py                    187     20     56      9    86%   101-102, 107-124, 130, 152, 178, 189, 223, 310, 312, 318, 422
+ontokit/services/translation_index.py                         9      1      2      1    82%   14
+ontokit/services/translation_jobs.py                        215     14     58     12    89%   211->213, 230, 252-262, 282, 289, 295->299, 302->315, 314, 356, 369, 445, 462->464
+ontokit/services/translation_review.py                      115     13     24     11    83%   58, 80, 125, 129->141, 147-149, 150->152, 164, 170, 192, 214, 239->256, 247-248, 252
+ontokit/services/translation_service.py                     216     14     28      7    91%   120, 153, 195, 201, 266-267, 279->300, 296-298, 364, 431-432, 476-477
+ontokit/services/trust_rate_limiter.py                       58      0     10      0   100%
+ontokit/services/trust_service.py                           151      4     50      4    96%   93, 96, 131, 385
+ontokit/services/user_service.py                             96      9     26      3    90%   67-70, 161-164, 244-247
+ontokit/services/validation_service.py                       87     22     32      5    69%   62-64, 86, 90-112, 228, 248-249, 267
+ontokit/services/verification.py                             54      0     12      0   100%
+ontokit/version.py                                            4      0      0      0   100%
+ontokit/worker.py                                           571     39     98     14    92%   72-76, 150->166, 160->166, 283, 291, 743, 804->811, 866->870, 899-925, 1011, 1034, 1093-1099, 1218-1227, 1309-1325, 1389->1394, 1420->1433, 1427, 1489->1504, 1500-1501, 1559-1561
+-----------------------------------------------------------------------------------------------------
+TOTAL                                                     20029   1787   4930    700    89%
+Coverage JSON written to file <audit-cache>/final-services-coverage.json
+=========================== short test summary info ============================
+FAILED tests/integration/test_notification_sockets.py::test_auth_fanout_restart_recovery_and_revocation[websockets-ontology/index-ws-ontology_index:updates-index_complete]
+FAILED tests/integration/test_notification_sockets.py::test_auth_fanout_restart_recovery_and_revocation[websockets-lint/ws-lint:updates-lint_complete]
+FAILED tests/integration/test_notification_sockets.py::test_auth_fanout_restart_recovery_and_revocation[websockets-quality/ws-quality:updates-duplicates_complete]
+FAILED tests/integration/test_notification_sockets.py::test_auth_fanout_restart_recovery_and_revocation[websockets-sansio-ontology/index-ws-ontology_index:updates-index_complete]
+FAILED tests/integration/test_notification_sockets.py::test_auth_fanout_restart_recovery_and_revocation[websockets-sansio-lint/ws-lint:updates-lint_complete]
+FAILED tests/integration/test_notification_sockets.py::test_auth_fanout_restart_recovery_and_revocation[websockets-sansio-quality/ws-quality:updates-duplicates_complete]
+=========== 6 failed, 4003 passed, 31 warnings in 122.69s (0:02:02) ============

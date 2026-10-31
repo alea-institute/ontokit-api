@@ -1,0 +1,52 @@
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 5f63c89c3669, Add projects and project_members tables
+INFO  [alembic.runtime.migration] Running upgrade 5f63c89c3669 -> a1b2c3d4e5f6, Add source_file_path and ontology_iri to projects
+INFO  [alembic.runtime.migration] Running upgrade a1b2c3d4e5f6 -> e68f6b98b09b, Add label_preferences to projects
+INFO  [alembic.runtime.migration] Running upgrade e68f6b98b09b -> b7c9d8e1f2a3, Add PR workflow tables
+INFO  [alembic.runtime.migration] Running upgrade b7c9d8e1f2a3 -> c8d9e0f1a2b3, Add lint_runs and lint_issues tables
+INFO  [alembic.runtime.migration] Running upgrade c8d9e0f1a2b3 -> 2d41d93ea12f, Add author_name and author_email to pull_request_comments
+INFO  [alembic.runtime.migration] Running upgrade 2d41d93ea12f -> 0c4545e3814e, add merge commit hashes to pull_requests
+INFO  [alembic.runtime.migration] Running upgrade 0c4545e3814e -> 295fa3db0e38, add author name and email to pull_requests
+INFO  [alembic.runtime.migration] Running upgrade 295fa3db0e38 -> a3b4c5d6e7f8, Add normalization_report column to projects table and normalization_runs table.
+INFO  [alembic.runtime.migration] Running upgrade a3b4c5d6e7f8 -> f4a5b6c7d8e9, Add preferred_branch to project_members.
+INFO  [alembic.runtime.migration] Running upgrade f4a5b6c7d8e9 -> g5b6c7d8e9f0, Add branch_metadata table.
+INFO  [alembic.runtime.migration] Running upgrade g5b6c7d8e9f0 -> h6c7d8e9f0g1, Add user_github_tokens table and PAT-based auth fields to github_integrations.
+INFO  [alembic.runtime.migration] Running upgrade h6c7d8e9f0g1 -> i7d8e9f0g1h2, Add ontology_file_path, sync_status, sync_error to github_integrations.
+INFO  [alembic.runtime.migration] Running upgrade i7d8e9f0g1h2 -> j8e9f0g1h2i3, Add turtle_file_path to github_integrations.
+INFO  [alembic.runtime.migration] Running upgrade j8e9f0g1h2i3 -> k9f0g1h2i3j4, Add join_requests table.
+INFO  [alembic.runtime.migration] Running upgrade k9f0g1h2i3j4 -> l0g1h2i3j4k5, Add suggestion_sessions table.
+INFO  [alembic.runtime.migration] Running upgrade l0g1h2i3j4k5 -> m1n2o3p4q5r6, Add entity_change_events table.
+INFO  [alembic.runtime.migration] Running upgrade m1n2o3p4q5r6 -> n2o3p4q5r6s7, Add embedding tables (pgvector).
+INFO  [alembic.runtime.migration] Running upgrade n2o3p4q5r6s7 -> o3p4q5r6s7t8, Add notifications table.
+INFO  [alembic.runtime.migration] Running upgrade o3p4q5r6s7t8 -> p4q5r6s7t8u9, Add upstream sync tables.
+INFO  [alembic.runtime.migration] Running upgrade p4q5r6s7t8u9 -> q5r6s7t8u9v0, Add suggestion review fields.
+INFO  [alembic.runtime.migration] Running upgrade q5r6s7t8u9v0 -> r6s7t8u9v0w1, Add github_hook_id to github_integrations.
+INFO  [alembic.runtime.migration] Running upgrade r6s7t8u9v0w1 -> s7t8u9v0w1x2, Add ontology index tables for query optimization.
+INFO  [alembic.runtime.migration] Running upgrade s7t8u9v0w1x2 -> r1s2t3u4v5w6, rename upstream to remote sync
+INFO  [alembic.runtime.migration] Running upgrade r1s2t3u4v5w6 -> 94afeba9ab5c, add project lint configs
+INFO  [alembic.runtime.migration] Running upgrade 94afeba9ab5c -> 47cc27515626, add subject_type to lint_issues
+INFO  [alembic.runtime.migration] Running upgrade 47cc27515626 -> u9v0w1x2y3a4, Add LLM config and audit tables, and can_self_merge_structural to project_members.
+INFO  [alembic.runtime.migration] Running upgrade u9v0w1x2y3a4 -> v9w0x1y2z3a4, Add HNSW index on entity_embeddings and duplicate_rejections table.
+INFO  [alembic.runtime.migration] Running upgrade v9w0x1y2z3a4 -> t8u9v0w1x2y3, Add anonymous suggestion fields to suggestion_sessions.
+INFO  [alembic.runtime.migration] Running upgrade t8u9v0w1x2y3 -> z3a4b5c6d7e8, Cap active embedding jobs per project.
+INFO  [alembic.runtime.migration] Running upgrade z3a4b5c6d7e8 -> a4b5c6d7e8f9, Add embedding-specific budget caps.
+INFO  [alembic.runtime.migration] Running upgrade a4b5c6d7e8f9 -> c2d3e4f5g6h7, Harden embedding refresh and ANN index integrity.
+INFO  [alembic.runtime.migration] Running upgrade c2d3e4f5g6h7 -> w0x1y2z3a4b5, Add contribution trust ladder tables and columns.
+INFO  [alembic.runtime.migration] Running upgrade w0x1y2z3a4b5 -> x1y2z3a4b5c6, Add auditable, fingerprint-bound distinct-entity decisions.
+INFO  [alembic.runtime.migration] Running upgrade x1y2z3a4b5c6 -> e4f5g6h7i8j9, Add one-open-PR-per-source-branch invariant.
+INFO  [alembic.runtime.migration] Running upgrade e4f5g6h7i8j9 -> g6h7i8j9k0l1, Add visible GitHub pull-request mirror receipts.
+INFO  [alembic.runtime.migration] Running upgrade g6h7i8j9k0l1 -> h7i8j9k0l1m2, Add PR Party tables and relax the project columns notifications/audit share.
+INFO  [alembic.runtime.migration] Running upgrade h7i8j9k0l1m2 -> b5c6d7e8f9a0, Add durable machine-translation provenance records.
+INFO  [alembic.runtime.migration] Running upgrade b5c6d7e8f9a0 -> c6d7e8f9a0b1, Add per-project translation configuration.
+INFO  [alembic.runtime.migration] Running upgrade c6d7e8f9a0b1 -> d7e8f9a0b1c2, Add primary translation provider and model.
+INFO  [alembic.runtime.migration] Running upgrade d7e8f9a0b1c2 -> e8f9a0b1c2d3, Add review-queue values to translation records.
+INFO  [alembic.runtime.migration] Running upgrade e8f9a0b1c2d3 -> f9a0b1c2d3e4, Add per-language native reviewer tags.
+INFO  [alembic.runtime.migration] Running upgrade f9a0b1c2d3e4 -> a0b1c2d3e4f5, Add durable translation backfill jobs.
+INFO  [alembic.runtime.migration] Running upgrade a0b1c2d3e4f5 -> b1c2d3e4f5g6, Add audit snapshot columns to suggestion outcomes.
+INFO  [alembic.runtime.migration] Running upgrade b1c2d3e4f5g6 -> d2e3f4g5h6i7, Add fail-closed demo project identity and source linkage.
+INFO  [alembic.runtime.migration] Running upgrade d2e3f4g5h6i7 -> e3f4g5h6i7j8, Expand the suggestion-session status constraint for reviewed outcomes.
+INFO  [alembic.runtime.migration] Running upgrade e3f4g5h6i7j8 -> f4g5h6i7j8k9, Track cumulative anonymous suggestion content bytes.
+INFO  [alembic.runtime.migration] Running upgrade f4g5h6i7j8k9 -> g5h6i7j8k9l0, Add the stale-anonymous reaper index without blocking writers.
+INFO  [alembic.runtime.migration] Running upgrade g5h6i7j8k9l0 -> h6i7j8k9l0m1, Add atomically published, auditable demo generations.
+INFO  [alembic.runtime.migration] Running upgrade h6i7j8k9l0m1 -> i7j8k9l0m1n2, Add durable purge markers to demo generations.

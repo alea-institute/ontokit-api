@@ -1,0 +1,42 @@
+systemd user scope unavailable; using prlimit address-space cap (6144 MiB)
+============================= test session starts ==============================
+platform linux -- Python 3.13.11, pytest-9.1.1, pluggy-1.6.0
+rootdir: <toolchain>/worktrees/drawdown-ontokit-api-2
+configfile: pyproject.toml
+plugins: anyio-4.14.2, asyncio-1.4.0, cov-7.1.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collected 789 items
+
+tests/unit/test_suggestions_routes.py ...........................        [  3%]
+tests/unit/test_anonymous_suggestions_routes.py ........................ [  6%]
+.......                                                                  [  7%]
+tests/unit/test_suggestion_service.py .................................. [ 11%]
+........................................................................ [ 20%]
+........................................................................ [ 29%]
+.                                                                        [ 30%]
+tests/unit/test_auth_disabled_routes.py ................................ [ 34%]
+........................................................................ [ 43%]
+...                                                                      [ 43%]
+tests/unit/test_suggestion_trust_integration.py ........................ [ 46%]
+........................................................................ [ 55%]
+........................................................................ [ 64%]
+......................................                                   [ 69%]
+tests/unit/test_pull_request_service.py ................................ [ 73%]
+.......................................................................  [ 82%]
+tests/unit/test_pull_request_service_extended.py ....................... [ 85%]
+...........................................................              [ 93%]
+tests/unit/test_pull_requests_routes.py ................................ [ 97%]
+......................                                                   [100%]
+
+=============================== warnings summary ===============================
+ontokit/schemas/anonymous_suggestion.py:8
+  ontokit/schemas/anonymous_suggestion.py:8: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class AnonymousSessionCreateResponse(BaseModel):
+
+tests/unit/test_suggestion_service.py::test_lifecycle_revision_submission_gates[False-submit]
+tests/unit/test_suggestion_service.py::test_lifecycle_revision_submission_gates[False-resubmit]
+  ontokit/services/suggestion_service.py:1967: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    await self._validate_submission_content(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 789 passed, 3 warnings in 5.10s ========================

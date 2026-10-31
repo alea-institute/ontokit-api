@@ -9,9 +9,11 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient
 
-from ontokit.core.auth import CurrentUser
+from ontokit.api.routes import pull_requests
+from ontokit.core.auth import CurrentUser, get_current_user, get_current_user_optional
 from ontokit.models.pull_request import PRStatus, ReviewStatus
 from ontokit.schemas.pull_request import (
     CommentCreate,
@@ -1175,6 +1177,220 @@ class TestCreateReview:
         )
 
         halt.assert_not_awaited()
+
+
+@asynccontextmanager
+async def _review_client(
+    service: PullRequestService, user: CurrentUser
+) -> AsyncIterator[AsyncClient]:
+    """Use real routing and service permissions with a test-local identity."""
+    app = FastAPI()
+    app.include_router(pull_requests.router)
+    app.dependency_overrides[pull_requests.get_service] = lambda: service
+    app.dependency_overrides[get_current_user] = lambda: user
+    app.dependency_overrides[get_current_user_optional] = lambda: user
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        yield client
+
+
+@pytest.fixture
+def review_effects(
+    service: PullRequestService, mock_db: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> MagicMock:
+    """Observe review effects without calling GitHub or notification transport."""
+    effects = MagicMock()
+    effects.halt = AsyncMock()
+    effects.notification = AsyncMock()
+    effects.notification_factory = Mock(return_value=effects.notification)
+    effects.github_review = AsyncMock(return_value=MagicMock(id=777))
+    effects.token = AsyncMock(
+        return_value=(MagicMock(repo_owner="example", repo_name="ontology"), "synthetic-token")
+    )
+    monkeypatch.setattr(service, "_halt_linked_suggestion_auto_accept", effects.halt)
+    monkeypatch.setattr(service, "_get_github_token", effects.token)
+    monkeypatch.setattr(
+        service, "_verified_stored_github_pr", AsyncMock(return_value=MagicMock(number=42))
+    )
+    monkeypatch.setattr(service.github_service, "create_review", effects.github_review)
+    monkeypatch.setattr(
+        "ontokit.services.pull_request_service.NotificationService", effects.notification_factory
+    )
+
+    def refresh_review(review: object) -> None:
+        review.id = REVIEW_ID  # type: ignore[attr-defined]
+        review.created_at = datetime(2026, 10, 27, tzinfo=UTC)  # type: ignore[attr-defined]
+
+    mock_db.refresh.side_effect = refresh_review
+    return effects
+
+
+def _assert_no_review_effects(mock_db: AsyncMock, effects: MagicMock) -> None:
+    mock_db.add.assert_not_called()
+    mock_db.commit.assert_not_awaited()
+    mock_db.flush.assert_not_awaited()
+    effects.halt.assert_not_awaited()
+    effects.token.assert_not_awaited()
+    effects.github_review.assert_not_awaited()
+    effects.notification_factory.assert_not_called()
+
+
+async def test_private_nonmember_comment_review_http_denied_without_effects(
+    service: PullRequestService, mock_db: AsyncMock, review_effects: MagicMock
+) -> None:
+    project = _make_project(is_public=False)
+    pr = _make_pr(github_pr_number=42)
+    _setup_project_and_pr_lookup(mock_db, project, pr)
+
+    async with _review_client(service, _make_user(OTHER_ID)) as client:
+        response = await client.post(
+            f"/{PROJECT_ID}/pull-requests/1/reviews",
+            json={"status": "commented", "body": "A valid review"},
+        )
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "You don't have access to this project"}
+    _assert_no_review_effects(mock_db, review_effects)
+
+
+@pytest.mark.parametrize(
+    ("is_public", "user_id", "halts_clock"),
+    [(False, VIEWER_ID, False), (False, EDITOR_ID, True), (True, OTHER_ID, False)],
+)
+async def test_comment_review_access_controls_keep_notification_and_sync(
+    service: PullRequestService,
+    mock_db: AsyncMock,
+    review_effects: MagicMock,
+    is_public: bool,
+    user_id: str,
+    halts_clock: bool,
+) -> None:
+    project = _make_project(is_public=is_public)
+    pr = _make_pr(author_id="pr-author", github_pr_number=42)
+    _setup_project_and_pr_lookup(mock_db, project, pr)
+
+    async with _review_client(service, _make_user(user_id)) as client:
+        response = await client.post(
+            f"/{PROJECT_ID}/pull-requests/1/reviews",
+            json={"status": "commented", "body": "A valid review"},
+        )
+
+    assert response.status_code == 201
+    assert response.json() == {
+        "id": str(REVIEW_ID),
+        "pull_request_id": str(PR_ID),
+        "reviewer_id": user_id,
+        "reviewer": {"id": user_id, "name": None, "email": None},
+        "status": "commented",
+        "body": "A valid review",
+        "github_review_id": 777,
+        "created_at": "2026-10-27T00:00:00Z",
+    }
+    review = mock_db.add.call_args.args[0]
+    assert (review.pull_request_id, review.reviewer_id, review.status) == (
+        PR_ID,
+        user_id,
+        "commented",
+    )
+    assert mock_db.commit.await_count == 2
+    if halts_clock:
+        review_effects.halt.assert_awaited_once_with(PR_ID)
+    else:
+        review_effects.halt.assert_not_awaited()
+    review_effects.github_review.assert_awaited_once_with(
+        token="synthetic-token",
+        owner="example",
+        repo="ontology",
+        pr_number=42,
+        event="COMMENT",
+        body="A valid review",
+    )
+    review_effects.notification.create_notification.assert_awaited_once_with(
+        user_id="pr-author",
+        notification_type="pr_review",
+        title="Test User commented on PR #1: Test PR",
+        body="A valid review",
+        project_id=PROJECT_ID,
+        project_name="Test Ontology",
+        target_id=str(PR_ID),
+    )
+
+
+@pytest.mark.parametrize("role", ["owner", "admin", "editor", "viewer"])
+@pytest.mark.parametrize("review_status", ["approved", "changes_requested"])
+async def test_review_decision_role_boundary(
+    service: PullRequestService,
+    mock_db: AsyncMock,
+    review_effects: MagicMock,
+    role: str,
+    review_status: str,
+) -> None:
+    user_id = "decision-reviewer"
+    project = _make_project(is_public=False, members=[_make_member(user_id, role)])
+    pr = _make_pr(author_id="pr-author")
+    _setup_project_and_pr_lookup(mock_db, project, pr)
+
+    async with _review_client(service, _make_user(user_id)) as client:
+        response = await client.post(
+            f"/{PROJECT_ID}/pull-requests/1/reviews",
+            json={"status": review_status, "body": "Review decision"},
+        )
+
+    if role in ("owner", "admin"):
+        assert response.status_code == 201
+        assert response.json()["status"] == review_status
+        assert response.json()["reviewer_id"] == user_id
+        assert mock_db.add.call_args.args[0].status == review_status
+        assert mock_db.commit.await_count == 2
+        review_effects.notification.create_notification.assert_awaited_once()
+        if review_status == "changes_requested":
+            review_effects.halt.assert_awaited_once_with(PR_ID)
+        else:
+            review_effects.halt.assert_not_awaited()
+    else:
+        assert response.status_code == 403
+        assert response.json() == {
+            "detail": "Only admins and owners can approve or request changes"
+        }
+        _assert_no_review_effects(mock_db, review_effects)
+
+
+@pytest.mark.parametrize("pr_status", [PRStatus.CLOSED.value, PRStatus.MERGED.value])
+async def test_terminal_pr_review_has_no_write_effects(
+    service: PullRequestService,
+    mock_db: AsyncMock,
+    review_effects: MagicMock,
+    pr_status: str,
+) -> None:
+    _setup_project_and_pr_lookup(
+        mock_db, _make_project(is_public=False), _make_pr(status=pr_status, github_pr_number=42)
+    )
+    async with _review_client(service, _make_user(OWNER_ID)) as client:
+        response = await client.post(
+            f"/{PROJECT_ID}/pull-requests/1/reviews", json={"status": "commented"}
+        )
+    assert response.status_code == 400
+    assert response.json() == {"detail": "Cannot review a closed or merged pull request"}
+    _assert_no_review_effects(mock_db, review_effects)
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+async def test_review_lookup_is_scoped_to_requested_project(
+    service: PullRequestService, mock_db: AsyncMock, review_effects: MagicMock, method: str
+) -> None:
+    """Exercise the real lookup and inspect its SQL; persistence is covered separately."""
+    _setup_project_and_pr_lookup(mock_db, _make_project(is_public=False), None)
+    async with _review_client(service, _make_user(OWNER_ID)) as client:
+        kwargs = {"json": {"status": "commented"}} if method == "post" else {}
+        response = await client.request(method, f"/{PROJECT_ID}/pull-requests/42/reviews", **kwargs)
+    assert response.status_code == 404
+    assert response.json() == {"detail": "Pull request not found"}
+    statement = mock_db.execute.await_args.args[0]
+    compiled = statement.compile()
+    assert "pull_requests.project_id =" in str(statement)
+    assert "pull_requests.pr_number =" in str(statement)
+    assert PROJECT_ID in compiled.params.values()
+    assert 42 in compiled.params.values()
+    _assert_no_review_effects(mock_db, review_effects)
 
 
 # ---------------------------------------------------------------------------
