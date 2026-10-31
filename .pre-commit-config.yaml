@@ -6,19 +6,15 @@ repos:
         args: [--fix, --exit-non-zero-on-fix]
       - id: ruff-format
 
-  # Run mypy inside the uv-managed project venv (same command/scope as CI's
-  # `uv run mypy ontokit/`) instead of mirrors-mypy. mirrors-mypy builds a
-  # separate isolated env and reinstalls the full dependency set —
-  # sentence-transformers pulls torch — which made cold runs take 20+ min and
-  # forced a hand-maintained `additional_dependencies` list that drifts from
-  # pyproject.toml. The system hook reuses already-installed deps: no env
-  # build, no parallel list, single source of truth. Strictness and target
-  # Python come from [tool.mypy] in pyproject.toml. See issue #179.
+  # Share CI's locked Python 3.11 checker environment (.venv-mypy), leaving the
+  # Python 3.13 runtime .venv intact. The first run installs the dev group;
+  # later runs reuse it. Dependencies come only from pyproject.toml / uv.lock,
+  # and strictness and target Python remain in [tool.mypy]. See issue #179.
   - repo: local
     hooks:
       - id: mypy
         name: mypy (strict)
-        entry: uv run mypy ontokit/
+        entry: bash scripts/typecheck.sh
         language: system
         types: [python]
         files: ^ontokit/

@@ -74,6 +74,19 @@ uvicorn ontokit.main:app --reload
 > all dev dependencies and sets up pre-commit hooks (ruff + mypy) so that code
 > quality checks run automatically on every commit.
 
+Run `make typecheck` (or `bash scripts/typecheck.sh` from the repository root)
+for the authoritative strict mypy check of all `ontokit/`. The mypy pre-commit
+hook and CI lint job use that same runner. It synchronizes the locked dev group
+into `.venv-mypy/` with Python 3.11, matching the project's typing target and CI.
+The first run needs Python 3.11 and installs a second environment, including the
+ML dependencies; subsequent runs reuse it. uv obtains Python 3.11 if needed.
+
+Runtime development keeps the Python 3.13 `.venv` selected by `.python-version`.
+Running mypy directly in that environment can select newer NumPy stubs whose
+syntax is incompatible with the Python 3.11 typing target. The checker runner
+leaves the runtime environment and `uv.lock` unchanged; a stale lock or failed
+sync stops the check. Keep `uv run pyright ontokit/` for the advisory check.
+
 `AUTH_MODE=disabled` means **read and suggest only**: safe reads retain the shared
 anonymous identity, and anonymous suggestion sessions remain available. Routes
 using `RequiredUser` or `RequiredUserWithToken` return 403 for methods other than

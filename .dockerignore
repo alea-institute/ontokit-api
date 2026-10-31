@@ -2,6 +2,7 @@
 .env.*
 .git
 .gitignore
+.venv-mypy/
 __pycache__
 *.pyc
 .mypy_cache

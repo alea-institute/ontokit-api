@@ -2,7 +2,7 @@
 
 ## First-time project setup: install dependencies and pre-commit hooks
 setup:
-	uv sync --extra dev
+	uv sync --group dev
 	uv run pre-commit install
 
 ## Run linter with auto-fix
@@ -15,7 +15,7 @@ format:
 
 ## Run type checker
 typecheck:
-	uv run mypy ontokit/
+	bash scripts/typecheck.sh
 
 ## Run tests with coverage
 test:

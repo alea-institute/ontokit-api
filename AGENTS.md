@@ -38,12 +38,18 @@ ruff format ontokit/          # Format code
 
 ### Type Checking
 ```bash
-mypy ontokit/             # authoritative — gates CI & pre-commit
-uv run pyright ontokit/   # advisory — non-gating CI job + IDE
+make typecheck             # authoritative — same runner as CI & pre-commit
+uv run pyright ontokit/    # advisory — non-gating CI job + IDE
 ```
 
 **mypy is authoritative**: strict mode with the `pydantic.mypy` plugin, run in
 pre-commit and the `lint` CI job — it is the only type checker that gates merges.
+`make typecheck`, the hook and CI call `bash scripts/typecheck.sh`, which uses
+the locked dev group in a reusable Python 3.11 `.venv-mypy/`. The first run
+installs the full dependency set into that second environment. Runtime work
+keeps the Python 3.13 `.venv`; do not run mypy there, because its newer NumPy
+stubs may require syntax beyond the 3.11 typing target. The runner fails on
+stale locks or sync errors without rewriting `uv.lock`.
 **pyright is advisory (soft-gated)**: a CI job that goes red on any error but is
 **not** in the branch ruleset's required checks, so it surfaces problems without
 hard-blocking merges (issue #134); it is also the default IDE checker. It catches
