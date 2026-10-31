@@ -1,0 +1,6 @@
+{
+  "version": "2.5.0",
+  "url": "https://github.com/google/osv-scanner/releases/download/v2.5.0/osv-scanner_linux_amd64",
+  "sha256": "edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c",
+  "release_digest": "sha256:edcfc41d257db36148f065055655fe3fcfc434b0b423ea67468a84c207524e0c"
+}

@@ -1,0 +1,238 @@
+{
+  "source_revision": "51bd6f2802344d4e45b426e87684d0d2730be11a",
+  "lock_sha256": "aa2adf74b9ceb0fbf00006338499ec10806ec1014bebf83fd13a3f962993c0a0",
+  "environment": {
+    "runtime_python": "3.13.11",
+    "checker_python": "Python 3.11.14",
+    "uv": "uv 0.9.22",
+    "postgres": "17.11",
+    "postgres_extensions": {
+      "plpgsql": "1.0",
+      "vector": "0.8.7",
+      "pg_trgm": "1.6"
+    },
+    "migration_head": "i7j8k9l0m1n2",
+    "runtime_numpy": "2.5.2",
+    "checker_numpy": "2.4.6",
+    "redis": "7.4.10"
+  },
+  "checks": {
+    "lock-check": {
+      "command": [
+        "uv",
+        "lock",
+        "--check"
+      ],
+      "exit_code": 0,
+      "ended_at": "2026-10-26T19:15:24.784518+00:00"
+    },
+    "lock-check-offline": {
+      "command": [
+        "uv",
+        "lock",
+        "--check",
+        "--offline"
+      ],
+      "exit_code": 0,
+      "ended_at": "2026-10-26T19:15:24.803401+00:00"
+    },
+    "export": {
+      "command": [
+        "uv",
+        "export",
+        "--frozen",
+        "--no-dev",
+        "--no-hashes",
+        "--no-emit-project",
+        "--output-file",
+        "<temporary-directory>/runtime-requirements.txt"
+      ],
+      "exit_code": 0,
+      "ended_at": "2026-10-26T19:15:24.823264+00:00"
+    },
+    "sync-py313": {
+      "command": [
+        "uv",
+        "sync",
+        "--locked",
+        "--group",
+        "dev",
+        "--python",
+        "3.13"
+      ],
+      "exit_code": 0,
+      "ended_at": "2026-10-26T19:15:24.904127+00:00"
+    },
+    "sync-py311": {
+      "command": [
+        "uv",
+        "sync",
+        "--locked",
+        "--group",
+        "dev",
+        "--python",
+        "3.11"
+      ],
+      "exit_code": 0,
+      "ended_at": "2026-10-26T19:16:37.609353+00:00"
+    },
+    "ruff": {
+      "command": [
+        ".venv/bin/ruff",
+        "check",
+        "ontokit/"
+      ],
+      "exit_code": 0,
+      "ended_at": "2026-10-26T19:15:41.706626+00:00",
+      "output": "All checks passed!\n"
+    },
+    "format": {
+      "command": [
+        ".venv/bin/ruff",
+        "format",
+        "--check",
+        "ontokit/"
+      ],
+      "exit_code": 0,
+      "ended_at": "2026-10-26T19:15:41.706545+00:00",
+      "output": "193 files already formatted\n"
+    },
+    "mypy-py311": {
+      "command": [
+        "bash",
+        "scripts/memory-cap.sh",
+        "<temporary-directory>/venv311/bin/mypy",
+        "--cache-dir",
+        "<temporary-directory>/mypy-cache311",
+        "ontokit/"
+      ],
+      "exit_code": 0,
+      "ended_at": "2026-10-26T19:17:32.010721+00:00",
+      "output": "systemd user scope unavailable; using prlimit address-space cap (6144 MiB)\nSuccess: no issues found in 192 source files\n"
+    },
+    "pyright": {
+      "command": [
+        "bash",
+        "scripts/memory-cap.sh",
+        ".venv/bin/pyright",
+        "ontokit/"
+      ],
+      "exit_code": 0,
+      "ended_at": "2026-10-26T19:16:23.936168+00:00",
+      "output": "systemd user scope unavailable; using prlimit address-space cap (6144 MiB)\n0 errors, 0 warnings, 0 informations\nWARNING: there is a new pyright version available (v1.1.411 -> v1.1.414).\nPlease install the new version or set PYRIGHT_PYTHON_FORCE_VERSION to `latest`\n\n"
+    },
+    "focused-tests": {
+      "command": [
+        "bash",
+        "scripts/memory-cap.sh",
+        ".venv/bin/pytest",
+        "tests/unit/test_dockerfile_contract.py",
+        "tests/unit/test_entrypoint_lock_check.py",
+        "tests/unit/test_health.py",
+        "tests/unit/test_storage.py",
+        "tests/unit/test_llm_providers.py",
+        "tests/integration/test_git_operations.py",
+        "-v",
+        "--no-cov",
+        "-ra"
+      ],
+      "exit_code": 0,
+      "ended_at": "2026-10-26T19:18:25.035553+00:00",
+      "summary": "51 passed, 1 warning in 1.09s"
+    },
+    "migrations-ready": {
+      "command": [
+        ".venv/bin/alembic",
+        "upgrade",
+        "head"
+      ],
+      "exit_code": 0,
+      "fresh_disposable_database": true,
+      "ended_at": "2026-10-26T19:19:55.864691+00:00"
+    },
+    "full-suite": {
+      "command": [
+        "bash",
+        "scripts/memory-cap.sh",
+        "uv",
+        "run",
+        "--locked",
+        "--no-sync",
+        "pytest",
+        "tests/",
+        "-v",
+        "--cov=ontokit",
+        "--cov-branch",
+        "-ra",
+        "--junitxml=<temporary-directory>/junit.xml"
+      ],
+      "exit_code": 0,
+      "started_at": "2026-10-26T19:20:14.840954+00:00",
+      "ended_at": "2026-10-26T19:21:07.583957+00:00",
+      "database": "isolated PostgreSQL 17.11 with pgvector 0.8.7 and pg_trgm",
+      "redis": "isolated Redis 7.4.10",
+      "memory_cap_mib": 6144,
+      "junit_totals": {
+        "name": "pytest",
+        "errors": "0",
+        "failures": "0",
+        "skipped": "6",
+        "tests": "3941",
+        "time": "48.713",
+        "timestamp": "2026-10-26T14:20:16.606180-05:00"
+      },
+      "skipped_tests": [
+        {
+          "test": "tests.integration.test_notification_sockets.test_auth_fanout_restart_recovery_and_revocation[websockets-ontology/index-ws-ontology_index:updates-index_complete]",
+          "reason": "requires disposable B12 PostgreSQL and Redis services"
+        },
+        {
+          "test": "tests.integration.test_notification_sockets.test_auth_fanout_restart_recovery_and_revocation[websockets-lint/ws-lint:updates-lint_complete]",
+          "reason": "requires disposable B12 PostgreSQL and Redis services"
+        },
+        {
+          "test": "tests.integration.test_notification_sockets.test_auth_fanout_restart_recovery_and_revocation[websockets-quality/ws-quality:updates-duplicates_complete]",
+          "reason": "requires disposable B12 PostgreSQL and Redis services"
+        },
+        {
+          "test": "tests.integration.test_notification_sockets.test_auth_fanout_restart_recovery_and_revocation[websockets-sansio-ontology/index-ws-ontology_index:updates-index_complete]",
+          "reason": "requires disposable B12 PostgreSQL and Redis services"
+        },
+        {
+          "test": "tests.integration.test_notification_sockets.test_auth_fanout_restart_recovery_and_revocation[websockets-sansio-lint/ws-lint:updates-lint_complete]",
+          "reason": "requires disposable B12 PostgreSQL and Redis services"
+        },
+        {
+          "test": "tests.integration.test_notification_sockets.test_auth_fanout_restart_recovery_and_revocation[websockets-sansio-quality/ws-quality:updates-duplicates_complete]",
+          "reason": "requires disposable B12 PostgreSQL and Redis services"
+        }
+      ],
+      "summary": "3935 passed, 6 skipped, 28 warnings in 48.74s",
+      "coverage": "TOTAL                                                     20027   1830   4928    702    88%"
+    }
+  },
+  "smoke": {
+    "installed_versions": {
+      "certifi": "2026.10.19",
+      "filelock": "4.2.1",
+      "gitpython": "3.2.1",
+      "setuptools": "84.1.0",
+      "virtualenv": "21.14.13"
+    },
+    "imports": "pass",
+    "certifi_ssl_context": "pass",
+    "filelock_contention_and_release": "pass",
+    "gitpython_commit_and_read": "pass",
+    "virtualenv_create_and_run": "pass",
+    "created_python": "3.13.11"
+  },
+  "unix_socket_limit": {
+    "checked_at": "2026-10-26T19:21:38.102461+00:00",
+    "purpose": "B12 notification tests require a Unix-domain listener",
+    "available": false,
+    "error_type": "PermissionError",
+    "error": "[Errno 13] Permission denied"
+  },
+  "tests_added_or_changed": [],
+  "test_strategy": "Lock-only dependency update: existing tests unchanged; scanner before/after, locked installation, type checks, runtime/tooling smoke and existing suite provide the proof. No dependency-version assertion or scanner wrapper added."
+}
