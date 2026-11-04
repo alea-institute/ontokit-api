@@ -1090,7 +1090,13 @@ class SuggestionService:
         if existing_pr:
             # PR already created (previous attempt failed after PR but before session update)
             await self._bind_session_to_pr(
-                project_id, session, user, new_status, existing_pr.id, existing_pr.pr_number
+                project_id,
+                session,
+                user,
+                new_status,
+                existing_pr.id,
+                existing_pr.pr_number,
+                summary=summary,
             )
             return SuggestionSubmitResponse(
                 pr_number=existing_pr.pr_number,
@@ -1142,7 +1148,13 @@ class SuggestionService:
                 if raced_pr is None:
                     raise
                 await self._bind_session_to_pr(
-                    project_id, session, user, new_status, raced_pr.id, raced_pr.pr_number
+                    project_id,
+                    session,
+                    user,
+                    new_status,
+                    raced_pr.id,
+                    raced_pr.pr_number,
+                    summary=summary,
                 )
                 return SuggestionSubmitResponse(
                     pr_number=raced_pr.pr_number,
@@ -1166,7 +1178,13 @@ class SuggestionService:
             ),
         )
         await self._bind_session_to_pr(
-            project_id, session, user, new_status, pending.id, pending.pr_number
+            project_id,
+            session,
+            user,
+            new_status,
+            pending.id,
+            pending.pr_number,
+            summary=summary,
         )
         return pending
 
@@ -1178,9 +1196,18 @@ class SuggestionService:
         new_status: str,
         pr_id: UUID,
         pr_number: int,
+        *,
+        summary: str | None,
     ) -> None:
-        """Persist the common idempotent session-to-PR state transition."""
+        """Persist the common idempotent session-to-PR state transition.
+
+        Stores the submitter's note as submitted (schema caps apply; the
+        @mention neutralization is only for the PR description) so review and
+        list endpoints show it on a first submission. Resubmission keeps its
+        own assignment in ``_resubmit_already_locked``.
+        """
         session.status = new_status
+        session.summary = summary or None
         session.pr_number = pr_number
         session.pr_id = pr_id
         session.last_activity = datetime.now(UTC)
