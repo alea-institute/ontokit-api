@@ -73,6 +73,22 @@ class TestBuildEntityGraphBasic:
         assert focus_nodes[0].node_type == "focus"
 
     @pytest.mark.asyncio
+    async def test_rdfs_class_is_a_class(self) -> None:
+        """rdfs:Class subjects resolve like owl:Class ones (matches dev's is_class)."""
+        g = Graph()
+        g.add((EX.Thing, RDF.type, RDFS.Class))
+        g.add((EX.Sub, RDF.type, RDFS.Class))
+        g.add((EX.Sub, RDFS.subClassOf, EX.Thing))
+        svc = _service_with_graph(g)
+        result = await svc.build_entity_graph(PROJECT_ID, str(EX.Sub), BRANCH)
+        assert result is not None
+        types = {n.iri: n.node_type for n in result.nodes}
+        assert types[str(EX.Thing)] == "root"
+        assert types[str(EX.Sub)] == "focus"
+        parent = next(n for n in result.nodes if n.iri == str(EX.Thing))
+        assert parent.child_count == 1
+
+    @pytest.mark.asyncio
     async def test_ancestors_discovered(self) -> None:
         svc = _service_with_graph(_base_graph())
         result = await svc.build_entity_graph(PROJECT_ID, str(EX.Person), BRANCH)

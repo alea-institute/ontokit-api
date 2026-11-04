@@ -103,3 +103,72 @@ class TestProjectsGraphRoute:
         mock_onto.build_entity_graph.assert_called_once()
         call_kwargs = mock_onto.build_entity_graph.call_args[1]
         assert call_kwargs["branch"] == "develop"
+
+
+# ---------------------------------------------------------------------------
+# Anonymous reads in AUTH_MODE=optional (BAIF demo, U4)
+# ---------------------------------------------------------------------------
+
+
+class TestAnonymousGraphRead:
+    """The graph endpoint follows the same anonymous-read policy as tree/class."""
+
+    @pytest.fixture
+    def anon_client(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> Generator[tuple[TestClient, AsyncMock, AsyncMock], None, None]:
+        monkeypatch.setattr("ontokit.core.auth.settings.auth_mode", "optional")
+        mock_project_svc = AsyncMock()
+        mock_onto = AsyncMock()
+        mock_onto.is_loaded = MagicMock(return_value=True)
+        mock_git = MagicMock()
+        mock_git.get_default_branch = MagicMock(return_value="main")
+        # No user override: the real optional-user dependency runs with no token.
+        monkeypatch.setattr(
+            app,
+            "dependency_overrides",
+            {
+                get_service: lambda: mock_project_svc,
+                get_ontology: lambda: mock_onto,
+                get_git: lambda: mock_git,
+            },
+        )
+        yield TestClient(app), mock_project_svc, mock_onto
+
+    def test_anonymous_public_project_graph_succeeds(
+        self, anon_client: tuple[TestClient, AsyncMock, AsyncMock]
+    ) -> None:
+        client, project_svc, onto = anon_client
+        project_svc.get = AsyncMock(
+            return_value=MagicMock(source_file_path="ontology.ttl", label_preferences=None)
+        )
+        onto.build_entity_graph = AsyncMock(return_value=_sample_graph_response())
+
+        resp = client.get(
+            f"/api/v1/projects/{PROJECT_ID}/ontology/classes/graph",
+            params={"class_iri": FOCUS_IRI},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["focus_iri"] == FOCUS_IRI
+        # Access is decided by the shared project visibility check, as an anonymous caller.
+        project_svc.get.assert_awaited_once_with(PROJECT_ID, None)
+
+    def test_anonymous_private_project_graph_is_denied(
+        self, anon_client: tuple[TestClient, AsyncMock, AsyncMock]
+    ) -> None:
+        from fastapi import HTTPException
+
+        client, project_svc, onto = anon_client
+        project_svc.get = AsyncMock(
+            side_effect=HTTPException(status_code=404, detail="Project not found")
+        )
+        onto.build_entity_graph = AsyncMock(return_value=_sample_graph_response())
+
+        graph = client.get(
+            f"/api/v1/projects/{PROJECT_ID}/ontology/classes/graph",
+            params={"class_iri": FOCUS_IRI},
+        )
+
+        assert graph.status_code == 404
+        onto.build_entity_graph.assert_not_awaited()
