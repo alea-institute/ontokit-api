@@ -939,7 +939,14 @@ async def run_embedding_generation_task(
         from ontokit.services.embedding_service import EmbeddingService
 
         service = EmbeddingService(db)
-        await service.embed_project(UUID(project_id), branch, UUID(job_id))
+        ran = await service.embed_project(UUID(project_id), branch, UUID(job_id))
+        if not ran:
+            return {
+                "project_id": project_id,
+                "branch": branch,
+                "job_id": job_id,
+                "status": "skipped",
+            }
 
         logger.info(f"Embedding generation completed for project {project_id} branch {branch}")
         return {"project_id": project_id, "branch": branch, "job_id": job_id, "status": "completed"}
@@ -1654,7 +1661,13 @@ class WorkerSettings:
         auto_accept_suggestions,
         # Own timeout: a local CPU embed of a large ontology runs for well over
         # the 300 s worker default.
-        func(run_embedding_generation_task, timeout=settings.embedding_job_timeout_seconds),
+        func(
+            run_embedding_generation_task,
+            timeout=settings.embedding_job_timeout_seconds,
+            # No arq retry: a re-run after shutdown would repeat a job its
+            # handlers already marked failed. Users re-trigger generation.
+            max_tries=1,
+        ),
         run_single_entity_embed_task,
         run_batch_entity_embed_task,
         run_translation_label_diff_task,

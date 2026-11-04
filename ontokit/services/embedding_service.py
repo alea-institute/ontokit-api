@@ -65,7 +65,13 @@ def embedding_job_timeout_message() -> str:
 
 
 def stale_embedding_job_cutoff(now: datetime | None = None) -> datetime:
-    """Active jobs started before this instant can no longer be running."""
+    """Active jobs whose ``started_at`` precedes this instant are presumed dead.
+
+    For a running row ``started_at`` is its execution start (``embed_project``
+    restamps it), so arq's timeout has already fired. For a pending row it is
+    the enqueue time; a job queued that long is failed too, and
+    ``embed_project`` then refuses to run it rather than resurrect it.
+    """
     current = now or datetime.now(UTC)
     return (
         current
@@ -536,21 +542,39 @@ class EmbeddingService:
 
         return get_embedding_provider(provider_name, model_name, api_key)
 
-    async def embed_project(self, project_id: UUID, branch: str, job_id: UUID) -> None:
-        """Full project embedding (called from ARQ worker)."""
-        # Get or create job
-        result = await self._db.execute(select(EmbeddingJob).where(EmbeddingJob.id == job_id))
+    async def embed_project(self, project_id: UUID, branch: str, job_id: UUID) -> bool:
+        """Full project embedding (called from ARQ worker).
+
+        Returns False, changing nothing, when the job row is already failed or
+        completed (for example failed as stale while it waited in the queue):
+        a finished job is never resurrected.
+        """
+        # Lock the row so a concurrent stale-failure cannot interleave with the
+        # pending -> running flip.
+        result = await self._db.execute(
+            select(EmbeddingJob).where(EmbeddingJob.id == job_id).with_for_update()
+        )
         job = result.scalar_one_or_none()
+        # started_at becomes the execution start: arq's timeout and the stale
+        # cutoff both count from here, not from when the pending row was queued.
+        execution_start = datetime.now(UTC)
         if not job:
             job = EmbeddingJob(
                 id=job_id,
                 project_id=project_id,
                 branch=branch,
                 status="running",
+                started_at=execution_start,
             )
             self._db.add(job)
+        elif job.status not in ACTIVE_EMBEDDING_JOB_STATUSES:
+            logger.warning(
+                "Embedding job %s is already %s; not running it again", job_id, job.status
+            )
+            return False
         else:
             job.status = "running"
+            job.started_at = execution_start
         await self._db.commit()
 
         try:
@@ -714,6 +738,7 @@ class EmbeddingService:
                 if cfg:
                     cfg.last_full_embed_at = completed_at
                 await self._db.commit()
+            return True
 
         except BaseException as e:
             # BaseException, not Exception: arq's job timeout arrives as

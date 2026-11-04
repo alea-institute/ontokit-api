@@ -1207,7 +1207,10 @@ class SuggestionService:
         own assignment in ``_resubmit_already_locked``.
         """
         session.status = new_status
-        session.summary = summary or None
+        # Only a human-written note is stored; the inactivity auto-submit's
+        # system reason belongs in the PR description, not the review UI.
+        auto = new_status == SuggestionSessionStatus.AUTO_SUBMITTED.value
+        session.summary = None if auto else (summary or None)
         session.pr_number = pr_number
         session.pr_id = pr_id
         session.last_activity = datetime.now(UTC)

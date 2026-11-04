@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from arq.worker import Function
+from sqlalchemy.dialects import postgresql
 
 from ontokit.core.config import Settings, settings
 from ontokit.services.embedding_service import (
@@ -60,6 +61,12 @@ def test_embedding_generation_uses_its_own_arq_timeout() -> None:
     assert entry.timeout_s == settings.embedding_job_timeout_seconds
 
 
+def test_embedding_generation_is_never_retried_by_arq() -> None:
+    """A retry after shutdown would re-run a job the handlers already failed."""
+    entry = _worker_function("run_embedding_generation_task")
+    assert entry.max_tries == 1
+
+
 @pytest.mark.parametrize(
     "name", ["run_single_entity_embed_task", "run_batch_entity_embed_task", "run_lint_task"]
 )
@@ -84,7 +91,7 @@ def _db_cancelled_during_project_load() -> AsyncMock:
     db = AsyncMock()
     db.add = Mock()
     job_result = MagicMock()
-    job_result.scalar_one_or_none.return_value = MagicMock(id=uuid.uuid4())
+    job_result.scalar_one_or_none.return_value = MagicMock(id=uuid.uuid4(), status="pending")
     db.execute.side_effect = [
         job_result,  # select EmbeddingJob
         asyncio.CancelledError(),  # arq timeout lands mid-query
@@ -261,3 +268,82 @@ async def test_generate_fails_stale_jobs_before_the_active_check() -> None:
 
     assert calls[:2] == ["fail-stale", "active-check"]
     pool.enqueue_job.assert_awaited_once()
+
+
+# ── 3. Execution start and never resurrecting a finished job ─────────────────
+
+
+def _job_lookup(job: object, *then: object) -> AsyncMock:
+    db = AsyncMock()
+    db.add = Mock()
+    result = MagicMock()
+    result.scalar_one_or_none.return_value = job
+    db.execute.side_effect = [result, *then]
+    return db
+
+
+@pytest.mark.parametrize("final_status", ["failed", "completed"])
+async def test_embed_project_never_resurrects_a_finished_job(final_status: str) -> None:
+    job = MagicMock(id=uuid.uuid4(), status=final_status, started_at=None)
+    db = _job_lookup(job)
+
+    ran = await EmbeddingService(db).embed_project(PROJECT_ID, "main", job.id)
+
+    assert ran is False
+    assert job.status == final_status
+    assert job.started_at is None
+    assert db.execute.await_count == 1
+    db.commit.assert_not_awaited()
+    # The lookup locks the row so a concurrent stale-failure cannot interleave.
+    lookup = db.execute.await_args_list[0].args[0]
+    assert "FOR UPDATE" in str(lookup.compile(dialect=postgresql.dialect()))
+
+
+async def test_running_flip_restamps_started_at_with_execution_start() -> None:
+    """arq's timeout counts from execution, not from the pending-row insert."""
+    queued_at = datetime.now(UTC) - timedelta(hours=5)
+    job = MagicMock(id=uuid.uuid4(), status="pending", started_at=queued_at)
+    db = _job_lookup(job, RuntimeError("stop after the flip"))
+    before = datetime.now(UTC)
+
+    with (
+        patch("ontokit.services.ontology.get_ontology_service", return_value=MagicMock()),
+        patch("ontokit.git.bare_repository.BareGitRepositoryService", return_value=MagicMock()),
+        patch("ontokit.services.storage.get_storage_service", return_value=MagicMock()),
+        pytest.raises(RuntimeError),
+    ):
+        await EmbeddingService(db).embed_project(PROJECT_ID, "main", job.id)
+
+    assert job.started_at >= before
+    # The flip was committed before the work began.
+    db.commit.assert_awaited()
+
+
+async def test_new_job_row_records_execution_start() -> None:
+    db = _job_lookup(None, RuntimeError("stop after the flip"))
+    before = datetime.now(UTC)
+
+    with (
+        patch("ontokit.services.ontology.get_ontology_service", return_value=MagicMock()),
+        patch("ontokit.git.bare_repository.BareGitRepositoryService", return_value=MagicMock()),
+        patch("ontokit.services.storage.get_storage_service", return_value=MagicMock()),
+        pytest.raises(RuntimeError),
+    ):
+        await EmbeddingService(db).embed_project(PROJECT_ID, "main", uuid.uuid4())
+
+    added = db.add.call_args.args[0]
+    assert added.status == "running"
+    assert added.started_at >= before
+
+
+async def test_worker_reports_a_skipped_job() -> None:
+    ctx, backstop = _ctx_with_backstop()
+
+    with patch("ontokit.services.embedding_service.EmbeddingService") as service_cls:
+        service_cls.return_value.embed_project = AsyncMock(return_value=False)
+        result = await run_embedding_generation_task(
+            ctx, str(PROJECT_ID), "main", str(uuid.uuid4())
+        )
+
+    assert result["status"] == "skipped"
+    backstop.execute.assert_not_awaited()

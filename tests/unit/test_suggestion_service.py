@@ -2427,9 +2427,15 @@ class TestAutoSubmitStaleSessionsExtended:
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
 
+            stale_session.summary = "Note from an earlier revision"
             count = await service.auto_submit_stale_sessions()
 
         assert count == 1
+        # The system reason stays in the PR description, but the stored note
+        # is for human-written notes only.
+        pr_create = mock_pr_svc._claim_pull_request_already_locked.await_args.args[1]
+        assert "Auto-submitted: session inactive" in pr_create.description
+        assert stale_session.summary is None
 
     @pytest.mark.asyncio
     async def test_auto_submit_discards_session_on_access_loss(
