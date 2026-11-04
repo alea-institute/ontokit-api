@@ -21,7 +21,7 @@ from ontokit.schemas.embeddings import (
     EmbeddingGenerateResponse,
     EmbeddingStatus,
 )
-from ontokit.services.embedding_service import EmbeddingService
+from ontokit.services.embedding_service import EmbeddingService, fail_stale_embedding_jobs
 from ontokit.services.project_service import get_project_service
 
 logger = logging.getLogger(__name__)
@@ -103,6 +103,10 @@ async def generate_embeddings(
 
     git = get_git_service()
     resolved_branch = branch or git.get_default_branch(project_id)
+
+    # A job row left active by a worker that died past the arq timeout would
+    # otherwise hold the one-active-job slot forever.
+    await fail_stale_embedding_jobs(db, project_id)
 
     # Cap in-flight work per project, regardless of caller-selected branch.
     active_q = (

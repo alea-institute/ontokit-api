@@ -145,6 +145,11 @@ class Settings(BaseSettings):
             if entry.strip()
         )
 
+    # arq timeout for one full-project embedding job. A local CPU embed of
+    # ~18k entities runs far past arq's 300 s worker default; other jobs keep
+    # that default. Jobs still marked active well past this are failed as stale.
+    embedding_job_timeout_seconds: int = Field(default=7200, ge=60)
+
     # --- GitHub mirror (R3, R16) ---
     # System-owned machine identity that pushes the mirror. When empty, sync
     # falls back to the connecting user's stored PAT with a deprecation
