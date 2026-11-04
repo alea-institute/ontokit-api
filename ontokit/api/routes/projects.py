@@ -68,6 +68,7 @@ from ontokit.schemas.pull_request import (
 )
 from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.change_event_service import ChangeEventService
+from ontokit.services.commit_identity import resolve_commit_author
 from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.github_service import get_github_service
 from ontokit.services.indexed_ontology import IndexedOntologyService
@@ -1467,14 +1468,15 @@ async def save_source_content(
         except Exception:
             logger.debug("Could not capture pre-commit graph for diff", exc_info=True)
 
+        author_name, author_email = await resolve_commit_author(db, user)
         try:
             commit_info = git.commit_changes(
                 project_id=project_id,
                 ontology_content=content_bytes,
                 filename=filename,
                 message=data.commit_message,
-                author_name=user.name,
-                author_email=user.email,
+                author_name=author_name,
+                author_email=author_email,
                 branch_name=current_branch,
                 expected_head=current_revision,
             )

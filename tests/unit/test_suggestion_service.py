@@ -22,6 +22,9 @@ from ontokit.schemas.suggestion import SuggestionSubmitResponse
 from ontokit.services.embedding_service import EmbeddingBudgetExceeded, EmbeddingPricingUnavailable
 from ontokit.services.suggestion_service import SuggestionService
 
+# Scripts the commit-identity preference query itself (see tests/unit/conftest.py).
+pytestmark = pytest.mark.real_commit_preference
+
 PROJECT_ID = uuid.UUID("12345678-1234-5678-1234-567812345678")
 
 
@@ -3207,21 +3210,28 @@ def reviewer_merge(
 async def test_editor_approve_merges_deletes_branch_and_notifies(
     service: SuggestionService, reviewer_merge: MagicMock
 ) -> None:
+    from ontokit.services.commit_identity import CommitIdentityService, noreply_alias
+
     ctx = reviewer_merge
-    await service.approve(PROJECT_ID, ctx.session.session_id, ctx.reviewer)
+    # The approver has not opted in to a verified address.
+    with patch.object(CommitIdentityService, "get_preference", AsyncMock(return_value=None)):
+        await service.approve(PROJECT_ID, ctx.session.session_id, ctx.reviewer)
 
     assert ctx.session.status == "merged"
     assert ctx.session.reviewer_id == ctx.reviewer.id
     assert ctx.pr.status == "merged"
     assert ctx.pr.merged_by == ctx.reviewer.id
+    # The merge commit is authored with the approver's noreply alias, never
+    # the account email (git history is public once mirrored).
     service.git_service.merge_branch.assert_called_once_with(
         project_id=PROJECT_ID,
         source=ctx.session.branch,
         target="main",
         message=f"Merge suggestion: {ctx.session.session_id}",
         author_name=ctx.reviewer.name,
-        author_email=ctx.reviewer.email,
+        author_email=noreply_alias(ctx.reviewer.id, ctx.reviewer.name),
     )
+    assert service.git_service.merge_branch.call_args.kwargs["author_email"] != ctx.reviewer.email
     service.git_service.delete_branch.assert_called_once_with(PROJECT_ID, ctx.session.branch)
     decisions = [
         call.kwargs

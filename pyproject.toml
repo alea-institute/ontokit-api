@@ -145,3 +145,6 @@ warn_required_dynamic_aliases = true
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-v --cov=ontokit --cov-report=term-missing"
+markers = [
+    "real_commit_preference: exercise the commit-identity preference query instead of the unit-test default of no opt-in",
+]

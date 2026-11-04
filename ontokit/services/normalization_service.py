@@ -14,6 +14,7 @@ from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.normalization import NormalizationRun
 from ontokit.models.project import Project
 from ontokit.services.branch_lock import branch_write_lock
+from ontokit.services.commit_identity import resolve_commit_author
 from ontokit.services.ontology_extractor import OntologyMetadataExtractor
 from ontokit.services.storage import StorageError, StorageService
 
@@ -261,13 +262,17 @@ class NormalizationService:
                 if report.prefixes_removed:
                     commit_message += f"Prefixes removed: {', '.join(report.prefixes_removed)}\n"
 
+                if user is not None:
+                    author_name, author_email = await resolve_commit_author(self.db, user)
+                else:
+                    author_name, author_email = "OntoKit System", "system@ontokit.dev"
                 commit_info = self.git_service.commit_changes(
                     project_id=project.id,
                     ontology_content=normalized_content,
                     filename=filename,
                     message=commit_message,
-                    author_name=user.name if user else "OntoKit System",
-                    author_email=user.email if user else "system@ontokit.dev",
+                    author_name=author_name,
+                    author_email=author_email,
                     branch_name=branch,
                     expected_head=expected_head,
                 )
