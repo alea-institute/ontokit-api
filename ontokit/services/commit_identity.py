@@ -24,6 +24,7 @@ import unicodedata
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.core.auth import CurrentUser
 from ontokit.core.config import settings
 from ontokit.models.user_commit_identity import UserCommitIdentity
 
@@ -164,6 +165,28 @@ class CommitIdentityService:
         return preference
 
 
+# Actor ids of automation (e.g. "system:auto-accept"); never a person.
+SYSTEM_ACTOR_PREFIX = "system:"
+
+
+async def resolve_commit_author(
+    db: AsyncSession, user: CurrentUser | None
+) -> tuple[str | None, str | None]:
+    """The (name, email) for ANY git commit written on behalf of ``user``.
+
+    Every user-derived author or committer goes through here, never the
+    account's own address: the noreply alias by default, the verified address
+    only on opt-in (the same rules as suggestion commits). A system actor, or
+    no user at all, returns ``email=None`` so the repository falls back to the
+    OntoKit system identity.
+    """
+    if user is None:
+        return (None, None)
+    if str(user.id).startswith(SYSTEM_ACTOR_PREFIX):
+        return (user.name, None)
+    return await CommitIdentityService(db).resolve(str(user.id), user.name)
+
+
 def get_commit_identity_service(db: AsyncSession) -> CommitIdentityService:
     """Factory function for dependency injection."""
     return CommitIdentityService(db)
@@ -176,6 +199,7 @@ __all__ = [
     "anonymous_alias",
     "get_commit_identity_service",
     "noreply_alias",
+    "resolve_commit_author",
     "slugify_display_name",
     "stable_user_suffix",
 ]

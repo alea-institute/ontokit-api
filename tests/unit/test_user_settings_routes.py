@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ontokit.main import app
@@ -171,6 +172,8 @@ class TestSearchUsers:
         assert response.status_code == 422
 
 
+# Scripts the commit-identity preference query itself (see tests/unit/conftest.py).
+@pytest.mark.real_commit_preference
 class TestCommitIdentityEndpoints:
     """Commit-authoring identity (R14, R15).
 

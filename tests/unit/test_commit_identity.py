@@ -23,6 +23,9 @@ from ontokit.services.commit_identity import (
     stable_user_suffix,
 )
 
+# Scripts the commit-identity preference query itself (see tests/unit/conftest.py).
+pytestmark = pytest.mark.real_commit_preference
+
 REAL_EMAIL = "maria.gonzalez@parish.example.org"
 
 # RFC-5322-ish: a local part of safe characters, then a domain with a dot.

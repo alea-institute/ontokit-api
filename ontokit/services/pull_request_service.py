@@ -70,6 +70,7 @@ from ontokit.services.branch_lock import (
     branch_write_lock,
     pull_request_write_locks,
 )
+from ontokit.services.commit_identity import resolve_commit_author
 from ontokit.services.github_service import GitHubPR, GitHubService, get_github_service
 from ontokit.services.mirror_credential import resolve_mirror_credential
 from ontokit.services.notification_service import NotificationService
@@ -1122,13 +1123,14 @@ class PullRequestService:
         merge_message = (
             merge_request.merge_message or f"Merge pull request #{pr_number}: {pr.title}"
         )
+        author_name, author_email = await resolve_commit_author(self.db, user)
         merge_result = self.git_service.merge_branch(
             project_id=project_id,
             source=pr.source_branch,
             target=pr.target_branch,
             message=merge_message,
-            author_name=user.name,
-            author_email=user.email,
+            author_name=author_name,
+            author_email=author_email,
         )
 
         if not merge_result.success:

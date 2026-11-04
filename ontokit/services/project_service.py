@@ -37,6 +37,7 @@ from ontokit.schemas.project import (
     TransferOwnership,
 )
 from ontokit.services.branch_lock import branch_write_lock
+from ontokit.services.commit_identity import resolve_commit_author
 from ontokit.services.demo_project_provisioning import resolve_current_demo_project
 from ontokit.services.ontology_extractor import (
     NormalizationReport,
@@ -202,13 +203,14 @@ class ProjectService:
 
         # Initialize git repository for version control
         commit_hash: str | None = None
+        author_name, author_email = await resolve_commit_author(self.db, owner)
         try:
             init_commit = self.git_service.initialize_repository(
                 project_id=db_project.id,
                 ontology_content=normalized_content,
                 filename="ontology.ttl",
-                author_name=owner.name,
-                author_email=owner.email,
+                author_name=author_name,
+                author_email=author_email,
                 project_name=project_name,
             )
             commit_hash = init_commit.hash
@@ -369,6 +371,7 @@ class ProjectService:
         # Clone the entire repo as bare git in a background thread
         repo_url = f"https://github.com/{repo_owner}/{repo_name}.git"
         commit_hash: str | None = None
+        author_name, author_email = await resolve_commit_author(self.db, owner)
         try:
             await asyncio.to_thread(
                 self.git_service.clone_from_github,
@@ -389,8 +392,8 @@ class ProjectService:
                         ontology_content=normalized_content,
                         filename=git_file_path,
                         message="Normalize ontology to canonical Turtle format",
-                        author_name=owner.name,
-                        author_email=owner.email,
+                        author_name=author_name,
+                        author_email=author_email,
                         branch_name=default_branch,
                     )
                     commit_hash = normalize_commit.hash
@@ -412,8 +415,8 @@ class ProjectService:
                     project_id=db_project.id,
                     ontology_content=normalized_content,
                     filename=git_file_path,
-                    author_name=owner.name,
-                    author_email=owner.email,
+                    author_name=author_name,
+                    author_email=author_email,
                     project_name=project_name,
                 )
                 commit_hash = init_commit.hash
@@ -810,13 +813,14 @@ class ProjectService:
                 change_lines = "\n".join(f"- {change}" for change in changes)
                 commit_message = f"Update ontology metadata\n\n{change_lines}\n\nAutomated sync from project settings."
 
+                author_name, author_email = await resolve_commit_author(self.db, user)
                 commit_info = self.git_service.commit_changes(
                     project_id=project.id,
                     ontology_content=updated_content,
                     filename=git_filename,
                     message=commit_message,
-                    author_name=user.name,
-                    author_email=user.email,
+                    author_name=author_name,
+                    author_email=author_email,
                     branch_name=branch,
                     expected_head=expected_head,
                 )

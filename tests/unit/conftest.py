@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Generator
+from collections.abc import Generator, Iterator
 from typing import Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -13,6 +13,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.core.auth import CurrentUser, get_current_user, get_current_user_optional
 from ontokit.core.database import get_db
 from ontokit.main import app
+
+
+@pytest.fixture(autouse=True)
+def _default_commit_identity_preference(request: pytest.FixtureRequest) -> Iterator[None]:
+    """Default every unit test to "no verified-email opt-in".
+
+    Every commit written on a user's behalf resolves its author through
+    CommitIdentityService (no real email in git). Generic AsyncMock sessions
+    would otherwise hand that lookup a truthy mock "row". Tests of the lookup
+    itself, and suites that script the preference query explicitly, mark
+    themselves ``real_commit_preference``.
+    """
+    if request.node.get_closest_marker("real_commit_preference"):
+        yield
+        return
+    from ontokit.services.commit_identity import CommitIdentityService
+
+    with patch.object(CommitIdentityService, "get_preference", AsyncMock(return_value=None)):
+        yield
 
 
 @pytest.fixture
