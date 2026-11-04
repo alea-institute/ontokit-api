@@ -18,7 +18,11 @@ from httpx import ASGITransport, AsyncClient
 from starlette.requests import Request
 
 from ontokit.api.routes.anonymous_suggestions import get_service as get_suggestion_service
-from ontokit.core.client_ip import get_client_ip
+from ontokit.core.client_ip import (
+    anonymous_ip_storage_form,
+    get_client_ip,
+    ipv6_bucket_prefix,
+)
 from ontokit.core.config import Settings, settings
 from ontokit.main import app
 
@@ -73,10 +77,92 @@ def test_trusted_peer_cf_connecting_ip_is_honored(trust) -> None:  # type: ignor
     assert get_client_ip(req) == "198.51.100.1"
 
 
-def test_trusted_peer_falls_back_to_first_forwarded_hop(trust) -> None:  # type: ignore[no-untyped-def]
+def test_trusted_peer_falls_back_to_forwarded_for(trust) -> None:  # type: ignore[no-untyped-def]
     trust("127.0.0.1")
-    req = _request("127.0.0.1", {"X-Forwarded-For": " 198.51.100.2 , 172.18.0.1"})
+    req = _request("127.0.0.1", {"X-Forwarded-For": " 198.51.100.2 "})
     assert get_client_ip(req) == "198.51.100.2"
+
+
+def test_forwarded_for_walks_from_the_right_skipping_trusted_hops(trust) -> None:  # type: ignore[no-untyped-def]
+    # The leftmost entry is client-supplied and spoofable; the first hop not
+    # added by one of our own proxies is the real visitor.
+    trust("127.0.0.1, 172.16.0.0/12")
+    req = _request(
+        "127.0.0.1",
+        {"X-Forwarded-For": "6.6.6.6, 198.51.100.2, 172.18.0.9, 127.0.0.1"},
+    )
+    assert get_client_ip(req) == "198.51.100.2"
+
+
+def test_forwarded_for_of_only_trusted_hops_uses_peer(trust) -> None:  # type: ignore[no-untyped-def]
+    trust("127.0.0.1, 172.16.0.0/12")
+    req = _request("127.0.0.1", {"X-Forwarded-For": "172.18.0.9, 127.0.0.1"})
+    assert get_client_ip(req) == "127.0.0.1"
+
+
+def test_forwarded_for_stops_at_malformed_hop(trust) -> None:  # type: ignore[no-untyped-def]
+    trust("127.0.0.1")
+    req = _request("127.0.0.1", {"X-Forwarded-For": "198.51.100.2, garbage"})
+    assert get_client_ip(req) == "127.0.0.1"
+
+
+def test_cf_connecting_ip_outranks_forwarded_for(trust) -> None:  # type: ignore[no-untyped-def]
+    trust("127.0.0.1")
+    req = _request(
+        "127.0.0.1",
+        {"CF-Connecting-IP": "198.51.100.1", "X-Forwarded-For": "198.51.100.2"},
+    )
+    assert get_client_ip(req) == "198.51.100.1"
+
+
+def test_ipv4_mapped_peer_matches_ipv4_trusted_proxy(trust) -> None:  # type: ignore[no-untyped-def]
+    trust("127.0.0.1")
+    req = _request("::ffff:127.0.0.1", {"CF-Connecting-IP": "198.51.100.1"})
+    assert get_client_ip(req) == "198.51.100.1"
+
+
+def test_ipv4_mapped_peer_is_normalized_when_untrusted(trust) -> None:  # type: ignore[no-untyped-def]
+    trust("")
+    assert get_client_ip(_request("::ffff:203.0.113.9")) == "203.0.113.9"
+
+
+def test_ipv4_mapped_header_value_is_normalized(trust) -> None:  # type: ignore[no-untyped-def]
+    trust("127.0.0.1")
+    req = _request("127.0.0.1", {"CF-Connecting-IP": "::ffff:198.51.100.1"})
+    assert get_client_ip(req) == "198.51.100.1"
+
+
+def test_ipv4_mapped_forwarded_hop_is_recognized_as_trusted(trust) -> None:  # type: ignore[no-untyped-def]
+    trust("127.0.0.1")
+    req = _request("127.0.0.1", {"X-Forwarded-For": "198.51.100.2, ::ffff:127.0.0.1"})
+    assert get_client_ip(req) == "198.51.100.2"
+
+
+# ── Rate-limit bucketing ──────────────────────────────────────────────────────
+
+
+def test_ipv4_is_its_own_bucket() -> None:
+    assert anonymous_ip_storage_form("198.51.100.7") == "198.51.100.7"
+    assert ipv6_bucket_prefix("198.51.100.7") is None
+
+
+def test_ipv6_is_stored_exploded() -> None:
+    assert anonymous_ip_storage_form("2001:db8::1") == "2001:0db8:0000:0000:0000:0000:0000:0001"
+
+
+def test_ipv6_addresses_in_one_slash64_share_a_bucket() -> None:
+    a = ipv6_bucket_prefix("2001:db8:0:0:aaaa::1")
+    b = ipv6_bucket_prefix("2001:db8::ffff:ffff:ffff:ffff")
+    assert a == b == "2001:0db8:0000:0000:"
+
+
+def test_ipv6_addresses_in_different_slash64s_do_not_share() -> None:
+    assert ipv6_bucket_prefix("2001:db8:0:1::1") != ipv6_bucket_prefix("2001:db8:0:2::1")
+
+
+def test_non_ip_key_is_kept_verbatim() -> None:
+    assert anonymous_ip_storage_form("unknown") == "unknown"
+    assert ipv6_bucket_prefix("unknown") is None
 
 
 def test_trusted_peer_without_headers_uses_peer(trust) -> None:  # type: ignore[no-untyped-def]
