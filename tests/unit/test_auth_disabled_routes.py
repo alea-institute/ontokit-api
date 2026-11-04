@@ -119,15 +119,10 @@ def _assert_write_inventory_exhaustive(target: Any, allowlist: dict[tuple[str, s
     routes = _all_write_routes(target)
     mounted = {(method, route.path) for route, method in routes}
     assert allowlist.keys() <= mounted, "Remove unmounted allowlist entries"
-    # OptionalUser refresh has an explicit handler gate, covered behaviorally below.
-    explicitly_gated = ("POST", "/api/v1/projects/{project_id}/normalization/refresh")
-    assert explicitly_gated in mounted
     uncovered = {
         (method, route.path)
         for route, method in routes
-        if not _requires_user(route.dependant)
-        and (method, route.path) != explicitly_gated
-        and (method, route.path) not in allowlist
+        if not _requires_user(route.dependant) and (method, route.path) not in allowlist
     }
     assert not uncovered, (
         f"Writes without a disabled-mode gate or documented exception: {uncovered}"
@@ -180,7 +175,7 @@ async def disabled_client(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Asyn
 
 
 @pytest.mark.parametrize("auth_mode", ["disabled", "optional"])
-async def test_normalization_refresh_disabled_mode_gate(
+async def test_normalization_refresh_refuses_anonymous(
     disabled_client: AsyncClient, monkeypatch: pytest.MonkeyPatch, auth_mode: str
 ) -> None:
     monkeypatch.setattr("ontokit.core.auth.settings.auth_mode", auth_mode)
@@ -205,11 +200,10 @@ async def test_normalization_refresh_disabled_mode_gate(
         pool_factory.assert_not_called()
         assert pool.mock_calls == []
     else:
-        assert response.status_code == 200
-        assert response.json()["job_id"] == "refresh-job"
-        service.get.assert_awaited_once_with(UUID(PROJECT_ID), None)
-        pool_factory.assert_awaited_once_with()
-        pool.enqueue_job.assert_awaited_once_with("check_normalization_status_task", PROJECT_ID)
+        # Anonymous refresh is refused in optional mode too (BAIF demo, U5).
+        assert response.status_code == 401
+        assert service.mock_calls == []
+        pool_factory.assert_not_called()
 
 
 def _stub_unrelated_dependencies(
