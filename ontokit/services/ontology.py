@@ -41,6 +41,16 @@ FORMAT_MAP = {
     ".json": "json-ld",
 }
 
+
+def rdf_format_for_filename(filename: str) -> str:
+    """Return the rdflib parser format for an ontology file, by extension."""
+    ext = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+    rdf_format = FORMAT_MAP.get(ext)
+    if not rdf_format:
+        raise ValueError(f"Unsupported file format: {ext}")
+    return rdf_format
+
+
 # Map prefix names to RDF properties
 LABEL_PROPERTY_MAP = {
     "rdfs:label": RDFS.label,

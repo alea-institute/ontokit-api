@@ -31,6 +31,7 @@ from ontokit.models.translation import (
     hash_literal_value,
 )
 from ontokit.services.llm import check_llm_access, consume_rate_limit_units
+from ontokit.services.ontology import rdf_format_for_filename
 from ontokit.services.translation_annotations import read_annotation, translation_record_digest
 from ontokit.services.translation_backfill import BackfillLiteral, select_backfill_literals
 from ontokit.services.translation_service import TranslationService
@@ -290,11 +291,12 @@ async def run_label_diff_job(
     filename = get_git_ontology_path(project)
     repository = git.get_repository(project_uuid)
     commit = cast(pygit2.Commit, repository.repo.revparse_single(commit_hash))
-    current = Graph().parse(data=repository.read_file(commit_hash, filename), format="turtle")
+    rdf_format = rdf_format_for_filename(filename)
+    current = Graph().parse(data=repository.read_file(commit_hash, filename), format=rdf_format)
     parent = Graph()
     if commit.parents:
         parent.parse(
-            data=repository.read_file(str(commit.parents[0].id), filename), format="turtle"
+            data=repository.read_file(str(commit.parents[0].id), filename), format=rdf_format
         )
     tasks = discover_translation_tasks(
         parent, current, config, await _covered_values(db, project_uuid, current)
