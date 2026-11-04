@@ -20,6 +20,7 @@ from sqlalchemy.orm import selectinload
 from ontokit.core.anonymous_token import create_anonymous_token
 from ontokit.core.auth import ANONYMOUS_USER, CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
+from ontokit.core.config import settings
 from ontokit.core.exceptions import GuidedHTTPException
 from ontokit.core.limits import (
     MAX_ANONYMOUS_SESSION_BYTES,
@@ -2203,8 +2204,9 @@ class SuggestionService:
     ) -> AnonymousSessionCreateResponse:
         """Create an anonymous suggestion session with rate limiting.
 
-        Checks that fewer than 5 anonymous sessions have been created from
-        the same IP address in the last hour before creating a new one.
+        Checks that fewer than ``settings.anonymous_sessions_per_ip_per_hour``
+        anonymous sessions have been created from the same IP address in the
+        last hour before creating a new one.
         """
         from sqlalchemy import func as sa_func
 
@@ -2217,9 +2219,9 @@ class SuggestionService:
                 detail="Anonymous suggestions are only available on public projects",
             )
 
-        # Rate limit check: max 5 anonymous sessions per IP per hour — GLOBAL
+        # Rate limit check: max N anonymous sessions per IP per hour — GLOBAL
         # across projects on purpose. Scoping by project would let one IP mint
-        # 5 sessions (and git branches) on every public project per hour.
+        # N sessions (and git branches) on every public project per hour.
         cutoff = datetime.now(UTC) - timedelta(hours=1)
         rate_result = await self.db.execute(
             select(sa_func.count(SuggestionSession.id)).where(
@@ -2229,7 +2231,7 @@ class SuggestionService:
             )
         )
         session_count = rate_result.scalar() or 0
-        if session_count >= 5:
+        if session_count >= settings.anonymous_sessions_per_ip_per_hour:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Rate limit exceeded. Try again later.",

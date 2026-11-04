@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.anonymous_token import verify_anonymous_token
 from ontokit.core.api_paths import ANONYMOUS_BEACON_PATH, ANONYMOUS_SAVE_PATH
+from ontokit.core.client_ip import get_client_ip
 from ontokit.core.config import settings
 from ontokit.core.database import get_db
 from ontokit.schemas.anonymous_suggestion import (
@@ -75,11 +76,13 @@ async def create_anonymous_session(
 ) -> AnonymousSessionCreateResponse:
     """Create a new anonymous suggestion session.
 
-    No authentication required. Rate-limited to 5 sessions per IP per hour.
+    No authentication required. Rate-limited per client IP per hour
+    (ANONYMOUS_SESSIONS_PER_IP_PER_HOUR, default 5); behind a trusted proxy
+    the IP comes from its forwarded header (TRUSTED_PROXY_IPS).
     Only available when AUTH_MODE is not "required".
     """
     _require_anonymous_mode()
-    client_ip = request.client.host if request.client else "unknown"
+    client_ip = get_client_ip(request) or "unknown"
     return await service.create_anonymous_session(project_id, client_ip)
 
 

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
 from ontokit.core.auth import OptionalUser, RequiredUser
+from ontokit.core.client_ip import get_client_ip
 from ontokit.core.database import get_db
 from ontokit.schemas.errors import HTTPErrorResponse
 from ontokit.schemas.suggestion import (
@@ -120,7 +121,7 @@ async def submit_session(
         data,
         user,
         verification_token=x_verification_token,
-        client_ip=request.client.host if request.client else None,
+        client_ip=get_client_ip(request),
         # ArqRedis satisfies TrustLimiterRedis structurally; the protocol
         # exists so the limiter does not depend on the ARQ client type.
         redis=cast("TrustLimiterRedis | None", redis),
@@ -272,7 +273,7 @@ async def resubmit_session(
         data,
         user,
         verification_token=x_verification_token,
-        client_ip=request.client.host if request.client else None,
+        client_ip=get_client_ip(request),
         redis=cast("TrustLimiterRedis | None", redis),
     )
 

@@ -1,6 +1,7 @@
 """Application configuration using Pydantic Settings."""
 
 from functools import lru_cache
+from ipaddress import IPv4Network, IPv6Network, ip_network
 from typing import Literal
 
 from pydantic import Field, PostgresDsn, RedisDsn, field_validator
@@ -108,6 +109,41 @@ class Settings(BaseSettings):
     # Per-account daily submission cap for the untrusted rung (R10). Anonymous
     # submissions keep their separate, DB-backed per-IP session limit.
     untrusted_daily_suggestion_limit: int = 10
+
+    # Anonymous suggestion sessions one client IP may create per hour, across
+    # all projects. A conference demo behind one NAT raises this to fit its
+    # attendees; the default suits the open internet.
+    anonymous_sessions_per_ip_per_hour: int = Field(default=5, ge=1)
+
+    # Reverse proxies whose forwarded client-IP headers are believed, as
+    # comma-separated IPs or CIDRs (e.g. the cloudflared connector's address).
+    # Only when the immediate peer is in this set does the API read
+    # CF-Connecting-IP, then the first X-Forwarded-For hop. EMPTY (the default)
+    # ignores those headers entirely, so a direct caller cannot spoof its IP.
+    trusted_proxy_ips: str = ""
+
+    @field_validator("trusted_proxy_ips")
+    @classmethod
+    def validate_trusted_proxy_ips(cls, v: str) -> str:
+        """Reject a malformed entry at startup rather than silently trusting less."""
+        for entry in v.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                ip_network(entry, strict=False)
+            except ValueError as e:
+                raise ValueError(f"TRUSTED_PROXY_IPS: invalid IP or CIDR {entry!r}") from e
+        return v
+
+    @property
+    def trusted_proxy_networks(self) -> tuple[IPv4Network | IPv6Network, ...]:
+        """Parsed ``TRUSTED_PROXY_IPS``."""
+        return tuple(
+            ip_network(entry.strip(), strict=False)
+            for entry in self.trusted_proxy_ips.split(",")
+            if entry.strip()
+        )
 
     # --- GitHub mirror (R3, R16) ---
     # System-owned machine identity that pushes the mirror. When empty, sync
