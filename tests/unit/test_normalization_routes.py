@@ -201,6 +201,30 @@ class TestRefreshNormalizationStatus:
         assert response.json()["job_id"] is None
 
 
+class TestRefreshNormalizationRequiresAuth:
+    """POST /normalization/refresh enqueues work, so anonymous callers are refused."""
+
+    @pytest.mark.parametrize("auth_mode", ["optional", "required"])
+    @patch("ontokit.api.routes.normalization.get_arq_pool", new_callable=AsyncMock)
+    def test_anonymous_refresh_is_401(
+        self,
+        mock_pool_fn: AsyncMock,
+        auth_mode: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr("ontokit.core.auth.settings.auth_mode", auth_mode)
+        project_service = AsyncMock()
+        project_service.get = AsyncMock(return_value=_make_project_response())
+        # Keep the real auth dependency; only the project service is stubbed.
+        monkeypatch.setattr(app, "dependency_overrides", {get_service: lambda: project_service})
+
+        response = TestClient(app).post(f"/api/v1/projects/{PROJECT_ID}/normalization/refresh")
+
+        assert response.status_code == 401
+        project_service.get.assert_not_awaited()
+        mock_pool_fn.assert_not_called()
+
+
 class TestQueueNormalization:
     """Tests for POST /api/v1/projects/{id}/normalization/queue."""
 

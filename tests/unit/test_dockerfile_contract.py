@@ -184,3 +184,29 @@ def test_dev_services_mount_live_lock_and_entrypoint() -> None:
         volumes = compose["services"][service]["volumes"]
         assert "./uv.lock:/home/ontokit/app/uv.lock.live:ro" in volumes
         assert "./scripts/entrypoint.sh:/usr/local/bin/entrypoint.sh:ro" in volumes
+
+
+UVICORN_LAUNCHERS = (
+    (DOCKERFILE, "CMD"),
+    (DOCKERFILE_PROD, "CMD"),
+    (COMPOSE, "command"),
+    (ROOT / "deploy" / "compose.dev.images.yaml", "command"),
+)
+
+
+@pytest.mark.parametrize(
+    "launcher,kind", UVICORN_LAUNCHERS, ids=lambda value: getattr(value, "name", value)
+)
+def test_uvicorn_never_rewrites_client_from_forwarded_headers(launcher: Path, kind: str) -> None:
+    """Only ontokit.core.client_ip interprets forwarded headers (BAIF demo, U5).
+
+    Uvicorn's proxy-header middleware would otherwise replace request.client
+    with a forwarded value before TRUSTED_PROXY_IPS is consulted.
+    """
+    text = launcher.read_text(encoding="utf-8")
+    uvicorn_lines = [
+        line for line in text.splitlines() if '"uvicorn"' in line and line.strip().startswith(kind)
+    ]
+    assert uvicorn_lines, f"{launcher.name}: no uvicorn {kind} found"
+    for line in uvicorn_lines:
+        assert '"--no-proxy-headers"' in line, f"{launcher.name}: {line.strip()}"

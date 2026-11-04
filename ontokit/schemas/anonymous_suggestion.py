@@ -20,12 +20,16 @@ class AnonymousSessionCreateResponse(BaseModel):
 class AnonymousSubmitRequest(BaseModel):
     """Request body for submitting an anonymous suggestion session."""
 
-    summary: str | None = Field(default=None, description="Optional summary of the changes")
+    # Literal matches ANONYMOUS_SUMMARY_MAX_LENGTH in suggestion_service; the
+    # schema module stays free of service imports.
+    summary: str | None = Field(
+        default=None, max_length=1000, description="Optional summary of the changes"
+    )
     submitter_name: str | None = Field(
-        default=None, description="Optional name to credit with the suggestion"
+        default=None, max_length=255, description="Optional name to credit with the suggestion"
     )
     submitter_email: str | None = Field(
-        default=None, description="Optional email to associate with the suggestion"
+        default=None, max_length=255, description="Optional email to associate with the suggestion"
     )
     # Spam-control field. Deliberately documented as an ordinary optional
     # website URL: the real semantics (filled -> silent fake success) must not

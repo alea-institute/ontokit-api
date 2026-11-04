@@ -522,6 +522,20 @@ Optional mode without Zitadel remains supported. The former Traefik basic-auth
 gate is intentionally absent; Zitadel is the sole configured authentication
 system after the 2026-08-10 flip, superseding KTD2.
 
+## Anonymous access behind a proxy
+
+Two settings govern the anonymous suggestion limiter:
+
+| Setting | Default | Meaning |
+| --- | --- | --- |
+| `TRUSTED_PROXY_IPS` | empty | Comma-separated IPs or CIDRs of reverse proxies (for example, the cloudflared connector's address as the API sees it, such as its Docker network CIDR). A malformed entry stops startup. |
+| `ANONYMOUS_SESSIONS_PER_IP_PER_HOUR` | `5` | Anonymous sessions one client may create per hour, across all projects. Raise it for an event where many attendees share one NAT address. |
+
+- **Trusted peer:** if the immediate peer falls in `TRUSTED_PROXY_IPS`, then the API reads `CF-Connecting-IP`. Failing that, it walks `X-Forwarded-For` from the right, skips trusted hops, and takes the first untrusted hop.
+- **Untrusted peer:** the API ignores those headers, so a direct caller cannot pick its own bucket.
+- **Address forms:** IPv4-mapped IPv6 addresses count as IPv4. The limiter counts IPv6 clients per /64 and stores the full address, exploded, for audit.
+- **Uvicorn:** every launch command passes `--no-proxy-headers`. `ontokit/core/client_ip.py` alone interprets forwarded headers, and `request.client` stays the real TCP peer.
+
 ## Known gotchas
 
 - The previously deployed `zitadel-login:latest` image (now pinned by digest)

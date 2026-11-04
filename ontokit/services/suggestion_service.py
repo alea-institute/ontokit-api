@@ -20,6 +20,8 @@ from sqlalchemy.orm import selectinload
 from ontokit.core.anonymous_token import create_anonymous_token
 from ontokit.core.auth import ANONYMOUS_USER, CurrentUser
 from ontokit.core.beacon_token import create_beacon_token, verify_beacon_token
+from ontokit.core.client_ip import anonymous_ip_storage_form, ipv6_bucket_prefix
+from ontokit.core.config import settings
 from ontokit.core.exceptions import GuidedHTTPException
 from ontokit.core.limits import (
     MAX_ANONYMOUS_SESSION_BYTES,
@@ -149,6 +151,48 @@ _MINT_STRUCTURAL_TYPES = frozenset(
         RDF.Alt,
     }
 )
+
+
+# Server-side cap on anonymous summaries (BAIF demo, U5). The schema enforces
+# it at the boundary; the constant is shared so tests and schema agree.
+ANONYMOUS_SUMMARY_MAX_LENGTH = 1000
+
+_ZERO_WIDTH_JOINER = "\u200d"
+
+
+def neutralize_mentions(text: str) -> str:
+    """Break ``@name`` mentions so untrusted text cannot ping people on GitHub.
+
+    A zero-width joiner after every ``@`` keeps the text readable while
+    preventing GitHub (and the mirror) from resolving a user or team mention.
+    """
+    return text.replace("@", "@" + _ZERO_WIDTH_JOINER)
+
+
+def build_suggestion_pr_description(
+    *,
+    summary: str | None,
+    entities: list[str],
+    changes_count: int,
+    is_anonymous: bool,
+    submitter_name: str | None,
+    user_label: str,
+) -> str:
+    """Render a suggestion PR description; anonymous free text is mention-safe."""
+    body_parts: list[str] = []
+    if summary:
+        body_parts.append(neutralize_mentions(summary) if is_anonymous else summary)
+    body_parts.append(f"\n**Entities modified** ({changes_count} changes):")
+    for entity in entities:
+        body_parts.append(f"- {entity}")
+    if is_anonymous:
+        if submitter_name:
+            body_parts.append(f"\n*Submitted by {neutralize_mentions(submitter_name)}*")
+        else:
+            body_parts.append("\n*Submitted anonymously*")
+    else:
+        body_parts.append(f"\n*Submitted by {user_label}*")
+    return "\n".join(body_parts)
 
 
 class SuggestionService:
@@ -1024,22 +1068,15 @@ class SuggestionService:
         if len(title) > 500:
             title = title[:497] + "..."
 
-        body_parts = []
-        if summary:
-            body_parts.append(summary)
-        body_parts.append(f"\n**Entities modified** ({session.changes_count} changes):")
-        for entity in entities:
-            body_parts.append(f"- {entity}")
         is_anonymous = getattr(session, "is_anonymous", False)
-        if is_anonymous:
-            submitter_name = getattr(session, "submitter_name", None)
-            if submitter_name:
-                body_parts.append(f"\n*Submitted by {submitter_name}*")
-            else:
-                body_parts.append("\n*Submitted anonymously*")
-        else:
-            body_parts.append(f"\n*Submitted by {session.user_name or session.user_id}*")
-        description = "\n".join(body_parts)
+        description = build_suggestion_pr_description(
+            summary=summary,
+            entities=entities,
+            changes_count=session.changes_count,
+            is_anonymous=is_anonymous,
+            submitter_name=getattr(session, "submitter_name", None),
+            user_label=session.user_name or session.user_id,
+        )
 
         # Check for an existing PR on this branch (idempotency on retry)
         existing_pr_result = await self.db.execute(
@@ -2203,8 +2240,9 @@ class SuggestionService:
     ) -> AnonymousSessionCreateResponse:
         """Create an anonymous suggestion session with rate limiting.
 
-        Checks that fewer than 5 anonymous sessions have been created from
-        the same IP address in the last hour before creating a new one.
+        Checks that fewer than ``settings.anonymous_sessions_per_ip_per_hour``
+        anonymous sessions have been created from the same IP address in the
+        last hour before creating a new one.
         """
         from sqlalchemy import func as sa_func
 
@@ -2217,19 +2255,31 @@ class SuggestionService:
                 detail="Anonymous suggestions are only available on public projects",
             )
 
-        # Rate limit check: max 5 anonymous sessions per IP per hour — GLOBAL
+        # Rate limit check: max N anonymous sessions per IP per hour — GLOBAL
         # across projects on purpose. Scoping by project would let one IP mint
-        # 5 sessions (and git branches) on every public project per hour.
+        # N sessions (and git branches) on every public project per hour.
+        # IPv6 counts per /64 (a visitor can rotate within their delegation);
+        # the full address is still stored. IPv6 is stored exploded so every
+        # address in a /64 shares one fixed-width prefix, which keeps this a
+        # plain LIKE with no schema change. Rows written before this change
+        # used the compressed form and age out of the one-hour window.
+        client_ip = anonymous_ip_storage_form(client_ip)
+        bucket_prefix = ipv6_bucket_prefix(client_ip)
+        ip_match = (
+            SuggestionSession.client_ip.like(f"{bucket_prefix}%")
+            if bucket_prefix is not None
+            else SuggestionSession.client_ip == client_ip
+        )
         cutoff = datetime.now(UTC) - timedelta(hours=1)
         rate_result = await self.db.execute(
             select(sa_func.count(SuggestionSession.id)).where(
                 SuggestionSession.is_anonymous.is_(True),
-                SuggestionSession.client_ip == client_ip,
+                ip_match,
                 SuggestionSession.created_at > cutoff,
             )
         )
         session_count = rate_result.scalar() or 0
-        if session_count >= 5:
+        if session_count >= settings.anonymous_sessions_per_ip_per_hour:
             raise HTTPException(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Rate limit exceeded. Try again later.",

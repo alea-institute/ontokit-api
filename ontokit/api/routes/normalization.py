@@ -6,13 +6,12 @@ from typing import Annotated
 from uuid import UUID
 
 from arq.jobs import Job, JobStatus
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.utils.redis import get_arq_pool
-from ontokit.core.auth import OptionalUser, RequiredUser, require_read_only_request
-from ontokit.core.config import settings
+from ontokit.core.auth import OptionalUser, RequiredUser
 from ontokit.core.database import get_db
 from ontokit.schemas.project import NormalizationReportResponse
 from ontokit.services.normalization_service import NormalizationService, get_normalization_service
@@ -155,9 +154,8 @@ async def get_normalization_status(
 @router.post("/{project_id}/normalization/refresh", response_model=RefreshStatusResponse)
 async def refresh_normalization_status(
     project_id: UUID,
-    request: Request,
     project_service: Annotated[ProjectService, Depends(get_service)],
-    user: OptionalUser,
+    user: RequiredUser,
 ) -> RefreshStatusResponse:
     """
     Trigger a background job to check normalization status.
@@ -165,10 +163,11 @@ async def refresh_normalization_status(
     This queues an async job that downloads and parses the ontology
     to determine if normalization is needed. Results will be available
     via the GET /normalization/status endpoint once complete.
-    """
-    if settings.auth_mode == "disabled":
-        require_read_only_request(request)
 
+    Requires authentication: anonymous callers get 401, so a public demo
+    cannot be used to enqueue unbounded background work. In AUTH_MODE=disabled
+    the required-user dependency refuses this write with 403.
+    """
     # Check access
     await project_service.get(project_id, user)
 

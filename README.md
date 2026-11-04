@@ -95,6 +95,12 @@ are anonymous suggestions, token-authenticated beacons, signed webhooks, auth
 endpoints, and read-only SPARQL.
 Use `required` or `optional` with sign-in for editing.
 
+Anonymous suggestion sessions are limited per client per hour
+(`ANONYMOUS_SESSIONS_PER_IP_PER_HOUR`, default 5; the limiter counts IPv6 per /64).
+Behind a reverse proxy, list the proxy in `TRUSTED_PROXY_IPS` (IPs or CIDRs, empty
+by default) so that the limiter keys on the visitor's `CF-Connecting-IP` or forwarded
+address. See `deploy/RUNBOOK.md`, "Anonymous access behind a proxy".
+
 ## Testing and memory limits
 
 Run `make test` for the full suite, or
