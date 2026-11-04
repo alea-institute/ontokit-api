@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from rdflib import RDFS, Graph, Literal, URIRef
 
+from ontokit.models.translation import TranslationRecord, hash_literal_value
 from ontokit.services.ontology import rdf_format_for_filename
 from ontokit.services.translation_coverage import TranslationCoverageService
 
@@ -150,7 +151,20 @@ async def test_entity_state_on_folio_layout_succeeds() -> None:
     empty.all.return_value = []
     empty.scalars.return_value.all.return_value = []
     empty.scalar_one_or_none.return_value = None
-    service._db.execute = AsyncMock(return_value=empty)  # type: ignore[union-attr]
+    # A verified record makes entity-state read provenance from the branch file.
+    verified = TranslationRecord(
+        entity_iri=str(ENTITY),
+        predicate=str(RDFS.label),
+        language="es",
+        source_value_hash=hash_literal_value("Thing"),
+        translated_value_hash=hash_literal_value("Cosa"),
+        state="verified",
+    )
+    records = MagicMock()
+    records.scalars.return_value.all.return_value = [verified]
+    service._db.execute = AsyncMock(  # type: ignore[union-attr]
+        side_effect=[empty, empty, records, empty]
+    )
 
     state = await service.entity_state(PROJECT_ID, str(ENTITY), "main")
 
