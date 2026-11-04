@@ -9,7 +9,7 @@ services:
     image: ${ONTOKIT_API_IMAGE:?ONTOKIT_API_IMAGE must be a pinned image digest}
     # Dockerfile.prod defaults to four workers; DEV keeps the single process its
     # 2g memory limit was sized for, without the development image's --reload.
-    command: ["uvicorn", "ontokit.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "ontokit.main:app", "--host", "0.0.0.0", "--port", "8000", "--no-proxy-headers"]
 
   worker:
     image: ${ONTOKIT_API_IMAGE:?ONTOKIT_API_IMAGE must be a pinned image digest}

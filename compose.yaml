@@ -278,7 +278,7 @@ services:
       # Superadmin - comma-separated list of Zitadel user IDs with full system access
       SUPERADMIN_USER_IDS: ${SUPERADMIN_USER_IDS:-}
     entrypoint: ["/usr/local/bin/entrypoint.sh"]
-    command: ["uvicorn", "ontokit.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command: ["uvicorn", "ontokit.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload", "--no-proxy-headers"]
     # RUN_MIGRATIONS=1 (default) runs alembic on startup.
     # Set RUN_MIGRATIONS=0 on non-leader replicas in multi-replica deployments.
     ports:
