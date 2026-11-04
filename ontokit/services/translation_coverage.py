@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any
 from typing import Literal as TypeLiteral
@@ -177,7 +178,14 @@ class TranslationCoverageService:
             )
         )
         records = list(record_result.scalars().all())
-        graph = self._entity_subgraph(await self._load_branch_graph(project_id, branch), entity_iri)
+        # The graph only feeds ``_is_verified``, which returns False before
+        # reading it for any non-verified record; skip the full-file parse then.
+        if any(record.state == "verified" for record in records):
+            graph = self._entity_subgraph(
+                await self._load_branch_graph(project_id, branch), entity_iri
+            )
+        else:
+            graph = Graph()
         return languages, labels, records, graph
 
     async def _load_languages(self, project_id: UUID) -> list[str]:
@@ -200,11 +208,17 @@ class TranslationCoverageService:
         """
         if self._git is None:
             raise RuntimeError("coverage service I/O dependencies are not configured")
+        git = self._git
         filename = await self._ontology_filename(project_id, branch)
-        return Graph().parse(
-            data=self._git.get_file_from_branch(project_id, branch, filename),
-            format=rdf_format_for_filename(filename),
-        )
+
+        def read_and_parse() -> Graph:
+            return Graph().parse(
+                data=git.get_file_from_branch(project_id, branch, filename),
+                format=rdf_format_for_filename(filename),
+            )
+
+        # A full-ontology parse takes seconds; keep it off the event loop.
+        return await asyncio.to_thread(read_and_parse)
 
     async def _ontology_filename(self, project_id: UUID, branch: str) -> str:
         """Resolve the project's ontology file like the rest of the codebase.

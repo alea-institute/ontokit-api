@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, Mock
 
 import pytest
@@ -238,15 +241,85 @@ async def test_entity_state_load_is_scoped_to_the_requested_entity() -> None:
     git.get_repository.return_value = repository
     git.get_file_from_branch.return_value = graph.serialize(format="turtle").encode()
 
-    result = await TranslationCoverageService(db, git).entity_state(
-        PROJECT_ID, str(EX.one), "main"
-    )
+    result = await TranslationCoverageService(db, git).entity_state(PROJECT_ID, str(EX.one), "main")
 
     assert result["items"][0]["state"] == "verified"
     label_query = str(db.execute.await_args_list[1].args[0])
     record_query = str(db.execute.await_args_list[2].args[0])
     assert "indexed_entities.iri =" in label_query
     assert "translation_records.entity_iri =" in record_query
+
+
+def _entity_state_service(
+    records: list[TranslationRecord], graph: Graph
+) -> tuple[TranslationCoverageService, Mock]:
+    config_result = Mock()
+    config_result.scalar_one_or_none.return_value = SimpleNamespace(language_tags=["es"])
+    label_result = Mock()
+    label_result.all.return_value = [
+        (str(EX.one), str(SKOS.prefLabel), "en", "One"),
+        (str(EX.one), str(SKOS.prefLabel), "es", "Uno"),
+    ]
+    record_result = Mock()
+    record_result.scalars.return_value.all.return_value = records
+    job_result = Mock()
+    job_result.scalars.return_value.all.return_value = []
+    db = AsyncMock()
+    db.execute.side_effect = [config_result, label_result, record_result, job_result]
+    repository = Mock()
+    repository.list_files.return_value = ["ontology.ttl"]
+    git = Mock()
+    git.get_repository.return_value = repository
+    git.get_file_from_branch.return_value = graph.serialize(format="turtle").encode()
+    return TranslationCoverageService(db, git), git
+
+
+@pytest.mark.asyncio
+async def test_entity_state_without_verified_records_skips_branch_graph(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provisional = _record(str(EX.one), "es", "One", "Uno", state="provisional")
+    service, git = _entity_state_service([provisional], Graph())
+    load_graph = AsyncMock(side_effect=AssertionError("branch graph must not load"))
+    monkeypatch.setattr(service, "_load_branch_graph", load_graph)
+
+    result = await service.entity_state(PROJECT_ID, str(EX.one), "main")
+
+    load_graph.assert_not_awaited()
+    git.get_file_from_branch.assert_not_called()
+    assert result["items"] == [
+        {
+            "predicate": str(SKOS.prefLabel),
+            "language": "es",
+            "state": "provisional",
+            "value": "Uno",
+            "record_id": str(provisional.id),
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_entity_state_with_verified_record_loads_graph_off_the_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    record = _record(str(EX.one), "es", "One", "Uno")
+    graph = Graph()
+    _annotate(graph, record, "Uno")
+    service, git = _entity_state_service([record], graph)
+    to_thread_calls: list[object] = []
+    real_to_thread = asyncio.to_thread
+
+    async def spy_to_thread(func: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
+        to_thread_calls.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", spy_to_thread)
+
+    result = await service.entity_state(PROJECT_ID, str(EX.one), "main")
+
+    assert result["items"][0]["state"] == "verified"
+    assert len(to_thread_calls) == 1
+    git.get_file_from_branch.assert_called_once_with(PROJECT_ID, "main", "ontology.ttl")
 
 
 @pytest.mark.asyncio
