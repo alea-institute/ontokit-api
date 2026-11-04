@@ -11,18 +11,25 @@ from rdflib import Graph, Literal, URIRef
 from rdflib.namespace import OWL
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from ontokit.git import GitRepositoryService
 from ontokit.models.ontology_index import IndexedEntity, IndexedLabel
+from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.translation import (
     ProjectTranslationConfig,
     TranslationJob,
     TranslationRecord,
     hash_literal_value,
 )
+from ontokit.services.ontology import rdf_format_for_filename
 from ontokit.services.translation_annotations import read_annotation, translation_record_digest
 
 CoverageState = TypeLiteral["verified", "provisional", "pending", "missing"]
+
+# Heuristic fallback only: RDF serializations rdflib parses by extension.
+# OWL/XML (.owx) and ambiguous .xml/.json are never guessed.
+_FALLBACK_EXTENSIONS = (".ttl", ".owl", ".rdf", ".nt", ".n3", ".jsonld")
 
 
 @dataclass(frozen=True, slots=True)
@@ -141,7 +148,7 @@ class TranslationCoverageService:
             select(TranslationRecord).where(TranslationRecord.project_id == project_id)
         )
         records = list(record_result.scalars().all())
-        graph = self._load_branch_graph(project_id, branch)
+        graph = await self._load_branch_graph(project_id, branch)
         return languages, labels, records, graph
 
     async def _load_entity(
@@ -170,7 +177,7 @@ class TranslationCoverageService:
             )
         )
         records = list(record_result.scalars().all())
-        graph = self._entity_subgraph(self._load_branch_graph(project_id, branch), entity_iri)
+        graph = self._entity_subgraph(await self._load_branch_graph(project_id, branch), entity_iri)
         return languages, labels, records, graph
 
     async def _load_languages(self, project_id: UUID) -> list[str]:
@@ -184,19 +191,54 @@ class TranslationCoverageService:
         config = config_result.scalar_one_or_none()
         return list(config.language_tags if config else [])
 
-    def _load_branch_graph(self, project_id: UUID, branch: str) -> Graph:
+    async def _load_branch_graph(self, project_id: UUID, branch: str) -> Graph:
+        """Parse the branch's canonical ontology file fresh from git.
+
+        Deliberately not the editor's in-memory graph cache: coverage and
+        provenance must reflect the branch head, including translation commits
+        the cache may not have seen.
+        """
         if self._git is None:
             raise RuntimeError("coverage service I/O dependencies are not configured")
-        repository = self._git.get_repository(project_id)
-        candidates = [
-            path
-            for path in repository.list_files(branch)
-            if path.casefold().endswith((".ttl", ".owl", ".rdf"))
-        ]
-        filename = "ontology.ttl" if "ontology.ttl" in candidates else candidates[0]
+        filename = await self._ontology_filename(project_id, branch)
         return Graph().parse(
-            data=self._git.get_file_from_branch(project_id, branch, filename), format="turtle"
+            data=self._git.get_file_from_branch(project_id, branch, filename),
+            format=rdf_format_for_filename(filename),
         )
+
+    async def _ontology_filename(self, project_id: UUID, branch: str) -> str:
+        """Resolve the project's ontology file like the rest of the codebase.
+
+        ``get_git_ontology_path`` (GitHub turtle/ontology path, then the source
+        file's basename, then ``ontology.ttl``) wins when that file exists on
+        the branch. Otherwise fall back to a heuristic that prefers Turtle and
+        only considers serializations rdflib parses by extension.
+        """
+        if self._git is None:
+            raise RuntimeError("coverage service I/O dependencies are not configured")
+        files = list(self._git.get_repository(project_id).list_files(branch))
+        project = None
+        if self._db is not None:
+            project = await self._db.scalar(
+                select(Project)
+                .options(selectinload(Project.github_integration))
+                .where(Project.id == project_id)
+            )
+        if project is not None:
+            configured = get_git_ontology_path(project)
+            if configured in files:
+                return configured
+        if "ontology.ttl" in files:
+            return "ontology.ttl"
+        candidates = sorted(
+            (path for path in files if path.casefold().endswith(_FALLBACK_EXTENSIONS)),
+            key=lambda path: (not path.casefold().endswith(".ttl"), path),
+        )
+        if not candidates:
+            raise FileNotFoundError(
+                f"No ontology file found on branch {branch!r} of project {project_id}"
+            )
+        return candidates[0]
 
     @staticmethod
     def _entity_subgraph(graph: Graph, entity_iri: str) -> Graph:
