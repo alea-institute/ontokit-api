@@ -1,9 +1,10 @@
 """Embedding service — manage embeddings, semantic search, similarity."""
 
+import asyncio
 import logging
 import math
 from collections.abc import Awaitable, Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Protocol, TypeVar, cast, runtime_checkable
 from uuid import UUID
@@ -17,6 +18,7 @@ from sqlalchemy.dialects.postgresql import Insert
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ontokit.core.config import settings
 from ontokit.models.embedding import (
     EmbeddingJob,
     EntityEmbedding,
@@ -48,6 +50,59 @@ from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
 from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
 
 logger = logging.getLogger(__name__)
+
+ACTIVE_EMBEDDING_JOB_STATUSES = ("pending", "running")
+# Slack past the arq timeout before an active row is presumed dead: the
+# worker's own cleanup should have run by then, so only a lost worker remains.
+STALE_EMBEDDING_JOB_GRACE = timedelta(minutes=15)
+
+
+def embedding_job_timeout_message() -> str:
+    return (
+        "Embedding generation was cancelled or exceeded "
+        f"EMBEDDING_JOB_TIMEOUT_SECONDS ({settings.embedding_job_timeout_seconds}s)"
+    )
+
+
+def stale_embedding_job_cutoff(now: datetime | None = None) -> datetime:
+    """Active jobs whose ``started_at`` precedes this instant are presumed dead.
+
+    For a running row ``started_at`` is its execution start (``embed_project``
+    restamps it), so arq's timeout has already fired. For a pending row it is
+    the enqueue time; a job queued that long is failed too, and
+    ``embed_project`` then refuses to run it rather than resurrect it.
+    """
+    current = now or datetime.now(UTC)
+    return (
+        current
+        - timedelta(seconds=settings.embedding_job_timeout_seconds)
+        - (STALE_EMBEDDING_JOB_GRACE)
+    )
+
+
+async def fail_stale_embedding_jobs(db: AsyncSession, project_id: UUID) -> int:
+    """Mark a project's pending/running jobs older than the timeout as failed.
+
+    Covers a worker that died without running its cleanup (OOM kill, host
+    restart). Frees the one-active-job slot so a new generation can start.
+    """
+    result = await db.execute(
+        update(EmbeddingJob)
+        .where(
+            EmbeddingJob.project_id == project_id,
+            EmbeddingJob.status.in_(ACTIVE_EMBEDDING_JOB_STATUSES),
+            EmbeddingJob.started_at < stale_embedding_job_cutoff(),
+        )
+        .values(
+            status="failed",
+            error_message=f"Stale job: {embedding_job_timeout_message()}",
+            completed_at=datetime.now(UTC),
+        )
+    )
+    count = int(getattr(result, "rowcount", 0) or 0)
+    if count:
+        await db.commit()
+    return count
 
 
 class EmbeddingBudgetExceeded(RuntimeError):
@@ -409,7 +464,9 @@ class EmbeddingService:
             .where(
                 EmbeddingJob.project_id == project_id,
                 EmbeddingJob.branch == branch,
-                EmbeddingJob.status.in_(["pending", "running"]),
+                EmbeddingJob.status.in_(ACTIVE_EMBEDDING_JOB_STATUSES),
+                # A row past the timeout is a dead job, not progress to report.
+                EmbeddingJob.started_at >= stale_embedding_job_cutoff(),
             )
             .order_by(EmbeddingJob.started_at.desc())
             .limit(1)
@@ -485,21 +542,39 @@ class EmbeddingService:
 
         return get_embedding_provider(provider_name, model_name, api_key)
 
-    async def embed_project(self, project_id: UUID, branch: str, job_id: UUID) -> None:
-        """Full project embedding (called from ARQ worker)."""
-        # Get or create job
-        result = await self._db.execute(select(EmbeddingJob).where(EmbeddingJob.id == job_id))
+    async def embed_project(self, project_id: UUID, branch: str, job_id: UUID) -> bool:
+        """Full project embedding (called from ARQ worker).
+
+        Returns False, changing nothing, when the job row is already failed or
+        completed (for example failed as stale while it waited in the queue):
+        a finished job is never resurrected.
+        """
+        # Lock the row so a concurrent stale-failure cannot interleave with the
+        # pending -> running flip.
+        result = await self._db.execute(
+            select(EmbeddingJob).where(EmbeddingJob.id == job_id).with_for_update()
+        )
         job = result.scalar_one_or_none()
+        # started_at becomes the execution start: arq's timeout and the stale
+        # cutoff both count from here, not from when the pending row was queued.
+        execution_start = datetime.now(UTC)
         if not job:
             job = EmbeddingJob(
                 id=job_id,
                 project_id=project_id,
                 branch=branch,
                 status="running",
+                started_at=execution_start,
             )
             self._db.add(job)
+        elif job.status not in ACTIVE_EMBEDDING_JOB_STATUSES:
+            logger.warning(
+                "Embedding job %s is already %s; not running it again", job_id, job.status
+            )
+            return False
         else:
             job.status = "running"
+            job.started_at = execution_start
         await self._db.commit()
 
         try:
@@ -663,24 +738,37 @@ class EmbeddingService:
                 if cfg:
                     cfg.last_full_embed_at = completed_at
                 await self._db.commit()
+            return True
 
-        except Exception as e:
-            await self._db.rollback()
-            # Discard an incomplete private snapshot; the prior live index was
-            # never touched. Use a raw UPDATE because rollback may expire job.
-            await self._db.execute(
-                delete(EntityEmbeddingStaging).where(EntityEmbeddingStaging.job_id == job_id)
-            )
-            await self._db.execute(
-                update(EmbeddingJob)
-                .where(EmbeddingJob.id == job_id)
-                .values(
-                    status="failed",
-                    error_message=str(e),
-                    completed_at=datetime.now(UTC),
+        except BaseException as e:
+            # BaseException, not Exception: arq's job timeout arrives as
+            # asyncio.CancelledError, and that path must not leave the row
+            # "running" forever.
+            if isinstance(e, asyncio.CancelledError | TimeoutError):
+                message = embedding_job_timeout_message()
+            else:
+                message = str(e) or type(e).__name__
+            try:
+                await self._db.rollback()
+                # Discard an incomplete private snapshot; the prior live index
+                # was never touched. Raw UPDATE because rollback may expire job.
+                await self._db.execute(
+                    delete(EntityEmbeddingStaging).where(EntityEmbeddingStaging.job_id == job_id)
                 )
-            )
-            await self._db.commit()
+                await self._db.execute(
+                    update(EmbeddingJob)
+                    .where(EmbeddingJob.id == job_id)
+                    .values(
+                        status="failed",
+                        error_message=message,
+                        completed_at=datetime.now(UTC),
+                    )
+                )
+                await self._db.commit()
+            except Exception:
+                # The worker's fresh-session backstop retries the status write;
+                # never let cleanup failure replace the original error.
+                logger.exception("Could not record failure for embedding job %s", job_id)
             raise
 
     async def embed_single_entity(self, project_id: UUID, branch: str, entity_iri: str) -> None:

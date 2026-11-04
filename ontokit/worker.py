@@ -1,5 +1,6 @@
 """ARQ worker for background task processing."""
 
+import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator
@@ -938,14 +939,65 @@ async def run_embedding_generation_task(
         from ontokit.services.embedding_service import EmbeddingService
 
         service = EmbeddingService(db)
-        await service.embed_project(UUID(project_id), branch, UUID(job_id))
+        ran = await service.embed_project(UUID(project_id), branch, UUID(job_id))
+        if not ran:
+            return {
+                "project_id": project_id,
+                "branch": branch,
+                "job_id": job_id,
+                "status": "skipped",
+            }
 
         logger.info(f"Embedding generation completed for project {project_id} branch {branch}")
         return {"project_id": project_id, "branch": branch, "job_id": job_id, "status": "completed"}
 
-    except Exception as e:
-        logger.exception(f"Embedding generation failed for project {project_id}: {e}")
+    except BaseException as e:
+        # Includes asyncio.CancelledError, which is how arq's job timeout lands.
+        logger.exception(f"Embedding generation failed for project {project_id}: {e!r}")
+        await _mark_embedding_job_failed(ctx, job_id, e)
         raise
+
+
+async def _mark_embedding_job_failed(
+    ctx: dict[str, Any], job_id: str, error: BaseException
+) -> None:
+    """Backstop: record failure on a fresh session if the job is still active.
+
+    The task's own session may be mid-query when a timeout cancels it, so the
+    service's cleanup can fail. Only a still-active row is updated, so a
+    message the service already recorded is kept.
+    """
+    session_factory = ctx.get("session_factory")
+    if session_factory is None:
+        return
+
+    from sqlalchemy import update
+
+    from ontokit.models.embedding import EmbeddingJob
+    from ontokit.services.embedding_service import (
+        ACTIVE_EMBEDDING_JOB_STATUSES,
+        embedding_job_timeout_message,
+    )
+
+    if isinstance(error, asyncio.CancelledError | TimeoutError):
+        message = embedding_job_timeout_message()
+    else:
+        message = str(error) or type(error).__name__
+    session = session_factory()
+    try:
+        await session.execute(
+            update(EmbeddingJob)
+            .where(
+                EmbeddingJob.id == UUID(job_id),
+                EmbeddingJob.status.in_(ACTIVE_EMBEDDING_JOB_STATUSES),
+            )
+            .values(status="failed", error_message=message, completed_at=datetime.now(UTC))
+        )
+        await session.commit()
+    except Exception:
+        logger.exception("Backstop could not mark embedding job %s failed", job_id)
+    finally:
+        await session.close()
 
 
 async def run_single_entity_embed_task(
@@ -1607,7 +1659,15 @@ class WorkerSettings:
         func(sync_github_project_task, keep_result=0, max_tries=1),
         auto_submit_stale_suggestions,
         auto_accept_suggestions,
-        run_embedding_generation_task,
+        # Own timeout: a local CPU embed of a large ontology runs for well over
+        # the 300 s worker default.
+        func(
+            run_embedding_generation_task,
+            timeout=settings.embedding_job_timeout_seconds,
+            # No arq retry: a re-run after shutdown would repeat a job its
+            # handlers already marked failed. Users re-trigger generation.
+            max_tries=1,
+        ),
         run_single_entity_embed_task,
         run_batch_entity_embed_task,
         run_translation_label_diff_task,

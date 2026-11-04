@@ -639,6 +639,7 @@ class TestEmbedProject:
 
         existing_job = MagicMock()
         existing_job.id = job_id
+        existing_job.status = "pending"
         job_result = MagicMock()
         job_result.scalar_one_or_none.return_value = existing_job
 
@@ -851,6 +852,7 @@ class TestEmbedProject:
 
         existing_job = MagicMock()
         existing_job.id = job_id
+        existing_job.status = "pending"
         job_result = MagicMock()
         job_result.scalar_one_or_none.return_value = existing_job
 

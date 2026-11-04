@@ -1178,6 +1178,11 @@ class TestSubmit:
         service._enqueue_branch_refresh.assert_awaited_once_with(
             PROJECT_ID, session.branch, full_embedding=True
         )
+        # The first submission's note is persisted for the review UI.
+        assert session.summary == "My changes"
+        session.pr_id = None  # keep _build_summary off the PR lookup
+        listed = await service._build_summary(session)
+        assert listed.summary == "My changes"
 
     @pytest.mark.asyncio
     async def test_submit_no_changes_raises_400(
@@ -1280,6 +1285,7 @@ class TestSubmit:
         result = await service.submit(PROJECT_ID, session.session_id, data, user)
         assert result.pr_number == 10
         assert result.status == "submitted"
+        assert session.summary == "test"
 
     @pytest.mark.asyncio
     async def test_submit_reconciles_open_pr_created_after_precheck(
@@ -1333,6 +1339,7 @@ class TestSubmit:
         assert result.pr_number == 11
         assert result.pr_url == raced_pr.github_pr_url
         assert session.pr_id == raced_pr.id
+        assert session.summary == "summary"
         assert session.status == SuggestionSessionStatus.SUBMITTED.value
         mock_db.commit.assert_awaited_once()
 
@@ -1428,6 +1435,7 @@ class TestSubmit:
 
         assert result.pr_number == 6
         assert result.status == "submitted"
+        assert session.summary == "changes"
 
         if not is_member:
             assert service.trust.resolve_tier(project, user) is TrustTier.UNTRUSTED
@@ -1971,6 +1979,7 @@ class TestResubmit:
 
         session.reviewer_feedback = "Please fix the labels"
         session.reviewed_at = datetime.now(UTC)
+        session.summary = "Original first-submission note"
         with (
             patch.object(service, "_validate_submission_content", new=AsyncMock()) as validate,
             patch(
@@ -2418,9 +2427,15 @@ class TestAutoSubmitStaleSessionsExtended:
             mock_notif = AsyncMock()
             mock_notif_cls.return_value = mock_notif
 
+            stale_session.summary = "Note from an earlier revision"
             count = await service.auto_submit_stale_sessions()
 
         assert count == 1
+        # The system reason stays in the PR description, but the stored note
+        # is for human-written notes only.
+        pr_create = mock_pr_svc._claim_pull_request_already_locked.await_args.args[1]
+        assert "Auto-submitted: session inactive" in pr_create.description
+        assert stale_session.summary is None
 
     @pytest.mark.asyncio
     async def test_auto_submit_discards_session_on_access_loss(
@@ -3944,3 +3959,79 @@ async def test_revision_dismisses_prior_approval_history(
     assert approval.body == "Original review"
     assert objection.status == "changes_requested"
     assert ctx.session.revision == 2
+
+
+# ---------------------------------------------------------------------------
+# First-submission summary persistence (hosted UAT bug)
+# ---------------------------------------------------------------------------
+
+
+async def _first_submit_via_existing_pr(
+    service: SuggestionService,
+    mock_db: AsyncMock,
+    session: MagicMock,
+    summary: str | None,
+) -> None:
+    existing_pr = MagicMock(id=uuid.uuid4(), pr_number=7, github_pr_url=None)
+    existing_pr_result = MagicMock()
+    existing_pr_result.scalar_one_or_none.return_value = existing_pr
+    mock_db.execute.side_effect = _padded(existing_pr_result, project=_make_project())
+    service.git_service.get_default_branch = MagicMock(return_value="main")
+
+    result = await service._create_pr_for_session(
+        PROJECT_ID,
+        session,
+        _make_user(),
+        summary,
+        SuggestionSessionStatus.SUBMITTED.value,
+    )
+    assert result.pr_number == 7
+
+
+@pytest.mark.asyncio
+async def test_first_anonymous_submit_stores_raw_summary(
+    service: SuggestionService, mock_db: AsyncMock
+) -> None:
+    """The stored note is the as-submitted text; only the PR body is mention-safe."""
+    session = _make_session(is_anonymous=True, changes_count=1)
+
+    await _first_submit_via_existing_pr(service, mock_db, session, "Please ping @octocat")
+
+    assert session.summary == "Please ping @octocat"
+    session.pr_id = None
+    assert (await service._build_summary(session)).summary == "Please ping @octocat"
+
+
+@pytest.mark.asyncio
+async def test_submit_anonymous_forwards_summary_to_persistence(
+    service: SuggestionService, mock_db: AsyncMock, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    session = _make_session(is_anonymous=True, changes_count=1)
+    monkeypatch.setattr(service, "_get_session", AsyncMock(return_value=session))
+    existing_pr = MagicMock(id=uuid.uuid4(), pr_number=8, github_pr_url=None)
+    existing_pr_result = MagicMock()
+    existing_pr_result.scalar_one_or_none.return_value = existing_pr
+    mock_db.execute.side_effect = _padded(existing_pr_result, project=_make_project())
+    service.git_service.get_default_branch = MagicMock(return_value="main")
+
+    result = await service.submit_anonymous(
+        PROJECT_ID,
+        session.session_id,
+        AnonymousSubmitRequest(summary="Anonymous note"),
+        session.session_id,
+    )
+
+    assert result.pr_number == 8
+    assert session.summary == "Anonymous note"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("summary", [None, ""], ids=["none", "empty"])
+async def test_first_submit_without_note_stores_none(
+    service: SuggestionService, mock_db: AsyncMock, summary: str | None
+) -> None:
+    session = _make_session(changes_count=1)
+
+    await _first_submit_via_existing_pr(service, mock_db, session, summary)
+
+    assert session.summary is None
