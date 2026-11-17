@@ -212,9 +212,15 @@ def test_ci_lint_uses_one_locked_python311_environment() -> None:
             assert "--locked" in args
 
 
-def test_setup_installs_dev_group_and_hooks() -> None:
+@pytest.mark.parametrize("makelevel", ["0", "1"])
+def test_setup_installs_dev_group_and_hooks(makelevel: str) -> None:
     result = subprocess.run(
-        ["make", "--dry-run", "setup"], cwd=ROOT, capture_output=True, text=True, check=False
+        ["make", "--no-print-directory", "--dry-run", "setup"],
+        cwd=ROOT,
+        env={**os.environ, "MAKELEVEL": makelevel},
+        capture_output=True,
+        text=True,
+        check=False,
     )
     assert result.returncode == 0, result.stderr
     commands = result.stdout.splitlines()
