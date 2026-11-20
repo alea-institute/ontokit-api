@@ -342,3 +342,50 @@ async def test_changed_entities_returns_only_markers_and_caps_entities(feed) -> 
     filtered = await service.list_changed_entities(PROJECT, branch="trunk", origin=["ai"])
     assert filtered.truncated
     assert filtered.items[0].model_dump() == first
+
+
+@pytest.mark.asyncio
+async def test_other_reports_untracked_changes_only_for_entities_present_at_both_edges(
+    feed,
+) -> None:
+    service, connection = feed
+    _insert(
+        connection,
+        [
+            _event("Annotated", 2, changed_fields=["other"]),
+            _event(
+                "Relabeled",
+                3,
+                changed_fields=["labels", "other"],
+                old_values={"labels": ["Draft"]},
+                new_values={"labels": ["Final"]},
+            ),
+            _event(
+                "Relabeled",
+                1,
+                "rename",
+                changed_fields=["labels"],
+                old_values={"labels": ["Final"]},
+                new_values={"labels": ["Draft"]},
+            ),
+            _event("Added", 3, "create", new_values={"labels": ["Added"]}),
+            _event("Added", 1, changed_fields=["other"]),
+            _event("Removed", 3, changed_fields=["other"]),
+            _event("Removed", 1, "delete", old_values={"labels": ["Removed"]}),
+        ],
+    )
+
+    response = await service.list_changes(PROJECT, branch="trunk")
+
+    other = {"field": "other", "before": None, "after": None}
+    fields = {
+        item.entity_iri.removeprefix(BASE_IRI): [
+            change.model_dump() for change in item.field_changes
+        ]
+        for item in response.items
+    }
+    # A net-zero label edit is omitted; the value-less flag stays.
+    assert fields["Annotated"] == [other]
+    assert fields["Relabeled"] == [other]
+    assert other not in fields["Added"]
+    assert other not in fields["Removed"]

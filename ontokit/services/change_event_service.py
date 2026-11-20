@@ -14,6 +14,7 @@ from rdflib import BNode, Graph, URIRef
 from rdflib import Literal as RDFLiteral
 from rdflib.compare import isomorphic
 from rdflib.namespace import OWL, RDF, RDFS, SKOS
+from rdflib.term import Node
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
@@ -62,6 +63,12 @@ _CHANGE_FIELDS: tuple[ChangeField, ...] = (
     "comments",
     "other",
 )
+_LITERAL_FIELDS: dict[Node, str] = {
+    RDFS.label: "labels",
+    SKOS.definition: "definitions",
+    RDFS.comment: "comments",
+}
+_Triple = tuple[Node, Node, Node]
 _MARKER_LIMIT = 5000
 _ITEM_EVENT_LIMIT = 20
 _EVENT_INSERT_BATCH_SIZE = 1000
@@ -212,29 +219,42 @@ def _group_changes(filters: list[ColumnElement[bool]]) -> CTE:
     )
 
 
-def _field_changes(events: list[EntityChangeEvent]) -> list[FieldChange]:
+def _field_changes(events: list[EntityChangeEvent], net_change: NetChange) -> list[FieldChange]:
+    """Report the net change per field over the entity's events, newest first.
+
+    A tracked field carries the value before its earliest change and after its
+    latest, and is omitted when the two are equal. ``other`` carries no values,
+    so it cannot net out: it is reported whenever any event in the window
+    changed statements outside the tracked fields, and only for an entity that
+    existed at both edges of the window.
+    """
     before: dict[ChangeField, ChangeFieldValue] = {}
     after: dict[ChangeField, ChangeFieldValue] = {}
+    other_changed = False
     for event in reversed(events):
         old, new = event.old_values or {}, event.new_values or {}
         touched = set(event.changed_fields or [])
+        other_changed = other_changed or "other" in touched
         if event.event_type in (ChangeEventType.CREATE, ChangeEventType.DELETE):
             touched.update(old)
             touched.update(new)
         for field in _CHANGE_FIELDS:
             if field not in touched or field == "other":
-                continue  # Untracked triples have no comparable before/after values.
+                continue
             absent: ChangeFieldValue = False if field == "deprecated" else []
             before.setdefault(
                 field, old.get(field, absent if event.event_type == "create" else None)
             )
             after[field] = new.get(field, absent if event.event_type == "delete" else None)
 
-    return [
+    changes = [
         FieldChange(field=field, before=before[field], after=after[field])
         for field in _CHANGE_FIELDS
         if field in before and before[field] != after[field]
     ]
+    if other_changed and net_change == "modified":
+        changes.append(FieldChange(field="other", before=None, after=None))
+    return changes
 
 
 def _project_change_item(
@@ -263,7 +283,7 @@ def _project_change_item(
         authors=[
             ChangeAuthor(user_id=user_id, user_name=name) for user_id, name in authors.items()
         ],
-        field_changes=_field_changes(events),
+        field_changes=_field_changes(events, net_change),
         events=[_serialize_event(event) for event in events[:_ITEM_EVENT_LIMIT]],
     )
 
@@ -287,29 +307,57 @@ def _entity_values(graph: Graph, uri: URIRef, entity_type: str) -> dict[str, lis
     }
 
 
-def _entity_description(graph: Graph, uri: URIRef) -> Graph:
-    """Collect the entity's outgoing statements and follow only blank nodes."""
+def _tracked_field(predicate: Node, obj: Node, parent_predicate: URIRef) -> str | None:
+    """Name the tracked field whose value a statement supplies, if any."""
+    if isinstance(obj, RDFLiteral) and predicate in _LITERAL_FIELDS:
+        return _LITERAL_FIELDS[predicate]
+    if predicate == parent_predicate and isinstance(obj, URIRef):
+        return "parents"
+    if predicate == OWL.deprecated:
+        return "deprecated"
+    return None
+
+
+def _description(graph: Graph, statements: set[_Triple]) -> Graph:
+    """Collect the statements and everything reachable from them through blank nodes."""
     description = Graph()
-    pending: list[URIRef | BNode] = [uri]
+    pending = list(statements)
     seen: set[BNode] = set()
     while pending:
-        for triple in graph.triples((pending.pop(), None, None)):
-            description.add(triple)
-            obj = triple[2]
-            if isinstance(obj, BNode) and obj not in seen:
-                seen.add(obj)
-                pending.append(obj)
+        triple = pending.pop()
+        description.add(triple)
+        obj = triple[2]
+        if isinstance(obj, BNode) and obj not in seen:
+            seen.add(obj)
+            pending.extend(graph.triples((obj, None, None)))
     return description
 
 
-def _entity_statements_changed(old_graph: Graph, new_graph: Graph, uri: URIRef) -> bool:
-    old_triples = set(old_graph.triples((uri, None, None)))
-    new_triples = set(new_graph.triples((uri, None, None)))
-    if any(isinstance(obj, BNode) for _, _, obj in chain(old_triples, new_triples)):
+def _other_statements_changed(
+    old_graph: Graph, new_graph: Graph, uri: URIRef, entity_type: str, changed_fields: list[str]
+) -> bool:
+    """Report a change to the entity that its changed tracked fields do not show.
+
+    Statements that supply a changed tracked field are set aside. What remains
+    covers every other predicate, anonymous class expressions, and the language
+    tags and datatypes of tracked literals whose text stayed the same.
+    """
+    parent_predicate = RDFS.subPropertyOf if entity_type == "property" else RDFS.subClassOf
+
+    def remaining(graph: Graph) -> set[_Triple]:
+        return {
+            triple
+            for triple in graph.triples((uri, None, None))
+            if _tracked_field(triple[1], triple[2], parent_predicate) not in changed_fields
+        }
+
+    old_statements, new_statements = remaining(old_graph), remaining(new_graph)
+    if any(isinstance(obj, BNode) for _, _, obj in chain(old_statements, new_statements)):
+        # Blank-node labels differ between parses of the same content.
         return not isomorphic(
-            _entity_description(old_graph, uri), _entity_description(new_graph, uri)
+            _description(old_graph, old_statements), _description(new_graph, new_statements)
         )
-    return old_triples != new_triples
+    return old_statements != new_statements
 
 
 def _get_declared_entities(graph: Graph) -> dict[str, str]:
@@ -496,7 +544,7 @@ class ChangeEventService:
             old_vals: dict[str, object] = {field: old_values[field] for field in changed_fields}
             new_vals: dict[str, object] = {field: new_values[field] for field in changed_fields}
 
-            if not changed_fields and _entity_statements_changed(old_graph, new_graph, uri):
+            if _other_statements_changed(old_graph, new_graph, uri, etype, changed_fields):
                 changed_fields.append("other")
 
             if not changed_fields or not fits_column(iri):

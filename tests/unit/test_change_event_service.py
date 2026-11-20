@@ -325,6 +325,74 @@ class TestRecordEventsFromDiff:
         assert [event.changed_fields for event in events] == expected_fields
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("before", "after", "expected_fields", "event_type"),
+        [
+            pytest.param(
+                'rdfs:label "Member"; rdfs:seeAlso ex:Roster',
+                'rdfs:label "Member"; rdfs:seeAlso ex:Directory',
+                ["other"],
+                "update",
+                id="untracked-predicate",
+            ),
+            pytest.param(
+                'rdfs:label "Member"; rdfs:seeAlso ex:Roster',
+                'rdfs:label "Participant"; rdfs:seeAlso ex:Directory',
+                ["labels", "other"],
+                "update",
+                id="tracked-and-untracked",
+            ),
+            pytest.param(
+                'rdfs:label "Member"; rdfs:seeAlso ex:Roster',
+                'rdfs:label "Participant"; rdfs:seeAlso ex:Roster',
+                ["labels"],
+                "rename",
+                id="tracked-only",
+            ),
+            pytest.param(
+                'rdfs:label "Member"@en',
+                'rdfs:label "Member"@fr',
+                ["other"],
+                "update",
+                id="language-tag-of-a-tracked-literal",
+            ),
+            pytest.param(
+                'rdfs:label "Member"; rdfs:subClassOf ex:Person',
+                'rdfs:label "Member"; rdfs:subClassOf ex:Person, '
+                "[ a owl:Restriction; owl:onProperty ex:knows; owl:someValuesFrom ex:Person ]",
+                ["other"],
+                "update",
+                id="anonymous-parent-expression",
+            ),
+        ],
+    )
+    async def test_other_marks_statement_changes_the_tracked_fields_do_not_show(
+        self,
+        service: ChangeEventService,
+        before: str,
+        after: str,
+        expected_fields: list[str],
+        event_type: str,
+    ) -> None:
+        def parse(statement: str) -> Graph:
+            return Graph().parse(
+                data=f"""\
+                    @prefix ex: <https://example.org/ontology#> .
+                    @prefix owl: <{OWL}> .
+                    @prefix rdfs: <{RDFS}> .
+                    ex:Member a owl:Class; {statement} .
+                """,
+                format="turtle",
+            )
+
+        (event,) = await service.record_events_from_diff(
+            PROJECT_ID, BRANCH, parse(before), parse(after), USER_ID, USER_NAME, COMMIT_HASH
+        )
+
+        assert (event.changed_fields, event.event_type) == (expected_fields, event_type)
+        assert "other" not in (event.old_values or {}) | (event.new_values or {})
+
+    @pytest.mark.asyncio
     async def test_none_old_graph_all_creates(
         self,
         service: ChangeEventService,
