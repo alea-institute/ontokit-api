@@ -1,24 +1,41 @@
 """Change event service — track entity modifications from graph diffs."""
 
 import logging
+from base64 import b64decode, urlsafe_b64encode
+from collections import defaultdict
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID
 
 from rdflib import Graph, URIRef
 from rdflib import Literal as RDFLiteral
-from rdflib.namespace import OWL, RDF, RDFS
-from sqlalchemy import func, select
+from rdflib.namespace import OWL, RDF, RDFS, SKOS
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import ColumnElement
+from sqlalchemy.sql.selectable import CTE
 
-from ontokit.models.change_event import ChangeEventType, EntityChangeEvent
+from ontokit.models.change_event import ChangeEventType, ChangeOrigin, EntityChangeEvent
 from ontokit.schemas.analytics import (
     ActivityDay,
+    ChangeAuthor,
+    ChangeAuthorCount,
+    ChangedEntitiesResponse,
+    ChangedEntity,
     ChangeEvent,
+    ChangeField,
+    ChangeFieldValue,
+    ChangesSummary,
+    ChangesWindow,
     ContributorStats,
     EntityHistoryResponse,
+    FieldChange,
     HotEntity,
+    NetChange,
     ProjectActivity,
+    ProjectChangeItem,
+    ProjectChangesResponse,
     TopEditor,
 )
 from ontokit.services.rdf_utils import get_entity_type as _get_entity_type
@@ -26,14 +43,215 @@ from ontokit.services.rdf_utils import is_deprecated as _is_deprecated
 
 logger = logging.getLogger(__name__)
 
+OriginResolver = Callable[
+    [UUID, dict[str, dict[str, list[str]]]], Awaitable[dict[str, dict[str, str | None]]]
+]
+_CHANGE_FIELDS: tuple[ChangeField, ...] = (
+    "labels",
+    "definitions",
+    "parents",
+    "deprecated",
+    "comments",
+    "other",
+)
+_MARKER_LIMIT = 5000
+_ITEM_EVENT_LIMIT = 20
 
-def _get_labels(graph: Graph, uri: URIRef) -> list[str]:
-    return [str(o) for o in graph.objects(uri, RDFS.label) if isinstance(o, RDFLiteral)]
+
+class InvalidChangesCursor(ValueError):
+    """A project changes cursor could not be decoded."""
 
 
-def _get_parents(graph: Graph, uri: URIRef, entity_type: str = "class") -> list[str]:
+def _utc_iso(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(UTC).isoformat()
+
+
+def _read_cursor(cursor: str, days: int, now: datetime) -> tuple[datetime, datetime, str]:
+    try:
+        window_end, last_changed_at, iri = (
+            b64decode(cursor, altchars=b"-_", validate=True).decode().split("|", 2)
+        )
+        until = datetime.fromisoformat(window_end)
+        timestamp = datetime.fromisoformat(last_changed_at)
+        since = until - timedelta(days=days)
+        if (
+            until.utcoffset() != timedelta(0)
+            or timestamp.utcoffset() != timedelta(0)
+            or not since <= timestamp <= until <= now
+            or not iri
+            or len(iri) > 2000
+            or "\x00" in iri
+        ):
+            raise ValueError
+    except (ValueError, OverflowError) as exc:
+        raise InvalidChangesCursor("Invalid changes cursor") from exc
+    return until, timestamp, iri
+
+
+def _serialize_event(row: EntityChangeEvent) -> ChangeEvent:
+    return ChangeEvent(
+        id=str(row.id),
+        project_id=str(row.project_id),
+        branch=row.branch,
+        entity_iri=row.entity_iri,
+        entity_type=row.entity_type,
+        event_type=cast(
+            Literal["create", "update", "delete", "rename", "reparent", "deprecate"],
+            row.event_type,
+        ),
+        user_id=row.user_id,
+        user_name=row.user_name,
+        commit_hash=row.commit_hash,
+        origin=ChangeOrigin(row.origin),
+        origin_model=row.origin_model,
+        origin_batch_id=str(row.origin_batch_id) if row.origin_batch_id is not None else None,
+        changed_fields=row.changed_fields or [],
+        old_values=row.old_values,
+        new_values=row.new_values,
+        created_at=_utc_iso(row.created_at),
+    )
+
+
+def _event_filters(
+    project_id: UUID,
+    branch: str,
+    since: datetime,
+    until: datetime,
+    origin: Sequence[str] | None,
+    author: list[str] | None = None,
+    entity_type: list[str] | None = None,
+    event_type: list[str] | None = None,
+) -> list[ColumnElement[bool]]:
+    event = EntityChangeEvent
+    filters = [
+        event.project_id == project_id,
+        event.branch == branch,
+        event.created_at.between(since, until),
+    ]
+    for column, values in (
+        (event.origin, origin),
+        (event.user_id, author),
+        (event.entity_type, entity_type),
+        (event.event_type, event_type),
+    ):
+        if values:
+            filters.append(column.in_(values))
+    return filters
+
+
+def _group_changes(filters: list[ColumnElement[bool]]) -> CTE:
+    event = EntityChangeEvent
+    newest_first = (event.created_at.desc(), event.id.desc())
+    # The descending partition's last value is the earliest event in the filtered window.
+    ranked = (
+        select(
+            event.entity_iri,
+            event.created_at.label("last_changed_at"),
+            event.event_type,
+            func.last_value(event.event_type)
+            .over(partition_by=event.entity_iri, order_by=newest_first, rows=(None, None))
+            .label("first_event_type"),
+            func.count()
+            .filter(event.event_type == ChangeEventType.DELETE)
+            .over(partition_by=event.entity_iri)
+            .label("delete_count"),
+            func.row_number()
+            .over(partition_by=event.entity_iri, order_by=newest_first)
+            .label("event_rank"),
+        )
+        .where(*filters)
+        .subquery()
+    ).c
+    net_change = case(
+        (ranked.event_type == ChangeEventType.DELETE, "removed"),
+        (
+            (ranked.first_event_type == ChangeEventType.CREATE) & (ranked.delete_count == 0),
+            "added",
+        ),
+        else_="modified",
+    )
+    return (
+        select(ranked.entity_iri, ranked.last_changed_at, net_change.label("net_change"))
+        .where(ranked.event_rank == 1)
+        .cte("changed_entities")
+    )
+
+
+def _field_changes(events: list[EntityChangeEvent]) -> list[FieldChange]:
+    before: dict[ChangeField, ChangeFieldValue] = {}
+    after: dict[ChangeField, ChangeFieldValue] = {}
+    for event in reversed(events):
+        old, new = event.old_values or {}, event.new_values or {}
+        touched = set(event.changed_fields or [])
+        if event.event_type in (ChangeEventType.CREATE, ChangeEventType.DELETE):
+            touched.update(old)
+            touched.update(new)
+        for field in _CHANGE_FIELDS:
+            if field not in touched or field == "other":
+                continue  # Untracked triples have no comparable before/after values.
+            absent: ChangeFieldValue = False if field == "deprecated" else []
+            before.setdefault(
+                field, old.get(field, absent if event.event_type == "create" else None)
+            )
+            after[field] = new.get(field, absent if event.event_type == "delete" else None)
+
+    return [
+        FieldChange(field=field, before=before[field], after=after[field])
+        for field in _CHANGE_FIELDS
+        if field in before and before[field] != after[field]
+    ]
+
+
+def _project_change_item(
+    entity_iri: str, net_change: NetChange, events: list[EntityChangeEvent]
+) -> ProjectChangeItem:
+    label = None
+    authors: dict[str, str | None] = {}
+    for event in events:
+        if label is None:
+            labels = (event.new_values or {}).get("labels") or (event.old_values or {}).get(
+                "labels"
+            )
+            if labels:
+                label = labels[0]
+        if authors.get(event.user_id) is None:
+            authors[event.user_id] = event.user_name
+    latest = events[0]
+    return ProjectChangeItem(
+        entity_iri=entity_iri,
+        entity_type=latest.entity_type,
+        net_change=net_change,
+        label=label,
+        origins=sorted({ChangeOrigin(event.origin) for event in events}),
+        last_changed_at=_utc_iso(latest.created_at),
+        event_count=len(events),
+        authors=[
+            ChangeAuthor(user_id=user_id, user_name=name) for user_id, name in authors.items()
+        ],
+        field_changes=_field_changes(events),
+        events=[_serialize_event(event) for event in events[:_ITEM_EVENT_LIMIT]],
+    )
+
+
+def _literal_values(graph: Graph, uri: URIRef, predicate: URIRef) -> list[str]:
+    return sorted(str(o) for o in graph.objects(uri, predicate) if isinstance(o, RDFLiteral))
+
+
+def _get_parents(graph: Graph, uri: URIRef, entity_type: str) -> list[str]:
     predicate = RDFS.subPropertyOf if entity_type == "property" else RDFS.subClassOf
-    return [str(p) for p in graph.objects(uri, predicate) if isinstance(p, URIRef)]
+    return sorted(str(p) for p in graph.objects(uri, predicate) if isinstance(p, URIRef))
+
+
+def _entity_values(graph: Graph, uri: URIRef, entity_type: str) -> dict[str, list[str] | bool]:
+    return {
+        "labels": _literal_values(graph, uri, RDFS.label),
+        "definitions": _literal_values(graph, uri, SKOS.definition),
+        "parents": _get_parents(graph, uri, entity_type),
+        "deprecated": _is_deprecated(graph, uri),
+        "comments": _literal_values(graph, uri, RDFS.comment),
+    }
 
 
 def _get_declared_entities(graph: Graph) -> dict[str, str]:
@@ -65,6 +283,10 @@ class ChangeEventService:
         changed_fields: list[str] | None = None,
         old_values: dict[str, object] | None = None,
         new_values: dict[str, object] | None = None,
+        *,
+        origin: str = ChangeOrigin.HUMAN,
+        origin_model: str | None = None,
+        origin_batch_id: UUID | None = None,
     ) -> EntityChangeEvent:
         event = EntityChangeEvent(
             project_id=project_id,
@@ -75,6 +297,9 @@ class ChangeEventService:
             user_id=user_id,
             user_name=user_name,
             commit_hash=commit_hash,
+            origin=origin,
+            origin_model=origin_model,
+            origin_batch_id=origin_batch_id,
             changed_fields=changed_fields or [],
             old_values=old_values,
             new_values=new_values,
@@ -91,17 +316,42 @@ class ChangeEventService:
         user_id: str,
         user_name: str | None,
         commit_hash: str | None,
+        *,
+        origin_resolver: OriginResolver | None = None,
+        default_origin: str = ChangeOrigin.HUMAN,
     ) -> list[EntityChangeEvent]:
         """Compare two RDFLib graphs and generate change events."""
-        old_entities = _get_declared_entities(old_graph) if old_graph else {}
+        old_graph = old_graph if old_graph is not None else Graph()
+        old_entities = _get_declared_entities(old_graph)
         new_entities = _get_declared_entities(new_graph)
 
         events: list[EntityChangeEvent] = []
         old_iris = set(old_entities.keys())
         new_iris = set(new_entities.keys())
 
+        created_values = {
+            iri: _entity_values(new_graph, URIRef(iri), new_entities[iri])
+            for iri in new_iris - old_iris
+        }
+        origins: dict[str, dict[str, str | None]] = {}
+        if origin_resolver is not None and created_values:
+            created = {
+                iri: {field: cast(list[str], values[field]) for field in ("labels", "definitions")}
+                for iri, values in created_values.items()
+            }
+            try:
+                # Roll back a failed ledger query without poisoning the event transaction.
+                async with self._db.begin_nested():
+                    origins = await origin_resolver(project_id, created)
+            except Exception:
+                logger.warning("Failed to resolve change origins", exc_info=True)
+                origins = {}
+
         # Created entities
-        for iri in new_iris - old_iris:
+        fallback_origin = default_origin if origin_resolver is None else ChangeOrigin.HUMAN
+        for iri, values in created_values.items():
+            provenance = origins.get(iri, {})
+            batch_id = provenance.get("batch_id")
             events.append(
                 await self.record_event(
                     project_id,
@@ -112,6 +362,10 @@ class ChangeEventService:
                     user_id,
                     user_name,
                     commit_hash,
+                    new_values=dict(values),
+                    origin=provenance.get("origin") or fallback_origin,
+                    origin_model=provenance.get("model"),
+                    origin_batch_id=UUID(batch_id) if batch_id is not None else None,
                 )
             )
 
@@ -127,6 +381,8 @@ class ChangeEventService:
                     user_id,
                     user_name,
                     commit_hash,
+                    old_values=dict(_entity_values(old_graph, URIRef(iri), old_entities[iri])),
+                    origin=default_origin,
                 )
             )
 
@@ -134,49 +390,17 @@ class ChangeEventService:
         for iri in old_iris & new_iris:
             uri = URIRef(iri)
             etype = new_entities[iri]
-            changed_fields: list[str] = []
-            old_vals: dict[str, object] = {}
-            new_vals: dict[str, object] = {}
-
-            # Check labels
-            old_labels = _get_labels(old_graph, uri) if old_graph else []
-            new_labels = _get_labels(new_graph, uri)
-            if sorted(old_labels) != sorted(new_labels):
-                changed_fields.append("labels")
-                old_vals["labels"] = old_labels
-                new_vals["labels"] = new_labels
-
-            # Check parents
-            old_parents = _get_parents(old_graph, uri, etype) if old_graph else []
-            new_parents = _get_parents(new_graph, uri, etype)
-            if sorted(old_parents) != sorted(new_parents):
-                changed_fields.append("parents")
-                old_vals["parents"] = old_parents
-                new_vals["parents"] = new_parents
-
-            # Check deprecated
-            old_dep = _is_deprecated(old_graph, uri) if old_graph else False
-            new_dep = _is_deprecated(new_graph, uri)
-            if old_dep != new_dep:
-                changed_fields.append("deprecated")
-                old_vals["deprecated"] = old_dep
-                new_vals["deprecated"] = new_dep
-
-            # Check comments
-            old_comments = (
-                [str(o) for o in old_graph.objects(uri, RDFS.comment) if isinstance(o, RDFLiteral)]
-                if old_graph
-                else []
-            )
-            new_comments = [
-                str(o) for o in new_graph.objects(uri, RDFS.comment) if isinstance(o, RDFLiteral)
+            old_values = _entity_values(old_graph, uri, etype)
+            new_values = _entity_values(new_graph, uri, etype)
+            changed_fields = [
+                field for field in old_values if old_values[field] != new_values[field]
             ]
-            if sorted(old_comments) != sorted(new_comments):
-                changed_fields.append("comments")
+            old_vals: dict[str, object] = {field: old_values[field] for field in changed_fields}
+            new_vals: dict[str, object] = {field: new_values[field] for field in changed_fields}
 
             if not changed_fields:
                 # Check if any triples changed at all for this entity
-                old_triples = set(old_graph.triples((uri, None, None))) if old_graph else set()
+                old_triples = set(old_graph.triples((uri, None, None)))
                 new_triples = set(new_graph.triples((uri, None, None)))
                 if old_triples != new_triples:
                     changed_fields.append("other")
@@ -207,6 +431,7 @@ class ChangeEventService:
                     changed_fields,
                     old_vals or None,
                     new_vals or None,
+                    origin=default_origin,
                 )
             )
 
@@ -214,6 +439,165 @@ class ChangeEventService:
             await self._db.commit()
 
         return events
+
+    async def list_changes(
+        self,
+        project_id: UUID,
+        *,
+        branch: str,
+        days: int = 7,
+        origin: Sequence[str] | None = None,
+        author: list[str] | None = None,
+        entity_type: list[str] | None = None,
+        event_type: list[str] | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> ProjectChangesResponse:
+        until = datetime.now(UTC)
+        position = None
+        if cursor is not None:
+            until, timestamp, iri = _read_cursor(cursor, days, until)
+            position = timestamp, iri
+        since = until - timedelta(days=days)
+        filters = _event_filters(
+            project_id, branch, since, until, origin, author, entity_type, event_type
+        )
+        entities = _group_changes(filters)
+        page = select(entities).order_by(entities.c.last_changed_at.desc(), entities.c.entity_iri)
+        if position is not None:
+            timestamp, iri = position
+            page = page.where(
+                or_(
+                    entities.c.last_changed_at < timestamp,
+                    (entities.c.last_changed_at == timestamp) & (entities.c.entity_iri > iri),
+                )
+            )
+        rows = (await self._db.execute(page.limit(limit + 1))).all()
+        next_cursor = None
+        if len(rows) > limit:
+            rows = rows[:limit]
+            last = rows[-1]
+            key = f"{_utc_iso(until)}|{_utc_iso(last.last_changed_at)}|{last.entity_iri}"
+            next_cursor = urlsafe_b64encode(key.encode()).decode()
+
+        items = []
+        if rows:
+            # Only fetch event payloads for entities on this page. Older events within the
+            # window still contribute to an item's net changes even if its timeline is capped.
+            event = EntityChangeEvent
+            query = (
+                select(event)
+                .where(*filters, event.entity_iri.in_([row.entity_iri for row in rows]))
+                .order_by(event.created_at.desc(), event.id.desc())
+            )
+            events_by_iri: dict[str, list[EntityChangeEvent]] = defaultdict(list)
+            for result in (await self._db.execute(query)).scalars():
+                events_by_iri[result.entity_iri].append(result)
+            items = [
+                _project_change_item(row.entity_iri, row.net_change, events_by_iri[row.entity_iri])
+                for row in rows
+            ]
+
+        return ProjectChangesResponse(
+            window=ChangesWindow(
+                days=days, since=_utc_iso(since), until=_utc_iso(until), branch=branch
+            ),
+            summary=await self._changes_summary(entities, filters),
+            items=items,
+            next_cursor=next_cursor,
+        )
+
+    async def _changes_summary(
+        self, entities: CTE, filters: list[ColumnElement[bool]]
+    ) -> ChangesSummary:
+        event = EntityChangeEvent
+        net_counts = select(entities.c.net_change, func.count()).group_by(entities.c.net_change)
+        by_net_change: dict[NetChange, int] = {"added": 0, "modified": 0, "removed": 0}
+        for net_change, count in await self._db.execute(net_counts):
+            by_net_change[net_change] = count
+
+        origin_counts = select(event.origin, func.count()).where(*filters).group_by(event.origin)
+        by_origin = dict.fromkeys(ChangeOrigin, 0)
+        for origin, count in await self._db.execute(origin_counts):
+            by_origin[ChangeOrigin(origin)] = count
+
+        # Count by stable user ID and take the most recent known display name.
+        authors = (
+            select(
+                event.user_id,
+                event.user_name,
+                func.count().over(partition_by=event.user_id).label("event_count"),
+                func.row_number()
+                .over(
+                    partition_by=event.user_id,
+                    order_by=(event.user_name.is_(None), event.created_at.desc(), event.id.desc()),
+                )
+                .label("author_rank"),
+            )
+            .where(*filters)
+            .subquery()
+        ).c
+        author_counts = (
+            select(authors.user_id, authors.user_name, authors.event_count)
+            .where(authors.author_rank == 1)
+            .order_by(authors.event_count.desc(), authors.user_id)
+        )
+        return ChangesSummary(
+            total_events=sum(by_origin.values()),
+            entities_changed=sum(by_net_change.values()),
+            by_net_change=by_net_change,
+            by_origin=by_origin,
+            authors=[
+                ChangeAuthorCount(
+                    user_id=row.user_id, user_name=row.user_name, event_count=row.event_count
+                )
+                for row in await self._db.execute(author_counts)
+            ],
+        )
+
+    async def list_changed_entities(
+        self,
+        project_id: UUID,
+        *,
+        branch: str,
+        days: int = 7,
+        origin: Sequence[str] | None = None,
+    ) -> ChangedEntitiesResponse:
+        until = datetime.now(UTC)
+        filters = _event_filters(project_id, branch, until - timedelta(days=days), until, origin)
+        entities = _group_changes(filters)
+        page = (
+            select(entities)
+            .order_by(entities.c.last_changed_at.desc(), entities.c.entity_iri)
+            .limit(_MARKER_LIMIT + 1)
+        )
+        rows = (await self._db.execute(page)).all()
+        if not rows:
+            return ChangedEntitiesResponse(items=[], truncated=False)
+
+        shown = rows[:_MARKER_LIMIT]
+        event = EntityChangeEvent
+        origins_query = (
+            select(event.entity_iri, event.origin)
+            .where(*filters, event.entity_iri.in_([row.entity_iri for row in shown]))
+            .distinct()
+        )
+        origins: dict[str, list[ChangeOrigin]] = defaultdict(list)
+        for iri, event_origin in await self._db.execute(origins_query):
+            origins[iri].append(ChangeOrigin(event_origin))
+
+        return ChangedEntitiesResponse(
+            items=[
+                ChangedEntity(
+                    entity_iri=row.entity_iri,
+                    net_change=row.net_change,
+                    origins=sorted(origins[row.entity_iri]),
+                    last_changed_at=_utc_iso(row.last_changed_at),
+                )
+                for row in shown
+            ],
+            truncated=len(rows) > _MARKER_LIMIT,
+        )
 
     async def get_entity_history(
         self,
@@ -237,27 +621,7 @@ class ChangeEventService:
         result = await self._db.execute(query)
         rows = result.scalars().all()
 
-        events = [
-            ChangeEvent(
-                id=str(r.id),
-                project_id=str(r.project_id),
-                branch=r.branch,
-                entity_iri=r.entity_iri,
-                entity_type=r.entity_type,
-                event_type=cast(
-                    Literal["create", "update", "delete", "rename", "reparent", "deprecate"],
-                    r.event_type,
-                ),
-                user_id=r.user_id,
-                user_name=r.user_name,
-                commit_hash=r.commit_hash,
-                changed_fields=r.changed_fields or [],
-                old_values=r.old_values,
-                new_values=r.new_values,
-                created_at=r.created_at.isoformat(),
-            )
-            for r in rows
-        ]
+        events = [_serialize_event(row) for row in rows]
 
         # Get total count
         count_q = (

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock
 
 import pytest
 from rdflib import Graph, Literal, URIRef
-from rdflib.namespace import OWL, RDF, RDFS
+from rdflib.namespace import OWL, RDF, RDFS, SKOS
 
 from ontokit.models.change_event import ChangeEventType, EntityChangeEvent
 from ontokit.services.change_event_service import ChangeEventService
@@ -60,6 +60,7 @@ class TestRecordEvent:
         assert result.project_id == PROJECT_ID
         assert result.entity_iri == ENTITY_IRI
         assert result.event_type == ChangeEventType.CREATE
+        assert result.origin == "human"
 
     @pytest.mark.asyncio
     async def test_defaults_changed_fields_to_empty_list(
@@ -93,12 +94,19 @@ class TestRecordEventsFromDiff:
         uri = URIRef("http://example.org/ontology#NewClass")
         new_graph.add((uri, RDF.type, OWL.Class))
         new_graph.add((uri, RDFS.label, Literal("New Class")))
+        new_graph.add((uri, SKOS.definition, Literal("A new concept.")))
+        parent = URIRef("https://example.org/ontology#Parent")
+        new_graph.add((uri, RDFS.subClassOf, parent))
 
         events = await service.record_events_from_diff(
             PROJECT_ID, BRANCH, old_graph, new_graph, USER_ID, USER_NAME, COMMIT_HASH
         )
         assert len(events) == 1
         assert events[0].event_type == ChangeEventType.CREATE
+        assert events[0].new_values is not None
+        assert events[0].new_values["labels"] == ["New Class"]
+        assert events[0].new_values["definitions"] == ["A new concept."]
+        assert events[0].new_values["parents"] == [str(parent)]
         mock_db.commit.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -112,6 +120,9 @@ class TestRecordEventsFromDiff:
         uri = URIRef("http://example.org/ontology#OldClass")
         old_graph.add((uri, RDF.type, OWL.Class))
         old_graph.add((uri, RDFS.label, Literal("Old Class")))
+        old_graph.add((uri, SKOS.definition, Literal("An old concept.")))
+        parent = URIRef("https://example.org/ontology#Parent")
+        old_graph.add((uri, RDFS.subClassOf, parent))
 
         new_graph = Graph()
 
@@ -120,6 +131,110 @@ class TestRecordEventsFromDiff:
         )
         assert len(events) == 1
         assert events[0].event_type == ChangeEventType.DELETE
+        assert events[0].old_values is not None
+        assert events[0].old_values["labels"] == ["Old Class"]
+        assert events[0].old_values["definitions"] == ["An old concept."]
+        assert events[0].old_values["parents"] == [str(parent)]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("before,after", [(None, "New"), ("Old", "New"), ("Old", None)])
+    async def test_captures_definition_changes(
+        self, service: ChangeEventService, before: str | None, after: str | None
+    ) -> None:
+        uri = URIRef(ENTITY_IRI)
+        old_graph, new_graph = Graph(), Graph()
+        for graph, definition in ((old_graph, before), (new_graph, after)):
+            graph.add((uri, RDF.type, OWL.Class))
+            if definition is not None:
+                graph.add((uri, SKOS.definition, Literal(definition)))
+            graph.add((uri, SKOS.definition, URIRef("https://example.org/ignored")))
+
+        (event,) = await service.record_events_from_diff(
+            PROJECT_ID, BRANCH, old_graph, new_graph, USER_ID, USER_NAME, COMMIT_HASH
+        )
+        assert event.changed_fields == ["definitions"]
+        assert event.old_values == {"definitions": [before] if before else []}
+        assert event.new_values == {"definitions": [after] if after else []}
+
+    @pytest.mark.asyncio
+    async def test_captures_comment_values_on_system_updates(
+        self, service: ChangeEventService
+    ) -> None:
+        uri = URIRef(ENTITY_IRI)
+        old_graph, new_graph = Graph(), Graph()
+        for graph, comment in ((old_graph, "Old comment"), (new_graph, "New comment")):
+            graph.add((uri, RDF.type, OWL.Class))
+            graph.add((uri, RDFS.comment, Literal(comment)))
+
+        (event,) = await service.record_events_from_diff(
+            PROJECT_ID,
+            BRANCH,
+            old_graph,
+            new_graph,
+            USER_ID,
+            USER_NAME,
+            COMMIT_HASH,
+            default_origin="system",
+        )
+        assert event.changed_fields == ["comments"]
+        assert event.old_values == {"comments": ["Old comment"]}
+        assert event.new_values == {"comments": ["New comment"]}
+        assert event.origin == "system"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("resolver_raises", [False, True])
+    async def test_resolves_all_creates_together(
+        self, service: ChangeEventService, mock_db: AsyncMock, resolver_raises: bool
+    ) -> None:
+        graph = Graph()
+        input_values = {}
+        for label in ("Generated", "Edited", "Manual"):
+            iri = f"https://example.org/ontology#{label}"
+            uri = URIRef(iri)
+            graph.add((uri, RDF.type, OWL.Class))
+            graph.add((uri, RDFS.label, Literal(label)))
+            graph.add((uri, SKOS.definition, Literal(f"{label} definition")))
+            input_values[iri] = {"labels": [label], "definitions": [f"{label} definition"]}
+        generated, edited, manual = input_values
+        batch = uuid.uuid4()
+        resolver = AsyncMock(
+            return_value={
+                generated: {"origin": "ai", "model": "test-model", "batch_id": str(batch)},
+                edited: {"origin": "ai_edited", "model": "test-model", "batch_id": str(batch)},
+            },
+            side_effect=RuntimeError("resolver unavailable") if resolver_raises else None,
+        )
+        mock_db.begin_nested = MagicMock()
+
+        events = await service.record_events_from_diff(
+            PROJECT_ID,
+            BRANCH,
+            None,
+            graph,
+            USER_ID,
+            USER_NAME,
+            COMMIT_HASH,
+            origin_resolver=resolver,
+        )
+
+        resolver.assert_awaited_once_with(PROJECT_ID, input_values)
+        mock_db.commit.assert_awaited_once()
+        by_iri = {event.entity_iri: event for event in events}
+        assert by_iri.keys() == input_values.keys()
+        for iri, origin in ((generated, "ai"), (edited, "ai_edited"), (manual, "human")):
+            event = by_iri[iri]
+            if resolver_raises or origin == "human":
+                assert (event.origin, event.origin_model, event.origin_batch_id) == (
+                    "human",
+                    None,
+                    None,
+                )
+            else:
+                assert (event.origin, event.origin_model, event.origin_batch_id) == (
+                    origin,
+                    "test-model",
+                    batch,
+                )
 
     @pytest.mark.asyncio
     async def test_detects_renamed_entities(
@@ -198,6 +313,9 @@ class TestGetEntityHistory:
         row.user_id = USER_ID
         row.user_name = USER_NAME
         row.commit_hash = COMMIT_HASH
+        row.origin = "ai"
+        row.origin_model = "test-model"
+        row.origin_batch_id = uuid.uuid4()
         row.changed_fields = []
         row.old_values = None
         row.new_values = None
@@ -217,6 +335,10 @@ class TestGetEntityHistory:
         assert response.entity_iri == ENTITY_IRI
         assert response.total == 1
         assert len(response.events) == 1
+        (event,) = response.events
+        assert event.origin == "ai"
+        assert event.origin_model == "test-model"
+        assert event.origin_batch_id == str(row.origin_batch_id)
 
 
 class TestGetActivity:

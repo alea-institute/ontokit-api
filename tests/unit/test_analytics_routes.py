@@ -4,8 +4,12 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from ontokit.core.auth import get_current_user_optional
+from ontokit.main import app
 from ontokit.schemas.analytics import (
     ActivityDay,
     ContributorStats,
@@ -194,3 +198,118 @@ class TestGetContributors:
         assert len(data) == 1
         assert data[0]["total_count"] == 32
         assert data[0]["user_name"] == "Alice"
+
+
+@pytest.mark.parametrize("path", ["changes", "changed-entities"])
+def test_change_feeds_enforce_project_visibility(
+    authed_client: tuple[TestClient, AsyncMock], path: str
+) -> None:
+    client, db = authed_client
+    with (
+        patch("ontokit.api.routes.analytics.get_project_service") as projects,
+        patch("ontokit.api.routes.analytics.get_git_service") as git,
+    ):
+        projects.return_value.get = AsyncMock(
+            side_effect=HTTPException(status_code=403, detail="Access denied")
+        )
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/analytics/{path}")
+    assert response.status_code == 403
+    args = projects.return_value.get.await_args.args
+    assert str(args[0]) == PROJECT_ID
+    assert args[1].id == "test-user-id"
+    git.assert_not_called()
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "path,params",
+    [
+        ("changes", {"origin": "invalid"}),
+        ("changed-entities", {"origin": "invalid"}),
+        ("changes", {"cursor": "%%%"}),
+        ("changes", {"cursor": ""}),
+        ("changes", {"days": 0}),
+        ("changed-entities", {"days": 366}),
+        ("changes", {"limit": 201}),
+    ],
+)
+def test_change_feeds_reject_invalid_queries(
+    authed_client: tuple[TestClient, AsyncMock], path: str, params: dict[str, str | int]
+) -> None:
+    client, db = authed_client
+    with (
+        patch("ontokit.api.routes.analytics.get_project_service") as projects,
+        patch("ontokit.api.routes.analytics.get_git_service") as git,
+    ):
+        projects.return_value.get = AsyncMock(return_value=_make_project_response())
+        git.return_value.get_repository.return_value.get_default_branch.return_value = "trunk"
+        response = client.get(f"/api/v1/projects/{PROJECT_ID}/analytics/{path}", params=params)
+    assert response.status_code == 422
+    db.execute.assert_not_awaited()
+
+
+@pytest.mark.parametrize("path", ["changes", "changed-entities"])
+def test_change_feeds_allow_visible_anonymous_projects(
+    authed_client: tuple[TestClient, AsyncMock], path: str
+) -> None:
+    client, _ = authed_client
+
+    async def anonymous() -> None:
+        return None
+
+    route = f"/api/v1/projects/{PROJECT_ID}/analytics/{path}"
+    app.dependency_overrides[get_current_user_optional] = anonymous
+    with (
+        patch("ontokit.api.routes.analytics.get_project_service") as projects,
+        patch("ontokit.api.routes.analytics.get_git_service") as git,
+        patch("ontokit.api.routes.analytics.ChangeEventService") as change_service,
+    ):
+        projects.return_value.get = AsyncMock(return_value=_make_project_response())
+        git.return_value.get_repository.return_value.get_default_branch.return_value = "trunk"
+        if path == "changes":
+            method = change_service.return_value.list_changes = AsyncMock(
+                return_value={
+                    "window": {
+                        "days": 7,
+                        "since": "2026-11-13T00:00:00Z",
+                        "until": "2026-11-20T00:00:00Z",
+                        "branch": "trunk",
+                    },
+                    "summary": {
+                        "total_events": 0,
+                        "entities_changed": 0,
+                        "by_net_change": {"added": 0, "modified": 0, "removed": 0},
+                        "by_origin": {"human": 0, "ai": 0, "ai_edited": 0, "system": 0},
+                        "authors": [],
+                    },
+                    "items": [],
+                    "next_cursor": None,
+                }
+            )
+        else:
+            method = change_service.return_value.list_changed_entities = AsyncMock(
+                return_value={"items": [], "truncated": False}
+            )
+        response = client.get(route, params={"origin": ["human", "ai"]})
+        assert response.status_code == 200
+        args = projects.return_value.get.await_args.args
+        assert str(args[0]) == PROJECT_ID
+        assert args[1] is None
+        git.return_value.get_repository.assert_called_once_with(args[0])
+        assert method.await_args.kwargs["branch"] == "trunk"
+        assert method.await_args.kwargs["days"] == 7
+        assert method.await_args.kwargs["origin"] == ["human", "ai"]
+        if path == "changes":
+            assert response.json()["window"]["branch"] == "trunk"
+            filters = {
+                "branch": "review",
+                "author": ["user-a", "user-b"],
+                "entity_type": ["property", "class"],
+                "event_type": ["create", "update"],
+                "limit": 3,
+            }
+            assert client.get(route, params=filters).status_code == 200
+            assert {key: method.await_args.kwargs[key] for key in filters} == filters
+            git.return_value.get_repository.assert_called_once()
+        else:
+            assert response.json() == {"items": [], "truncated": False}

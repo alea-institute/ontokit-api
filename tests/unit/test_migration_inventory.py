@@ -6,6 +6,8 @@ import re
 from pathlib import Path
 
 import yaml
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 
 ROOT = Path(__file__).parents[2]
 COMPOSE_DEV = ROOT / "deploy" / "compose.dev.yaml"
@@ -62,3 +64,10 @@ def test_backup_and_restore_cover_every_stateful_volume() -> None:
     for script in SCRIPTS:
         # postgres_data travels as pg_dumpall, never as a raw cluster copy.
         assert set(_script_volumes(script)) == volumes - {"postgres_data"}, script.name
+
+
+def test_alembic_has_one_current_head() -> None:
+    config = Config()
+    config.set_main_option("script_location", str(ROOT / "alembic"))
+
+    assert ScriptDirectory.from_config(config).get_heads() == ["j8k9l0m1n2o3"]

@@ -20,6 +20,13 @@ class ChangeEventType(StrEnum):
     DEPRECATE = "deprecate"
 
 
+class ChangeOrigin(StrEnum):
+    HUMAN = "human"
+    AI = "ai"
+    AI_EDITED = "ai_edited"
+    SYSTEM = "system"
+
+
 class EntityChangeEvent(Base):
     __tablename__ = "entity_change_events"
 
@@ -34,6 +41,9 @@ class EntityChangeEvent(Base):
     user_id: Mapped[str] = mapped_column(String(255))
     user_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     commit_hash: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    origin: Mapped[str] = mapped_column(String(20), server_default=ChangeOrigin.HUMAN)
+    origin_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    origin_batch_id: Mapped[uuid.UUID | None] = mapped_column(nullable=True)
     changed_fields: Mapped[list[str]] = mapped_column(JSON, default=list)
     old_values: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     new_values: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
@@ -45,4 +55,5 @@ class EntityChangeEvent(Base):
         Index("ix_change_events_project_entity", "project_id", "entity_iri"),
         Index("ix_change_events_project_time", "project_id", "created_at"),
         Index("ix_change_events_project_branch_time", "project_id", "branch", "created_at"),
+        Index("ix_change_events_project_origin_time", "project_id", "origin", "created_at"),
     )

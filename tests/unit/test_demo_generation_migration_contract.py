@@ -9,10 +9,8 @@ from unittest.mock import MagicMock
 
 import pytest
 import sqlalchemy as sa
-from alembic.config import Config
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from alembic.script import ScriptDirectory
 
 from ontokit.models.demo_generation import DemoGeneration
 
@@ -159,13 +157,11 @@ def test_upgrade_accepts_exactly_the_approved_uniform_legacy_demo_set() -> None:
     )
 
 
-def test_purge_migration_is_the_single_head() -> None:
+def test_purge_migration_follows_atomic_demo_generations() -> None:
     module = _load_migration(PURGE_MIGRATION)
-    config = Config()
-    config.set_main_option("script_location", str(MIGRATION.parents[1]))
 
+    assert module.revision == "i7j8k9l0m1n2"
     assert module.down_revision == "h6i7j8k9l0m1"
-    assert ScriptDirectory.from_config(config).get_heads() == [module.revision]
 
 
 def test_purge_columns_match_model_and_are_nullable() -> None:
