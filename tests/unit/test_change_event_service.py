@@ -27,6 +27,7 @@ def mock_db() -> AsyncMock:
     session = AsyncMock()
     session.commit = AsyncMock()
     session.execute = AsyncMock()
+    session.scalar = AsyncMock(return_value=None)
     session.add = Mock()
     return session
 
@@ -274,6 +275,54 @@ class TestRecordEventsFromDiff:
         )
         assert events == []
         mock_db.commit.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("before", "after", "expected_fields"),
+        [
+            pytest.param(
+                "rdfs:subClassOf [ a owl:Restriction; owl:onProperty ex:knows; "
+                "owl:someValuesFrom ex:Person ]",
+                "rdfs:subClassOf [ owl:someValuesFrom ex:Person; owl:onProperty ex:knows; "
+                "a owl:Restriction ]",
+                [],
+                id="unchanged-restriction",
+            ),
+            pytest.param(
+                "rdfs:subClassOf [ a owl:Restriction; owl:onProperty ex:knows; "
+                "owl:someValuesFrom ex:Person ]",
+                "rdfs:subClassOf [ a owl:Restriction; owl:onProperty ex:knows; "
+                "owl:someValuesFrom ex:Organization ]",
+                [["other"]],
+                id="changed-restriction",
+            ),
+            pytest.param(
+                "owl:intersectionOf ( ex:Person ex:Contributor ex:Owner )",
+                "owl:intersectionOf ( ex:Person ex:Contributor ex:Owner )",
+                [],
+                id="unchanged-list",
+            ),
+        ],
+    )
+    async def test_compares_blank_node_descriptions_across_parses(
+        self, service: ChangeEventService, before: str, after: str, expected_fields: list[list[str]]
+    ) -> None:
+        def parse(statement: str) -> Graph:
+            return Graph().parse(
+                data=f"""\
+                    @prefix ex: <https://example.org/ontology#> .
+                    @prefix owl: <{OWL}> .
+                    @prefix rdfs: <{RDFS}> .
+                    ex:Member a owl:Class; {statement} .
+                """,
+                format="turtle",
+            )
+
+        events = await service.record_events_from_diff(
+            PROJECT_ID, BRANCH, parse(before), parse(after), USER_ID, USER_NAME, COMMIT_HASH
+        )
+
+        assert [event.changed_fields for event in events] == expected_fields
 
     @pytest.mark.asyncio
     async def test_none_old_graph_all_creates(

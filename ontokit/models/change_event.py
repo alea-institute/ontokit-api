@@ -10,6 +10,8 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ontokit.core.database import Base
 
+MAX_ENTITY_IRI_LENGTH = 2000
+
 
 class ChangeEventType(StrEnum):
     CREATE = "create"
@@ -35,7 +37,7 @@ class EntityChangeEvent(Base):
         ForeignKey("projects.id", ondelete="CASCADE"), index=True
     )
     branch: Mapped[str] = mapped_column(String(255))
-    entity_iri: Mapped[str] = mapped_column(String(2000))
+    entity_iri: Mapped[str] = mapped_column(String(MAX_ENTITY_IRI_LENGTH))
     entity_type: Mapped[str] = mapped_column(String(50))
     event_type: Mapped[str] = mapped_column(String(50))
     user_id: Mapped[str] = mapped_column(String(255))
@@ -56,4 +58,5 @@ class EntityChangeEvent(Base):
         Index("ix_change_events_project_time", "project_id", "created_at"),
         Index("ix_change_events_project_branch_time", "project_id", "branch", "created_at"),
         Index("ix_change_events_project_origin_time", "project_id", "origin", "created_at"),
+        Index("ix_change_events_project_branch_commit", "project_id", "branch", "commit_hash"),
     )

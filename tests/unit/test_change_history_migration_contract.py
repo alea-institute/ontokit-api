@@ -19,7 +19,7 @@ def test_watermark_schema_and_concurrent_index() -> None:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    from ontokit.models import ChangeHistoryWatermark
+    from ontokit.models import ChangeHistoryWatermark, EntityChangeEvent
 
     module.op = op = MagicMock()
     assert module.down_revision == "j8k9l0m1n2o3"
@@ -52,6 +52,11 @@ def test_watermark_schema_and_concurrent_index() -> None:
             call.get_context().autocommit_block().__exit__(None, None, None),
         ]
     )
+    index_name, event_table_name, index_columns = op.create_index.call_args.args
+    event_table = sa.inspect(EntityChangeEvent).local_table
+    assert event_table.name == event_table_name
+    event_indexes = {index.name: list(index.columns.keys()) for index in event_table.indexes}
+    assert event_indexes.get(index_name) == index_columns
 
     op.reset_mock()
     module.downgrade()

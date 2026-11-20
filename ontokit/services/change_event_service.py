@@ -4,19 +4,27 @@ import logging
 from base64 import b64decode, urlsafe_b64encode
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import chain
 from typing import Literal, cast
 from uuid import UUID
 
-from rdflib import Graph, URIRef
+from rdflib import BNode, Graph, URIRef
 from rdflib import Literal as RDFLiteral
+from rdflib.compare import isomorphic
 from rdflib.namespace import OWL, RDF, RDFS, SKOS
 from sqlalchemy import case, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql import ColumnElement
 from sqlalchemy.sql.selectable import CTE
 
-from ontokit.models.change_event import ChangeEventType, ChangeOrigin, EntityChangeEvent
+from ontokit.models.change_event import (
+    MAX_ENTITY_IRI_LENGTH,
+    ChangeEventType,
+    ChangeOrigin,
+    EntityChangeEvent,
+)
 from ontokit.schemas.analytics import (
     ActivityDay,
     ChangeAuthor,
@@ -63,10 +71,29 @@ class InvalidChangesCursor(ValueError):
     """A project changes cursor could not be decoded."""
 
 
+@dataclass
+class ChangeEventSkips:
+    overlong_iris: int = 0
+
+    def warn(self) -> None:
+        if self.overlong_iris:
+            logger.warning(
+                "Skipped %d change events with entity IRIs longer than %d characters",
+                self.overlong_iris,
+                MAX_ENTITY_IRI_LENGTH,
+            )
+
+
 def _utc_iso(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
     return value.astimezone(UTC).isoformat()
+
+
+def _clamp_occurrence_time(value: datetime) -> datetime:
+    if value.utcoffset() is None:
+        raise ValueError("occurred_at must be timezone-aware")
+    return min(value.astimezone(UTC), datetime.now(UTC))
 
 
 def _read_cursor(cursor: str, days: int, now: datetime) -> tuple[datetime, datetime, str]:
@@ -82,7 +109,7 @@ def _read_cursor(cursor: str, days: int, now: datetime) -> tuple[datetime, datet
             or timestamp.utcoffset() != timedelta(0)
             or not since <= timestamp <= until <= now
             or not iri
-            or len(iri) > 2000
+            or len(iri) > MAX_ENTITY_IRI_LENGTH
             or "\x00" in iri
         ):
             raise ValueError
@@ -260,6 +287,31 @@ def _entity_values(graph: Graph, uri: URIRef, entity_type: str) -> dict[str, lis
     }
 
 
+def _entity_description(graph: Graph, uri: URIRef) -> Graph:
+    """Collect the entity's outgoing statements and follow only blank nodes."""
+    description = Graph()
+    pending: list[URIRef | BNode] = [uri]
+    seen: set[BNode] = set()
+    while pending:
+        for triple in graph.triples((pending.pop(), None, None)):
+            description.add(triple)
+            obj = triple[2]
+            if isinstance(obj, BNode) and obj not in seen:
+                seen.add(obj)
+                pending.append(obj)
+    return description
+
+
+def _entity_statements_changed(old_graph: Graph, new_graph: Graph, uri: URIRef) -> bool:
+    old_triples = set(old_graph.triples((uri, None, None)))
+    new_triples = set(new_graph.triples((uri, None, None)))
+    if any(isinstance(obj, BNode) for _, _, obj in chain(old_triples, new_triples)):
+        return not isomorphic(
+            _entity_description(old_graph, uri), _entity_description(new_graph, uri)
+        )
+    return old_triples != new_triples
+
+
 def _get_declared_entities(graph: Graph) -> dict[str, str]:
     """Get {iri: entity_type} for all declared entities in graph."""
     entities: dict[str, str] = {}
@@ -312,9 +364,7 @@ class ChangeEventService:
             new_values=new_values,
         )
         if occurred_at is not None:
-            if occurred_at.utcoffset() is None:
-                raise ValueError("occurred_at must be timezone-aware")
-            event.created_at = min(occurred_at.astimezone(UTC), datetime.now(UTC))
+            event.created_at = _clamp_occurrence_time(occurred_at)
         self._db.add(event)
         return event
 
@@ -332,15 +382,42 @@ class ChangeEventService:
         default_origin: str = ChangeOrigin.HUMAN,
         occurred_at: datetime | None = None,
         auto_commit: bool = True,
+        skips: ChangeEventSkips | None = None,
     ) -> list[EntityChangeEvent]:
         """Compare two RDFLib graphs and generate change events."""
         old_graph = old_graph if old_graph is not None else Graph()
         old_entities = _get_declared_entities(old_graph)
         new_entities = _get_declared_entities(new_graph)
+        skipped = ChangeEventSkips() if skips is None else skips
+
+        def fits_column(iri: str) -> bool:
+            if len(iri) <= MAX_ENTITY_IRI_LENGTH:
+                return True
+            skipped.overlong_iris += 1
+            return False
+
+        if occurred_at is not None:
+            occurred_at = _clamp_occurrence_time(occurred_at)
+            # Inline saves and reconciliation hold the same branch lock. The
+            # query also sees earlier commits already flushed in this transaction.
+            latest = await self._db.scalar(
+                select(EntityChangeEvent.created_at)
+                .where(
+                    EntityChangeEvent.project_id == project_id, EntityChangeEvent.branch == branch
+                )
+                .order_by(EntityChangeEvent.created_at.desc())
+                .limit(1)
+            )
+            if latest is not None:
+                if latest.tzinfo is None:
+                    latest = latest.replace(tzinfo=UTC)
+                occurred_at = max(occurred_at, latest + timedelta(microseconds=1))
 
         events: list[EntityChangeEvent] = []
 
         async def append(event: EntityChangeEvent) -> None:
+            if occurred_at is not None:
+                event.created_at = occurred_at
             events.append(event)
             if len(events) % _EVENT_INSERT_BATCH_SIZE == 0:
                 await self._db.flush()
@@ -348,7 +425,7 @@ class ChangeEventService:
         old_iris = set(old_entities.keys())
         new_iris = set(new_entities.keys())
 
-        created_iris = new_iris - old_iris
+        created_iris = {iri for iri in new_iris - old_iris if fits_column(iri)}
         origins: dict[str, dict[str, str | None]] = {}
         if origin_resolver is not None and created_iris:
             created = {
@@ -385,12 +462,13 @@ class ChangeEventService:
                     origin=provenance.get("origin") or default_origin,
                     origin_model=provenance.get("model"),
                     origin_batch_id=UUID(batch_id) if batch_id is not None else None,
-                    occurred_at=occurred_at,
                 )
             )
 
         # Deleted entities
         for iri in old_iris - new_iris:
+            if not fits_column(iri):
+                continue
             await append(
                 await self.record_event(
                     project_id,
@@ -403,7 +481,6 @@ class ChangeEventService:
                     commit_hash,
                     old_values=dict(_entity_values(old_graph, URIRef(iri), old_entities[iri])),
                     origin=default_origin,
-                    occurred_at=occurred_at,
                 )
             )
 
@@ -419,14 +496,10 @@ class ChangeEventService:
             old_vals: dict[str, object] = {field: old_values[field] for field in changed_fields}
             new_vals: dict[str, object] = {field: new_values[field] for field in changed_fields}
 
-            if not changed_fields:
-                # Check if any triples changed at all for this entity
-                old_triples = set(old_graph.triples((uri, None, None)))
-                new_triples = set(new_graph.triples((uri, None, None)))
-                if old_triples != new_triples:
-                    changed_fields.append("other")
+            if not changed_fields and _entity_statements_changed(old_graph, new_graph, uri):
+                changed_fields.append("other")
 
-            if not changed_fields:
+            if not changed_fields or not fits_column(iri):
                 continue
 
             # Determine event type
@@ -453,7 +526,6 @@ class ChangeEventService:
                     old_vals or None,
                     new_vals or None,
                     origin=default_origin,
-                    occurred_at=occurred_at,
                 )
             )
 
@@ -461,6 +533,8 @@ class ChangeEventService:
             await self._db.flush()
         if events and auto_commit:
             await self._db.commit()
+        if skips is None:
+            skipped.warn()
 
         return events
 

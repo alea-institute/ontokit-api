@@ -25,7 +25,7 @@ from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import PullRequest
 from ontokit.models.user_commit_identity import UserCommitIdentity
 from ontokit.services.ai_origin_service import AIOriginService
-from ontokit.services.change_event_service import ChangeEventService
+from ontokit.services.change_event_service import ChangeEventService, ChangeEventSkips
 from ontokit.services.commit_identity import noreply_alias
 from ontokit.services.ontology import rdf_format_for_filename
 
@@ -204,6 +204,7 @@ class ChangeHistoryReconciler:
                 baseline = baseline.parents[0] if baseline.parent_ids else None
 
             recorder = ChangeEventService(self._db)
+            skips = ChangeEventSkips()
             resolve_origin = AIOriginService(self._db).resolve
             for _ in range(min(max_commits, len(pending))):
                 commit = pending[-1]
@@ -243,6 +244,7 @@ class ChangeHistoryReconciler:
                             origin_resolver=resolve_origin,
                             default_origin=origin,
                             auto_commit=False,
+                            skips=skips,
                         )
                         result["recorded"] += len(events)
                     else:
@@ -255,6 +257,7 @@ class ChangeHistoryReconciler:
             result["more"] = bool(pending) or (
                 current_ref is not None and current_ref.target != head.id
             )
+        skips.warn()
         return result
 
     async def _attribution(

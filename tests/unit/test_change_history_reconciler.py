@@ -15,7 +15,7 @@ from rdflib.namespace import OWL, RDFS, SKOS
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ontokit.git.bare_repository import BareGitRepositoryService
+from ontokit.git.bare_repository import BareGitRepositoryService, BareOntologyRepository
 from ontokit.models.change_event import EntityChangeEvent
 from ontokit.models.llm_generated_entity import LLMGeneratedEntity
 from ontokit.models.normalization import NormalizationRun
@@ -242,6 +242,22 @@ async def test_inline_save_diffs_against_git_parent_when_cache_is_stale(history:
 
 
 @pytest.mark.asyncio
+async def test_consecutive_inline_saves_in_one_second_keep_landing_order(history: History):
+    previous, _ = history.commit(PREFIXES)
+    timestamp = (datetime.now(UTC) - timedelta(seconds=1)).replace(microsecond=0)
+    signature = pygit2.Signature("Owner", "owner@example.org", int(timestamp.timestamp()), 0)
+
+    with patch.object(BareOntologyRepository, "_get_signature", return_value=signature):
+        created = await save_inline(history, PREFIXES + "ex:A a owl:Class .", previous)
+        deleted = await save_inline(history, PREFIXES, created.commit_hash)
+
+    assert {row.commit_hash: row.created_at.replace(tzinfo=UTC) for row in history.events()} == {
+        created.commit_hash: timestamp,
+        deleted.commit_hash: timestamp + timedelta(microseconds=1),
+    }
+
+
+@pytest.mark.asyncio
 async def test_inline_save_does_not_persist_an_email_as_the_display_name(history: History):
     previous, _ = history.commit(PREFIXES)
     await save_inline(
@@ -451,6 +467,56 @@ async def test_first_parent_history_has_commit_times_and_no_duplicate_events(his
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("max_commits", [1, 50], ids=["separate-runs", "same-run"])
+async def test_same_second_commit_burst_keeps_feed_order(history: History, max_commits: int):
+    from ontokit.services.change_event_service import ChangeEventService
+
+    timestamp = (datetime.now(UTC) - timedelta(days=1)).replace(microsecond=0)
+    created, _ = history.commit(PREFIXES + "ex:A a owl:Class .", time=timestamp)
+    deleted, _ = history.commit(PREFIXES, time=timestamp)
+    content = PREFIXES
+    commits = [created, deleted]
+    for i in range(8):
+        content += f"ex:Class{i} a owl:Class .\n"
+        commit, _ = history.commit(content, time=timestamp)
+        commits.append(commit)
+
+    for _ in commits:
+        if not (await history.reconcile(max_commits=max_commits))["more"]:
+            break
+
+    with history.session.begin():
+        # UUID order is opposite to landing order for the entity's two events.
+        for commit, event_id in [(created, UUID(int=2)), (deleted, UUID(int=1))]:
+            history.session.execute(
+                sa.update(EntityChangeEvent)
+                .where(EntityChangeEvent.commit_hash == commit)
+                .values(id=event_id)
+            )
+        feed = await ChangeEventService(history.db).list_changes(PROJECT, branch=BRANCH)
+
+    item = next(item for item in feed.items if item.entity_iri == BASE_IRI + "A")
+    assert item.net_change == "transient"
+    assert [event.commit_hash for event in item.events] == [deleted, created]
+    times = {row.commit_hash: row.created_at.replace(tzinfo=UTC) for row in history.events()}
+    assert [times[commit] for commit in commits] == [
+        timestamp + timedelta(microseconds=i) for i in range(len(commits))
+    ]
+
+
+@pytest.mark.asyncio
+async def test_clock_skew_does_not_move_a_commit_before_its_parent(history: History):
+    parent, parent_time = history.commit(PREFIXES + "ex:A a owl:Class .")
+    child, _ = history.commit(PREFIXES, time=parent_time - timedelta(minutes=5))
+
+    assert (await history.reconcile())["recorded"] == 2
+    assert {row.commit_hash: row.created_at.replace(tzinfo=UTC) for row in history.events()} == {
+        parent: parent_time,
+        child: parent_time + timedelta(microseconds=1),
+    }
+
+
+@pytest.mark.asyncio
 async def test_no_entity_change_advances_watermark_and_rerun_does_not_parse(history: History):
     from ontokit.services import change_history_reconciler
 
@@ -463,6 +529,47 @@ async def test_no_entity_change_advances_watermark_and_rerun_does_not_parse(hist
     with patch.object(change_history_reconciler, "read_history_graph") as read:
         assert (await history.reconcile())["processed"] == 0
     read.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_overlong_entity_iris_do_not_block_reconciliation(
+    history: History, caplog: pytest.LogCaptureFixture
+):
+    with history.session.begin():
+        # SQLite accepts oversized VARCHAR values unless the test enforces the limit.
+        history.session.execute(
+            sa.text("""
+                CREATE TRIGGER enforce_entity_iri_length BEFORE INSERT ON entity_change_events
+                WHEN length(NEW.entity_iri) > 2000
+                BEGIN SELECT RAISE(ABORT, 'entity IRI exceeds column limit'); END
+            """)
+        )
+
+    boundary_iri = BASE_IRI + "a" * (2000 - len(BASE_IRI))
+    overlong_iri = boundary_iri + "b"
+    content = PREFIXES + f"<{boundary_iri}> a owl:Class .\n"
+    first, _ = history.commit(content + f"<{overlong_iri}> a owl:Class .")
+    second_content = content + "ex:AlsoValid a owl:Class .\n"
+    second, _ = history.commit(
+        second_content + f'<{overlong_iri}> a owl:Class; rdfs:label "Updated" .'
+    )
+    history.commit(second_content)
+    head, _ = history.commit(second_content + "ex:Later a owl:Class .")
+
+    result = await history.reconcile()
+
+    assert result["processed"] == 4
+    assert result["recorded"] == 3
+    assert history.watermark() == head
+    assert {(row.commit_hash, row.entity_iri) for row in history.events()} == {
+        (first, boundary_iri),
+        (second, BASE_IRI + "AlsoValid"),
+        (head, BASE_IRI + "Later"),
+    }
+    assert [r.message for r in caplog.records if "entity IRIs longer" in r.message] == [
+        "Skipped 3 change events with entity IRIs longer than 2000 characters"
+    ]
+    assert overlong_iri not in caplog.text
 
 
 @pytest.mark.asyncio
