@@ -43,10 +43,31 @@ class ReconciliationResult(TypedDict):
     more: bool
 
 
+def _branch_head(git: BareGitRepositoryService | None, project_id: UUID, branch: str) -> str | None:
+    try:
+        git = git or BareGitRepositoryService()
+        if not git.repository_exists(project_id):
+            return None
+        ref = git.get_repository(project_id).repo.references.get(f"refs/heads/{branch}")
+        return str(ref.peel(pygit2.Commit).id) if ref is not None else None
+    except Exception:
+        return None
+
+
 async def enqueue_change_history(
-    project_id: UUID, branch: str, *, pool: ArqRedis | None = None
+    project_id: UUID,
+    branch: str,
+    *,
+    pool: ArqRedis | None = None,
+    git: BareGitRepositoryService | None = None,
 ) -> None:
-    """Queue one job per branch, without affecting the landing operation."""
+    """Queue one job per branch head, without affecting the landing operation.
+
+    ARQ ignores a job whose id is already queued or running. An id that named
+    only the branch dropped a landing made while that branch's job was
+    finishing, so the id also names the head being reconciled. Jobs for one
+    branch still run one at a time under the branch lock.
+    """
     from ontokit.api.utils.redis import get_arq_pool
 
     if branch.startswith("suggest/"):
@@ -54,13 +75,14 @@ async def enqueue_change_history(
 
     try:
         async with asyncio.timeout(_ENQUEUE_TIMEOUT_SECONDS):
+            head = await asyncio.to_thread(_branch_head, git, project_id, branch)
             if pool is None:
                 pool = await get_arq_pool()
             await pool.enqueue_job(
                 RECONCILE_CHANGE_HISTORY_TASK,
                 str(project_id),
                 branch,
-                _job_id=f"change-history:{project_id}:{branch}",
+                _job_id=":".join(filter(None, ("change-history", str(project_id), branch, head))),
             )
     except Exception as exc:
         logger.warning(

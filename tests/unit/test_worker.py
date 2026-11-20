@@ -1899,8 +1899,12 @@ async def test_history_job_continues_under_the_same_queue_id(mock_ctx, project_i
 
 
 def _repository_with_branches(*branches: str) -> Mock:
-    references = [f"refs/heads/{branch}" for branch in branches]
-    return Mock(repo=Mock(references=[*references, "refs/remotes/origin/main", "refs/tags/v1"]))
+    names = [f"refs/heads/{branch}" for branch in branches]
+    references = {
+        name: Mock(peel=Mock(return_value=Mock(id=f"head-of-{name.rsplit('/', 1)[1]}")))
+        for name in [*names, "refs/remotes/origin/main", "refs/tags/v1"]
+    }
+    return Mock(repo=Mock(references=references))
 
 
 @pytest.mark.asyncio
@@ -1913,10 +1917,10 @@ async def test_history_and_ledger_crons_run_daily(mock_ctx, mock_db_session, moc
     mock_ctx["session_factory"] = MagicMock(return_value=session_manager)
     mock_db_session.scalars.return_value = [first, second]
     git = Mock()
-    git.get_repository.side_effect = [
-        _repository_with_branches("trunk", "work"),
-        _repository_with_branches("main", "suggest/contributor/proposal"),
-    ]
+    git.get_repository.side_effect = {
+        first: _repository_with_branches("trunk", "work"),
+        second: _repository_with_branches("main", "suggest/contributor/proposal"),
+    }.__getitem__
     purge = AsyncMock(return_value=2)
     with (
         patch.object(worker, "BareGitRepositoryService", return_value=git),
@@ -1929,6 +1933,11 @@ async def test_history_and_ledger_crons_run_daily(mock_ctx, mock_db_session, moc
         ("reconcile_change_history_task", str(first), "trunk"),
         ("reconcile_change_history_task", str(first), "work"),
         ("reconcile_change_history_task", str(second), "main"),
+    ]
+    assert [call.kwargs["_job_id"] for call in mock_redis.enqueue_job.await_args_list] == [
+        f"change-history:{first}:trunk:head-of-trunk",
+        f"change-history:{first}:work:head-of-work",
+        f"change-history:{second}:main:head-of-main",
     ]
     purge.assert_awaited_once_with(365)
     mock_db_session.commit.assert_awaited_once()
@@ -1953,10 +1962,10 @@ async def test_history_sweep_skips_suggestions_and_continues_after_repository_er
     mock_db_session.scalars.return_value = [broken, suggestion, good]
     git = Mock()
     git.repository_exists.side_effect = [pygit2.GitError("Invalid repository"), True, True]
-    git.get_repository.side_effect = [
-        _repository_with_branches("suggest/contributor/proposal"),
-        _repository_with_branches("trunk"),
-    ]
+    git.get_repository.side_effect = {
+        suggestion: _repository_with_branches("suggest/contributor/proposal"),
+        good: _repository_with_branches("trunk"),
+    }.__getitem__
 
     with patch.object(worker, "BareGitRepositoryService", return_value=git):
         await worker.sweep_change_history(mock_ctx)

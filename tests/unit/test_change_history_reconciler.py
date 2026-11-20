@@ -224,6 +224,27 @@ async def test_history_enqueue_timeout_does_not_block_landing(monkeypatch, caplo
 
 
 @pytest.mark.asyncio
+async def test_each_landing_queues_its_own_job(history: History):
+    """A job id that named only the branch dropped a landing made while its job was finishing."""
+    from ontokit.services.change_history_reconciler import enqueue_change_history
+
+    pool = Mock(enqueue_job=AsyncMock())
+    first, _ = history.commit(PREFIXES + "ex:A a owl:Class .")
+    await enqueue_change_history(PROJECT, BRANCH, pool=pool, git=history.git)
+    await enqueue_change_history(PROJECT, BRANCH, pool=pool, git=history.git)
+    second, _ = history.commit(PREFIXES + "ex:A a owl:Class . ex:B a owl:Class .")
+    await enqueue_change_history(PROJECT, BRANCH, pool=pool, git=history.git)
+    await enqueue_change_history(PROJECT, "missing", pool=pool, git=history.git)
+
+    assert [call.kwargs["_job_id"] for call in pool.enqueue_job.await_args_list] == [
+        f"change-history:{PROJECT}:{BRANCH}:{first}",
+        f"change-history:{PROJECT}:{BRANCH}:{first}",
+        f"change-history:{PROJECT}:{BRANCH}:{second}",
+        f"change-history:{PROJECT}:missing",
+    ]
+
+
+@pytest.mark.asyncio
 async def test_inline_save_diffs_against_git_parent_when_cache_is_stale(history: History):
     from ontokit.services.ontology import OntologyService
 

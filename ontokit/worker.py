@@ -1621,7 +1621,7 @@ async def sweep_change_history(ctx: dict[str, Any]) -> None:
             )
             continue
         for branch in branches:
-            await enqueue_change_history(project_id, branch, pool=ctx["redis"])
+            await enqueue_change_history(project_id, branch, pool=ctx["redis"], git=git)
 
 
 async def purge_generated_entity_ledger(ctx: dict[str, Any]) -> int:

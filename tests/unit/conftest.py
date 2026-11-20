@@ -34,6 +34,20 @@ def _default_commit_identity_preference(request: pytest.FixtureRequest) -> Itera
         yield
 
 
+@pytest.fixture(autouse=True)
+def _no_job_queue() -> Iterator[None]:
+    """Keep unit tests away from a real job queue.
+
+    Many landing paths queue change-history reconciliation through the shared
+    pool. Without this, each such test waits on a Redis connection, and a
+    developer's local Redis receives real jobs. Tests of queueing patch the
+    pool themselves.
+    """
+    unavailable = AsyncMock(side_effect=ConnectionError("Unit tests have no job queue"))
+    with patch("ontokit.api.utils.redis.get_arq_pool", unavailable):
+        yield
+
+
 @pytest.fixture
 def authed_client() -> Generator[tuple[TestClient, AsyncMock], None, None]:
     """TestClient with mocked DB and authenticated user.
