@@ -14,6 +14,7 @@ from ontokit.git import GitRepositoryService, get_git_service
 from ontokit.models.normalization import NormalizationRun
 from ontokit.models.project import Project
 from ontokit.services.branch_lock import branch_write_lock
+from ontokit.services.change_history_reconciler import enqueue_change_history
 from ontokit.services.commit_identity import resolve_commit_author
 from ontokit.services.ontology_extractor import OntologyMetadataExtractor
 from ontokit.services.storage import StorageError, StorageService
@@ -297,6 +298,8 @@ class NormalizationService:
 
         self.db.add(run)
         await self.db.commit()
+        if commit_hash and branch is not None:
+            await enqueue_change_history(project.id, branch)
         await self.db.refresh(run)
 
         logger.info(

@@ -56,6 +56,7 @@ _CHANGE_FIELDS: tuple[ChangeField, ...] = (
 )
 _MARKER_LIMIT = 5000
 _ITEM_EVENT_LIMIT = 20
+_EVENT_INSERT_BATCH_SIZE = 1000
 
 
 class InvalidChangesCursor(ValueError):
@@ -292,6 +293,7 @@ class ChangeEventService:
         origin: str = ChangeOrigin.HUMAN,
         origin_model: str | None = None,
         origin_batch_id: UUID | None = None,
+        occurred_at: datetime | None = None,
     ) -> EntityChangeEvent:
         event = EntityChangeEvent(
             project_id=project_id,
@@ -309,6 +311,10 @@ class ChangeEventService:
             old_values=old_values,
             new_values=new_values,
         )
+        if occurred_at is not None:
+            if occurred_at.utcoffset() is None:
+                raise ValueError("occurred_at must be timezone-aware")
+            event.created_at = min(occurred_at.astimezone(UTC), datetime.now(UTC))
         self._db.add(event)
         return event
 
@@ -324,6 +330,8 @@ class ChangeEventService:
         *,
         origin_resolver: OriginResolver | None = None,
         default_origin: str = ChangeOrigin.HUMAN,
+        occurred_at: datetime | None = None,
+        auto_commit: bool = True,
     ) -> list[EntityChangeEvent]:
         """Compare two RDFLib graphs and generate change events."""
         old_graph = old_graph if old_graph is not None else Graph()
@@ -331,6 +339,12 @@ class ChangeEventService:
         new_entities = _get_declared_entities(new_graph)
 
         events: list[EntityChangeEvent] = []
+
+        async def append(event: EntityChangeEvent) -> None:
+            events.append(event)
+            if len(events) % _EVENT_INSERT_BATCH_SIZE == 0:
+                await self._db.flush()
+
         old_iris = set(old_entities.keys())
         new_iris = set(new_entities.keys())
 
@@ -353,11 +367,10 @@ class ChangeEventService:
                 origins = {}
 
         # Created entities
-        fallback_origin = default_origin if origin_resolver is None else ChangeOrigin.HUMAN
         for iri, values in created_values.items():
             provenance = origins.get(iri, {})
             batch_id = provenance.get("batch_id")
-            events.append(
+            await append(
                 await self.record_event(
                     project_id,
                     branch,
@@ -368,15 +381,16 @@ class ChangeEventService:
                     user_name,
                     commit_hash,
                     new_values=dict(values),
-                    origin=provenance.get("origin") or fallback_origin,
+                    origin=provenance.get("origin") or default_origin,
                     origin_model=provenance.get("model"),
                     origin_batch_id=UUID(batch_id) if batch_id is not None else None,
+                    occurred_at=occurred_at,
                 )
             )
 
         # Deleted entities
         for iri in old_iris - new_iris:
-            events.append(
+            await append(
                 await self.record_event(
                     project_id,
                     branch,
@@ -388,6 +402,7 @@ class ChangeEventService:
                     commit_hash,
                     old_values=dict(_entity_values(old_graph, URIRef(iri), old_entities[iri])),
                     origin=default_origin,
+                    occurred_at=occurred_at,
                 )
             )
 
@@ -423,7 +438,7 @@ class ChangeEventService:
             else:
                 event_type = ChangeEventType.UPDATE
 
-            events.append(
+            await append(
                 await self.record_event(
                     project_id,
                     branch,
@@ -437,10 +452,13 @@ class ChangeEventService:
                     old_vals or None,
                     new_vals or None,
                     origin=default_origin,
+                    occurred_at=occurred_at,
                 )
             )
 
-        if events:
+        if len(events) % _EVENT_INSERT_BATCH_SIZE:
+            await self._db.flush()
+        if events and auto_commit:
             await self._db.commit()
 
         return events

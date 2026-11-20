@@ -163,6 +163,8 @@ class Settings(BaseSettings):
     # restore the legacy bidirectional behavior.
     github_mirror_outbound_only: bool = True
 
+    llm_generated_entity_retention_days: int = Field(default=365, ge=1)
+
     # Demo retention: always preserve at least one retired generation for rollback.
     demo_retention_keep_retired: int = Field(default=1, ge=1)
     demo_retention_min_age_days: int = Field(default=7, ge=0)

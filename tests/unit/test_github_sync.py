@@ -444,3 +444,45 @@ class TestTryMerge:
 
         result = _try_merge(repo, MagicMock(), MagicMock(), "main")
         assert result["conflict"] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("ahead", "conflict", "push_ok", "enqueue_fails", "expected_status", "queued"),
+    [
+        (0, False, True, False, "pulled", True),
+        (0, False, True, True, "pulled", True),
+        (1, False, True, False, "merged_and_pushed", True),
+        (1, False, False, False, "error", True),
+        (1, True, True, False, "conflict", False),
+    ],
+)
+async def test_local_github_landing_enqueues_once(
+    ahead, conflict, push_ok, enqueue_fails, expected_status, queued
+):
+    integration = _make_integration()
+    git = _make_git_service()
+    repo = _make_mock_repo(push_ok=push_ok)
+    repo.repo = _make_pygit2_repo(ahead=ahead, behind=2)
+    git.get_repository.return_value = repo
+    pool = MagicMock()
+    pool.enqueue_job = AsyncMock(
+        side_effect=RuntimeError("Queue unavailable") if enqueue_fails else None
+    )
+
+    with (
+        patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=pool)),
+        patch("ontokit.services.github_sync._try_merge", return_value={"conflict": conflict}),
+    ):
+        result = await sync_github_project(integration, PAT, git, AsyncMock(), outbound_only=False)
+
+    assert result["status"] == expected_status
+    if queued:
+        pool.enqueue_job.assert_awaited_once_with(
+            "reconcile_change_history_task",
+            str(PROJECT_ID),
+            BRANCH,
+            _job_id=f"change-history:{PROJECT_ID}:{BRANCH}",
+        )
+    else:
+        pool.enqueue_job.assert_not_awaited()

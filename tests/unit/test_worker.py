@@ -1864,3 +1864,66 @@ class TestRunRemoteCheckTaskAdditional:
         assert mock_config.error_message == "github api error"
         # Published: start + failed
         assert mock_ctx["redis"].publish.await_count >= 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("more", [True, False])
+async def test_history_job_continues_under_the_same_queue_id(mock_ctx, project_id, more):
+    from arq import Retry
+    from arq.worker import Function
+
+    from ontokit import worker
+
+    mock_ctx["session_factory"] = MagicMock(return_value=MagicMock())
+    branch = "trunk"
+    result = {"processed": 2, "recorded": 2, "skipped": 0, "parse_errors": 0, "more": more}
+    reconcile = AsyncMock(return_value=result)
+    with patch.object(
+        worker, "ChangeHistoryReconciler", return_value=Mock(reconcile_branch=reconcile)
+    ):
+        if more:
+            with pytest.raises(Retry):
+                await worker.reconcile_change_history_task(mock_ctx, project_id, branch)
+        else:
+            assert (
+                await worker.reconcile_change_history_task(mock_ctx, project_id, branch) == result
+            )
+
+    reconcile.assert_awaited_once_with(uuid.UUID(project_id), branch)
+    job = next(
+        job
+        for job in worker.WorkerSettings.functions
+        if isinstance(job, Function) and job.coroutine is worker.reconcile_change_history_task
+    )
+    assert job.keep_result_s == 0 and job.max_tries > 5
+
+
+@pytest.mark.asyncio
+async def test_history_and_ledger_crons_run_daily(mock_ctx, mock_db_session, mock_redis):
+    from ontokit import worker
+
+    first, second = uuid.uuid4(), uuid.uuid4()
+    session_manager = MagicMock()
+    session_manager.__aenter__.return_value = mock_db_session
+    mock_ctx["session_factory"] = MagicMock(return_value=session_manager)
+    mock_db_session.scalars.return_value = [first, second]
+    git = Mock()
+    git.get_default_branch.side_effect = ["trunk", "main"]
+    purge = AsyncMock(return_value=2)
+    with (
+        patch.object(worker, "BareGitRepositoryService", return_value=git),
+        patch.object(worker, "AIOriginService", return_value=Mock(purge_older_than=purge)),
+    ):
+        await worker.sweep_change_history(mock_ctx)
+        await worker.purge_generated_entity_ledger(mock_ctx)
+
+    assert [call.args for call in mock_redis.enqueue_job.await_args_list] == [
+        ("reconcile_change_history_task", str(first), "trunk"),
+        ("reconcile_change_history_task", str(second), "main"),
+    ]
+    purge.assert_awaited_once_with(365)
+    mock_db_session.commit.assert_awaited_once()
+    for coroutine in (worker.sweep_change_history, worker.purge_generated_entity_ledger):
+        (job,) = [job for job in worker.WorkerSettings.cron_jobs if job.coroutine is coroutine]
+        assert isinstance(job.hour, int) and isinstance(job.minute, int)
+        assert job.month is None and job.day is None and job.weekday is None

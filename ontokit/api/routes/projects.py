@@ -66,8 +66,10 @@ from ontokit.schemas.pull_request import (
     GitHubRepoFilesResponse,
     ProjectCreateFromGitHub,
 )
+from ontokit.services.ai_origin_service import AIOriginService
 from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.change_event_service import ChangeEventService
+from ontokit.services.change_history_reconciler import advance_inline_watermark
 from ontokit.services.commit_identity import resolve_commit_author
 from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.github_service import get_github_service
@@ -1558,19 +1560,32 @@ async def save_source_content(
             logger.warning("Failed to reload ontology after save: %s", e)
 
         change_events = []
-        try:
-            new_graph = await ontology._get_graph(project_id, current_branch)
-            change_events = await change_service.record_events_from_diff(
-                project_id,
-                current_branch,
-                old_graph,
-                new_graph,
-                user.id,
-                user.name,
-                commit_info.hash,
-            )
-        except Exception:
-            logger.warning("Failed to record change events", exc_info=True)
+        if not current_branch.startswith("suggest/"):
+            try:
+                new_graph = await ontology._get_graph(project_id, current_branch)
+                async with db.begin_nested():
+                    change_events = await change_service.record_events_from_diff(
+                        project_id,
+                        current_branch,
+                        old_graph,
+                        new_graph,
+                        user.id,
+                        user.name,
+                        commit_info.hash,
+                        origin_resolver=AIOriginService(db).resolve,
+                        auto_commit=False,
+                    )
+                    await advance_inline_watermark(
+                        db,
+                        project_id,
+                        current_branch,
+                        current_revision,
+                        commit_info.hash,
+                        is_default_branch=current_branch == repository.get_default_branch(),
+                    )
+            except Exception:
+                change_events = []
+                logger.warning("Failed to record change events", exc_info=True)
 
         # Release the transaction-scoped advisory lock before another writer
         # can enter this process-local critical section.

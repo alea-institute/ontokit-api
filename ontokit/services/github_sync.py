@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.core.config import settings
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.pull_request import GitHubIntegration
+from ontokit.services.change_history_reconciler import enqueue_change_history
 from ontokit.services.demo_target_authorizer import (
     DemoTargetDenied,
     authorize_integration_target,
@@ -176,6 +177,7 @@ async def sync_github_project(
         if behind > 0 and ahead == 0:
             # Remote is ahead, local is not — fast-forward
             pygit2_repo.references[local_ref_name].set_target(remote_oid)
+            await enqueue_change_history(project_id, branch)
             integration.sync_status = "idle"
             integration.sync_error = None
             integration.last_sync_at = datetime.now(UTC)
@@ -213,6 +215,7 @@ async def sync_github_project(
                 await db.commit()
                 return {"status": "conflict", "ahead": ahead, "behind": behind}
 
+            await enqueue_change_history(project_id, branch)
             # Merge succeeded — push the merge commit
             if repo.push(
                 branch=branch,

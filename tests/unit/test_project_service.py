@@ -2198,3 +2198,87 @@ class TestToResponseEdgeCases:
 
         response = service._to_response(project, user)
         assert response.git_ontology_path == "ontology.ttl"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["upload", "github", "github-fallback", "git-failed"])
+async def test_import_enqueues_one_job_when_git_has_history(
+    service: ProjectService,
+    mock_db: AsyncMock,
+    mock_git_service: MagicMock,
+    operation: str,
+) -> None:
+    from rdflib.namespace import OWL
+
+    owner = _make_user()
+    mock_db.refresh.side_effect = _make_simulate_refresh(owner.id, extended=True)
+    storage = AsyncMock()
+    storage.upload_file.return_value = "projects/example/ontology.ttl"
+    pool = MagicMock(enqueue_job=AsyncMock())
+    if operation == "github-fallback":
+        mock_git_service.clone_from_github.side_effect = RuntimeError("Clone failed")
+    if operation == "git-failed":
+        mock_git_service.initialize_repository.side_effect = RuntimeError("Git init failed")
+
+    kwargs = {
+        "file_content": (
+            f"@prefix owl: <{OWL}> .\n<https://example.org/ontology> a owl:Ontology ."
+        ).encode(),
+        "filename": "ontology.ttl",
+        "is_public": True,
+        "owner": owner,
+        "storage": storage,
+    }
+    with patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=pool)):
+        if operation.startswith("github"):
+            result = await service.create_from_github(
+                **kwargs,
+                repo_owner="example",
+                repo_name="ontology",
+                ontology_file_path="ontology.ttl",
+                default_branch="trunk",
+                github_token="",
+            )
+        else:
+            result = await service.create_from_import(**kwargs)
+    if operation == "git-failed":
+        pool.enqueue_job.assert_not_awaited()
+    else:
+        branch = "trunk" if operation == "github" else "main"
+        pool.enqueue_job.assert_awaited_once_with(
+            "reconcile_change_history_task",
+            str(result.id),
+            branch,
+            _job_id=f"change-history:{result.id}:{branch}",
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", [True, False])
+async def test_project_metadata_git_landing_queues_history(
+    service: ProjectService,
+    mock_git_service: MagicMock,
+    changed: bool,
+) -> None:
+    from rdflib.namespace import DCTERMS, OWL
+
+    project = _make_project()
+    storage = AsyncMock()
+    mock_git_service.get_file_at_version.return_value = (
+        f"@prefix owl: <{OWL}> .\n"
+        f"@prefix dcterms: <{DCTERMS}> .\n"
+        '<https://example.org/ontology> a owl:Ontology; dcterms:title "Original" .'
+    )
+    mock_git_service.commit_changes.return_value = MagicMock(hash="b" * 40)
+    pool = MagicMock(enqueue_job=AsyncMock())
+    with patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=pool)):
+        commit_hash = await service._sync_metadata_to_rdf(
+            project,
+            "Updated" if changed else None,
+            None,
+            _make_user(),
+            storage,
+        )
+
+    assert (commit_hash is not None) == changed
+    assert pool.enqueue_job.await_count == int(changed)

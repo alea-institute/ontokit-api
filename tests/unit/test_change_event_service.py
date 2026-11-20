@@ -428,3 +428,52 @@ class TestGetContributors:
         assert contributors[0].user_id == USER_ID
         assert contributors[0].total_count == 9
         assert contributors[0].create_count == 3
+
+
+@pytest.mark.asyncio
+async def test_record_event_occurrence_time_uses_utc_and_clamps_future(
+    service: ChangeEventService,
+) -> None:
+    from datetime import timedelta, timezone
+
+    past = datetime(2025, 1, 1, 12, tzinfo=timezone(timedelta(hours=2)))
+    before = datetime.now(UTC)
+
+    async def record(**kwargs: datetime) -> EntityChangeEvent:
+        return await service.record_event(
+            PROJECT_ID, BRANCH, ENTITY_IRI, "class", ChangeEventType.CREATE, USER_ID, **kwargs
+        )
+
+    historical = await record(occurred_at=past)
+    future = await record(occurred_at=before + timedelta(days=1))
+    default = await record()
+
+    assert historical.created_at == datetime(2025, 1, 1, 10, tzinfo=UTC)
+    assert historical.created_at.tzinfo is UTC
+    assert before <= future.created_at <= datetime.now(UTC)
+    assert default.created_at is None
+
+
+@pytest.mark.asyncio
+async def test_large_diff_flushes_in_batches(
+    service: ChangeEventService, mock_db: AsyncMock
+) -> None:
+    graph = Graph()
+    for index in range(18_000):
+        graph.add((URIRef(f"https://example.org/class/{index}"), RDF.type, OWL.Class))
+
+    flushed_sizes: list[int] = []
+
+    async def flush() -> None:
+        flushed_sizes.append(mock_db.add.call_count - sum(flushed_sizes))
+
+    mock_db.flush.side_effect = flush
+    occurred_at = datetime(2025, 1, 1, tzinfo=UTC)
+    events = await service.record_events_from_diff(
+        PROJECT_ID, BRANCH, None, graph, USER_ID, USER_NAME, COMMIT_HASH, occurred_at=occurred_at
+    )
+
+    assert len(events) == 18_000
+    assert all(event.created_at == occurred_at for event in events)
+    assert sum(flushed_sizes) == 18_000
+    assert 0 < min(flushed_sizes) <= max(flushed_sizes) <= 1000

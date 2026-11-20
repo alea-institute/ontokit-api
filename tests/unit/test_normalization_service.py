@@ -342,3 +342,30 @@ class TestGetNormalizationServiceFactory:
 
         svc = get_normalization_service(mock_db, mock_storage)
         assert isinstance(svc, NormalizationService)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["normalizes", "dry-run", "git-failed"])
+async def test_normalization_enqueues_only_successful_git_landing(
+    service: NormalizationService,
+    mock_git_service: MagicMock,
+    operation: str,
+) -> None:
+    from unittest.mock import patch
+
+    mock_git_service.get_default_branch.return_value = "main"
+    if operation == "git-failed":
+        mock_git_service.commit_changes.side_effect = RuntimeError("Git write failed")
+    service.extractor = Mock(wraps=service.extractor)
+    _, report = service.extractor.normalize_to_turtle(SAMPLE_TURTLE, "ontology.ttl")
+    service.extractor.normalize_to_turtle.return_value = (SAMPLE_TURTLE + b"\n", report)
+    pool = Mock(enqueue_job=AsyncMock())
+
+    with patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=pool)):
+        if operation == "git-failed":
+            with pytest.raises(RuntimeError, match="Git write failed"):
+                await service.run_normalization(_make_project())
+        else:
+            await service.run_normalization(_make_project(), dry_run=operation == "dry-run")
+
+    assert pool.enqueue_job.await_count == int(operation == "normalizes")

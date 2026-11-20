@@ -37,6 +37,7 @@ from ontokit.schemas.project import (
     TransferOwnership,
 )
 from ontokit.services.branch_lock import branch_write_lock
+from ontokit.services.change_history_reconciler import enqueue_change_history
 from ontokit.services.commit_identity import resolve_commit_author
 from ontokit.services.demo_project_provisioning import resolve_current_demo_project
 from ontokit.services.ontology_extractor import (
@@ -214,6 +215,7 @@ class ProjectService:
                 project_name=project_name,
             )
             commit_hash = init_commit.hash
+            await enqueue_change_history(db_project.id, "main")
             logger.info(f"Initialized git repository for project {db_project.id}")
         except Exception as e:
             # Log the error but don't fail the import - git is supplementary
@@ -369,6 +371,7 @@ class ProjectService:
         await self.db.refresh(db_project, ["members", "github_integration"])
 
         # Clone the entire repo as bare git in a background thread
+        landed_branch: str | None = None
         repo_url = f"https://github.com/{repo_owner}/{repo_name}.git"
         commit_hash: str | None = None
         author_name, author_email = await resolve_commit_author(self.db, owner)
@@ -379,6 +382,7 @@ class ProjectService:
                 repo_url,
                 github_token,
             )
+            landed_branch = default_branch
             logger.info(f"Cloned GitHub repo {repo_owner}/{repo_name} for project {db_project.id}")
 
             # After cloning, commit normalized content to the correct path in git.
@@ -420,6 +424,7 @@ class ProjectService:
                     project_name=project_name,
                 )
                 commit_hash = init_commit.hash
+                landed_branch = "main"
                 logger.info(f"Initialized fallback git repository for project {db_project.id}")
             except Exception as init_err:
                 logger.warning(
@@ -446,6 +451,9 @@ class ProjectService:
             )
             self.db.add(run)
             await self.db.commit()
+
+        if landed_branch is not None:
+            await enqueue_change_history(db_project.id, landed_branch)
 
         return self._to_import_response(db_project, owner, file_path)
 
@@ -721,7 +729,7 @@ class ProjectService:
                     branch
                 )
                 try:
-                    return await self._sync_metadata_to_rdf_locked(
+                    commit_hash = await self._sync_metadata_to_rdf_locked(
                         project,
                         new_name,
                         new_description,
@@ -734,6 +742,9 @@ class ProjectService:
                     # End the transaction-scoped advisory lock before the
                     # process-local branch lock admits another writer.
                     await self.db.commit()
+            if commit_hash is not None:
+                await enqueue_change_history(project.id, branch)
+            return commit_hash
 
         return await self._sync_metadata_to_rdf_locked(
             project,

@@ -28,6 +28,7 @@ from ontokit.models.translation import (
     hash_literal_value,
 )
 from ontokit.services.branch_lock import branch_write_lock
+from ontokit.services.change_history_reconciler import enqueue_change_history
 from ontokit.services.llm.base import LLMProvider
 from ontokit.services.llm.budget import BudgetLimits
 from ontokit.services.llm.crypto import decrypt_secret
@@ -301,6 +302,7 @@ class TranslationService:
             records[language].state = "rejected"
         await self._db.commit()
         if commit is not None:
+            await enqueue_change_history(self.project_id, branch)
             try:
                 await self._index_enqueuer(
                     project_id=self.project_id, branch=branch, commit_hash=commit.hash

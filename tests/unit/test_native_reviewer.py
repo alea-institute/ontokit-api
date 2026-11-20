@@ -385,3 +385,61 @@ async def test_reviewer_tag_assignment_is_owner_admin_gated(role: str, allowed: 
         with pytest.raises(HTTPException) as exc_info:
             await routes._require_owner_or_admin(db, member.project_id, member.user_id, False)
         assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "operation", ["confirm", "reject", "reject-without-commit", "failed-confirm"]
+)
+async def test_translation_review_enqueues_only_a_durable_git_change(
+    bare_git_repo: BareOntologyRepository,
+    operation: str,
+) -> None:
+    from unittest.mock import patch
+
+    project_id = uuid4()
+    member = ProjectMember(id=uuid4(), project_id=project_id, user_id="reviewer", role="viewer")
+    record = _record(project_id)
+    service, db = _service(bare_git_repo)
+    if operation == "reject":
+        graph = Graph().parse(data=bare_git_repo.read_file("main", "ontology.ttl"), format="turtle")
+        literal = Literal("Mtu", lang="sw")
+        graph.add((ENTITY, RDFS.label, literal))
+        annotate(
+            graph,
+            ENTITY,
+            RDFS.label,
+            literal,
+            TranslationAnnotation(
+                method=record.method,
+                state=record.state,
+                created=record.created_at,
+                record_digest=translation_record_digest(record),
+            ),
+        )
+        bare_git_repo.write_file(
+            "main", "ontology.ttl", graph.serialize(format="turtle").encode(), "Surface translation"
+        )
+    if operation == "failed-confirm":
+        db.commit.side_effect = RuntimeError("database commit failed")
+
+    mutate = service.reject_loaded if operation.startswith("reject") else service.confirm_loaded
+    pool = Mock(enqueue_job=AsyncMock())
+    with patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=pool)):
+        kwargs = {
+            "project_id": project_id,
+            "branch": "main",
+            "filename": "ontology.ttl",
+            "member": member,
+            "reviewer_languages": {"sw"},
+            "record": record,
+            "author_name": "Reviewer",
+            "author_email": "reviewer@example.org",
+        }
+        if operation == "failed-confirm":
+            with pytest.raises(RuntimeError, match="database commit failed"):
+                await mutate(**kwargs)
+        else:
+            assert (await mutate(**kwargs) is not None) == (operation != "reject-without-commit")
+
+    assert pool.enqueue_job.await_count == int(operation in ("confirm", "reject"))

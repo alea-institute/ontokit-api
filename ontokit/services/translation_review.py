@@ -14,6 +14,7 @@ from ontokit.git.bare_repository import BareGitRepositoryService, CommitInfo
 from ontokit.models.project import ProjectMember
 from ontokit.models.translation import TranslationRecord, hash_literal_value
 from ontokit.services.branch_lock import branch_write_lock
+from ontokit.services.change_history_reconciler import enqueue_change_history
 from ontokit.services.translation_annotations import (
     TranslationAnnotation,
     annotate,
@@ -256,6 +257,7 @@ class TranslationReviewService:
             raise
 
     async def _enqueue(self, project_id: uuid.UUID, branch: str, commit_hash: str) -> None:
+        await enqueue_change_history(project_id, branch)
         try:
             await self.index_enqueuer(project_id=project_id, branch=branch, commit_hash=commit_hash)
         except Exception:

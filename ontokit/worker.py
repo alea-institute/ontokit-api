@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
-from arq import ArqRedis, cron, func
+from arq import ArqRedis, Retry, cron, func
 from sqlalchemy import select
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -35,6 +35,12 @@ from ontokit.models.lint import LintIssue, LintRun, LintRunStatus
 from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import GitHubIntegration
+from ontokit.services.ai_origin_service import AIOriginService
+from ontokit.services.change_history_reconciler import (
+    ChangeHistoryReconciler,
+    ReconciliationResult,
+    enqueue_change_history,
+)
 from ontokit.services.demo_project_provisioning import demo_generation_attempt_lease
 from ontokit.services.demo_retention import DemoRetentionService
 from ontokit.services.demo_target_authorizer import DemoTargetDenied, integration_target_load
@@ -1582,6 +1588,41 @@ async def purge_demo_generations(ctx: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+async def reconcile_change_history_task(
+    ctx: dict[str, Any], project_id: str, branch: str
+) -> ReconciliationResult:
+    """Run a batch, retaining the deduplicated job ID for continuation."""
+    async with ctx["session_factory"]() as db:
+        result = await ChangeHistoryReconciler(db, BareGitRepositoryService()).reconcile_branch(
+            UUID(project_id), branch
+        )
+    if result["more"]:
+        # ARQ cannot enqueue an ID that is already running. Retry requeues
+        # the same job after the transaction and its lock have been released.
+        raise Retry(defer=1)
+    return result
+
+
+async def sweep_change_history(ctx: dict[str, Any]) -> None:
+    """Queue the default branch of each project for periodic catch-up."""
+    async with ctx["session_factory"]() as db:
+        project_ids = list(await db.scalars(select(Project.id)))
+    git = BareGitRepositoryService()
+    for project_id in project_ids:
+        branch = git.get_default_branch(project_id) if git.repository_exists(project_id) else "main"
+        await enqueue_change_history(project_id, branch, pool=ctx["redis"])
+
+
+async def purge_generated_entity_ledger(ctx: dict[str, Any]) -> int:
+    """Expire old generation proposals in one transaction."""
+    async with ctx["session_factory"]() as db:
+        purged = await AIOriginService(db).purge_older_than(
+            settings.llm_generated_entity_retention_days
+        )
+        await db.commit()
+    return purged
+
+
 async def startup(ctx: dict[str, Any]) -> None:
     """Initialize worker context on startup."""
     logger.info("Starting ARQ worker...")
@@ -1645,6 +1686,7 @@ class WorkerSettings:
 
     functions = [
         func(purge_demo_generations, timeout=settings.demo_retention_run_budget_seconds + 300),
+        func(reconcile_change_history_task, keep_result=0, max_tries=1000),
         run_ontology_index_task,
         run_lint_task,
         func(run_consistency_check_task, timeout=900),  # 15 min for large ontologies
@@ -1697,6 +1739,8 @@ class WorkerSettings:
 
     # Cron jobs
     cron_jobs = [
+        cron(sweep_change_history, hour=3, minute=0),
+        cron(purge_generated_entity_ledger, hour=5, minute=0),
         # After the 03:17 host refresh; the service leases one generation at a time.
         cron(
             purge_demo_generations,

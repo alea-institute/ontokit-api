@@ -253,3 +253,27 @@ async def test_translation_diff_adds_only_target_entity_and_axiom_triples(
     assert Literal("Personne", lang="fr") in Graph().parse(data=updated, format="turtle").objects(
         ENTITY, RDFS.label
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_translation_landing_queues_one_history_job(
+    bare_git_repo: BareOntologyRepository, accepted: bool
+) -> None:
+    from unittest.mock import patch
+
+    project_id = uuid4()
+    service, _db, _git = _service(bare_git_repo, project_id=project_id, enqueue_index=AsyncMock())
+    pool = Mock(enqueue_job=AsyncMock())
+    with patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=pool)):
+        result = await _apply(service, {"fr": _result("fr", "Personne", accepted=accepted)})
+
+    assert (result.commit is not None) == accepted
+    assert pool.enqueue_job.await_count == int(accepted)
+    if accepted:
+        pool.enqueue_job.assert_awaited_with(
+            "reconcile_change_history_task",
+            str(project_id),
+            "main",
+            _job_id=f"change-history:{project_id}:main",
+        )

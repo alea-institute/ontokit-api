@@ -2,6 +2,7 @@
 
 from ontokit.models.branch_metadata import BranchMetadata
 from ontokit.models.change_event import ChangeEventType, EntityChangeEvent
+from ontokit.models.change_history_watermark import ChangeHistoryWatermark
 from ontokit.models.demo_generation import DemoGeneration, DemoGenerationStatus
 from ontokit.models.distinct_entity_decision import DistinctEntityDecision
 from ontokit.models.duplicate_rejection import DuplicateRejection
@@ -59,6 +60,7 @@ __all__ = [
     "LLMGeneratedEntity",
     "ProjectLLMConfig",
     "ChangeEventType",
+    "ChangeHistoryWatermark",
     "DistinctEntityDecision",
     "DemoGeneration",
     "DemoGenerationStatus",

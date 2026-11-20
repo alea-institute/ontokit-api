@@ -70,6 +70,7 @@ from ontokit.services.branch_lock import (
     branch_write_lock,
     pull_request_write_locks,
 )
+from ontokit.services.change_history_reconciler import enqueue_change_history
 from ontokit.services.commit_identity import resolve_commit_author
 from ontokit.services.github_service import GitHubPR, GitHubService, get_github_service
 from ontokit.services.mirror_credential import resolve_mirror_credential
@@ -1169,6 +1170,8 @@ class PullRequestService:
         # before the best-effort remote operation.
         pr.github_sync_merge_title = merge_message
         await self.db.commit()
+        if merge_result.merge_commit_hash != base_commit_hash:
+            await enqueue_change_history(project_id, pr.target_branch)
         await self.db.refresh(pr)
         await self._sync_pull_request_to_github(
             project_id,

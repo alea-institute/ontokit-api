@@ -6,7 +6,7 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, Mock
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -2425,3 +2425,55 @@ async def test_suggestion_close_seam(
         assert pr.status == "closed"
         sync.assert_awaited_once()
         assert db.rollback.await_count == int(sync_fails)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("merge_succeeds", "enqueue_fails"), [(False, False), (True, False), (True, True)]
+)
+async def test_merge_enqueues_change_history_after_local_status_is_durable(
+    service: PullRequestService,
+    mock_db: AsyncMock,
+    mock_git_service: MagicMock,
+    merge_succeeds: bool,
+    enqueue_fails: bool,
+) -> None:
+    project = _make_project(pr_approval_required=0)
+    pr = _make_pr(author_id=OWNER_ID)
+    _setup_project_and_pr_lookup(mock_db, project, pr)
+    mock_git_service.list_branches.return_value = []
+    mock_git_service.merge_branch.return_value = MagicMock(
+        success=merge_succeeds, merge_commit_hash="a" * 40
+    )
+
+    durable_at_enqueue = []
+
+    async def enqueue(*_args, **_kwargs):
+        durable_at_enqueue.append((mock_db.commit.await_count, pr.merge_commit_hash))
+        if enqueue_fails:
+            raise RuntimeError("Queue unavailable")
+
+    pool = MagicMock(enqueue_job=AsyncMock(side_effect=enqueue))
+    request = PRMergeRequest(delete_source_branch=False)
+    with (
+        patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=pool)),
+        patch.object(service, "_sync_pull_request_to_github", AsyncMock()),
+    ):
+        if merge_succeeds:
+            assert (
+                await service.merge_pull_request(PROJECT_ID, 1, request, _make_user(OWNER_ID))
+            ).success
+        else:
+            with pytest.raises(HTTPException):
+                await service.merge_pull_request(PROJECT_ID, 1, request, _make_user(OWNER_ID))
+
+    if merge_succeeds:
+        pool.enqueue_job.assert_awaited_once_with(
+            "reconcile_change_history_task",
+            str(PROJECT_ID),
+            pr.target_branch,
+            _job_id=f"change-history:{PROJECT_ID}:{pr.target_branch}",
+        )
+        assert durable_at_enqueue == [(1, "a" * 40)]
+    else:
+        pool.enqueue_job.assert_not_awaited()
