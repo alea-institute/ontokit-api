@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from uuid import UUID
 
@@ -23,7 +22,7 @@ from fastapi.testclient import TestClient
 from starlette.types import Message, Receive, Scope, Send
 
 from ontokit.api.routes import generation
-from ontokit.core.database import engine, get_db
+from ontokit.core.database import engine
 from ontokit.main import app
 from ontokit.schemas.generation import (
     GeneratedSuggestion,
@@ -517,56 +516,46 @@ def test_generate_uses_a_new_batch_id_for_each_request(
     assert UUID(first.json()["batch_id"]) != UUID(second.json()["batch_id"])
 
 
-def test_generate_returns_suggestions_when_ledger_commit_fails(
+def test_ledger_is_durable_before_the_response_and_its_failure_keeps_the_suggestions(
     authed_client: tuple[TestClient, AsyncMock],
     generation_pipeline: AsyncMock,
     ledger_session: AsyncMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """An acceptance can only follow the response, so it always finds the ledger rows."""
     _, session = authed_client
-    _happy_path_execute(session)
     generated = _generation_response()
-    generation_pipeline.return_value = generated
+    generation_pipeline.side_effect = lambda **_kwargs: generated
     label = generated.suggestions[0].label
     operations = []
-    response_sent = asyncio.Event()
-    ledger_finished = asyncio.Event()
 
-    async def request_db() -> AsyncIterator[AsyncMock]:
-        yield session
-        operations.append("request session closed")
+    async def commit() -> None:
+        operations.append("ledger")
 
     async def fail_commit() -> None:
-        await response_sent.wait()
         operations.append("ledger")
-        raise RuntimeError(label)
-
-    async def fail_cleanup(*_args: object) -> None:
-        ledger_finished.set()
         raise RuntimeError(label)
 
     async def observe_response(scope: Scope, receive: Receive, send: Send) -> None:
         async def record_body(message: Message) -> None:
-            await send(message)
-            if message["type"] == "http.response.body" and not message.get("more_body"):
+            if message["type"] == "http.response.start":
                 operations.append("response")
-                response_sent.set()
+            await send(message)
 
         await asyncio.wait_for(app(scope, receive, record_body), timeout=2)
-        await asyncio.wait_for(ledger_finished.wait(), timeout=2)
 
-    session.commit.side_effect = [None, RuntimeError(label)]
-    ledger_session.commit.side_effect = fail_commit
-    ledger_session.__aexit__.side_effect = fail_cleanup
-    app.dependency_overrides[get_db] = request_db
     client = TestClient(observe_response)
-    response = client.post(GENERATE_URL, json=GENERATE_BODY)
+    for ledger_commit in (commit, fail_commit):
+        operations.clear()
+        _happy_path_execute(session)
+        ledger_session.commit.side_effect = ledger_commit
+        response = client.post(GENERATE_URL, json=GENERATE_BODY)
 
-    assert response.status_code == 200
-    assert UUID(response.json()["batch_id"]).version == 4
-    assert response.json()["suggestions"][0]["label"] == label
-    assert operations == ["request session closed", "response", "ledger"]
-    session.commit.assert_awaited_once()
+        assert response.status_code == 200
+        assert UUID(response.json()["batch_id"]).version == 4
+        assert response.json()["suggestions"][0]["label"] == label
+        assert operations == ["ledger", "response"]
+
     session.rollback.assert_not_awaited()
     bind = generation.async_session_maker.call_args.kwargs.get("bind", engine)
     assert bind.sync_engine.hide_parameters
@@ -576,6 +565,29 @@ def test_generate_returns_suggestions_when_ledger_commit_fails(
         "ledger" in record.getMessage() and record.levelno == logging.WARNING
         for record in caplog.records
     )
+
+
+def test_stalled_ledger_write_does_not_hold_the_response(
+    authed_client: tuple[TestClient, AsyncMock],
+    generation_pipeline: AsyncMock,
+    ledger_session: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, session = authed_client
+    _happy_path_execute(session)
+    generation_pipeline.return_value = _generation_response()
+
+    async def stall() -> None:
+        await asyncio.Event().wait()
+
+    ledger_session.commit.side_effect = stall
+    monkeypatch.setattr(generation, "_LEDGER_WRITE_TIMEOUT_SECONDS", 0.01, raising=False)
+
+    response = client.post(GENERATE_URL, json=GENERATE_BODY)
+
+    assert response.status_code == 200
+    assert "TimeoutError" in caplog.text
 
 
 def test_generate_transient_failure_returns_batch_id(

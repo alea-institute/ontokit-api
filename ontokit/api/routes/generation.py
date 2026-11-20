@@ -18,11 +18,12 @@ Authorization pattern mirrors llm.py:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -70,6 +71,7 @@ router = APIRouter(prefix="/projects/{project_id}/llm", tags=["Generation"])
 # Keep generated text out of SQL logs, including when SQL echo is enabled.
 _ledger_engine = engine.execution_options()
 _ledger_engine.sync_engine.hide_parameters = True
+_LEDGER_WRITE_TIMEOUT_SECONDS = 5
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -171,10 +173,19 @@ async def _write_generated_entity_ledger(
     batch_id: str,
     proposals: list[GeneratedSuggestion],
 ) -> None:
-    """Persist the batch with a session owned by the background task."""
+    """Commit the batch in its own session before the response leaves.
+
+    A reviewer can accept a proposal only after receiving it, so the rows that
+    mark its origin must already be durable. The write is bounded and its
+    failure is tolerated: generation succeeds and those proposals read as
+    human-authored.
+    """
     try:
         batch_uuid = UUID(batch_id)
-        async with async_session_maker(bind=_ledger_engine) as db:
+        async with (
+            asyncio.timeout(_LEDGER_WRITE_TIMEOUT_SECONDS),
+            async_session_maker(bind=_ledger_engine) as db,
+        ):
             db.add_all(
                 [
                     LLMGeneratedEntity(
@@ -211,8 +222,7 @@ async def _write_generated_entity_ledger(
 async def generate_suggestions(
     project_id: UUID,
     request: GenerateSuggestionsRequest,
-    background_tasks: BackgroundTasks,
-    db: Annotated[AsyncSession, Depends(get_db, scope="function")],
+    db: Annotated[AsyncSession, Depends(get_db)],
     user: RequiredUser,
     x_byo_api_key: Annotated[str | None, Header(alias="X-BYO-API-Key")] = None,
 ) -> GenerateSuggestionsResponse:
@@ -453,13 +463,8 @@ async def generate_suggestions(
         if suggestion.suggestion_type in {"children", "siblings"}
     ]
     if proposals:
-        background_tasks.add_task(
-            _write_generated_entity_ledger,
-            project_id,
-            user.id,
-            request,
-            response.batch_id,
-            proposals,
+        await _write_generated_entity_ledger(
+            project_id, user.id, request, response.batch_id, proposals
         )
 
     return response
