@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from ontokit.services.llm.prompts.grounding import definition_line
+
 SYSTEM: str = (
     "You are an ontology expert specializing in legal knowledge representation "
     "aligned with the FOLIO (Federated Open Legal Information Ontology) OWL/RDF/SKOS schema. "
@@ -44,6 +46,9 @@ def build_messages(context: dict[str, Any], batch_size: int = 5) -> list[dict[st
     existing_children = context.get("existing_children", [])
 
     parts = [f"Ontology class: {label} <{cc['iri']}>"]
+    definition = definition_line(cc)
+    if definition:
+        parts.append(definition)
 
     if parents:
         parent_labels = ", ".join(p["label"] for p in parents)

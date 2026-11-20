@@ -37,3 +37,27 @@ def test_json_parser_does_not_salvage_injected_object_from_prose() -> None:
 
 def test_hostile_generated_iris_are_rejected() -> None:
     assert not _is_safe_iri("https://safe.test/> . <https://evil.test/x>")
+
+
+def test_subclass_and_sibling_prompts_are_grounded_in_the_class_definition() -> None:
+    context = _context("Contract")
+    context["current_class"]["annotations"] = [  # type: ignore[index]
+        {
+            "property_iri": "http://www.w3.org/2000/01/rdf-schema#comment",
+            "values": [{"value": "Reviewed in March.", "lang": "en"}],
+        },
+        {
+            "property_iri": "http://www.w3.org/2004/02/skos/core#definition",
+            "values": [{"value": "A legally binding agreement between parties.", "lang": "en"}],
+        },
+    ]
+    for suggestion_type in ("children", "siblings"):
+        system, user = PROMPT_BUILDERS[suggestion_type](context, 3)
+        lines = user["content"].splitlines()
+        assert lines[0] == "<untrusted_ontology_data>"
+        assert lines[2] == "Definition: A legally binding agreement between parties."
+        assert "Reviewed in March." not in user["content"]
+        assert "Definition" not in system["content"].split("Output schema")[0]
+
+        undefined = PROMPT_BUILDERS[suggestion_type](_context("Contract"), 3)[1]["content"]
+        assert "Definition:" not in undefined
