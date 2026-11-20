@@ -72,9 +72,9 @@ from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.change_event_service import ChangeEventService
 from ontokit.services.change_history_reconciler import (
     advance_inline_watermark,
+    enqueue_change_history,
     event_display_name,
     read_history_graph,
-    seed_inline_watermark,
 )
 from ontokit.services.commit_identity import resolve_commit_author
 from ontokit.services.embedding_service import EmbeddingService
@@ -1558,6 +1558,7 @@ async def save_source_content(
             logger.warning("Failed to reload ontology after save: %s", e)
 
         change_events = []
+        history_needs_reconciliation = False
         if not current_branch.startswith("suggest/"):
             try:
                 # The cache can reflect another revision. Compare the exact
@@ -1578,25 +1579,15 @@ async def save_source_content(
                         occurred_at=datetime.fromisoformat(commit_info.timestamp),
                         auto_commit=False,
                     )
-                    await advance_inline_watermark(
-                        db,
-                        project_id,
-                        current_branch,
-                        current_revision,
-                        commit_info.hash,
-                        is_default_branch=current_branch == repository.get_default_branch(),
+                    # Without a contiguous watermark, reconciliation sets the
+                    # branch baseline and records any landing this save follows.
+                    history_needs_reconciliation = not await advance_inline_watermark(
+                        db, project_id, current_branch, current_revision, commit_info.hash
                     )
             except Exception:
                 change_events = []
+                history_needs_reconciliation = True
                 logger.warning("Failed to record change events", exc_info=True)
-                try:
-                    if current_branch != repository.get_default_branch():
-                        async with db.begin_nested():
-                            await seed_inline_watermark(
-                                db, project_id, current_branch, current_revision
-                            )
-                except Exception:
-                    logger.warning("Failed to seed change history watermark", exc_info=True)
 
         # Release the transaction-scoped advisory lock before another writer
         # can enter this process-local critical section.
@@ -1680,6 +1671,9 @@ async def save_source_content(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail="The save transaction could not be finalized; changes were rolled back.",
             ) from e
+
+    if history_needs_reconciliation:
+        await enqueue_change_history(project_id, current_branch)
 
     # Auto-embed changed entities if configured
     if change_events:

@@ -41,6 +41,7 @@ from ontokit.services.change_history_reconciler import (
     ChangeHistoryReconciler,
     ReconciliationResult,
     enqueue_change_history,
+    history_branches,
 )
 from ontokit.services.demo_project_provisioning import demo_generation_attempt_lease
 from ontokit.services.demo_retention import DemoRetentionService
@@ -1605,7 +1606,7 @@ async def reconcile_change_history_task(
 
 
 async def sweep_change_history(ctx: dict[str, Any]) -> None:
-    """Queue the default branch of each project for periodic catch-up."""
+    """Queue every recorded branch of each project for periodic catch-up."""
     async with ctx["session_factory"]() as db:
         project_ids = list(await db.scalars(select(Project.id)))
     git = BareGitRepositoryService()
@@ -1613,13 +1614,14 @@ async def sweep_change_history(ctx: dict[str, Any]) -> None:
         try:
             if not git.repository_exists(project_id):
                 continue
-            branch = git.get_default_branch(project_id)
+            branches = history_branches(git.get_repository(project_id).repo)
         except (OSError, ValueError, pygit2.GitError):
             logger.warning(
                 "Could not resolve repository for history sweep of project %s", project_id
             )
             continue
-        await enqueue_change_history(project_id, branch, pool=ctx["redis"])
+        for branch in branches:
+            await enqueue_change_history(project_id, branch, pool=ctx["redis"])
 
 
 async def purge_generated_entity_ledger(ctx: dict[str, Any]) -> int:

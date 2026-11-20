@@ -1109,67 +1109,73 @@ class PullRequestService:
                 recovery="Obtain the required reviews before attempting to merge.",
             )
 
-        # Capture commit hashes before merge
-        branches = self.git_service.list_branches(project_id)
-        branch_map = {b.name: b for b in branches}
+        # Hold the target branch from the ref move through the commit that
+        # records the merge. Change-history reconciliation takes the same lock,
+        # so it attributes the merge commit to this pull request's author.
+        async with branch_write_lock(self.db, project_id, pr.target_branch):
+            # Capture commit hashes before merge
+            branches = self.git_service.list_branches(project_id)
+            branch_map = {b.name: b for b in branches}
 
-        base_commit_hash = None
-        head_commit_hash = None
-        if pr.target_branch in branch_map:
-            base_commit_hash = branch_map[pr.target_branch].commit_hash
-        if pr.source_branch in branch_map:
-            head_commit_hash = branch_map[pr.source_branch].commit_hash
+            base_commit_hash = None
+            head_commit_hash = None
+            if pr.target_branch in branch_map:
+                base_commit_hash = branch_map[pr.target_branch].commit_hash
+            if pr.source_branch in branch_map:
+                head_commit_hash = branch_map[pr.source_branch].commit_hash
 
-        # Perform merge in local git
-        merge_message = (
-            merge_request.merge_message or f"Merge pull request #{pr_number}: {pr.title}"
-        )
-        author_name, author_email = await resolve_commit_author(self.db, user)
-        merge_result = self.git_service.merge_branch(
-            project_id=project_id,
-            source=pr.source_branch,
-            target=pr.target_branch,
-            message=merge_message,
-            author_name=author_name,
-            author_email=author_email,
-        )
-
-        if not merge_result.success:
-            raise GuidedHTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=f"Merge failed: {merge_result.message}",
-                code="merge_failed",
-                message="The pull request could not be merged.",
-                recovery="Review the current branches and merge result, resolving any reported conflicts before trying again.",
+            # Perform merge in local git
+            merge_message = (
+                merge_request.merge_message or f"Merge pull request #{pr_number}: {pr.title}"
+            )
+            author_name, author_email = await resolve_commit_author(self.db, user)
+            merge_result = self.git_service.merge_branch(
+                project_id=project_id,
+                source=pr.source_branch,
+                target=pr.target_branch,
+                message=merge_message,
+                author_name=author_name,
+                author_email=author_email,
             )
 
-        # Update PR status and store commit hashes
-        pr.status = PRStatus.MERGED.value
-        pr.merged_by = user.id
-        merged_at = datetime.now(UTC)
-        pr.merged_at = merged_at
-        pr.merge_commit_hash = merge_result.merge_commit_hash
-        pr.base_commit_hash = base_commit_hash
-        pr.head_commit_hash = head_commit_hash
-
-        # Delete source branch if requested
-        if merge_request.delete_source_branch:
-            try:
-                self.git_service.delete_branch(project_id, pr.source_branch)
-                # Clean up branch metadata
-                await self.db.execute(
-                    sa_delete(BranchMetadata).where(
-                        BranchMetadata.project_id == project_id,
-                        BranchMetadata.branch_name == pr.source_branch,
-                    )
+            if not merge_result.success:
+                # Release the transaction-scoped branch lock with the refusal.
+                await self.db.rollback()
+                raise GuidedHTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=f"Merge failed: {merge_result.message}",
+                    code="merge_failed",
+                    message="The pull request could not be merged.",
+                    recovery="Review the current branches and merge result, resolving any reported conflicts before trying again.",
                 )
-            except Exception as e:
-                logger.warning(f"Failed to delete source branch: {e}")
 
-        # Persist the authoritative local merge and its replayable GitHub title
-        # before the best-effort remote operation.
-        pr.github_sync_merge_title = merge_message
-        await self.db.commit()
+            # Update PR status and store commit hashes
+            pr.status = PRStatus.MERGED.value
+            pr.merged_by = user.id
+            merged_at = datetime.now(UTC)
+            pr.merged_at = merged_at
+            pr.merge_commit_hash = merge_result.merge_commit_hash
+            pr.base_commit_hash = base_commit_hash
+            pr.head_commit_hash = head_commit_hash
+
+            # Delete source branch if requested
+            if merge_request.delete_source_branch:
+                try:
+                    self.git_service.delete_branch(project_id, pr.source_branch)
+                    # Clean up branch metadata
+                    await self.db.execute(
+                        sa_delete(BranchMetadata).where(
+                            BranchMetadata.project_id == project_id,
+                            BranchMetadata.branch_name == pr.source_branch,
+                        )
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to delete source branch: {e}")
+
+            # Persist the authoritative local merge and its replayable GitHub title
+            # before the best-effort remote operation.
+            pr.github_sync_merge_title = merge_message
+            await self.db.commit()
         if merge_result.merge_commit_hash != base_commit_hash:
             await enqueue_change_history(project_id, pr.target_branch)
         await self.db.refresh(pr)

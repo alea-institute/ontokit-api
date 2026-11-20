@@ -55,6 +55,7 @@ class History:
         self.db.scalar.side_effect = self.scalar
         self.locked = False
         self.lock_available = True
+        self.enqueue = AsyncMock()
 
     @asynccontextmanager
     async def transaction(self):
@@ -185,6 +186,7 @@ async def save_inline(
     project = SimpleNamespace(user_role="owner", source_file_path=PATH, git_ontology_path=None)
     with (
         patch("ontokit.api.routes.projects.get_arq_pool", AsyncMock(return_value=None)),
+        patch("ontokit.api.routes.projects.enqueue_change_history", history.enqueue),
         patch("ontokit.services.translation_jobs.enqueue_label_diff_after_commit", AsyncMock()),
     ):
         return await save_source_content(
@@ -311,8 +313,10 @@ async def test_inline_flush_failure_can_be_reconciled_without_partial_events(
 
     assert history.repo.get_branch_commit_hash(branch) == first_saved.commit_hash
     history.db.rollback.assert_not_awaited()
-    assert history.watermark(branch) == previous
+    expected_watermark = previous if branch == BRANCH else None
+    assert history.watermark(branch) == expected_watermark
     assert not [row for row in history.events() if row.commit_hash == first_saved.commit_hash]
+    history.enqueue.assert_awaited_once_with(PROJECT, branch)
 
     saved = await save_inline(
         history,
@@ -320,7 +324,8 @@ async def test_inline_flush_failure_can_be_reconciled_without_partial_events(
         first_saved.commit_hash,
         branch=branch,
     )
-    assert history.watermark(branch) == previous
+    assert history.watermark(branch) == expected_watermark
+    assert history.enqueue.await_count == 2
     result = await history.reconcile(branch)
     assert (result["recorded"], result["skipped"]) == (1, 1)
     assert history.watermark(branch) == saved.commit_hash
@@ -331,21 +336,19 @@ async def test_inline_flush_failure_can_be_reconciled_without_partial_events(
 
 
 @pytest.mark.asyncio
-async def test_young_merge_waits_for_pr_attribution_before_advancing(history: History):
+async def test_merge_is_attributed_as_soon_as_the_branch_lock_is_free(history: History):
+    """The merge holds the branch lock through its PR commit, so no waiting period applies."""
     content = PREFIXES + "ex:A a owl:Class ."
-    previous, _ = history.commit(content)
+    history.commit(content)
     await history.reconcile()
     history.repo.create_branch("proposal", BRANCH)
     content += "ex:B a owl:Class ."
     side, _ = history.commit(content, branch="proposal")
-    merged, _ = history.commit(content, time=datetime.now(UTC), second_parent=side)
-    head, _ = history.commit(content + "ex:C a owl:Class .")
-
-    first = await history.reconcile()
-    assert first["processed"] == 0 and first["more"]
-    assert history.watermark() == previous
-    assert [row.commit_hash for row in history.events()] == [previous]
-
+    now = datetime.now(UTC)
+    unlinked, _ = history.commit(content, time=now, second_parent=side)
+    content += "ex:C a owl:Class ."
+    side, _ = history.commit(content, branch="proposal")
+    merged, _ = history.commit(content, time=now, second_parent=side)
     with history.session.begin():
         history.session.add(
             PullRequest(
@@ -360,11 +363,13 @@ async def test_young_merge_waits_for_pr_attribution_before_advancing(history: Hi
             )
         )
 
-    second = await history.reconcile()
-    assert second["processed"] == 2 and not second["more"]
-    assert history.watermark() == head
-    (event,) = [row for row in history.events() if row.commit_hash == merged]
-    assert (event.user_id, event.origin) == ("contributor", "human")
+    result = await history.reconcile()
+
+    assert result["processed"] == 2 and not result["more"]
+    assert history.watermark() == merged
+    attributed = {row.commit_hash: (row.user_id, row.origin) for row in history.events()}
+    assert attributed[unlinked] == ("system", "system")
+    assert attributed[merged] == ("contributor", "human")
 
 
 @pytest.mark.asyncio
@@ -612,20 +617,98 @@ async def test_parse_error_keeps_last_good_graph_across_batch_boundary(
 
 
 @pytest.mark.asyncio
-async def test_rewritten_branch_resets_and_nondefault_branch_starts_at_head(
+@pytest.mark.parametrize("default_merged_in", [False, True])
+async def test_work_branch_first_reconciliation_records_every_commit_since_its_fork(
+    history: History, default_merged_in: bool
+):
+    content = PREFIXES + "ex:Base a owl:Class ."
+    fork, _ = history.commit(content, age=5)
+    history.repo.create_branch("work", BRANCH)
+    work_content = content + "ex:A a owl:Class ."
+    first, _ = history.commit(work_content, branch="work", age=4)
+    expected = {(first, BASE_IRI + "A", "create")}
+    if default_merged_in:
+        content += "ex:Trunk a owl:Class ."
+        trunk, _ = history.commit(content, age=3)
+        work_content += "ex:Trunk a owl:Class ."
+        merge, _ = history.commit(work_content, branch="work", age=2, second_parent=trunk)
+        expected.add((merge, BASE_IRI + "Trunk", "create"))
+    head, _ = history.commit(work_content + "ex:B a owl:Class .", branch="work")
+    expected.add((head, BASE_IRI + "B", "create"))
+
+    result = await history.reconcile("work")
+
+    assert result["processed"] == len(expected) and not result["more"]
+    assert history.watermark("work") == head
+    assert {(row.commit_hash, row.entity_iri, row.event_type) for row in history.events()} == (
+        expected
+    )
+    assert {row.branch for row in history.events()} == {"work"}
+    assert fork not in {row.commit_hash for row in history.events()}
+    assert (await history.reconcile("work"))["processed"] == 0
+
+
+@pytest.mark.asyncio
+async def test_work_branch_without_commits_of_its_own_starts_at_its_head(history: History):
+    head, _ = history.commit(PREFIXES + "ex:Base a owl:Class .")
+    history.repo.create_branch("work", BRANCH)
+
+    assert (await history.reconcile("work"))["processed"] == 0
+    assert history.watermark("work") == head
+    assert history.events() == []
+
+
+@pytest.mark.asyncio
+async def test_first_inline_save_on_a_work_branch_leaves_the_baseline_to_reconciliation(
+    history: History,
+):
+    content = PREFIXES + "ex:Base a owl:Class ."
+    history.commit(content)
+    history.repo.create_branch("work", BRANCH)
+    content += "ex:Landed a owl:Class ."
+    landed, _ = history.commit(content, branch="work")
+
+    saved = await save_inline(history, content + "ex:Saved a owl:Class .", landed, branch="work")
+
+    assert history.watermark("work") is None
+    history.enqueue.assert_awaited_once_with(PROJECT, "work")
+    result = await history.reconcile("work")
+    assert (result["recorded"], result["skipped"]) == (1, 1)
+    assert history.watermark("work") == saved.commit_hash
+    assert {(row.commit_hash, row.entity_iri) for row in history.events()} == {
+        (landed, BASE_IRI + "Landed"),
+        (saved.commit_hash, BASE_IRI + "Saved"),
+    }
+
+    history.enqueue.reset_mock()
+    again = await save_inline(history, content, saved.commit_hash, branch="work")
+    assert history.watermark("work") == again.commit_hash
+    history.enqueue.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_rewritten_branch_resets_its_watermark(
     history: History, caplog: pytest.LogCaptureFixture
 ):
     base, _ = history.commit(PREFIXES)
     history.repo.create_branch("work", BRANCH)
     head, _ = history.commit(PREFIXES + "ex:A a owl:Class .", branch="work")
-    assert (await history.reconcile("work"))["processed"] == 0
+    assert (await history.reconcile("work"))["recorded"] == 1
     assert history.watermark("work") == head
     history.repo.repo.references["refs/heads/work"].set_target(pygit2.Oid(hex=base))
-    rewritten, _ = history.commit(PREFIXES + "ex:B a owl:Class .", branch="work")
+    orphan = history.repo.repo.create_commit(
+        None,
+        pygit2.Signature("Remote Contributor", "remote@example.org"),
+        pygit2.Signature("Integrator", "integrator@example.org"),
+        "Rewritten history",
+        history.repo.repo.TreeBuilder().write(),
+        [],
+    )
+    history.repo.repo.references["refs/heads/work"].set_target(orphan)
 
     assert (await history.reconcile("work"))["processed"] == 0
-    assert history.watermark("work") == rewritten
-    assert history.events() == []
+    assert history.watermark("work") == str(orphan)
+    assert [row.commit_hash for row in history.events()] == [head]
     assert "watermark" in caplog.text
 
 
@@ -774,6 +857,7 @@ async def test_direct_save_preserves_ai_provenance_and_watermark_contiguity(
     )
     with (
         patch("ontokit.api.routes.projects.get_arq_pool", AsyncMock(return_value=None)),
+        patch("ontokit.api.routes.projects.enqueue_change_history", history.enqueue),
         patch("ontokit.services.translation_jobs.enqueue_label_diff_after_commit", AsyncMock()),
     ):
         saved = await save_source_content(
@@ -798,6 +882,7 @@ async def test_direct_save_preserves_ai_provenance_and_watermark_contiguity(
         return
 
     assert history.watermark() == ({"gap": base, "initial": None}.get(pending, saved.commit_hash))
+    assert history.enqueue.await_args_list == ([((PROJECT, BRANCH),)] if pending else [])
     rows = {row.entity_iri.removeprefix(BASE_IRI): row for row in history.events()}
     assert {(name, row.origin) for name, row in rows.items()} == {
         ("Matched", "ai"),

@@ -527,10 +527,12 @@ class TestMergePullRequestExtended:
         merge_result.merge_commit_hash = "ccc"
         mock_git_service.merge_branch.return_value = merge_result
 
-        # DB calls: _get_project, _get_pr, sa_delete(BranchMetadata), _get_github_integration
+        # DB calls: _get_project, _get_pr, target branch lock, sa_delete(BranchMetadata),
+        # _get_github_integration
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
+            MagicMock(),  # advisory lock result (ignored)
             MagicMock(),  # sa_delete result (ignored)
             _scalar_result(None),  # _get_github_integration (no GitHub)
         ]
@@ -575,6 +577,7 @@ class TestMergePullRequestExtended:
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
+            MagicMock(),  # advisory lock result (ignored)
             _scalar_result(None),  # _get_github_integration
         ]
 
@@ -2184,6 +2187,7 @@ class TestMergePullRequestGitHubSync:
         mock_db.execute.side_effect = [
             _project_result(project),
             _pr_result(pr),
+            MagicMock(),  # advisory lock result (ignored)
         ]
         service._sync_pull_request_to_github = AsyncMock()  # type: ignore[method-assign]
 

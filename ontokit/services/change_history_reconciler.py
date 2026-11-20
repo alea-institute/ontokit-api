@@ -5,14 +5,13 @@ import json
 import logging
 from collections import deque
 from datetime import UTC, datetime, timedelta
-from typing import TypedDict
+from typing import Any, TypedDict, cast
 from uuid import UUID
 
 import pygit2
 from arq import ArqRedis
 from rdflib import Graph
-from sqlalchemy import func, select, text
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy import CursorResult, func, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -33,7 +32,6 @@ logger = logging.getLogger(__name__)
 
 RECONCILE_CHANGE_HISTORY_TASK = "reconcile_change_history_task"
 _BACKFILL_DAYS = 90
-_MERGE_ATTRIBUTION_GRACE_SECONDS = 30
 _ENQUEUE_TIMEOUT_SECONDS = 2
 
 
@@ -74,40 +72,34 @@ async def enqueue_change_history(
 
 
 async def advance_inline_watermark(
-    db: AsyncSession,
-    project_id: UUID,
-    branch: str,
-    previous_head: str,
-    commit_hash: str,
-    *,
-    is_default_branch: bool,
-) -> None:
-    """Advance a contiguous inline save under the source writer's branch lock."""
+    db: AsyncSession, project_id: UUID, branch: str, previous_head: str, commit_hash: str
+) -> bool:
+    """Advance a contiguous inline save under the source writer's branch lock.
+
+    Returns False when the branch has no watermark yet or its watermark trails
+    the save's parent. Reconciliation then establishes the baseline or catches
+    up; it skips the commits an inline save already recorded.
+    """
     watermark = ChangeHistoryWatermark
-    if is_default_branch and await db.get(watermark, (project_id, branch)) is None:
-        # Let the first reconciliation establish the historical baseline.
-        return
-
-    statement = insert(watermark).values(
-        project_id=project_id, branch=branch, commit_hash=commit_hash
-    )
-    await db.execute(
-        statement.on_conflict_do_update(
-            index_elements=[watermark.project_id, watermark.branch],
-            set_={"commit_hash": statement.excluded.commit_hash, "updated_at": func.now()},
-            where=watermark.commit_hash == previous_head,
+    result = await db.execute(
+        update(watermark)
+        .where(
+            watermark.project_id == project_id,
+            watermark.branch == branch,
+            watermark.commit_hash == previous_head,
         )
+        .values(commit_hash=commit_hash, updated_at=func.now())
     )
+    return cast(CursorResult[Any], result).rowcount == 1
 
 
-async def seed_inline_watermark(
-    db: AsyncSession, project_id: UUID, branch: str, previous_head: str
-) -> None:
-    """Keep a first failed save on a work branch eligible for reconciliation."""
-    await db.execute(
-        insert(ChangeHistoryWatermark)
-        .values(project_id=project_id, branch=branch, commit_hash=previous_head)
-        .on_conflict_do_nothing()
+def history_branches(repo: pygit2.Repository) -> list[str]:
+    """Name the local branches whose changes the feed records."""
+    prefix = "refs/heads/"
+    return sorted(
+        name.removeprefix(prefix)
+        for name in repo.references
+        if name.startswith(prefix) and not name.startswith(f"{prefix}suggest/")
     )
 
 
@@ -168,12 +160,20 @@ class ChangeHistoryReconciler:
                     watermark.commit_hash = commit_hash
                     watermark.updated_at = datetime.now(UTC)
 
-            if watermark is None and branch != repository.get_default_branch():
-                advance(head_hash)
-                return result
+            fork_from = None
+            default_branch = repository.get_default_branch()
+            if watermark is None and branch != default_branch:
+                # A work branch's own history starts where it left the default branch.
+                default_ref = repository.repo.references.get(f"refs/heads/{default_branch}")
+                if default_ref is not None:
+                    fork_from = default_ref.peel(pygit2.Commit).id
 
             baseline, pending = _select_history(
-                repository.repo, head, watermark.commit_hash if watermark else None, max_commits
+                repository.repo,
+                head,
+                watermark.commit_hash if watermark else None,
+                max_commits,
+                fork_from,
             )
             if watermark is not None and baseline is None:
                 logger.warning(
@@ -218,11 +218,9 @@ class ChangeHistoryReconciler:
                     )
                     .limit(1)
                 )
-                attribution = None
-                if existing is None:
-                    attribution = await self._attribution(project, commit)
-                    if attribution is None:
-                        break
+                # A pull-request merge holds this branch lock from its ref move
+                # through its commit, so a merged PR's row is visible here.
+                attribution = await self._attribution(project, commit) if existing is None else None
 
                 pending.pop()
                 new_graph = read_history_graph(commit, filename, original_filename)
@@ -262,7 +260,7 @@ class ChangeHistoryReconciler:
 
     async def _attribution(
         self, project: Project, commit: pygit2.Commit
-    ) -> tuple[str, str | None, ChangeOrigin] | None:
+    ) -> tuple[str, str | None, ChangeOrigin]:
         # Synthetic PRs created from old Git history stored an email as the ID.
         pr = await self._db.scalar(
             select(PullRequest)
@@ -281,12 +279,6 @@ class ChangeHistoryReconciler:
         name = event_display_name(author.name)
         if author.email == ONTOKIT_SYNC_COMMITTER_EMAIL:
             return "system", name, ChangeOrigin.SYSTEM
-
-        # The Git ref can become visible before the PR transaction commits.
-        # Leave the merge pending briefly so the PR author can take precedence.
-        age = datetime.now(UTC).timestamp() - commit.commit_time
-        if len(commit.parent_ids) > 1 and abs(age) < _MERGE_ATTRIBUTION_GRACE_SECONDS:
-            return None
 
         user_ids = {project.owner_id, *(member.user_id for member in project.members)}
         mapped_id = next(
@@ -328,15 +320,32 @@ class ChangeHistoryReconciler:
 
 
 def _select_history(
-    repo: pygit2.Repository, head: pygit2.Commit, previous_hash: str | None, max_commits: int
+    repo: pygit2.Repository,
+    head: pygit2.Commit,
+    previous_hash: str | None,
+    max_commits: int,
+    fork_from: pygit2.Oid | None = None,
 ) -> tuple[pygit2.Commit | None, deque[pygit2.Commit]]:
+    """Find the first-parent commits to record and the commit to diff the oldest against.
+
+    With a watermark, history resumes after it. Without one, it starts at the
+    backfill cutoff or, for a work branch, at the first commit it shares with
+    the default branch (``fork_from``), whichever comes first.
+    """
     # Keep the oldest pending batch and one lookahead while finding its baseline.
     pending: deque[pygit2.Commit] = deque(maxlen=max_commits + 1)
     cutoff = (datetime.now(UTC) - timedelta(days=_BACKFILL_DAYS)).timestamp()
     walk = repo.walk(head.id, pygit2.enums.SortMode.TOPOLOGICAL)
     walk.simplify_first_parent()
     for commit in walk:
-        if str(commit.id) == previous_hash if previous_hash else commit.commit_time < cutoff:
+        if previous_hash:
+            is_baseline = str(commit.id) == previous_hash
+        else:
+            is_baseline = commit.commit_time < cutoff or (
+                fork_from is not None
+                and (commit.id == fork_from or repo.descendant_of(fork_from, commit.id))
+            )
+        if is_baseline:
             return commit, pending
         pending.append(commit)
 

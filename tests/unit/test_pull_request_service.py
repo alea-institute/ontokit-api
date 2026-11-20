@@ -252,7 +252,8 @@ def _setup_project_and_pr_lookup(
     pr_result = MagicMock()
     pr_result.scalar_one_or_none.return_value = pr
 
-    mock_db.execute.side_effect = [project_result, pr_result]
+    # A merge also takes the target branch advisory lock.
+    mock_db.execute.side_effect = [project_result, pr_result, MagicMock()]
 
 
 def _setup_multi_execute(mock_db: AsyncMock, *results: MagicMock | None) -> None:
@@ -854,7 +855,12 @@ class TestMergePullRequest:
         gh_integration_result = MagicMock()
         gh_integration_result.scalar_one_or_none.return_value = None
 
-        mock_db.execute.side_effect = [project_result, pr_result, gh_integration_result]
+        mock_db.execute.side_effect = [
+            project_result,
+            pr_result,
+            MagicMock(),
+            gh_integration_result,
+        ]
 
         merge_req = PRMergeRequest(merge_message="Merge it", delete_source_branch=False)
         result = await service.merge_pull_request(PROJECT_ID, 1, merge_req, user)
@@ -2477,3 +2483,48 @@ async def test_merge_enqueues_change_history_after_local_status_is_durable(
         assert durable_at_enqueue == [(1, "a" * 40)]
     else:
         pool.enqueue_job.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_merge_holds_the_target_branch_lock_until_the_pull_request_commits(
+    service: PullRequestService, mock_db: AsyncMock, mock_git_service: MagicMock
+) -> None:
+    """History reconciliation shares this lock, so it never sees the ref without the PR row."""
+    project = _make_project(pr_approval_required=0)
+    pr = _make_pr(author_id=OWNER_ID)
+    _setup_project_and_pr_lookup(mock_db, project, pr)
+    mock_git_service.list_branches.return_value = []
+    steps: list[object] = []
+
+    @asynccontextmanager
+    async def lock(_db: object, project_id: uuid.UUID, branch: str) -> AsyncIterator[None]:
+        steps.append(("lock", project_id, branch))
+        try:
+            yield
+        finally:
+            steps.append("unlock")
+
+    def merge(**_kwargs: object) -> MagicMock:
+        steps.append("merge")
+        return MagicMock(success=True, merge_commit_hash="a" * 40)
+
+    async def commit() -> None:
+        steps.append(("commit", pr.merge_commit_hash))
+
+    mock_git_service.merge_branch.side_effect = merge
+    mock_db.commit.side_effect = commit
+    with (
+        patch("ontokit.services.pull_request_service.branch_write_lock", lock),
+        patch("ontokit.api.utils.redis.get_arq_pool", AsyncMock(return_value=None)),
+        patch.object(service, "_sync_pull_request_to_github", AsyncMock()),
+    ):
+        await service.merge_pull_request(
+            PROJECT_ID, 1, PRMergeRequest(delete_source_branch=False), _make_user(OWNER_ID)
+        )
+
+    assert steps[:4] == [
+        ("lock", PROJECT_ID, pr.target_branch),
+        "merge",
+        ("commit", "a" * 40),
+        "unlock",
+    ]
