@@ -394,7 +394,9 @@ async def test_merge_is_attributed_as_soon_as_the_branch_lock_is_free(history: H
 
 
 @pytest.mark.asyncio
-async def test_member_triggered_normalization_is_system_history(history: History):
+async def test_import_or_normalization_is_system_work_credited_to_the_member_who_ran_it(
+    history: History,
+):
     normalized, _ = history.commit(
         PREFIXES + "ex:A a owl:Class .", name="Owner", email=noreply_alias("owner", "Owner")
     )
@@ -412,9 +414,18 @@ async def test_member_triggered_normalization_is_system_history(history: History
             )
         )
 
-    assert (await history.reconcile())["recorded"] == 1
-    (event,) = history.events()
-    assert (event.user_id, event.origin) == ("system", "system")
+    unattributed, _ = history.commit(
+        PREFIXES + "ex:A a owl:Class . ex:B a owl:Class .", name="Upstream Author"
+    )
+
+    assert (await history.reconcile())["recorded"] == 2
+    events = {event.commit_hash: event for event in history.events()}
+    # The member ran it, so they are its author; the origin says it was not hand-edited.
+    event = events[normalized]
+    assert (event.user_id, event.user_name, event.origin) == ("owner", "Owner", "system")
+    # No account stands behind this commit, so the system author carries no person's name.
+    event = events[unattributed]
+    assert (event.user_id, event.user_name, event.origin) == ("system", None, "system")
 
 
 @pytest.mark.asyncio

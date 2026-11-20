@@ -297,10 +297,12 @@ class ChangeHistoryReconciler:
         if pr is not None:
             return pr.author_id, event_display_name(pr.author_name), ChangeOrigin.HUMAN
 
+        # The "system" author stands for no account, so it never carries a
+        # person's name: the feed's author list would offer that person.
+        system = ("system", None, ChangeOrigin.SYSTEM)
         author = commit.author
-        name = event_display_name(author.name)
         if author.email == ONTOKIT_SYNC_COMMITTER_EMAIL:
-            return "system", name, ChangeOrigin.SYSTEM
+            return system
 
         user_ids = {project.owner_id, *(member.user_id for member in project.members)}
         mapped_id = next(
@@ -336,9 +338,11 @@ class ChangeHistoryReconciler:
                 )
                 .limit(1)
             )
-            if normalization is None:
-                return mapped_id, name, ChangeOrigin.HUMAN
-        return "system", name, ChangeOrigin.SYSTEM
+            # An import or normalization is mechanical work a member ran:
+            # they are its author, and its origin is the system.
+            origin = ChangeOrigin.HUMAN if normalization is None else ChangeOrigin.SYSTEM
+            return mapped_id, event_display_name(author.name), origin
+        return system
 
 
 def _select_history(
