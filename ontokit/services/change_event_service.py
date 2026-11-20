@@ -119,7 +119,8 @@ def _event_filters(
     branch: str,
     since: datetime,
     until: datetime,
-    origin: Sequence[str] | None,
+    *,
+    origin: Sequence[str] | None = None,
     author: list[str] | None = None,
     entity_type: list[str] | None = None,
     event_type: list[str] | None = None,
@@ -130,14 +131,22 @@ def _event_filters(
         event.branch == branch,
         event.created_at.between(since, until),
     ]
-    for column, values in (
-        (event.origin, origin),
-        (event.user_id, author),
-        (event.entity_type, entity_type),
-        (event.event_type, event_type),
-    ):
-        if values:
-            filters.append(column.in_(values))
+    if entity_type:
+        filters.append(event.entity_type.in_(entity_type))
+
+    entity_filters = [
+        column.in_(values)
+        for column, values in (
+            (event.origin, origin),
+            (event.user_id, author),
+            (event.event_type, event_type),
+        )
+        if values
+    ]
+    if entity_filters:
+        # One matching event qualifies the entity. Keep its other events in the window.
+        matching_iris = select(event.entity_iri).where(*filters, *entity_filters)
+        filters.append(event.entity_iri.in_(matching_iris))
     return filters
 
 
@@ -153,10 +162,6 @@ def _group_changes(filters: list[ColumnElement[bool]]) -> CTE:
             func.last_value(event.event_type)
             .over(partition_by=event.entity_iri, order_by=newest_first, rows=(None, None))
             .label("first_event_type"),
-            func.count()
-            .filter(event.event_type == ChangeEventType.DELETE)
-            .over(partition_by=event.entity_iri)
-            .label("delete_count"),
             func.row_number()
             .over(partition_by=event.entity_iri, order_by=newest_first)
             .label("event_rank"),
@@ -164,12 +169,12 @@ def _group_changes(filters: list[ColumnElement[bool]]) -> CTE:
         .where(*filters)
         .subquery()
     ).c
+    starts_with_create = ranked.first_event_type == ChangeEventType.CREATE
+    ends_with_delete = ranked.event_type == ChangeEventType.DELETE
     net_change = case(
-        (ranked.event_type == ChangeEventType.DELETE, "removed"),
-        (
-            (ranked.first_event_type == ChangeEventType.CREATE) & (ranked.delete_count == 0),
-            "added",
-        ),
+        (starts_with_create & ends_with_delete, "transient"),
+        (starts_with_create, "added"),
+        (ends_with_delete, "removed"),
         else_="modified",
     )
     return (
@@ -460,7 +465,14 @@ class ChangeEventService:
             position = timestamp, iri
         since = until - timedelta(days=days)
         filters = _event_filters(
-            project_id, branch, since, until, origin, author, entity_type, event_type
+            project_id,
+            branch,
+            since,
+            until,
+            origin=origin,
+            author=author,
+            entity_type=entity_type,
+            event_type=event_type,
         )
         entities = _group_changes(filters)
         page = select(entities).order_by(entities.c.last_changed_at.desc(), entities.c.entity_iri)
@@ -512,7 +524,12 @@ class ChangeEventService:
     ) -> ChangesSummary:
         event = EntityChangeEvent
         net_counts = select(entities.c.net_change, func.count()).group_by(entities.c.net_change)
-        by_net_change: dict[NetChange, int] = {"added": 0, "modified": 0, "removed": 0}
+        by_net_change: dict[NetChange, int] = {
+            "added": 0,
+            "modified": 0,
+            "removed": 0,
+            "transient": 0,
+        }
         for net_change, count in await self._db.execute(net_counts):
             by_net_change[net_change] = count
 
@@ -564,7 +581,9 @@ class ChangeEventService:
         origin: Sequence[str] | None = None,
     ) -> ChangedEntitiesResponse:
         until = datetime.now(UTC)
-        filters = _event_filters(project_id, branch, until - timedelta(days=days), until, origin)
+        filters = _event_filters(
+            project_id, branch, until - timedelta(days=days), until, origin=origin
+        )
         entities = _group_changes(filters)
         page = (
             select(entities)

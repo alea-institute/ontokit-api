@@ -95,10 +95,25 @@ def test_upgrade_adds_change_origin_and_generated_entity_ledger() -> None:
             "ix_change_events_project_origin_time",
             "entity_change_events",
             ["project_id", "origin", "created_at"],
+            postgresql_concurrently=True,
         ),
         call("ix_llm_generated_project_iri", table, ["project_id", "entity_iri"]),
         call("ix_llm_generated_project_batch", table, ["project_id", "batch_id"]),
     ]
+    fake_op.get_context.assert_called_once_with()
+    fake_op.assert_has_calls(
+        [
+            call.get_context().autocommit_block(),
+            call.get_context().autocommit_block().__enter__(),
+            call.create_index(
+                "ix_change_events_project_origin_time",
+                "entity_change_events",
+                ["project_id", "origin", "created_at"],
+                postgresql_concurrently=True,
+            ),
+            call.get_context().autocommit_block().__exit__(None, None, None),
+        ]
+    )
     event_table = sa.inspect(EntityChangeEvent).local_table
     for name, column in columns.items():
         assert str(event_table.c[name].type) == str(column.type)
@@ -119,6 +134,19 @@ def test_downgrade_removes_both_storage_additions() -> None:
         "ix_llm_generated_project_iri",
         "ix_llm_generated_project_batch",
     }
+    fake_op.get_context.assert_called_once_with()
+    fake_op.assert_has_calls(
+        [
+            call.get_context().autocommit_block(),
+            call.get_context().autocommit_block().__enter__(),
+            call.drop_index(
+                "ix_change_events_project_origin_time",
+                table_name="entity_change_events",
+                postgresql_concurrently=True,
+            ),
+            call.get_context().autocommit_block().__exit__(None, None, None),
+        ]
+    )
     fake_op.drop_table.assert_called_once_with("llm_generated_entities")
     assert {entry.args for entry in fake_op.drop_column.call_args_list} == {
         ("entity_change_events", "origin"),

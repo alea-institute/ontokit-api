@@ -24,11 +24,13 @@ def upgrade() -> None:
     )
     op.add_column("entity_change_events", sa.Column("origin_model", sa.String(255), nullable=True))
     op.add_column("entity_change_events", sa.Column("origin_batch_id", sa.Uuid(), nullable=True))
-    op.create_index(
-        "ix_change_events_project_origin_time",
-        "entity_change_events",
-        ["project_id", "origin", "created_at"],
-    )
+    with op.get_context().autocommit_block():
+        op.create_index(
+            "ix_change_events_project_origin_time",
+            "entity_change_events",
+            ["project_id", "origin", "created_at"],
+            postgresql_concurrently=True,
+        )
 
     op.create_table(
         "llm_generated_entities",
@@ -62,10 +64,15 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    with op.get_context().autocommit_block():
+        op.drop_index(
+            "ix_change_events_project_origin_time",
+            table_name="entity_change_events",
+            postgresql_concurrently=True,
+        )
     op.drop_index("ix_llm_generated_project_batch", table_name="llm_generated_entities")
     op.drop_index("ix_llm_generated_project_iri", table_name="llm_generated_entities")
     op.drop_table("llm_generated_entities")
-    op.drop_index("ix_change_events_project_origin_time", table_name="entity_change_events")
     op.drop_column("entity_change_events", "origin_batch_id")
     op.drop_column("entity_change_events", "origin_model")
     op.drop_column("entity_change_events", "origin")

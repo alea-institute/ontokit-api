@@ -115,7 +115,7 @@ async def test_groups_entities_and_paginates_a_stable_window(feed) -> None:
     assert first.summary.model_dump() == {
         "total_events": 7,
         "entities_changed": 4,
-        "by_net_change": {"added": 1, "modified": 1, "removed": 2},
+        "by_net_change": {"added": 1, "modified": 1, "removed": 1, "transient": 1},
         "by_origin": {"human": 4, "ai": 1, "ai_edited": 1, "system": 1},
         "authors": [
             {"user_id": "user-a", "user_name": "Editor A", "event_count": 6},
@@ -153,7 +153,7 @@ async def test_groups_entities_and_paginates_a_stable_window(feed) -> None:
     assert [(i.entity_iri.removeprefix(BASE_IRI), i.net_change) for i in items] == [
         ("Added", "added"),
         ("Modified", "modified"),
-        ("ShortLived", "removed"),
+        ("ShortLived", "transient"),
         ("Removed", "removed"),
     ]
     _, modified, short_lived, removed = items
@@ -177,10 +177,11 @@ async def test_groups_entities_and_paginates_a_stable_window(feed) -> None:
 @pytest.mark.parametrize(
     "filters,expected,count",
     [
-        ({"origin": ["ai", "ai_edited"]}, {"Added": "added", "Modified": "modified"}, 2),
-        ({"author": ["user-b"]}, {"Modified": "modified"}, 1),
+        ({"origin": ["ai", "ai_edited"]}, {"Added": "added", "Modified": "modified"}, 4),
+        ({"author": ["user-b"]}, {"Modified": "modified"}, 2),
         ({"entity_type": ["property"]}, {"Modified": "modified"}, 2),
-        ({"event_type": ["create"]}, {"Added": "added", "ShortLived": "added"}, 2),
+        ({"event_type": ["create"]}, {"Added": "added", "ShortLived": "transient"}, 4),
+        ({"event_type": ["rename"], "origin": ["ai_edited"]}, {}, 0),
         (
             {"days": 2},
             {"Added": "modified", "Modified": "modified", "ShortLived": "removed"},
@@ -190,7 +191,9 @@ async def test_groups_entities_and_paginates_a_stable_window(feed) -> None:
         ({"origin": ["system"], "entity_type": ["individual"]}, {}, 0),
     ],
 )
-async def test_filters_events_before_grouping(feed, filters, expected, count) -> None:
+async def test_filters_select_entities_and_keep_their_window_events(
+    feed, filters, expected, count
+) -> None:
     service, connection = feed
     _insert(connection, _example_events())
 
@@ -199,6 +202,86 @@ async def test_filters_events_before_grouping(feed, filters, expected, count) ->
         expected
     )
     assert response.summary.total_events == count
+
+
+@pytest.mark.asyncio
+async def test_author_filter_uses_later_edits_by_other_authors(feed) -> None:
+    service, connection = feed
+    _insert(
+        connection,
+        [
+            _event(
+                "Renamed",
+                2,
+                "rename",
+                changed_fields=["labels"],
+                old_values={"labels": ["Original"]},
+                new_values={"labels": ["Draft"]},
+            ),
+            _event(
+                "Renamed",
+                1,
+                "rename",
+                origin="system",
+                user_id="user-b",
+                user_name="Editor B",
+                changed_fields=["labels"],
+                old_values={"labels": ["Draft"]},
+                new_values={"labels": ["Final"]},
+            ),
+            _event("Unmatched", 0, user_id="user-b", user_name="Editor B"),
+        ],
+    )
+
+    response = await service.list_changes(PROJECT, branch="trunk", author=["user-a"])
+
+    (item,) = response.items
+    assert item.entity_iri == BASE_IRI + "Renamed"
+    assert [(f.field, f.before, f.after) for f in item.field_changes] == [
+        ("labels", ["Original"], ["Final"]),
+    ]
+    assert item.label == "Final"
+    assert item.origins == ["human", "system"]
+    assert [author.user_id for author in item.authors] == ["user-b", "user-a"]
+    assert item.event_count == 2
+    assert [event.user_id for event in item.events] == ["user-b", "user-a"]
+    assert item.last_changed_at == item.events[0].created_at
+    assert response.summary.model_dump() == {
+        "total_events": 2,
+        "entities_changed": 1,
+        "by_net_change": {"added": 0, "modified": 1, "removed": 0, "transient": 0},
+        "by_origin": {"human": 1, "ai": 0, "ai_edited": 0, "system": 1},
+        "authors": [
+            {"user_id": "user-a", "user_name": "Editor A", "event_count": 1},
+            {"user_id": "user-b", "user_name": "Editor B", "event_count": 1},
+        ],
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "event_types,event_filter,net_change",
+    [
+        pytest.param(["delete", "create"], ["delete"], "modified", id="delete-recreate"),
+        pytest.param(["create", "delete"], None, "transient", id="create-delete"),
+        pytest.param(["create", "delete", "create"], None, "added", id="create-delete-recreate"),
+    ],
+)
+async def test_net_change_uses_existence_at_window_edges(
+    feed, event_types, event_filter, net_change
+) -> None:
+    service, connection = feed
+    _insert(
+        connection,
+        [_event("Entity", 3 - i, event_type) for i, event_type in enumerate(event_types)],
+    )
+
+    response = await service.list_changes(PROJECT, branch="trunk", event_type=event_filter)
+
+    (item,) = response.items
+    assert item.net_change == net_change
+    assert response.summary.by_net_change[net_change] == 1
+    assert response.summary.by_net_change["removed"] == 0
 
 
 @pytest.mark.asyncio
@@ -251,14 +334,11 @@ async def test_changed_entities_returns_only_markers_and_caps_entities(feed) -> 
     first = markers.items[0].model_dump()
     assert set(first) == {"entity_iri", "net_change", "origins", "last_changed_at"}
     assert first["entity_iri"] == BASE_IRI + "Newest"
-    assert first["net_change"] == "removed"
+    assert first["net_change"] == "transient"
     assert set(first["origins"]) == {"ai", "system"}
     assert markers.items[1].entity_iri == BASE_IRI + "Entity0000"
     assert markers.items[-1].entity_iri == BASE_IRI + "Entity4998"
 
-    filtered = await service.list_changed_entities(PROJECT, branch="trunk", origin=["system"])
-    assert not filtered.truncated
-    (marker,) = filtered.items
-    assert marker.entity_iri == BASE_IRI + "Newest"
-    assert marker.net_change == "removed"
-    assert marker.origins == ["system"]
+    filtered = await service.list_changed_entities(PROJECT, branch="trunk", origin=["ai"])
+    assert filtered.truncated
+    assert filtered.items[0].model_dump() == first

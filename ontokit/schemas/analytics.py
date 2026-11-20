@@ -8,7 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ontokit.models.change_event import ChangeOrigin
 
-NetChange = Literal["added", "modified", "removed"]
+NetChange = Literal["added", "modified", "removed", "transient"]
 ChangeField = Literal["labels", "definitions", "parents", "deprecated", "comments", "other"]
 ChangeFieldValue = list[str] | bool | None
 
