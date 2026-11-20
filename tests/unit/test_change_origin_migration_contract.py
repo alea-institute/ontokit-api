@@ -39,6 +39,7 @@ def test_upgrade_adds_change_origin_and_generated_entity_ledger() -> None:
     for entry in fake_op.add_column.call_args_list:
         table, column = entry.args
         assert table == "entity_change_events"
+        assert entry.kwargs == {"if_not_exists": True}
         columns[column.name] = column
     assert set(columns) == {"origin", "origin_model", "origin_batch_id"}
     assert columns["origin"].type.length == 20
@@ -105,6 +106,13 @@ def test_upgrade_adds_change_origin_and_generated_entity_ledger() -> None:
         [
             call.get_context().autocommit_block(),
             call.get_context().autocommit_block().__enter__(),
+            # An interrupted build leaves an invalid index that a rerun must replace.
+            call.drop_index(
+                "ix_change_events_project_origin_time",
+                table_name="entity_change_events",
+                postgresql_concurrently=True,
+                if_exists=True,
+            ),
             call.create_index(
                 "ix_change_events_project_origin_time",
                 "entity_change_events",
@@ -143,6 +151,7 @@ def test_downgrade_removes_both_storage_additions() -> None:
                 "ix_change_events_project_origin_time",
                 table_name="entity_change_events",
                 postgresql_concurrently=True,
+                if_exists=True,
             ),
             call.get_context().autocommit_block().__exit__(None, None, None),
         ]

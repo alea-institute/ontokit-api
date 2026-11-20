@@ -27,6 +27,7 @@ def test_watermark_schema_and_concurrent_index() -> None:
 
     table_name, *elements = op.create_table.call_args.args
     assert table_name == TABLE
+    assert op.create_table.call_args.kwargs == {"if_not_exists": True}
     table = sa.Table(TABLE, sa.MetaData(), *elements)
     assert list(table.primary_key.columns.keys()) == ["project_id", "branch"]
     assert isinstance(table.c.project_id.type, sa.Uuid)
@@ -43,6 +44,8 @@ def test_watermark_schema_and_concurrent_index() -> None:
     op.assert_has_calls(
         [
             call.get_context().autocommit_block().__enter__(),
+            # An interrupted build leaves an invalid index that a rerun must replace.
+            call.drop_index(INDEX, table_name=EVENTS, postgresql_concurrently=True, if_exists=True),
             call.create_index(
                 INDEX,
                 EVENTS,
@@ -63,7 +66,7 @@ def test_watermark_schema_and_concurrent_index() -> None:
     op.assert_has_calls(
         [
             call.get_context().autocommit_block().__enter__(),
-            call.drop_index(INDEX, table_name=EVENTS, postgresql_concurrently=True),
+            call.drop_index(INDEX, table_name=EVENTS, postgresql_concurrently=True, if_exists=True),
             call.get_context().autocommit_block().__exit__(None, None, None),
             call.drop_table(TABLE),
         ]

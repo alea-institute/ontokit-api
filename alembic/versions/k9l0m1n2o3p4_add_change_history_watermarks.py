@@ -15,6 +15,9 @@ depends_on: str | None = None
 
 
 def upgrade() -> None:
+    # The concurrent index build below commits this table before the revision
+    # is recorded. If that build is interrupted, the rerun finds the table and
+    # an invalid index, so both steps tolerate their own leftovers.
     op.create_table(
         "change_history_watermarks",
         sa.Column("project_id", sa.Uuid(), sa.ForeignKey("projects.id", ondelete="CASCADE")),
@@ -24,8 +27,15 @@ def upgrade() -> None:
             "updated_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False
         ),
         sa.PrimaryKeyConstraint("project_id", "branch"),
+        if_not_exists=True,
     )
     with op.get_context().autocommit_block():
+        op.drop_index(
+            "ix_change_events_project_branch_commit",
+            table_name="entity_change_events",
+            postgresql_concurrently=True,
+            if_exists=True,
+        )
         op.create_index(
             "ix_change_events_project_branch_commit",
             "entity_change_events",
@@ -36,9 +46,11 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     with op.get_context().autocommit_block():
+        # The drop commits on its own, so a rerun may find the index gone.
         op.drop_index(
             "ix_change_events_project_branch_commit",
             table_name="entity_change_events",
             postgresql_concurrently=True,
+            if_exists=True,
         )
     op.drop_table("change_history_watermarks")

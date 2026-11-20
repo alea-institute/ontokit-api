@@ -18,13 +18,31 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # The concurrent index build below commits these columns before the
+    # revision is recorded. If that build is interrupted, the rerun finds the
+    # columns and an invalid index, so both steps tolerate their own leftovers.
     op.add_column(
         "entity_change_events",
         sa.Column("origin", sa.String(20), nullable=False, server_default="human"),
+        if_not_exists=True,
     )
-    op.add_column("entity_change_events", sa.Column("origin_model", sa.String(255), nullable=True))
-    op.add_column("entity_change_events", sa.Column("origin_batch_id", sa.Uuid(), nullable=True))
+    op.add_column(
+        "entity_change_events",
+        sa.Column("origin_model", sa.String(255), nullable=True),
+        if_not_exists=True,
+    )
+    op.add_column(
+        "entity_change_events",
+        sa.Column("origin_batch_id", sa.Uuid(), nullable=True),
+        if_not_exists=True,
+    )
     with op.get_context().autocommit_block():
+        op.drop_index(
+            "ix_change_events_project_origin_time",
+            table_name="entity_change_events",
+            postgresql_concurrently=True,
+            if_exists=True,
+        )
         op.create_index(
             "ix_change_events_project_origin_time",
             "entity_change_events",
@@ -65,10 +83,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     with op.get_context().autocommit_block():
+        # The drop commits on its own, so a rerun may find the index gone.
         op.drop_index(
             "ix_change_events_project_origin_time",
             table_name="entity_change_events",
             postgresql_concurrently=True,
+            if_exists=True,
         )
     op.drop_index("ix_llm_generated_project_batch", table_name="llm_generated_entities")
     op.drop_index("ix_llm_generated_project_iri", table_name="llm_generated_entities")
