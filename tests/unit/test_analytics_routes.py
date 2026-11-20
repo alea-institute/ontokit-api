@@ -284,10 +284,20 @@ def test_change_feeds_enforce_project_visibility(
         ("changes", {"author": "user\x00"}),
         ("changes", {"entity_type": "class\x00"}),
         ("changes", {"event_type": "create\x00"}),
+        ("changes", {"author": [f"user-{number}" for number in range(51)]}),
+        ("changes", {"entity_type": ["class"] * 51}),
+        ("changes", {"event_type": ["create"] * 51}),
+        ("changes", {"origin": ["ai"] * 5}),
+        ("changed-entities", {"origin": ["ai"] * 5}),
+        ("changes", {"author": "a" * 256}),
+        ("changes", {"branch": "b" * 256}),
+        ("changes", {"cursor": "c" * 5001}),
     ],
 )
 def test_change_feeds_reject_invalid_queries(
-    authed_client: tuple[TestClient, AsyncMock], path: str, params: dict[str, str | int]
+    authed_client: tuple[TestClient, AsyncMock],
+    path: str,
+    params: dict[str, str | int | list[str]],
 ) -> None:
     client, db = authed_client
     with (

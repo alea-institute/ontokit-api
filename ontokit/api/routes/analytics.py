@@ -29,8 +29,12 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-# PostgreSQL text cannot contain NUL characters.
-_QueryText = Annotated[str, StringConstraints(pattern=r"^[^\x00]*$")]
+# PostgreSQL text cannot contain NUL characters. Lengths match the stored columns.
+_QueryText = Annotated[str, StringConstraints(pattern=r"^[^\x00]*$", max_length=255)]
+# Repeatable filters become SQL IN lists, so their size is bounded.
+_MAX_FILTER_VALUES = 50
+_OriginFilter = Annotated[list[ChangeOrigin] | None, Query(max_length=len(ChangeOrigin))]
+_TextFilter = Annotated[list[_QueryText] | None, Query(max_length=_MAX_FILTER_VALUES)]
 
 
 async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser | None) -> None:
@@ -76,12 +80,12 @@ async def get_project_changes(
     user: OptionalUser,
     days: int = Query(default=7, ge=1, le=365),
     branch: Annotated[_QueryText | None, Query()] = None,
-    origin: Annotated[list[ChangeOrigin] | None, Query()] = None,
-    author: Annotated[list[_QueryText] | None, Query()] = None,
-    entity_type: Annotated[list[_QueryText] | None, Query()] = None,
-    event_type: Annotated[list[_QueryText] | None, Query()] = None,
+    origin: _OriginFilter = None,
+    author: _TextFilter = None,
+    entity_type: _TextFilter = None,
+    event_type: _TextFilter = None,
     limit: int = Query(default=50, ge=1, le=200),
-    cursor: str | None = Query(default=None),
+    cursor: str | None = Query(default=None, max_length=4096),
 ) -> ProjectChangesResponse:
     """Get the net changes to entities in the filtered window."""
     await _verify_access(project_id, db, user)
@@ -111,7 +115,7 @@ async def get_changed_entities(
     user: OptionalUser,
     days: int = Query(default=7, ge=1, le=365),
     branch: Annotated[_QueryText | None, Query()] = None,
-    origin: Annotated[list[ChangeOrigin] | None, Query()] = None,
+    origin: _OriginFilter = None,
 ) -> ChangedEntitiesResponse:
     """Get changed-entity markers for the project tree."""
     await _verify_access(project_id, db, user)
