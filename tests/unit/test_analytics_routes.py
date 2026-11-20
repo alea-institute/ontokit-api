@@ -383,3 +383,36 @@ def test_change_feeds_allow_visible_anonymous_projects(
             git.return_value.get_repository.assert_called_once()
         else:
             assert response.json() == {"items": [], "truncated": False}
+
+
+@pytest.mark.parametrize(
+    "path,method", [("changes", "list_changes"), ("changed-entities", "list_changed_entities")]
+)
+def test_change_feeds_read_one_snapshot(
+    authed_client: tuple[TestClient, AsyncMock], path: str, method: str
+) -> None:
+    """Page, payload, and summary must agree while history is still being recorded."""
+    client, db = authed_client
+    steps = MagicMock()
+    db.rollback = steps.end_access_check
+    db.connection = steps.begin_snapshot
+    steps.end_access_check.side_effect = AsyncMock()
+    steps.begin_snapshot.side_effect = AsyncMock()
+
+    with (
+        patch("ontokit.api.routes.analytics.get_project_service") as projects,
+        patch("ontokit.api.routes.analytics.ChangeEventService") as change_service,
+    ):
+        projects.return_value.get = AsyncMock(return_value=_make_project_response())
+        steps.attach_mock(AsyncMock(side_effect=RuntimeError("Stop after the read")), "read_feed")
+        setattr(change_service.return_value, method, steps.read_feed)
+        client.get(f"/api/v1/projects/{PROJECT_ID}/analytics/{path}", params={"branch": "trunk"})
+
+    assert [call[0] for call in steps.mock_calls] == [
+        "end_access_check",
+        "begin_snapshot",
+        "read_feed",
+    ]
+    assert steps.begin_snapshot.call_args.kwargs == {
+        "execution_options": {"isolation_level": "REPEATABLE READ"}
+    }

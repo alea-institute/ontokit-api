@@ -48,6 +48,19 @@ async def _resolve_branch(project_id: UUID, branch: str | None) -> str:
     return await asyncio.to_thread(_default_branch, project_id)
 
 
+async def _begin_snapshot(db: AsyncSession) -> None:
+    """Serve every query of one feed response from the same snapshot.
+
+    A feed runs several queries (page, payload, summary). Under the default
+    isolation each sees the rows committed so far, so they disagree while
+    history is being recorded. The access check has already used this session;
+    its read-only transaction ends here because isolation is set at the start
+    of a transaction.
+    """
+    await db.rollback()
+    await db.connection(execution_options={"isolation_level": "REPEATABLE READ"})
+
+
 def get_change_events(
     db: Annotated[AsyncSession, Depends(get_db)],
 ) -> ChangeEventService:
@@ -72,10 +85,12 @@ async def get_project_changes(
 ) -> ProjectChangesResponse:
     """Get the net changes to entities in the filtered window."""
     await _verify_access(project_id, db, user)
+    resolved_branch = await _resolve_branch(project_id, branch)
+    await _begin_snapshot(db)
     try:
         return await service.list_changes(
             project_id,
-            branch=await _resolve_branch(project_id, branch),
+            branch=resolved_branch,
             days=days,
             origin=origin,
             author=author,
@@ -100,8 +115,10 @@ async def get_changed_entities(
 ) -> ChangedEntitiesResponse:
     """Get changed-entity markers for the project tree."""
     await _verify_access(project_id, db, user)
+    resolved_branch = await _resolve_branch(project_id, branch)
+    await _begin_snapshot(db)
     return await service.list_changed_entities(
-        project_id, branch=await _resolve_branch(project_id, branch), days=days, origin=origin
+        project_id, branch=resolved_branch, days=days, origin=origin
     )
 
 
