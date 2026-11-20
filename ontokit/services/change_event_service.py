@@ -348,15 +348,15 @@ class ChangeEventService:
         old_iris = set(old_entities.keys())
         new_iris = set(new_entities.keys())
 
-        created_values = {
-            iri: _entity_values(new_graph, URIRef(iri), new_entities[iri])
-            for iri in new_iris - old_iris
-        }
+        created_iris = new_iris - old_iris
         origins: dict[str, dict[str, str | None]] = {}
-        if origin_resolver is not None and created_values:
+        if origin_resolver is not None and created_iris:
             created = {
-                iri: {field: cast(list[str], values[field]) for field in ("labels", "definitions")}
-                for iri, values in created_values.items()
+                iri: {
+                    "labels": _literal_values(new_graph, URIRef(iri), RDFS.label),
+                    "definitions": _literal_values(new_graph, URIRef(iri), SKOS.definition),
+                }
+                for iri in created_iris
             }
             try:
                 # Roll back a failed ledger query without poisoning the event transaction.
@@ -365,9 +365,10 @@ class ChangeEventService:
             except Exception:
                 logger.warning("Failed to resolve change origins", exc_info=True)
                 origins = {}
+            del created
 
         # Created entities
-        for iri, values in created_values.items():
+        for iri in created_iris:
             provenance = origins.get(iri, {})
             batch_id = provenance.get("batch_id")
             await append(
@@ -380,7 +381,7 @@ class ChangeEventService:
                     user_id,
                     user_name,
                     commit_hash,
-                    new_values=dict(values),
+                    new_values=dict(_entity_values(new_graph, URIRef(iri), new_entities[iri])),
                     origin=provenance.get("origin") or default_origin,
                     origin_model=provenance.get("model"),
                     origin_batch_id=UUID(batch_id) if batch_id is not None else None,

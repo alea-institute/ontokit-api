@@ -11,6 +11,7 @@ from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
+import pygit2
 from arq import ArqRedis, Retry, cron, func
 from sqlalchemy import select
 from sqlalchemy.exc import ProgrammingError, SQLAlchemyError
@@ -1609,7 +1610,15 @@ async def sweep_change_history(ctx: dict[str, Any]) -> None:
         project_ids = list(await db.scalars(select(Project.id)))
     git = BareGitRepositoryService()
     for project_id in project_ids:
-        branch = git.get_default_branch(project_id) if git.repository_exists(project_id) else "main"
+        try:
+            if not git.repository_exists(project_id):
+                continue
+            branch = git.get_default_branch(project_id)
+        except (OSError, ValueError, pygit2.GitError):
+            logger.warning(
+                "Could not resolve repository for history sweep of project %s", project_id
+            )
+            continue
         await enqueue_change_history(project_id, branch, pool=ctx["redis"])
 
 

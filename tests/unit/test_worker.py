@@ -1927,3 +1927,32 @@ async def test_history_and_ledger_crons_run_daily(mock_ctx, mock_db_session, moc
         (job,) = [job for job in worker.WorkerSettings.cron_jobs if job.coroutine is coroutine]
         assert isinstance(job.hour, int) and isinstance(job.minute, int)
         assert job.month is None and job.day is None and job.weekday is None
+
+
+@pytest.mark.asyncio
+async def test_history_sweep_skips_suggestions_and_continues_after_repository_error(
+    mock_ctx, mock_db_session, mock_redis, caplog
+):
+    import pygit2
+
+    from ontokit import worker
+
+    broken, suggestion, good = (uuid.uuid4() for _ in range(3))
+    session_manager = MagicMock()
+    session_manager.__aenter__.return_value = mock_db_session
+    mock_ctx["session_factory"] = MagicMock(return_value=session_manager)
+    mock_db_session.scalars.return_value = [broken, suggestion, good]
+    git = Mock()
+    git.repository_exists.side_effect = [pygit2.GitError("Invalid repository"), True, True]
+    git.get_default_branch.side_effect = ["suggest/contributor/proposal", "trunk"]
+
+    with patch.object(worker, "BareGitRepositoryService", return_value=git):
+        await worker.sweep_change_history(mock_ctx)
+
+    mock_redis.enqueue_job.assert_awaited_once()
+    assert mock_redis.enqueue_job.call_args.args == (
+        "reconcile_change_history_task",
+        str(good),
+        "trunk",
+    )
+    assert str(broken) in caplog.text

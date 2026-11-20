@@ -1,5 +1,6 @@
 """Reconcile entity change events against a branch's first-parent history."""
 
+import asyncio
 import json
 import logging
 from collections import deque
@@ -15,9 +16,11 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from ontokit.git.bare_repository import BareGitRepositoryService, BareOntologyRepository
+from ontokit.core.constants import ONTOKIT_SYNC_COMMITTER_EMAIL
+from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.change_event import ChangeOrigin, EntityChangeEvent
 from ontokit.models.change_history_watermark import ChangeHistoryWatermark
+from ontokit.models.normalization import NormalizationRun
 from ontokit.models.project import Project, get_git_ontology_path
 from ontokit.models.pull_request import PullRequest
 from ontokit.models.user_commit_identity import UserCommitIdentity
@@ -30,6 +33,8 @@ logger = logging.getLogger(__name__)
 
 RECONCILE_CHANGE_HISTORY_TASK = "reconcile_change_history_task"
 _BACKFILL_DAYS = 90
+_MERGE_ATTRIBUTION_GRACE_SECONDS = 30
+_ENQUEUE_TIMEOUT_SECONDS = 2
 
 
 class ReconciliationResult(TypedDict):
@@ -46,15 +51,19 @@ async def enqueue_change_history(
     """Queue one job per branch, without affecting the landing operation."""
     from ontokit.api.utils.redis import get_arq_pool
 
+    if branch.startswith("suggest/"):
+        return
+
     try:
-        if pool is None:
-            pool = await get_arq_pool()
-        await pool.enqueue_job(
-            RECONCILE_CHANGE_HISTORY_TASK,
-            str(project_id),
-            branch,
-            _job_id=f"change-history:{project_id}:{branch}",
-        )
+        async with asyncio.timeout(_ENQUEUE_TIMEOUT_SECONDS):
+            if pool is None:
+                pool = await get_arq_pool()
+            await pool.enqueue_job(
+                RECONCILE_CHANGE_HISTORY_TASK,
+                str(project_id),
+                branch,
+                _job_id=f"change-history:{project_id}:{branch}",
+            )
     except Exception as exc:
         logger.warning(
             "Failed to queue change history for project %s branch %s (%s)",
@@ -91,6 +100,17 @@ async def advance_inline_watermark(
     )
 
 
+async def seed_inline_watermark(
+    db: AsyncSession, project_id: UUID, branch: str, previous_head: str
+) -> None:
+    """Keep a first failed save on a work branch eligible for reconciliation."""
+    await db.execute(
+        insert(ChangeHistoryWatermark)
+        .values(project_id=project_id, branch=branch, commit_hash=previous_head)
+        .on_conflict_do_nothing()
+    )
+
+
 class ChangeHistoryReconciler:
     def __init__(self, db: AsyncSession, git: BareGitRepositoryService) -> None:
         self._db = db
@@ -99,16 +119,25 @@ class ChangeHistoryReconciler:
     async def reconcile_branch(
         self, project_id: UUID, branch: str, *, max_commits: int = 50
     ) -> ReconciliationResult:
+        if max_commits < 1:
+            raise ValueError("max_commits must be positive")
         result = ReconciliationResult(
             processed=0, recorded=0, skipped=0, parse_errors=0, more=False
         )
+        if branch.startswith("suggest/"):
+            return result
+
         async with self._db.begin():
             # Share the source writer's key so an inline save cannot race deduplication.
             locked = await self._db.scalar(
                 text("SELECT pg_try_advisory_xact_lock(hashtext(:lock_key))"),
                 {"lock_key": f"suggestion:{project_id}:{branch}"},
             )
-            if not locked or not self._git.repository_exists(project_id):
+            if not locked:
+                # An inline writer may be about to release a new head.
+                result["more"] = True
+                return result
+            if not self._git.repository_exists(project_id):
                 return result
 
             project = await self._db.get(
@@ -139,9 +168,7 @@ class ChangeHistoryReconciler:
                     watermark.commit_hash = commit_hash
                     watermark.updated_at = datetime.now(UTC)
 
-            if branch != repository.get_default_branch() and (
-                watermark is None or branch.startswith("suggest/")
-            ):
+            if watermark is None and branch != repository.get_default_branch():
                 advance(head_hash)
                 return result
 
@@ -171,7 +198,7 @@ class ChangeHistoryReconciler:
             # A previous batch may have ended on a parse error. Recover the last
             # good graph while leaving those commits marked as processed.
             while baseline is not None:
-                old_graph = _read_graph(repository, str(baseline.id), filename, original_filename)
+                old_graph = read_history_graph(baseline, filename, original_filename)
                 if old_graph is not None:
                     break
                 baseline = baseline.parents[0] if baseline.parent_ids else None
@@ -179,24 +206,31 @@ class ChangeHistoryReconciler:
             recorder = ChangeEventService(self._db)
             resolve_origin = AIOriginService(self._db).resolve
             for _ in range(min(max_commits, len(pending))):
-                commit = pending.pop()
+                commit = pending[-1]
                 commit_hash = str(commit.id)
-                new_graph = _read_graph(repository, commit_hash, filename, original_filename)
+                existing = await self._db.scalar(
+                    select(EntityChangeEvent.id)
+                    .where(
+                        EntityChangeEvent.project_id == project_id,
+                        EntityChangeEvent.branch == branch,
+                        EntityChangeEvent.commit_hash == commit_hash,
+                    )
+                    .limit(1)
+                )
+                attribution = None
+                if existing is None:
+                    attribution = await self._attribution(project, commit)
+                    if attribution is None:
+                        break
+
+                pending.pop()
+                new_graph = read_history_graph(commit, filename, original_filename)
                 if new_graph is None:
                     logger.warning("Could not parse ontology at commit %s", commit_hash)
                     result["parse_errors"] += 1
                 else:
-                    existing = await self._db.scalar(
-                        select(EntityChangeEvent.id)
-                        .where(
-                            EntityChangeEvent.project_id == project_id,
-                            EntityChangeEvent.branch == branch,
-                            EntityChangeEvent.commit_hash == commit_hash,
-                        )
-                        .limit(1)
-                    )
-                    if existing is None:
-                        user_id, user_name, origin = await self._attribution(project, commit)
+                    if attribution is not None:
+                        user_id, user_name, origin = attribution
                         events = await recorder.record_events_from_diff(
                             project_id,
                             branch,
@@ -225,7 +259,7 @@ class ChangeHistoryReconciler:
 
     async def _attribution(
         self, project: Project, commit: pygit2.Commit
-    ) -> tuple[str, str | None, ChangeOrigin]:
+    ) -> tuple[str, str | None, ChangeOrigin] | None:
         # Synthetic PRs created from old Git history stored an email as the ID.
         pr = await self._db.scalar(
             select(PullRequest)
@@ -238,28 +272,55 @@ class ChangeHistoryReconciler:
             .limit(1)
         )
         if pr is not None:
-            return pr.author_id, _display_name(pr.author_name), ChangeOrigin.HUMAN
+            return pr.author_id, event_display_name(pr.author_name), ChangeOrigin.HUMAN
 
         author = commit.author
-        name = _display_name(author.name)
-        user_ids = {project.owner_id, *(member.user_id for member in project.members)}
-        for user_id in user_ids:
-            if user_id and noreply_alias(user_id, author.name) == author.email:
-                return user_id, name, ChangeOrigin.HUMAN
+        name = event_display_name(author.name)
+        if author.email == ONTOKIT_SYNC_COMMITTER_EMAIL:
+            return "system", name, ChangeOrigin.SYSTEM
 
-        verified_ids = (
-            await self._db.scalars(
-                select(UserCommitIdentity.user_id)
-                .where(
-                    UserCommitIdentity.commit_email == author.email,
-                    UserCommitIdentity.commit_email_verified.is_(True),
-                    UserCommitIdentity.use_verified_email.is_(True),
+        # The Git ref can become visible before the PR transaction commits.
+        # Leave the merge pending briefly so the PR author can take precedence.
+        age = datetime.now(UTC).timestamp() - commit.commit_time
+        if len(commit.parent_ids) > 1 and abs(age) < _MERGE_ATTRIBUTION_GRACE_SECONDS:
+            return None
+
+        user_ids = {project.owner_id, *(member.user_id for member in project.members)}
+        mapped_id = next(
+            (
+                user_id
+                for user_id in user_ids
+                if user_id and noreply_alias(user_id, author.name) == author.email
+            ),
+            None,
+        )
+        if mapped_id is None:
+            verified_ids = (
+                await self._db.scalars(
+                    select(UserCommitIdentity.user_id)
+                    .where(
+                        UserCommitIdentity.commit_email == author.email,
+                        UserCommitIdentity.commit_email_verified.is_(True),
+                        UserCommitIdentity.use_verified_email.is_(True),
+                    )
+                    .limit(2)
                 )
-                .limit(2)
+            ).all()
+            if len(verified_ids) == 1:
+                mapped_id = verified_ids[0]
+
+        if mapped_id is not None:
+            normalization = await self._db.scalar(
+                select(NormalizationRun.id)
+                .where(
+                    NormalizationRun.project_id == project.id,
+                    NormalizationRun.commit_hash == str(commit.id),
+                    NormalizationRun.is_dry_run.is_(False),
+                )
+                .limit(1)
             )
-        ).all()
-        if len(verified_ids) == 1:
-            return verified_ids[0], name, ChangeOrigin.HUMAN
+            if normalization is None:
+                return mapped_id, name, ChangeOrigin.HUMAN
         return "system", name, ChangeOrigin.SYSTEM
 
 
@@ -292,28 +353,31 @@ def _select_history(
     return None, pending
 
 
-def _display_name(name: str | None) -> str | None:
-    # Git author names are untrusted and sometimes contain the email itself.
+def event_display_name(name: str | None) -> str | None:
+    """Keep emails out of the event display name, including provider fallbacks."""
     return name[:255] if name and "@" not in name else None
 
 
-def _read_graph(
-    repository: BareOntologyRepository,
-    commit_hash: str,
-    filename: str,
-    original_filename: str | None,
+def read_history_graph(
+    commit: object, filename: str, original_filename: str | None = None
 ) -> Graph | None:
+    """Parse the ontology from an immutable commit tree."""
+    if not isinstance(commit, pygit2.Commit):
+        return None
     try:
         try:
-            content = repository.read_file(commit_hash, filename)
+            blob = commit.tree[filename]
         except KeyError:
             if not original_filename or original_filename == filename:
                 raise
             filename = original_filename
-            content = repository.read_file(commit_hash, filename)
+            blob = commit.tree[filename]
+        if not isinstance(blob, pygit2.Blob):
+            return None
+        content = blob.data
         rdf_format = rdf_format_for_filename(filename)
         if rdf_format == "json-ld" and _has_external_context(json.loads(content)):
-            # A background parse of Git history must not fetch URLs or local files.
+            # A history parse must not fetch URLs or local files.
             return None
         return Graph().parse(data=content, format=rdf_format)
     except Exception:

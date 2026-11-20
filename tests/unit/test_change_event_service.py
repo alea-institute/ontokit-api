@@ -456,8 +456,10 @@ async def test_record_event_occurrence_time_uses_utc_and_clamps_future(
 
 @pytest.mark.asyncio
 async def test_large_diff_flushes_in_batches(
-    service: ChangeEventService, mock_db: AsyncMock
+    service: ChangeEventService, mock_db: AsyncMock, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from ontokit.services import change_event_service
+
     graph = Graph()
     for index in range(18_000):
         graph.add((URIRef(f"https://example.org/class/{index}"), RDF.type, OWL.Class))
@@ -468,12 +470,38 @@ async def test_large_diff_flushes_in_batches(
         flushed_sizes.append(mock_db.add.call_count - sum(flushed_sizes))
 
     mock_db.flush.side_effect = flush
+    mock_db.begin_nested = MagicMock(return_value=MagicMock())
+    event_values_created = 0
+    resolver_inputs: list[tuple[int, int]] = []
+    extract_values = change_event_service._entity_values
+
+    def tracked_values(*args):
+        nonlocal event_values_created
+        event_values_created += 1
+        assert event_values_created - mock_db.add.call_count == 1
+        return extract_values(*args)
+
+    async def resolve(_project_id, created):
+        resolver_inputs.append((len(created), event_values_created))
+        return {}
+
+    monkeypatch.setattr(change_event_service, "_entity_values", tracked_values)
     occurred_at = datetime(2025, 1, 1, tzinfo=UTC)
     events = await service.record_events_from_diff(
-        PROJECT_ID, BRANCH, None, graph, USER_ID, USER_NAME, COMMIT_HASH, occurred_at=occurred_at
+        PROJECT_ID,
+        BRANCH,
+        None,
+        graph,
+        USER_ID,
+        USER_NAME,
+        COMMIT_HASH,
+        occurred_at=occurred_at,
+        origin_resolver=resolve,
     )
 
     assert len(events) == 18_000
+    assert resolver_inputs == [(18_000, 0)]
+    assert event_values_created == 18_000
     assert all(event.created_at == occurred_at for event in events)
     assert sum(flushed_sizes) == 18_000
     assert 0 < min(flushed_sizes) <= max(flushed_sizes) <= 1000

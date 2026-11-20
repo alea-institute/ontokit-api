@@ -2,6 +2,7 @@
 
 import contextlib
 import logging
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -69,7 +70,12 @@ from ontokit.schemas.pull_request import (
 from ontokit.services.ai_origin_service import AIOriginService
 from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.change_event_service import ChangeEventService
-from ontokit.services.change_history_reconciler import advance_inline_watermark
+from ontokit.services.change_history_reconciler import (
+    advance_inline_watermark,
+    event_display_name,
+    read_history_graph,
+    seed_inline_watermark,
+)
 from ontokit.services.commit_identity import resolve_commit_author
 from ontokit.services.embedding_service import EmbeddingService
 from ontokit.services.github_service import get_github_service
@@ -1460,15 +1466,7 @@ async def save_source_content(
                 detail=detail.model_dump(),
             )
 
-        # Capture old graph for change event diffing (before the commit).
-        old_graph = None
         was_loaded = ontology.is_loaded(project_id, current_branch)
-        try:
-            if not was_loaded:
-                await ontology.load_from_git(project_id, current_branch, filename, git)
-            old_graph = await ontology._get_graph(project_id, current_branch)
-        except Exception:
-            logger.debug("Could not capture pre-commit graph for diff", exc_info=True)
 
         author_name, author_email = await resolve_commit_author(db, user)
         try:
@@ -1562,17 +1560,22 @@ async def save_source_content(
         change_events = []
         if not current_branch.startswith("suggest/"):
             try:
-                new_graph = await ontology._get_graph(project_id, current_branch)
+                # The cache can reflect another revision. Compare the exact
+                # parent snapshot and the Turtle graph validated for this save.
+                old_graph = read_history_graph(repository.repo.get(current_revision), filename)
+                if old_graph is None:
+                    raise ValueError("Could not parse the parent revision")
                 async with db.begin_nested():
                     change_events = await change_service.record_events_from_diff(
                         project_id,
                         current_branch,
                         old_graph,
-                        new_graph,
+                        g,
                         user.id,
-                        user.name,
+                        event_display_name(user.name),
                         commit_info.hash,
                         origin_resolver=AIOriginService(db).resolve,
+                        occurred_at=datetime.fromisoformat(commit_info.timestamp),
                         auto_commit=False,
                     )
                     await advance_inline_watermark(
@@ -1586,6 +1589,14 @@ async def save_source_content(
             except Exception:
                 change_events = []
                 logger.warning("Failed to record change events", exc_info=True)
+                try:
+                    if current_branch != repository.get_default_branch():
+                        async with db.begin_nested():
+                            await seed_inline_watermark(
+                                db, project_id, current_branch, current_revision
+                            )
+                except Exception:
+                    logger.warning("Failed to seed change history watermark", exc_info=True)
 
         # Release the transaction-scoped advisory lock before another writer
         # can enter this process-local critical section.

@@ -5,18 +5,20 @@ import json
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import UUID
 
 import pygit2
 import pytest
 import sqlalchemy as sa
 from rdflib.namespace import OWL, RDFS, SKOS
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.change_event import EntityChangeEvent
 from ontokit.models.llm_generated_entity import LLMGeneratedEntity
+from ontokit.models.normalization import NormalizationRun
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.pull_request import GitHubIntegration, PullRequest
 from ontokit.models.user_commit_identity import UserCommitIdentity
@@ -47,6 +49,7 @@ class History:
         self.db.flush.side_effect = session.flush
         self.db.commit.side_effect = self.commit_db
         self.db.get.side_effect = session.get
+        self.db.get_bind = session.get_bind
         self.db.execute.side_effect = self.execute
         self.db.scalars.side_effect = session.scalars
         self.db.scalar.side_effect = self.scalar
@@ -96,6 +99,7 @@ class History:
         email: str = "remote@example.org",
         second_parent: str | None = None,
         filename: str = PATH,
+        time: datetime | None = None,
     ) -> tuple[str, datetime]:
         git = self.repo.repo
         ref = f"refs/heads/{branch}"
@@ -103,7 +107,7 @@ class History:
         parents = [parent] if parent is not None else []
         if second_parent is not None:
             parents.append(pygit2.Oid(hex=second_parent))
-        time = (datetime.now(UTC) - timedelta(days=age)).replace(microsecond=0)
+        time = time or (datetime.now(UTC) - timedelta(days=age)).replace(microsecond=0)
         author = pygit2.Signature(name, email, int(time.timestamp()) - 3600, 0)
         committer = pygit2.Signature(
             "Integrator", "integrator@example.org", int(time.timestamp()), 0
@@ -137,6 +141,15 @@ def history(tmp_path: Path):
     from ontokit.models.change_history_watermark import ChangeHistoryWatermark
 
     engine = sa.create_engine("sqlite://")
+
+    @sa.event.listens_for(engine, "connect")
+    def disable_implicit_transactions(connection, _record):
+        connection.isolation_level = None
+
+    @sa.event.listens_for(engine, "begin")
+    def begin_transaction(connection):
+        connection.exec_driver_sql("BEGIN")
+
     models = (
         Project,
         ProjectMember,
@@ -145,6 +158,7 @@ def history(tmp_path: Path):
         UserCommitIdentity,
         EntityChangeEvent,
         LLMGeneratedEntity,
+        NormalizationRun,
         ChangeHistoryWatermark,
     )
     with engine.begin() as connection:
@@ -157,8 +171,253 @@ def history(tmp_path: Path):
     engine.dispose()
 
 
+async def save_inline(
+    history, content, previous, *, branch=BRANCH, ontology=None, user_name="Owner"
+):
+    from types import SimpleNamespace
+
+    from ontokit.api.routes.projects import save_source_content
+    from ontokit.core.auth import CurrentUser
+    from ontokit.schemas.project import SourceContentSave
+    from ontokit.services.change_event_service import ChangeEventService
+    from ontokit.services.ontology import OntologyService
+
+    project = SimpleNamespace(user_role="owner", source_file_path=PATH, git_ontology_path=None)
+    with (
+        patch("ontokit.api.routes.projects.get_arq_pool", AsyncMock(return_value=None)),
+        patch("ontokit.services.translation_jobs.enqueue_label_diff_after_commit", AsyncMock()),
+    ):
+        return await save_source_content(
+            PROJECT,
+            SourceContentSave(
+                content=content, commit_message="Source save", base_revision=previous
+            ),
+            history.db,
+            SimpleNamespace(get=AsyncMock(return_value=project)),
+            SimpleNamespace(upload_file=AsyncMock()),
+            ontology if ontology is not None else OntologyService(),
+            history.git,
+            ChangeEventService(history.db),
+            SimpleNamespace(get_config=AsyncMock(return_value=None)),
+            CurrentUser(id="owner", name=user_name, email="owner@example.org"),
+            branch=branch,
+        )
+
+
+@pytest.mark.asyncio
+async def test_history_enqueue_timeout_does_not_block_landing(monkeypatch, caplog):
+    from ontokit.services import change_history_reconciler
+
+    async def unresponsive_queue(*_args, **_kwargs):
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(change_history_reconciler, "_ENQUEUE_TIMEOUT_SECONDS", 0.01, raising=False)
+    pool = Mock(enqueue_job=AsyncMock(side_effect=unresponsive_queue))
+    await asyncio.wait_for(
+        change_history_reconciler.enqueue_change_history(PROJECT, BRANCH, pool=pool), timeout=0.25
+    )
+
+    pool.enqueue_job.assert_awaited_once()
+    assert "TimeoutError" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_inline_save_diffs_against_git_parent_when_cache_is_stale(history: History):
+    from ontokit.services.ontology import OntologyService
+
+    content = PREFIXES + "ex:A a owl:Class ."
+    history.commit(content)
+    ontology = OntologyService()
+    await ontology.load_from_git(PROJECT, BRANCH, PATH, history.git)
+    content += "ex:B a owl:Class ."
+    previous, _ = history.commit(content)
+    await history.reconcile()
+
+    saved = await save_inline(history, content + "ex:C a owl:Class .", previous, ontology=ontology)
+
+    assert history.watermark() == saved.commit_hash
+    assert [row.entity_iri for row in history.events() if row.commit_hash == saved.commit_hash] == [
+        BASE_IRI + "C"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_inline_save_does_not_persist_an_email_as_the_display_name(history: History):
+    previous, _ = history.commit(PREFIXES)
+    await save_inline(
+        history, PREFIXES + "ex:A a owl:Class .", previous, user_name="owner@example.org"
+    )
+
+    (event,) = history.events()
+    assert (event.user_id, event.user_name) == ("owner", None)
+
+
+@pytest.mark.asyncio
+async def test_history_reads_the_commit_even_if_a_branch_has_its_hash_as_a_name(history: History):
+    prior, _ = history.commit(PREFIXES)
+    head, _ = history.commit(PREFIXES + "ex:A a owl:Class .")
+    history.repo.repo.references.create(f"refs/heads/{head}", pygit2.Oid(hex=prior))
+
+    assert (await history.reconcile())["recorded"] == 1
+    (event,) = history.events()
+    assert (event.commit_hash, event.entity_iri) == (head, BASE_IRI + "A")
+
+
+@pytest.mark.asyncio
+async def test_zero_commit_budget_is_rejected_instead_of_retrying_forever(history: History):
+    history.commit(PREFIXES)
+    with pytest.raises(ValueError, match="max_commits"):
+        await history.reconcile(max_commits=0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("branch", [BRANCH, "work"])
+async def test_inline_flush_failure_can_be_reconciled_without_partial_events(
+    history: History, branch: str
+):
+    content = PREFIXES + "ex:A a owl:Class ."
+    previous, _ = history.commit(content)
+    await history.reconcile()
+    if branch != BRANCH:
+        history.repo.create_branch(branch, BRANCH)
+
+    # Use a real constraint violation after the recorder has flushed its events.
+    def fail_watermark_write(*_args, **_kwargs):
+        history.session.execute(sa.text("INSERT INTO projects (id) VALUES (NULL)"))
+
+    with patch(
+        "ontokit.api.routes.projects.advance_inline_watermark",
+        AsyncMock(side_effect=fail_watermark_write),
+    ):
+        first_saved = await save_inline(
+            history, content + "ex:B a owl:Class .", previous, branch=branch
+        )
+
+    assert history.repo.get_branch_commit_hash(branch) == first_saved.commit_hash
+    history.db.rollback.assert_not_awaited()
+    assert history.watermark(branch) == previous
+    assert not [row for row in history.events() if row.commit_hash == first_saved.commit_hash]
+
+    saved = await save_inline(
+        history,
+        content + "ex:B a owl:Class . ex:C a owl:Class .",
+        first_saved.commit_hash,
+        branch=branch,
+    )
+    assert history.watermark(branch) == previous
+    result = await history.reconcile(branch)
+    assert (result["recorded"], result["skipped"]) == (1, 1)
+    assert history.watermark(branch) == saved.commit_hash
+    assert (await history.reconcile(branch))["recorded"] == 0
+    assert {
+        (row.commit_hash, row.entity_iri) for row in history.events() if row.branch == branch
+    } >= {(first_saved.commit_hash, BASE_IRI + "B"), (saved.commit_hash, BASE_IRI + "C")}
+
+
+@pytest.mark.asyncio
+async def test_young_merge_waits_for_pr_attribution_before_advancing(history: History):
+    content = PREFIXES + "ex:A a owl:Class ."
+    previous, _ = history.commit(content)
+    await history.reconcile()
+    history.repo.create_branch("proposal", BRANCH)
+    content += "ex:B a owl:Class ."
+    side, _ = history.commit(content, branch="proposal")
+    merged, _ = history.commit(content, time=datetime.now(UTC), second_parent=side)
+    head, _ = history.commit(content + "ex:C a owl:Class .")
+
+    first = await history.reconcile()
+    assert first["processed"] == 0 and first["more"]
+    assert history.watermark() == previous
+    assert [row.commit_hash for row in history.events()] == [previous]
+
+    with history.session.begin():
+        history.session.add(
+            PullRequest(
+                project_id=PROJECT,
+                pr_number=1,
+                title="Proposal",
+                source_branch="proposal",
+                target_branch=BRANCH,
+                author_id="contributor",
+                author_name="Contributor",
+                merge_commit_hash=merged,
+            )
+        )
+
+    second = await history.reconcile()
+    assert second["processed"] == 2 and not second["more"]
+    assert history.watermark() == head
+    (event,) = [row for row in history.events() if row.commit_hash == merged]
+    assert (event.user_id, event.origin) == ("contributor", "human")
+
+
+@pytest.mark.asyncio
+async def test_member_triggered_normalization_is_system_history(history: History):
+    normalized, _ = history.commit(
+        PREFIXES + "ex:A a owl:Class .", name="Owner", email=noreply_alias("owner", "Owner")
+    )
+    with history.session.begin():
+        history.session.add(
+            NormalizationRun(
+                project_id=PROJECT,
+                triggered_by="owner",
+                report_json="{}",
+                original_format="turtle",
+                original_size_bytes=1,
+                normalized_size_bytes=2,
+                triple_count=1,
+                commit_hash=normalized,
+            )
+        )
+
+    assert (await history.reconcile())["recorded"] == 1
+    (event,) = history.events()
+    assert (event.user_id, event.origin) == ("system", "system")
+
+
+@pytest.mark.asyncio
+async def test_suggestion_branch_is_excluded_even_when_it_is_symbolic_head(history: History):
+    history.commit(PREFIXES)
+    branch = "suggest/contributor/proposal"
+    history.repo.create_branch(branch, BRANCH)
+    history.commit(PREFIXES + "ex:DoNotRecord a owl:Class .", branch=branch)
+    history.repo.repo.set_head(f"refs/heads/{branch}")
+
+    assert (await history.reconcile(branch))["processed"] == 0
+    assert history.watermark(branch) is None
+    assert history.events() == []
+
+
+@pytest.mark.asyncio
+async def test_rollback_after_events_are_flushed_keeps_watermark_and_retry_is_exact(
+    history: History,
+):
+    previous, _ = history.commit(PREFIXES)
+    await history.reconcile()
+    head, _ = history.commit(PREFIXES + "ex:A a owl:Class .")
+    flush = history.session.flush
+
+    def interrupt_after_event_flush():
+        flush()
+        history.session.execute(sa.text("INSERT INTO projects (id) VALUES (NULL)"))
+
+    history.db.flush.side_effect = interrupt_after_event_flush
+    with pytest.raises(IntegrityError):
+        await history.reconcile()
+    assert history.watermark() == previous
+    assert history.events() == []
+
+    history.db.flush.side_effect = flush
+    assert (await history.reconcile())["recorded"] == 1
+    assert history.watermark() == head
+    assert (await history.reconcile())["recorded"] == 0
+    assert len(history.events()) == 1
+
+
 @pytest.mark.asyncio
 async def test_first_parent_history_has_commit_times_and_no_duplicate_events(history: History):
+    from ontokit.services import change_history_reconciler
+
     a, ta = history.commit(PREFIXES + "ex:A a owl:Class .", age=3)
     history.repo.create_branch("proposal", BRANCH)
     side, _ = history.commit(
@@ -169,7 +428,9 @@ async def test_first_parent_history_has_commit_times_and_no_duplicate_events(his
         PREFIXES + "ex:A a owl:Class . ex:B a owl:Class . ex:C a owl:Class .", second_parent=side
     )
     with patch.object(
-        type(history.repo), "read_file", autospec=True, side_effect=type(history.repo).read_file
+        change_history_reconciler,
+        "read_history_graph",
+        wraps=change_history_reconciler.read_history_graph,
     ) as reads:
         result = await history.reconcile()
         rerun = await history.reconcile()
@@ -177,7 +438,7 @@ async def test_first_parent_history_has_commit_times_and_no_duplicate_events(his
     assert result == {"processed": 3, "recorded": 3, "skipped": 0, "parse_errors": 0, "more": False}
     assert rerun["processed"] == 0
     assert history.watermark() == c
-    assert [(args[1], args[2]) for args, _ in reads.call_args_list] == [
+    assert [(str(args[0].id), args[1]) for args, _ in reads.call_args_list] == [
         (a, PATH),
         (b, PATH),
         (c, PATH),
@@ -191,13 +452,15 @@ async def test_first_parent_history_has_commit_times_and_no_duplicate_events(his
 
 @pytest.mark.asyncio
 async def test_no_entity_change_advances_watermark_and_rerun_does_not_parse(history: History):
+    from ontokit.services import change_history_reconciler
+
     content = PREFIXES + "ex:A a owl:Class ."
     history.commit(content)
     head, _ = history.commit(content + "\n# Same triples")
     result = await history.reconcile()
     assert result["processed"] == 2 and result["recorded"] == 1
     assert history.watermark() == head
-    with patch.object(type(history.repo), "read_file") as read:
+    with patch.object(change_history_reconciler, "read_history_graph") as read:
         assert (await history.reconcile())["processed"] == 0
     read.assert_not_called()
 
@@ -263,7 +526,8 @@ async def test_rewritten_branch_resets_and_nondefault_branch_starts_at_head(
 async def test_contended_branch_job_does_no_work(history: History):
     history.commit(PREFIXES + "ex:A a owl:Class .")
     history.lock_available = False
-    assert (await history.reconcile())["processed"] == 0
+    result = await history.reconcile()
+    assert result["processed"] == 0 and result["more"]
     assert history.watermark() is None
     assert history.events() == []
 
