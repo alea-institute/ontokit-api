@@ -4,7 +4,8 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, cast
 from uuid import UUID
 
-from sqlalchemy import CursorResult, delete, func, select
+from sqlalchemy import CursorResult, String, any_, bindparam, delete, func, select
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import aliased
 
@@ -27,6 +28,14 @@ class AIOriginService:
             return {}
 
         ledger = LLMGeneratedEntity
+        iris = list(created)
+        if self._db.get_bind().dialect.name == "postgresql":
+            # A single array bind stays below asyncpg's parameter limit on large imports.
+            iri_matches = ledger.entity_iri == any_(
+                bindparam("entity_iris", iris, type_=ARRAY(String))
+            )
+        else:
+            iri_matches = ledger.entity_iri.in_(iris)
         ranked = (
             select(
                 ledger,
@@ -37,7 +46,7 @@ class AIOriginService:
                 )
                 .label("proposal_rank"),
             )
-            .where(ledger.project_id == project_id, ledger.entity_iri.in_(list(created)))
+            .where(ledger.project_id == project_id, iri_matches)
             .subquery()
         )
         rows = await self._db.scalars(

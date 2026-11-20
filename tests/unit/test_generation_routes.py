@@ -12,13 +12,19 @@ must work without any LLM configuration.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from collections.abc import AsyncIterator
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 from uuid import UUID
 
 import pytest
 from fastapi.testclient import TestClient
+from starlette.types import Message, Receive, Scope, Send
 
+from ontokit.api.routes import generation
+from ontokit.core.database import engine, get_db
+from ontokit.main import app
 from ontokit.schemas.generation import (
     GeneratedSuggestion,
     GenerateSuggestionsResponse,
@@ -44,6 +50,16 @@ def mock_model_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
         "ontokit.api.routes.generation.get_model_pricing",
         AsyncMock(return_value=(0.000001, 0.000002)),
     )
+
+
+@pytest.fixture(autouse=True)
+def ledger_session(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    session = AsyncMock()
+    session.add_all = Mock()
+    session.__aenter__.return_value = session
+    factory = Mock(return_value=session)
+    monkeypatch.setattr(generation, "async_session_maker", factory)
+    return session
 
 
 def _scalar_one_or_none(value: object) -> Mock:
@@ -377,7 +393,7 @@ def test_success_marks_matching_active_suggestion_session_as_llm_generated(
     assert "suggestion_sessions.branch" in statement_text
     assert "suggestion_sessions.status" in statement_text
     assert marker_statement.compile().params["is_llm_generated"] is True
-    assert session.commit.await_count == 2
+    session.commit.assert_awaited_once()
 
 
 def test_generation_without_matching_active_session_is_harmless(
@@ -407,7 +423,7 @@ def test_generation_without_matching_active_session_is_harmless(
         response = client.post(GENERATE_URL, json=GENERATE_BODY)
 
     assert response.status_code == 200
-    session.commit.assert_awaited_once()
+    session.commit.assert_not_awaited()
 
 
 @pytest.fixture
@@ -431,6 +447,7 @@ def generation_pipeline(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
 def test_generate_records_only_new_entity_suggestions(
     authed_client: tuple[TestClient, AsyncMock],
     generation_pipeline: AsyncMock,
+    ledger_session: AsyncMock,
     suggestion_type: str,
 ) -> None:
     client, session = authed_client
@@ -461,13 +478,15 @@ def test_generate_records_only_new_entity_suggestions(
     assert response.status_code == 200
     batch_id = UUID(response.json()["batch_id"])
     assert batch_id.version == 4
+    session.add_all.assert_not_called()
+    session.commit.assert_not_awaited()
     if suggestion_type not in {"children", "siblings"}:
-        session.add_all.assert_not_called()
-        session.commit.assert_not_awaited()
+        ledger_session.add_all.assert_not_called()
+        ledger_session.commit.assert_not_awaited()
         return
 
-    session.add_all.assert_called_once()
-    rows = session.add_all.call_args.args[0]
+    ledger_session.add_all.assert_called_once()
+    rows = ledger_session.add_all.call_args.args[0]
     assert len(rows) == 2
     for row, suggestion in zip(rows, generated.suggestions, strict=True):
         assert row.project_id == UUID(PROJECT_ID)
@@ -481,7 +500,7 @@ def test_generate_records_only_new_entity_suggestions(
         assert row.model == suggestion.model
         assert row.prompt_template == suggestion.prompt_template
         assert row.user_id == "test-user-id"
-    session.commit.assert_awaited_once()
+    ledger_session.commit.assert_awaited_once()
 
 
 def test_generate_uses_a_new_batch_id_for_each_request(
@@ -501,20 +520,58 @@ def test_generate_uses_a_new_batch_id_for_each_request(
 def test_generate_returns_suggestions_when_ledger_commit_fails(
     authed_client: tuple[TestClient, AsyncMock],
     generation_pipeline: AsyncMock,
+    ledger_session: AsyncMock,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    client, session = authed_client
+    _, session = authed_client
     _happy_path_execute(session)
-    generation_pipeline.return_value = _generation_response()
-    session.commit.side_effect = [None, RuntimeError("Ledger write failed")]
+    generated = _generation_response()
+    generation_pipeline.return_value = generated
+    label = generated.suggestions[0].label
+    operations = []
+    response_sent = asyncio.Event()
+    ledger_finished = asyncio.Event()
 
+    async def request_db() -> AsyncIterator[AsyncMock]:
+        yield session
+        operations.append("request session closed")
+
+    async def fail_commit() -> None:
+        await response_sent.wait()
+        operations.append("ledger")
+        raise RuntimeError(label)
+
+    async def fail_cleanup(*_args: object) -> None:
+        ledger_finished.set()
+        raise RuntimeError(label)
+
+    async def observe_response(scope: Scope, receive: Receive, send: Send) -> None:
+        async def record_body(message: Message) -> None:
+            await send(message)
+            if message["type"] == "http.response.body" and not message.get("more_body"):
+                operations.append("response")
+                response_sent.set()
+
+        await asyncio.wait_for(app(scope, receive, record_body), timeout=2)
+        await asyncio.wait_for(ledger_finished.wait(), timeout=2)
+
+    session.commit.side_effect = [None, RuntimeError(label)]
+    ledger_session.commit.side_effect = fail_commit
+    ledger_session.__aexit__.side_effect = fail_cleanup
+    app.dependency_overrides[get_db] = request_db
+    client = TestClient(observe_response)
     response = client.post(GENERATE_URL, json=GENERATE_BODY)
 
     assert response.status_code == 200
     assert UUID(response.json()["batch_id"]).version == 4
-    assert len(response.json()["suggestions"]) == 1
-    assert session.commit.await_count == 2
-    session.rollback.assert_awaited_once()
+    assert response.json()["suggestions"][0]["label"] == label
+    assert operations == ["request session closed", "response", "ledger"]
+    session.commit.assert_awaited_once()
+    session.rollback.assert_not_awaited()
+    bind = generation.async_session_maker.call_args.kwargs.get("bind", engine)
+    assert bind.sync_engine.hide_parameters
+    assert bind.pool is engine.pool
+    assert label not in caplog.text
     assert any(
         "ledger" in record.getMessage() and record.levelno == logging.WARNING
         for record in caplog.records
@@ -522,7 +579,9 @@ def test_generate_returns_suggestions_when_ledger_commit_fails(
 
 
 def test_generate_transient_failure_returns_batch_id(
-    authed_client: tuple[TestClient, AsyncMock], generation_pipeline: AsyncMock
+    authed_client: tuple[TestClient, AsyncMock],
+    generation_pipeline: AsyncMock,
+    ledger_session: AsyncMock,
 ) -> None:
     client, session = authed_client
     _happy_path_execute(session)
@@ -533,8 +592,8 @@ def test_generate_transient_failure_returns_batch_id(
     assert response.status_code == 200
     assert UUID(response.json()["batch_id"]).version == 4
     assert response.json()["suggestions"] == []
-    session.add_all.assert_not_called()
-    session.commit.assert_not_awaited()
+    ledger_session.add_all.assert_not_called()
+    ledger_session.commit.assert_not_awaited()
 
 
 def test_generate_402_when_atomic_reservation_refuses_call(

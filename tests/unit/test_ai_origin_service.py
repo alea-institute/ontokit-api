@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
@@ -61,6 +62,7 @@ async def test_resolve_classifies_generated_entities_in_one_query(ledger_session
     whitespace = _ledger_row(
         "Whitespace", label="  Property\tLease  ", definition="A contract\n granting use. "
     )
+    different_unicode = _ledger_row("Unicode", label="Café")
     older = _ledger_row("Repeated")
     newest = _ledger_row(
         "Repeated", label="New Lease", model="new-model", created_at=CREATED_AT + timedelta(days=1)
@@ -78,6 +80,7 @@ async def test_resolve_classifies_generated_entities_in_one_query(ledger_session
             edited_definition,
             no_definition,
             whitespace,
+            different_unicode,
             older,
             newest,
             other_project,
@@ -87,6 +90,7 @@ async def test_resolve_classifies_generated_entities_in_one_query(ledger_session
     ledger_session.flush()
     db = AsyncMock(spec=AsyncSession)
     db.scalars.side_effect = ledger_session.scalars
+    db.get_bind.return_value = ledger_session.get_bind()
 
     resolved = await AIOriginService(db).resolve(
         PROJECT_ID,
@@ -108,12 +112,17 @@ async def test_resolve_classifies_generated_entities_in_one_query(ledger_session
                 "labels": ["Property Lease"],
                 "definitions": [" A contract granting  use. "],
             },
+            different_unicode.entity_iri: {
+                "labels": ["Cafe\u0301"],
+                "definitions": ["A contract granting use."],
+            },
             newest.entity_iri: {"labels": ["Lease"], "definitions": ["A contract granting use."]},
             other_project.entity_iri: {
                 "labels": ["Lease"],
                 "definitions": ["A contract granting use."],
             },
             NAMESPACE + "Unknown": {"labels": [], "definitions": []},
+            **{f"{NAMESPACE}Missing{i}": {"labels": [], "definitions": []} for i in range(5000)},
         },
     )
 
@@ -127,9 +136,30 @@ async def test_resolve_classifies_generated_entities_in_one_query(ledger_session
             (edited_definition, "ai_edited"),
             (no_definition, "ai"),
             (whitespace, "ai"),
+            (different_unicode, "ai_edited"),
             (newest, "ai_edited"),
         )
     }
+
+
+@pytest.mark.asyncio
+async def test_resolve_binds_large_iri_sets_once_for_postgresql() -> None:
+    dialect = postgresql.asyncpg.dialect()
+    db = AsyncMock(spec=AsyncSession)
+    db.get_bind.return_value.dialect = dialect
+    created = {f"{NAMESPACE}Class{i}": {"labels": [], "definitions": []} for i in range(40_000)}
+    proposal = _ledger_row("Class39999", definition=None)
+    db.scalars.return_value = [proposal]
+    created[proposal.entity_iri]["labels"] = [proposal.label]
+
+    resolved = await AIOriginService(db).resolve(PROJECT_ID, created)
+
+    assert resolved[proposal.entity_iri]["origin"] == "ai"
+    db.scalars.assert_awaited_once()
+    query = db.scalars.await_args.args[0]
+    compiled = query.compile(dialect=dialect, compile_kwargs={"render_postcompile": True})
+    assert len(compiled.params) == 3
+    assert list(created) in compiled.params.values()
 
 
 @pytest.mark.asyncio

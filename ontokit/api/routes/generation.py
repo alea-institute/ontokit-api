@@ -22,18 +22,19 @@ import logging
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, status
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.api.routes.llm import _LOCAL_PROVIDERS
 from ontokit.core.auth import RequiredUser
-from ontokit.core.database import get_db
+from ontokit.core.database import async_session_maker, engine, get_db
 from ontokit.models.llm_config import ProjectLLMConfig
 from ontokit.models.llm_generated_entity import LLMGeneratedEntity
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.generation import (
+    GeneratedSuggestion,
     GenerateSuggestionsRequest,
     GenerateSuggestionsResponse,
     ValidateEntityRequest,
@@ -65,6 +66,10 @@ from ontokit.services.validation_service import ValidationService, detect_projec
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/projects/{project_id}/llm", tags=["Generation"])
+
+# Keep generated text out of SQL logs, including when SQL echo is enabled.
+_ledger_engine = engine.execution_options()
+_ledger_engine.sync_engine.hide_parameters = True
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -159,6 +164,46 @@ async def _mark_active_session_llm_generated(
     return True
 
 
+async def _write_generated_entity_ledger(
+    project_id: UUID,
+    user_id: str,
+    request: GenerateSuggestionsRequest,
+    batch_id: str,
+    proposals: list[GeneratedSuggestion],
+) -> None:
+    """Persist the batch with a session owned by the background task."""
+    try:
+        batch_uuid = UUID(batch_id)
+        async with async_session_maker(bind=_ledger_engine) as db:
+            db.add_all(
+                [
+                    LLMGeneratedEntity(
+                        project_id=project_id,
+                        branch=request.branch,
+                        entity_iri=suggestion.iri,
+                        batch_id=batch_uuid,
+                        suggestion_type=suggestion.suggestion_type,
+                        focus_iri=request.class_iri,
+                        label=suggestion.label,
+                        definition=suggestion.definition,
+                        model=suggestion.model,
+                        prompt_template=suggestion.prompt_template,
+                        user_id=user_id,
+                    )
+                    for suggestion in proposals
+                ]
+            )
+            await db.commit()
+    except Exception as exc:
+        # Database errors can embed the generated field values.
+        logger.warning(
+            "Failed to write generated entity ledger for project %s batch %s (%s)",
+            project_id,
+            batch_id,
+            type(exc).__name__,
+        )
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
@@ -166,7 +211,8 @@ async def _mark_active_session_llm_generated(
 async def generate_suggestions(
     project_id: UUID,
     request: GenerateSuggestionsRequest,
-    db: Annotated[AsyncSession, Depends(get_db)],
+    background_tasks: BackgroundTasks,
+    db: Annotated[AsyncSession, Depends(get_db, scope="function")],
     user: RequiredUser,
     x_byo_api_key: Annotated[str | None, Header(alias="X-BYO-API-Key")] = None,
 ) -> GenerateSuggestionsResponse:
@@ -401,37 +447,20 @@ async def generate_suggestions(
     if response.suggestions:
         await _mark_active_session_llm_generated(db, project_id, user.id, request.branch)
 
-    batch_id = UUID(response.batch_id)
-    ledger_rows = [
-        LLMGeneratedEntity(
-            project_id=project_id,
-            branch=request.branch,
-            entity_iri=suggestion.iri,
-            batch_id=batch_id,
-            suggestion_type=suggestion.suggestion_type,
-            focus_iri=request.class_iri,
-            label=suggestion.label,
-            definition=suggestion.definition,
-            model=suggestion.model,
-            prompt_template=suggestion.prompt_template,
-            user_id=user.id,
-        )
+    proposals = [
+        suggestion
         for suggestion in response.suggestions
         if suggestion.suggestion_type in {"children", "siblings"}
     ]
-    if ledger_rows:
-        try:
-            db.add_all(ledger_rows)
-            await db.commit()
-        except Exception as exc:
-            await db.rollback()
-            # Database errors can embed the generated field values.
-            logger.warning(
-                "Failed to write generated entity ledger for project %s batch %s (%s)",
-                project_id,
-                batch_id,
-                type(exc).__name__,
-            )
+    if proposals:
+        background_tasks.add_task(
+            _write_generated_entity_ledger,
+            project_id,
+            user.id,
+            request,
+            response.batch_id,
+            proposals,
+        )
 
     return response
 

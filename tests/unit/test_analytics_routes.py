@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+from threading import get_ident
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import UUID
 
 import pytest
-from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from ontokit.core.auth import get_current_user_optional
 from ontokit.main import app
+from ontokit.models.project import Project, ProjectMember
 from ontokit.schemas.analytics import (
     ActivityDay,
     ContributorStats,
@@ -201,24 +204,66 @@ class TestGetContributors:
 
 
 @pytest.mark.parametrize("path", ["changes", "changed-entities"])
+@pytest.mark.parametrize(
+    "caller,status", [("anonymous", 403), ("non-member", 403), ("member", 200)]
+)
 def test_change_feeds_enforce_project_visibility(
-    authed_client: tuple[TestClient, AsyncMock], path: str
+    authed_client: tuple[TestClient, AsyncMock], path: str, caller: str, status: int
 ) -> None:
     client, db = authed_client
-    with (
-        patch("ontokit.api.routes.analytics.get_project_service") as projects,
-        patch("ontokit.api.routes.analytics.get_git_service") as git,
-    ):
-        projects.return_value.get = AsyncMock(
-            side_effect=HTTPException(status_code=403, detail="Access denied")
+    now = datetime.now(UTC)
+    project = Project(
+        id=UUID(PROJECT_ID),
+        name="Private ontology",
+        owner_id="another-owner",
+        members=[ProjectMember(user_id="test-user-id", role="editor")]
+        if caller == "member"
+        else [],
+        is_public=False,
+        created_at=now,
+        updated_at=now,
+    )
+    db.execute.return_value = MagicMock()
+    db.execute.return_value.scalar_one_or_none.return_value = project
+
+    async def anonymous() -> None:
+        return None
+
+    if caller == "anonymous":
+        app.dependency_overrides[get_current_user_optional] = anonymous
+    prefix = f"/api/v1/projects/{PROJECT_ID}/analytics"
+    with patch("ontokit.api.routes.analytics.ChangeEventService") as change_service:
+        service = change_service.return_value
+        service.get_activity = AsyncMock(
+            return_value={"daily_counts": [], "total_events": 0, "top_editors": []}
         )
-        response = client.get(f"/api/v1/projects/{PROJECT_ID}/analytics/{path}")
-    assert response.status_code == 403
-    args = projects.return_value.get.await_args.args
-    assert str(args[0]) == PROJECT_ID
-    assert args[1].id == "test-user-id"
-    git.assert_not_called()
-    db.execute.assert_not_awaited()
+        service.list_changes = AsyncMock(
+            return_value={
+                "window": {
+                    "days": 7,
+                    "since": now.isoformat(),
+                    "until": now.isoformat(),
+                    "branch": "trunk",
+                },
+                "summary": {
+                    "total_events": 0,
+                    "entities_changed": 0,
+                    "by_net_change": {},
+                    "by_origin": {},
+                    "authors": [],
+                },
+                "items": [],
+                "next_cursor": None,
+            }
+        )
+        service.list_changed_entities = AsyncMock(return_value={"items": [], "truncated": False})
+        activity = client.get(f"{prefix}/activity")
+        response = client.get(f"{prefix}/{path}", params={"branch": "trunk"})
+    assert response.status_code == activity.status_code == status
+    if status == 403:
+        assert response.json() == activity.json()
+        service.list_changes.assert_not_awaited()
+        service.list_changed_entities.assert_not_awaited()
 
 
 @pytest.mark.parametrize(
@@ -229,8 +274,16 @@ def test_change_feeds_enforce_project_visibility(
         ("changes", {"cursor": "%%%"}),
         ("changes", {"cursor": ""}),
         ("changes", {"days": 0}),
+        ("changes", {"days": "invalid"}),
         ("changed-entities", {"days": 366}),
+        ("changed-entities", {"days": 0}),
         ("changes", {"limit": 201}),
+        ("changes", {"limit": 0}),
+        ("changes", {"branch": "trunk\x00"}),
+        ("changed-entities", {"branch": "trunk\x00"}),
+        ("changes", {"author": "user\x00"}),
+        ("changes", {"entity_type": "class\x00"}),
+        ("changes", {"event_type": "create\x00"}),
     ],
 )
 def test_change_feeds_reject_invalid_queries(
@@ -257,6 +310,21 @@ def test_change_feeds_allow_visible_anonymous_projects(
     async def anonymous() -> None:
         return None
 
+    request_thread = None
+    git_thread = None
+
+    async def get_project(*_args: object) -> MagicMock:
+        nonlocal request_thread
+        request_thread = get_ident()
+        return _make_project_response()
+
+    def get_repository(_project_id: UUID) -> MagicMock:
+        nonlocal git_thread
+        git_thread = get_ident()
+        repository = MagicMock()
+        repository.get_default_branch.return_value = "trunk"
+        return repository
+
     route = f"/api/v1/projects/{PROJECT_ID}/analytics/{path}"
     app.dependency_overrides[get_current_user_optional] = anonymous
     with (
@@ -264,8 +332,8 @@ def test_change_feeds_allow_visible_anonymous_projects(
         patch("ontokit.api.routes.analytics.get_git_service") as git,
         patch("ontokit.api.routes.analytics.ChangeEventService") as change_service,
     ):
-        projects.return_value.get = AsyncMock(return_value=_make_project_response())
-        git.return_value.get_repository.return_value.get_default_branch.return_value = "trunk"
+        projects.return_value.get = AsyncMock(side_effect=get_project)
+        git.return_value.get_repository.side_effect = get_repository
         if path == "changes":
             method = change_service.return_value.list_changes = AsyncMock(
                 return_value={
@@ -296,6 +364,8 @@ def test_change_feeds_allow_visible_anonymous_projects(
         assert str(args[0]) == PROJECT_ID
         assert args[1] is None
         git.return_value.get_repository.assert_called_once_with(args[0])
+        assert request_thread is not None and git_thread is not None
+        assert git_thread != request_thread
         assert method.await_args.kwargs["branch"] == "trunk"
         assert method.await_args.kwargs["days"] == 7
         assert method.await_args.kwargs["origin"] == ["human", "ai"]

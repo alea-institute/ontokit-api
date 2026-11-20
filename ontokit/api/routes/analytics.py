@@ -1,11 +1,13 @@
 """Analytics API endpoints — entity history, project activity, contributors."""
 
+import asyncio
 import logging
 from typing import Annotated
 from urllib.parse import unquote
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import StringConstraints
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ontokit.core.auth import CurrentUser, OptionalUser
@@ -27,16 +29,23 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# PostgreSQL text cannot contain NUL characters.
+_QueryText = Annotated[str, StringConstraints(pattern=r"^[^\x00]*$")]
+
 
 async def _verify_access(project_id: UUID, db: AsyncSession, user: CurrentUser | None) -> None:
     await get_project_service(db).get(project_id, user)
 
 
-def _resolve_branch(project_id: UUID, branch: str | None) -> str:
-    if branch is not None:
-        return branch
+def _default_branch(project_id: UUID) -> str:
     repo = get_git_service().get_repository(project_id)
     return repo.get_default_branch() if repo.is_initialized else "main"
+
+
+async def _resolve_branch(project_id: UUID, branch: str | None) -> str:
+    if branch is not None:
+        return branch
+    return await asyncio.to_thread(_default_branch, project_id)
 
 
 def get_change_events(
@@ -53,11 +62,11 @@ async def get_project_changes(
     service: Annotated[ChangeEventService, Depends(get_change_events)],
     user: OptionalUser,
     days: int = Query(default=7, ge=1, le=365),
-    branch: str | None = Query(default=None),
+    branch: Annotated[_QueryText | None, Query()] = None,
     origin: Annotated[list[ChangeOrigin] | None, Query()] = None,
-    author: Annotated[list[str] | None, Query()] = None,
-    entity_type: Annotated[list[str] | None, Query()] = None,
-    event_type: Annotated[list[str] | None, Query()] = None,
+    author: Annotated[list[_QueryText] | None, Query()] = None,
+    entity_type: Annotated[list[_QueryText] | None, Query()] = None,
+    event_type: Annotated[list[_QueryText] | None, Query()] = None,
     limit: int = Query(default=50, ge=1, le=200),
     cursor: str | None = Query(default=None),
 ) -> ProjectChangesResponse:
@@ -66,7 +75,7 @@ async def get_project_changes(
     try:
         return await service.list_changes(
             project_id,
-            branch=_resolve_branch(project_id, branch),
+            branch=await _resolve_branch(project_id, branch),
             days=days,
             origin=origin,
             author=author,
@@ -86,13 +95,13 @@ async def get_changed_entities(
     service: Annotated[ChangeEventService, Depends(get_change_events)],
     user: OptionalUser,
     days: int = Query(default=7, ge=1, le=365),
-    branch: str | None = Query(default=None),
+    branch: Annotated[_QueryText | None, Query()] = None,
     origin: Annotated[list[ChangeOrigin] | None, Query()] = None,
 ) -> ChangedEntitiesResponse:
     """Get changed-entity markers for the project tree."""
     await _verify_access(project_id, db, user)
     return await service.list_changed_entities(
-        project_id, branch=_resolve_branch(project_id, branch), days=days, origin=origin
+        project_id, branch=await _resolve_branch(project_id, branch), days=days, origin=origin
     )
 
 
