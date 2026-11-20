@@ -30,6 +30,7 @@ from ontokit.api.routes.llm import _LOCAL_PROVIDERS
 from ontokit.core.auth import RequiredUser
 from ontokit.core.database import get_db
 from ontokit.models.llm_config import ProjectLLMConfig
+from ontokit.models.llm_generated_entity import LLMGeneratedEntity
 from ontokit.models.project import Project, ProjectMember
 from ontokit.models.suggestion_session import SuggestionSession, SuggestionSessionStatus
 from ontokit.schemas.generation import (
@@ -399,6 +400,38 @@ async def generate_suggestions(
     # the trust scheduler reads; client flags cannot opt LLM work back in.
     if response.suggestions:
         await _mark_active_session_llm_generated(db, project_id, user.id, request.branch)
+
+    batch_id = UUID(response.batch_id)
+    ledger_rows = [
+        LLMGeneratedEntity(
+            project_id=project_id,
+            branch=request.branch,
+            entity_iri=suggestion.iri,
+            batch_id=batch_id,
+            suggestion_type=suggestion.suggestion_type,
+            focus_iri=request.class_iri,
+            label=suggestion.label,
+            definition=suggestion.definition,
+            model=suggestion.model,
+            prompt_template=suggestion.prompt_template,
+            user_id=user.id,
+        )
+        for suggestion in response.suggestions
+        if suggestion.suggestion_type in {"children", "siblings"}
+    ]
+    if ledger_rows:
+        try:
+            db.add_all(ledger_rows)
+            await db.commit()
+        except Exception as exc:
+            await db.rollback()
+            # Database errors can embed the generated field values.
+            logger.warning(
+                "Failed to write generated entity ledger for project %s batch %s (%s)",
+                project_id,
+                batch_id,
+                type(exc).__name__,
+            )
 
     return response
 

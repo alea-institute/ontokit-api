@@ -17,6 +17,7 @@ Design decisions (per 13-CONTEXT.md):
 from __future__ import annotations
 
 from typing import Any, Literal
+from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
@@ -197,6 +198,9 @@ class GenerateSuggestionsResponse(BaseModel):
     computed (some providers don't expose this before the call).
     """
 
+    batch_id: str = Field(
+        default_factory=lambda: str(uuid4()), json_schema_extra={"format": "uuid"}
+    )
     suggestions: list[GeneratedSuggestion]
     input_tokens: int
     output_tokens: int

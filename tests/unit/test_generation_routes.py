@@ -14,7 +14,9 @@ from __future__ import annotations
 
 import logging
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ontokit.schemas.generation import (
@@ -34,6 +36,14 @@ GENERATE_BODY = {
     "suggestion_type": "children",
     "batch_size": 3,
 }
+
+
+@pytest.fixture(autouse=True)
+def mock_model_pricing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "ontokit.api.routes.generation.get_model_pricing",
+        AsyncMock(return_value=(0.000001, 0.000002)),
+    )
 
 
 def _scalar_one_or_none(value: object) -> Mock:
@@ -318,6 +328,7 @@ def test_generate_success_shape(authed_client: tuple[TestClient, AsyncMock]):
 
     assert resp.status_code == 200
     body = resp.json()
+    assert UUID(body["batch_id"]).version == 4
     assert body["input_tokens"] == 120
     assert body["output_tokens"] == 60
     assert len(body["suggestions"]) == 1
@@ -366,7 +377,7 @@ def test_success_marks_matching_active_suggestion_session_as_llm_generated(
     assert "suggestion_sessions.branch" in statement_text
     assert "suggestion_sessions.status" in statement_text
     assert marker_statement.compile().params["is_llm_generated"] is True
-    session.commit.assert_awaited_once()
+    assert session.commit.await_count == 2
 
 
 def test_generation_without_matching_active_session_is_harmless(
@@ -396,6 +407,133 @@ def test_generation_without_matching_active_session_is_harmless(
         response = client.post(GENERATE_URL, json=GENERATE_BODY)
 
     assert response.status_code == 200
+    session.commit.assert_awaited_once()
+
+
+@pytest.fixture
+def generation_pipeline(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    pipeline = AsyncMock()
+    monkeypatch.setattr(
+        "ontokit.api.routes.generation.SuggestionGenerationService",
+        Mock(return_value=Mock(generate=pipeline)),
+    )
+    monkeypatch.setattr("ontokit.api.routes.generation._get_redis", lambda: None)
+    monkeypatch.setattr(
+        "ontokit.api.routes.generation.check_budget", AsyncMock(return_value=(True, None))
+    )
+    monkeypatch.setattr("ontokit.api.routes.generation.get_provider", Mock())
+    return pipeline
+
+
+@pytest.mark.parametrize(
+    "suggestion_type", ["children", "siblings", "annotations", "parents", "edges"]
+)
+def test_generate_records_only_new_entity_suggestions(
+    authed_client: tuple[TestClient, AsyncMock],
+    generation_pipeline: AsyncMock,
+    suggestion_type: str,
+) -> None:
+    client, session = authed_client
+    _happy_path_execute(session, marker_rowcount=0)
+    generated = _generation_response()
+    proposal = generated.suggestions[0].model_copy(
+        update={"suggestion_type": suggestion_type, "prompt_template": suggestion_type}
+    )
+    blocked = proposal.model_copy(
+        update={
+            "iri": "http://example.org/ontology#other",
+            "label": "Service Contract",
+            "definition": None,
+            "duplicate_verdict": "block",
+            "validation_errors": [
+                ValidationError(field="label", code="invalid_label", message="Review the label.")
+            ],
+        }
+    )
+    generated.suggestions = [proposal, blocked]
+    generation_pipeline.return_value = generated
+    branch = "suggest/test"
+
+    response = client.post(
+        GENERATE_URL, json={**GENERATE_BODY, "suggestion_type": suggestion_type, "branch": branch}
+    )
+
+    assert response.status_code == 200
+    batch_id = UUID(response.json()["batch_id"])
+    assert batch_id.version == 4
+    if suggestion_type not in {"children", "siblings"}:
+        session.add_all.assert_not_called()
+        session.commit.assert_not_awaited()
+        return
+
+    session.add_all.assert_called_once()
+    rows = session.add_all.call_args.args[0]
+    assert len(rows) == 2
+    for row, suggestion in zip(rows, generated.suggestions, strict=True):
+        assert row.project_id == UUID(PROJECT_ID)
+        assert row.branch == branch
+        assert row.entity_iri == suggestion.iri
+        assert row.batch_id == batch_id
+        assert row.suggestion_type == suggestion_type
+        assert row.focus_iri == GENERATE_BODY["class_iri"]
+        assert row.label == suggestion.label
+        assert row.definition == suggestion.definition
+        assert row.model == suggestion.model
+        assert row.prompt_template == suggestion.prompt_template
+        assert row.user_id == "test-user-id"
+    session.commit.assert_awaited_once()
+
+
+def test_generate_uses_a_new_batch_id_for_each_request(
+    authed_client: tuple[TestClient, AsyncMock], generation_pipeline: AsyncMock
+) -> None:
+    client, session = authed_client
+    generation_pipeline.side_effect = lambda **_kwargs: _generation_response()
+    _happy_path_execute(session)
+    first = client.post(GENERATE_URL, json=GENERATE_BODY)
+    _happy_path_execute(session)
+    second = client.post(GENERATE_URL, json=GENERATE_BODY)
+
+    assert first.status_code == second.status_code == 200
+    assert UUID(first.json()["batch_id"]) != UUID(second.json()["batch_id"])
+
+
+def test_generate_returns_suggestions_when_ledger_commit_fails(
+    authed_client: tuple[TestClient, AsyncMock],
+    generation_pipeline: AsyncMock,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client, session = authed_client
+    _happy_path_execute(session)
+    generation_pipeline.return_value = _generation_response()
+    session.commit.side_effect = [None, RuntimeError("Ledger write failed")]
+
+    response = client.post(GENERATE_URL, json=GENERATE_BODY)
+
+    assert response.status_code == 200
+    assert UUID(response.json()["batch_id"]).version == 4
+    assert len(response.json()["suggestions"]) == 1
+    assert session.commit.await_count == 2
+    session.rollback.assert_awaited_once()
+    assert any(
+        "ledger" in record.getMessage() and record.levelno == logging.WARNING
+        for record in caplog.records
+    )
+
+
+def test_generate_transient_failure_returns_batch_id(
+    authed_client: tuple[TestClient, AsyncMock], generation_pipeline: AsyncMock
+) -> None:
+    client, session = authed_client
+    _happy_path_execute(session)
+    generation_pipeline.side_effect = TimeoutError
+
+    response = client.post(GENERATE_URL, json=GENERATE_BODY)
+
+    assert response.status_code == 200
+    assert UUID(response.json()["batch_id"]).version == 4
+    assert response.json()["suggestions"] == []
+    session.add_all.assert_not_called()
     session.commit.assert_not_awaited()
 
 

@@ -15,6 +15,7 @@ from ontokit.models.lint import (
 )
 from ontokit.models.lint_config import ProjectLintConfig
 from ontokit.models.llm_config import LLMAuditLog, ProjectLLMConfig
+from ontokit.models.llm_generated_entity import LLMGeneratedEntity
 from ontokit.models.normalization import NormalizationRun
 from ontokit.models.notification import Notification
 from ontokit.models.ontology_index import (
@@ -55,6 +56,7 @@ from ontokit.models.user_github_token import UserGitHubToken
 __all__ = [
     "BranchMetadata",
     "LLMAuditLog",
+    "LLMGeneratedEntity",
     "ProjectLLMConfig",
     "ChangeEventType",
     "DistinctEntityDecision",

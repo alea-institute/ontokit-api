@@ -6,6 +6,8 @@ and validation guardrails (VALID-01..06, GEN-05..09).
 
 from __future__ import annotations
 
+from uuid import UUID
+
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
@@ -229,13 +231,14 @@ def test_generate_request_batch_size_bounds():
 
 
 def test_generate_response_structure():
-    """GenerateSuggestionsResponse has suggestions list and token counts."""
+    """GenerateSuggestionsResponse has a batch ID, suggestions, and token counts."""
     resp = GenerateSuggestionsResponse(
         suggestions=[],
         input_tokens=150,
         output_tokens=300,
         context_tokens_estimate=2500,
     )
+    assert UUID(resp.model_dump()["batch_id"]).version == 4
     assert resp.suggestions == []
     assert resp.input_tokens == 150
     assert resp.output_tokens == 300
