@@ -60,6 +60,11 @@ def _is_safe_iri(value: str) -> bool:
     )
 
 
+def _label_key(label: object) -> str:
+    """Compare labels without regard to case or spacing."""
+    return " ".join(str(label or "").casefold().split())
+
+
 class SuggestionGenerationService:
     """Orchestrates the full LLM suggestion generation pipeline.
 
@@ -139,6 +144,20 @@ class SuggestionGenerationService:
             p["iri"] for p in context.get("parents", []) if isinstance(p, dict) and p.get("iri")
         ]
 
+        # Labels already taken where a proposed class would land. This check
+        # reads the ontology index, so it holds when no embeddings exist.
+        taken_labels: dict[str, dict[str, Any]] = {}
+        if suggestion_type in ("children", "siblings"):
+            under_same_parent = context.get(
+                "existing_children" if suggestion_type == "children" else "same_parent_classes"
+            )
+            for existing in under_same_parent or []:
+                key = _label_key(existing.get("label"))
+                if key:
+                    taken_labels.setdefault(
+                        key, {"iri": existing["iri"], "label": existing["label"], "score": 1.0}
+                    )
+
         for raw in raw_suggestions:
             if not isinstance(raw, dict):
                 continue
@@ -215,6 +234,22 @@ class SuggestionGenerationService:
                             "error_type": type(exc).__name__,
                         },
                     )
+
+            # An identical label under the same parent is a duplicate whatever
+            # the semantic check found, including an earlier proposal in this batch.
+            if suggestion_type in ("children", "siblings"):
+                key = _label_key(parsed["label"])
+                same_label = taken_labels.get(key)
+                if same_label is not None:
+                    duplicate_verdict = "block"
+                    if same_label["iri"] not in {c["iri"] for c in duplicate_candidates}:
+                        duplicate_candidates.insert(0, same_label)
+                else:
+                    taken_labels[key] = {
+                        "iri": parsed["iri"],
+                        "label": parsed["label"],
+                        "score": 1.0,
+                    }
 
             # Build final suggestion (GEN-09: provenance="llm-proposed")
             results.append(

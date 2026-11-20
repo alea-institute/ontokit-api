@@ -139,7 +139,11 @@ async def test_assemble_context_includes_siblings():
             "parent_labels": {PARENT_IRI: "Parent Class"},
         },
         siblings=[
-            {"iri": CLASS_IRI, "label": "Test Class", "child_count": 0},  # self — should be excluded
+            {
+                "iri": CLASS_IRI,
+                "label": "Test Class",
+                "child_count": 0,
+            },  # self — should be excluded
             {"iri": SIBLING_IRI, "label": "Sibling Class", "child_count": 0},
         ],
     )
@@ -227,3 +231,30 @@ async def test_assemble_context_handles_root_class():
 
     assert result["parents"] == []
     assert result["siblings"] == []
+
+
+@pytest.mark.asyncio
+async def test_assemble_context_lists_every_class_under_the_parent_for_duplicate_checks():
+    """The prompt's sibling list is capped; the exact-label duplicate check must see them all."""
+    everything = [
+        {"iri": f"http://example.org/ontology#Sib{i}", "label": f"Sib {i}", "child_count": 0}
+        for i in range(25)
+    ] + [{"iri": CLASS_IRI, "label": "Test Class", "child_count": 0}]
+    index_mock = _make_index_mock(
+        class_detail={
+            "iri": CLASS_IRI,
+            "labels": [{"value": "Test Class", "lang": "en"}],
+            "annotations": [],
+            "parent_iris": [PARENT_IRI],
+            "parent_labels": {PARENT_IRI: "Parent Class"},
+        },
+        siblings=everything,
+    )
+    result = await _make_assembler(index_mock).assemble(
+        PROJECT_ID, BRANCH, CLASS_IRI, max_siblings=5
+    )
+
+    assert len(result["siblings"]) == 5
+    assert result["same_parent_classes"] == [
+        {"iri": item["iri"], "label": item["label"]} for item in everything
+    ]

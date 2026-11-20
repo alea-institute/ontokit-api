@@ -47,6 +47,7 @@ class OntologyContextAssembler:
                 - current_class: {iri, labels, annotations}
                 - parents: [{iri, label, annotations}]
                 - siblings: [{iri, label}]
+                - same_parent_classes: [{iri, label}]
                 - existing_children: [{iri, label}]
 
         Raises:
@@ -99,11 +100,15 @@ class OntologyContextAssembler:
 
         # Step 3: Get siblings — children of the first parent, excluding self
         siblings: list[dict[str, Any]] = []
+        # Every class under that parent, uncapped and including this one, so a
+        # proposed sibling's label can be checked against all of them.
+        same_parent_classes: list[dict[str, Any]] = []
         if parent_iris:
             primary_parent_iri = parent_iris[0]
             raw_siblings = await self._index.get_class_children(
                 project_id, branch, primary_parent_iri
             )
+            same_parent_classes = [{"iri": s["iri"], "label": s["label"]} for s in raw_siblings]
             # Exclude current class and cap at max_siblings
             siblings = [
                 {"iri": s["iri"], "label": s["label"]}
@@ -123,5 +128,6 @@ class OntologyContextAssembler:
             },
             "parents": parents,
             "siblings": siblings,
+            "same_parent_classes": same_parent_classes,
             "existing_children": existing_children,
         }

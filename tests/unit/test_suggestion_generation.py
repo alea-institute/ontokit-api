@@ -729,8 +729,7 @@ async def test_auto_validate_in_pipeline(
     # Dedup was called once per suggestion
     assert mock_duplicate_check_service.check.call_count == 2
     assert {
-        call.kwargs["proposed_iri"]
-        for call in mock_duplicate_check_service.check.await_args_list
+        call.kwargs["proposed_iri"] for call in mock_duplicate_check_service.check.await_args_list
     } == {suggestion.iri for suggestion in resp.suggestions}
 
 
@@ -856,3 +855,71 @@ async def test_confidence_normalization_scales(
     assert by_label["String Confidence"] is None, "String confidence should be normalized to None"
     assert abs(by_label["100-scale Confidence"] - 0.75) < 1e-6, "75 should normalize to 0.75"
     assert abs(by_label["Decimal Confidence"] - 0.75) < 1e-6, "0.75 should remain 0.75"
+
+
+# ---------------------------------------------------------------------------
+# Exact-label duplicates under the same parent, with no embedding index
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("dedup_fails", [False, True])
+@pytest.mark.parametrize(
+    ("suggestion_type", "context_key"),
+    [("children", "existing_children"), ("siblings", "same_parent_classes")],
+)
+async def test_exact_label_match_under_the_same_parent_is_blocked_without_embeddings(
+    mock_llm_provider,
+    mock_duplicate_check_service,
+    suggestion_type: str,
+    context_key: str,
+    dedup_fails: bool,
+):
+    existing = {"iri": "http://example.org/ontology#Lease", "label": "Residential  Lease"}
+    context = _make_context()
+    context[context_key] = [existing, {"iri": "http://example.org/ontology#Deed", "label": "Deed"}]
+    mock_assembler = AsyncMock()
+    mock_assembler.assemble = AsyncMock(return_value=context)
+    mock_validator = AsyncMock()
+    mock_validator.validate_entity = AsyncMock(return_value=[])
+    if dedup_fails:
+        # With no embedding configuration the semantic search raises.
+        mock_duplicate_check_service.check = AsyncMock(side_effect=RuntimeError("No embeddings"))
+    mock_llm_provider.chat = AsyncMock(
+        return_value=(
+            _make_llm_json(
+                [
+                    _suggestion("  residential lease "),
+                    _suggestion("Easement"),
+                    _suggestion("EASEMENT"),
+                    _suggestion("Leasehold"),
+                ]
+            ),
+            120,
+            60,
+        )
+    )
+
+    svc = _make_service(
+        mock_llm_provider, mock_assembler, mock_validator, mock_duplicate_check_service
+    )
+    resp = await svc.generate(
+        project_id=PROJECT_ID,
+        branch="main",
+        class_iri=CLASS_IRI,
+        suggestion_type=suggestion_type,
+        batch_size=4,
+        provider=mock_llm_provider,
+        project_namespace=NAMESPACE,
+    )
+
+    matches_existing, first, repeats_first, distinct = resp.suggestions
+    assert matches_existing.duplicate_verdict == "block"
+    assert matches_existing.duplicate_candidates == [{**existing, "score": 1.0}]
+    assert first.duplicate_verdict == "pass"
+    # The same label twice in one batch would also create two identical classes.
+    assert repeats_first.duplicate_verdict == "block"
+    assert repeats_first.duplicate_candidates == [
+        {"iri": first.iri, "label": "Easement", "score": 1.0}
+    ]
+    assert (distinct.duplicate_verdict, distinct.duplicate_candidates) == ("pass", [])

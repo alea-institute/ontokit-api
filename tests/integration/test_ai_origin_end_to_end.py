@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import threading
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from uuid import UUID, uuid4
@@ -61,6 +61,9 @@ PROPOSALS = [
     {"label": "Licence", "definition": "A contract granting permission to use a right."},
     {"label": "Wager", "definition": "A contract that turns on an uncertain event."},
 ]
+
+
+Stack = tuple[httpx.AsyncClient, UUID, BareGitRepositoryService, Callable[[], Awaitable[None]]]
 
 
 class _StubProvider(BaseHTTPRequestHandler):
@@ -126,7 +129,7 @@ class _MemoryStorage:
 @pytest_asyncio.fixture
 async def stack(
     tmp_path: Path, provider_url: str, monkeypatch: pytest.MonkeyPatch
-) -> AsyncIterator[tuple[httpx.AsyncClient, UUID, BareGitRepositoryService]]:
+) -> AsyncIterator[Stack]:
     """A project on the real services, with its history baseline and index built."""
     await engine.dispose()  # Drop connections another test's event loop opened.
     monkeypatch.setattr(settings, "git_repos_base_path", str(tmp_path))
@@ -169,15 +172,18 @@ async def stack(
         context = {"session_factory": async_session_maker, "redis": await get_arq_pool()}
         baseline = await worker.reconcile_change_history_task(context, str(project_id), "main")
         assert baseline["recorded"] == 3
-        async with async_session_maker() as db:
-            indexed = await worker.run_ontology_index_task(
-                {**context, "db": db}, str(project_id), "main"
-            )
-        assert indexed["status"] == "completed"
 
+        async def reindex() -> None:
+            async with async_session_maker() as db:
+                indexed = await worker.run_ontology_index_task(
+                    {**context, "db": db}, str(project_id), "main"
+                )
+            assert indexed["status"] == "completed"
+
+        await reindex()
         transport = httpx.ASGITransport(app=main.app)
         async with httpx.AsyncClient(transport=transport, base_url="http://api.test") as client:
-            yield client, project_id, git
+            yield client, project_id, git, reindex
     finally:
         for dependency in (get_current_user, get_current_user_optional, projects.get_storage):
             overrides.pop(dependency, None)
@@ -200,9 +206,9 @@ def _accepted_class(suggestion: dict[str, object], *, label: str | None = None) 
 
 @pytest.mark.asyncio
 async def test_accepted_edited_and_rejected_suggestions_reach_the_changes_feed(
-    stack: tuple[httpx.AsyncClient, UUID, BareGitRepositoryService],
+    stack: Stack,
 ) -> None:
-    client, project_id, git = stack
+    client, project_id, git, reindex = stack
     api = f"/api/v1/projects/{project_id}"
 
     generated = await client.post(
@@ -295,3 +301,18 @@ async def test_accepted_edited_and_rejected_suggestions_reach_the_changes_feed(
     marked = {item["entity_iri"]: item["origins"] for item in markers.json()["items"]}
     assert marked[unchanged["iri"]] == ["ai"] and marked[edited["iri"]] == ["ai_edited"]
     assert rejected["iri"] not in marked
+
+    # Asked again once the index reflects the save, the provider repeats itself.
+    # No embedding index exists, yet the label that now names a subclass is caught.
+    await reindex()
+    repeated = await client.post(
+        f"{api}/llm/generate-suggestions",
+        json={"class_iri": FOCUS, "branch": "main", "suggestion_type": "children", "batch_size": 3},
+    )
+    assert repeated.status_code == 200, repeated.text
+    again = {item["label"]: item for item in repeated.json()["suggestions"]}
+    assert again["Lease"]["duplicate_verdict"] == "block"
+    assert again["Lease"]["duplicate_candidates"] == [
+        {"iri": unchanged["iri"], "label": "Lease", "score": 1.0}
+    ]
+    assert again["Licence"]["duplicate_verdict"] == again["Wager"]["duplicate_verdict"] == "pass"
