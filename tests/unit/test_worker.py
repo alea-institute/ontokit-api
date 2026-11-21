@@ -9,6 +9,7 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from sqlalchemy import TextClause
 from sqlalchemy.exc import SQLAlchemyError
 
 from ontokit.core.constants import (
@@ -1162,8 +1163,12 @@ class TestSyncGithubProjects:
             result = await sync_github_projects(mock_ctx)
 
         assert result == {"total": 2, "synced": 2, "errors": 0}
-        assert mock_ctx["db"].execute.await_count == 1
-        statement = mock_ctx["db"].execute.await_args.args[0]
+        calls = mock_ctx["db"].execute.await_args_list
+        # Each sync also takes its branch write lock; that is not a target query.
+        queries = [call for call in calls if not isinstance(call.args[0], TextClause)]
+        assert len(queries) == 1
+        assert len(calls) - len(queries) == len(integrations)
+        statement = queries[0].args[0]
         loader_paths = {str(option.path) for option in statement._with_options}
         assert any("GitHubIntegration.project" in path for path in loader_paths)
         assert any("Project.demo_source_project" in path for path in loader_paths)

@@ -486,3 +486,81 @@ async def test_local_github_landing_enqueues_once(
         )
     else:
         pool.enqueue_job.assert_not_awaited()
+
+
+class _BranchLockDB:
+    """Model the transaction-scoped branch advisory lock a writer must respect."""
+
+    def __init__(self) -> None:
+        self.held = False
+        self.session = AsyncMock()
+        self.session.execute.side_effect = self._execute
+        self.session.commit.side_effect = self._release
+        self.session.rollback.side_effect = self._release
+
+    async def _execute(self, _statement: object, params: dict[str, str] | None = None) -> MagicMock:
+        if (params or {}).get("lock_key") == f"suggestion:{PROJECT_ID}:{BRANCH}":
+            assert not self.held
+            self.held = True
+        return MagicMock()
+
+    async def _release(self) -> None:
+        self.held = False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("local_ahead", [False, True], ids=["fast-forward", "merge"])
+async def test_inbound_sync_holds_the_branch_lock_so_a_racing_save_is_not_lost(
+    tmp_path, local_ahead: bool
+) -> None:
+    import pygit2
+
+    path = pygit2.init_repository(str(tmp_path / "project.git"), bare=True).path
+    lock = _BranchLockDB()
+    deferred: list[bool] = []
+    saved: list[pygit2.Oid] = []
+
+    def commit(repo: pygit2.Repository, ref: str | None, name: str, parents: list) -> pygit2.Oid:
+        sig = pygit2.Signature("Writer", "writer@example.org")
+        tree = repo.TreeBuilder()
+        tree.insert(name, repo.create_blob(name.encode()), pygit2.GIT_FILEMODE_BLOB)
+        return repo.create_commit(ref, sig, sig, name, tree.write(), parents)
+
+    def save(repo: pygit2.Repository) -> None:
+        # An inline save lands on the current tip, but only while it holds the lock.
+        if lock.held:
+            deferred.append(True)
+            return
+        tip = repo.references[f"refs/heads/{BRANCH}"].target
+        saved.append(commit(repo, f"refs/heads/{BRANCH}", "saved.ttl", [tip]))
+
+    class RacingRepository(pygit2.Repository):
+        def ahead_behind(self, local, upstream):  # type: ignore[override]
+            # Another process saves between the sync's ref read and its ref move.
+            save(self)
+            return super().ahead_behind(local, upstream)
+
+    repo = RacingRepository(str(path))
+    base = commit(repo, f"refs/heads/{BRANCH}", "base.ttl", [])
+    if local_ahead:
+        commit(repo, f"refs/heads/{BRANCH}", "local.ttl", [base])
+    remote = commit(repo, None, "remote.ttl", [base])
+    repo.references.create(f"refs/remotes/origin/{BRANCH}", remote)
+
+    bare = MagicMock(repo=repo)
+    bare.fetch.return_value = True
+    bare.push.return_value = True
+    git = _make_git_service()
+    git.get_repository.return_value = bare
+
+    result = await sync_github_project(
+        _make_integration(), PAT, git, lock.session, outbound_only=False
+    )
+    if deferred:
+        save(repo)
+
+    assert result["status"] == ("merged_and_pushed" if local_ahead else "pulled")
+    assert not lock.held
+    tip = repo.references[f"refs/heads/{BRANCH}"].target
+    assert saved and (tip == saved[0] or repo.descendant_of(tip, saved[0]))
+    assert repo.descendant_of(tip, remote)

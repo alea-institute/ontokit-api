@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ontokit.core.config import settings
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.pull_request import GitHubIntegration
+from ontokit.services.branch_lock import branch_write_lock
 from ontokit.services.change_history_reconciler import enqueue_change_history
 from ontokit.services.demo_target_authorizer import (
     DemoTargetDenied,
@@ -109,129 +110,137 @@ async def sync_github_project(
             await db.commit()
             return {"status": "error", "reason": "fetch_failed"}
 
-        # Compare local and remote refs
-        local_ref_name = f"refs/heads/{branch}"
-        remote_ref_name = f"refs/remotes/origin/{branch}"
+        # Every local writer moves this branch under its write lock. Hold it
+        # from reading the local ref through moving it, so a save that lands
+        # meanwhile is neither overwritten nor reported as a merge conflict.
+        # Committing releases it before any push, which needs no lock.
+        async with branch_write_lock(db, project_id, branch):
+            # Compare local and remote refs
+            local_ref_name = f"refs/heads/{branch}"
+            remote_ref_name = f"refs/remotes/origin/{branch}"
 
-        pygit2_repo = repo.repo
+            pygit2_repo = repo.repo
 
-        try:
-            local_oid = pygit2_repo.references[local_ref_name].target
-        except KeyError:
-            # Local branch doesn't exist — nothing to sync
-            integration.sync_status = "idle"
-            integration.sync_error = None
-            integration.last_sync_at = datetime.now(UTC)
-            await db.commit()
-            return {"status": "idle", "reason": "no_local_branch"}
-
-        try:
-            remote_oid = pygit2_repo.references[remote_ref_name].target
-        except KeyError:
-            # Remote branch doesn't exist yet — push local
-            if repo.push(
-                branch=branch,
-                token=pat,
-                target_authorization=authorization.capability,
-            ):
+            try:
+                local_oid = pygit2_repo.references[local_ref_name].target
+            except KeyError:
+                # Local branch doesn't exist — nothing to sync
                 integration.sync_status = "idle"
                 integration.sync_error = None
                 integration.last_sync_at = datetime.now(UTC)
                 await db.commit()
-                return {"status": "pushed", "reason": "new_remote_branch"}
-            else:
-                integration.sync_status = "error"
-                integration.sync_error = "Failed to push to remote"
-                await db.commit()
-                return {"status": "error", "reason": "push_failed"}
+                return {"status": "idle", "reason": "no_local_branch"}
 
-        if local_oid == remote_oid:
-            # Already in sync
-            integration.sync_status = "idle"
-            integration.sync_error = None
-            integration.last_sync_at = datetime.now(UTC)
-            await db.commit()
-            return {"status": "idle", "reason": "up_to_date"}
+            try:
+                remote_oid = pygit2_repo.references[remote_ref_name].target
+            except KeyError:
+                # Remote branch doesn't exist yet — push local
+                await db.commit()  # Release the branch lock; a push moves no local ref.
+                if repo.push(
+                    branch=branch,
+                    token=pat,
+                    target_authorization=authorization.capability,
+                ):
+                    integration.sync_status = "idle"
+                    integration.sync_error = None
+                    integration.last_sync_at = datetime.now(UTC)
+                    await db.commit()
+                    return {"status": "pushed", "reason": "new_remote_branch"}
+                else:
+                    integration.sync_status = "error"
+                    integration.sync_error = "Failed to push to remote"
+                    await db.commit()
+                    return {"status": "error", "reason": "push_failed"}
 
-        # Check divergence
-        ahead, behind = pygit2_repo.ahead_behind(local_oid, remote_oid)
-
-        if outbound_only and behind > 0:
-            # R16: the canonical repository is never advanced from the mirror,
-            # whether the remote is simply ahead or genuinely diverged. Report
-            # it and leave the local refs alone.
-            integration.sync_status = "diverged"
-            integration.sync_error = (
-                f"Remote has {behind} commit(s) not in the canonical repository. The mirror "
-                "is outbound-only; resolve on the GitHub side or reset the mirror."
-            )
-            await db.commit()
-            logger.warning(
-                "Outbound-only mirror for project %s is behind by %s commit(s) — "
-                "canonical repository left untouched",
-                project_id,
-                behind,
-            )
-            return {"status": "diverged", "ahead": ahead, "behind": behind}
-
-        if behind > 0 and ahead == 0:
-            # Remote is ahead, local is not — fast-forward
-            pygit2_repo.references[local_ref_name].set_target(remote_oid)
-            await enqueue_change_history(project_id, branch)
-            integration.sync_status = "idle"
-            integration.sync_error = None
-            integration.last_sync_at = datetime.now(UTC)
-            await db.commit()
-            return {"status": "pulled", "behind": behind}
-
-        elif ahead > 0 and behind == 0:
-            # Local is ahead — push
-            if repo.push(
-                branch=branch,
-                token=pat,
-                target_authorization=authorization.capability,
-            ):
+            if local_oid == remote_oid:
+                # Already in sync
                 integration.sync_status = "idle"
                 integration.sync_error = None
                 integration.last_sync_at = datetime.now(UTC)
                 await db.commit()
-                return {"status": "pushed", "ahead": ahead}
-            else:
-                integration.sync_status = "error"
-                integration.sync_error = "Failed to push to remote"
-                await db.commit()
-                return {"status": "error", "reason": "push_failed"}
+                return {"status": "idle", "reason": "up_to_date"}
 
-        else:
-            # Diverged — attempt merge
-            local_commit_oid = cast(pygit2.Oid, local_oid)
-            remote_commit_oid = cast(pygit2.Oid, remote_oid)
-            merge_result = _try_merge(pygit2_repo, local_commit_oid, remote_commit_oid, branch)
-            if merge_result["conflict"]:
-                integration.sync_status = "conflict"
-                integration.sync_error = cast(
-                    "str | None", merge_result.get("error", "Merge conflict detected")
+            # Check divergence
+            ahead, behind = pygit2_repo.ahead_behind(local_oid, remote_oid)
+
+            if outbound_only and behind > 0:
+                # R16: the canonical repository is never advanced from the mirror,
+                # whether the remote is simply ahead or genuinely diverged. Report
+                # it and leave the local refs alone.
+                integration.sync_status = "diverged"
+                integration.sync_error = (
+                    f"Remote has {behind} commit(s) not in the canonical repository. The mirror "
+                    "is outbound-only; resolve on the GitHub side or reset the mirror."
                 )
                 await db.commit()
-                return {"status": "conflict", "ahead": ahead, "behind": behind}
+                logger.warning(
+                    "Outbound-only mirror for project %s is behind by %s commit(s) — "
+                    "canonical repository left untouched",
+                    project_id,
+                    behind,
+                )
+                return {"status": "diverged", "ahead": ahead, "behind": behind}
 
-            await enqueue_change_history(project_id, branch)
-            # Merge succeeded — push the merge commit
-            if repo.push(
-                branch=branch,
-                token=pat,
-                target_authorization=authorization.capability,
-            ):
+            if behind > 0 and ahead == 0:
+                # Remote is ahead, local is not — fast-forward
+                pygit2_repo.references[local_ref_name].set_target(remote_oid)
+                await enqueue_change_history(project_id, branch)
                 integration.sync_status = "idle"
                 integration.sync_error = None
                 integration.last_sync_at = datetime.now(UTC)
                 await db.commit()
-                return {"status": "merged_and_pushed", "ahead": ahead, "behind": behind}
+                return {"status": "pulled", "behind": behind}
+
+            elif ahead > 0 and behind == 0:
+                # Local is ahead — push
+                await db.commit()  # Release the branch lock; a push moves no local ref.
+                if repo.push(
+                    branch=branch,
+                    token=pat,
+                    target_authorization=authorization.capability,
+                ):
+                    integration.sync_status = "idle"
+                    integration.sync_error = None
+                    integration.last_sync_at = datetime.now(UTC)
+                    await db.commit()
+                    return {"status": "pushed", "ahead": ahead}
+                else:
+                    integration.sync_status = "error"
+                    integration.sync_error = "Failed to push to remote"
+                    await db.commit()
+                    return {"status": "error", "reason": "push_failed"}
+
             else:
-                integration.sync_status = "error"
-                integration.sync_error = "Merge succeeded but push failed"
-                await db.commit()
-                return {"status": "error", "reason": "post_merge_push_failed"}
+                # Diverged — attempt merge
+                local_commit_oid = cast(pygit2.Oid, local_oid)
+                remote_commit_oid = cast(pygit2.Oid, remote_oid)
+                merge_result = _try_merge(pygit2_repo, local_commit_oid, remote_commit_oid, branch)
+                if merge_result["conflict"]:
+                    integration.sync_status = "conflict"
+                    integration.sync_error = cast(
+                        "str | None", merge_result.get("error", "Merge conflict detected")
+                    )
+                    await db.commit()
+                    return {"status": "conflict", "ahead": ahead, "behind": behind}
+
+                await enqueue_change_history(project_id, branch)
+                # Merge succeeded — push the merge commit
+                await db.commit()  # Release the branch lock; a push moves no local ref.
+                if repo.push(
+                    branch=branch,
+                    token=pat,
+                    target_authorization=authorization.capability,
+                ):
+                    integration.sync_status = "idle"
+                    integration.sync_error = None
+                    integration.last_sync_at = datetime.now(UTC)
+                    await db.commit()
+                    return {"status": "merged_and_pushed", "ahead": ahead, "behind": behind}
+                else:
+                    integration.sync_status = "error"
+                    integration.sync_error = "Merge succeeded but push failed"
+                    await db.commit()
+                    return {"status": "error", "reason": "post_merge_push_failed"}
 
     except Exception as e:
         logger.exception(f"Sync failed for project {project_id}: {e}")
