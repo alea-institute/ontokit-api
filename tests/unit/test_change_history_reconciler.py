@@ -1078,3 +1078,121 @@ async def test_running_job_reports_more_when_another_landing_advances_the_ref(hi
     assert result["processed"] == 1 and result["more"]
     assert history.watermark() == original
     assert (await history.reconcile())["recorded"] == 1
+
+
+@pytest.mark.asyncio
+async def test_history_parses_and_walks_off_the_event_loop(history: History):
+    import threading
+
+    from ontokit.services import change_history_reconciler
+
+    history.commit(PREFIXES + "ex:A a owl:Class .")
+    history.commit(PREFIXES + "ex:A a owl:Class . ex:B a owl:Class .")
+    loop_thread = threading.get_ident()
+    threads: list[tuple[str, int]] = []
+
+    def on_thread(name, function):
+        def call(*args, **kwargs):
+            threads.append((name, threading.get_ident()))
+            return function(*args, **kwargs)
+
+        return call
+
+    with (
+        patch.object(
+            change_history_reconciler,
+            "read_history_graph",
+            on_thread("parse", change_history_reconciler.read_history_graph),
+        ),
+        patch.object(
+            change_history_reconciler,
+            "_select_history",
+            on_thread("walk", change_history_reconciler._select_history),
+        ),
+    ):
+        assert (await history.reconcile())["recorded"] == 2
+
+    assert {name for name, _ in threads} == {"parse", "walk"}
+    assert loop_thread not in {thread for _, thread in threads}
+
+
+@pytest.mark.asyncio
+async def test_commit_with_an_unchanged_ontology_blob_is_not_reparsed(history: History):
+    from ontokit.services import change_history_reconciler
+
+    content = PREFIXES + "ex:A a owl:Class ."
+    first, _ = history.commit(content)
+    same, _ = history.commit(content)
+    head, _ = history.commit(content + "ex:B a owl:Class .")
+    with patch.object(
+        change_history_reconciler,
+        "read_history_graph",
+        wraps=change_history_reconciler.read_history_graph,
+    ) as reads:
+        result = await history.reconcile()
+
+    assert result["processed"] == 3 and result["recorded"] == 2
+    assert [str(args[0].id) for args, _ in reads.call_args_list] == [first, head]
+    assert history.watermark() == head
+    assert sorted((row.commit_hash, row.entity_iri) for row in history.events()) == sorted(
+        [(first, BASE_IRI + "A"), (head, BASE_IRI + "B")]
+    )
+
+
+@pytest.mark.asyncio
+async def test_oversized_ontology_is_logged_and_history_resumes_after_it(
+    history: History, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    from ontokit.services import change_history_reconciler
+
+    content = PREFIXES + "ex:A a owl:Class ."
+    first, _ = history.commit(content)
+    oversized_content = content + "ex:Huge a owl:Class . # " + "x" * 400
+    oversized, _ = history.commit(oversized_content)
+    head, _ = history.commit(content + "ex:B a owl:Class .")
+    monkeypatch.setattr(
+        change_history_reconciler, "_MAX_HISTORY_BLOB_BYTES", len(oversized_content) - 1
+    )
+    with patch.object(
+        change_history_reconciler,
+        "read_history_graph",
+        wraps=change_history_reconciler.read_history_graph,
+    ) as reads:
+        result = await history.reconcile()
+
+    assert result["parse_errors"] == 1 and result["processed"] == 3
+    assert oversized not in [str(args[0].id) for args, _ in reads.call_args_list]
+    assert history.watermark() == head
+    assert sorted((row.commit_hash, row.entity_iri) for row in history.events()) == sorted(
+        [(first, BASE_IRI + "A"), (head, BASE_IRI + "B")]
+    )
+    assert any(
+        oversized in record.getMessage() and "history limit" in record.getMessage()
+        for record in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_first_backfill_stops_at_its_commit_cap_regardless_of_commit_time(
+    history: History, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+):
+    from ontokit.services import change_history_reconciler
+
+    monkeypatch.setattr(change_history_reconciler, "_BACKFILL_MAX_COMMITS", 2)
+    content = PREFIXES + "ex:A a owl:Class ."
+    history.commit(content)
+    baseline, _ = history.commit(content + "ex:B a owl:Class .")
+    second, _ = history.commit(content + "ex:B a owl:Class . ex:C a owl:Class .")
+    head, _ = history.commit(content + "ex:B a owl:Class . ex:C a owl:Class . ex:D a owl:Class .")
+
+    result = await history.reconcile()
+
+    assert result["processed"] == 2 and not result["more"]
+    assert history.watermark() == head
+    assert sorted((row.commit_hash, row.entity_iri) for row in history.events()) == sorted(
+        [(second, BASE_IRI + "C"), (head, BASE_IRI + "D")]
+    )
+    assert any(
+        "2 commits" in record.getMessage() and baseline in record.getMessage()
+        for record in caplog.records
+    )

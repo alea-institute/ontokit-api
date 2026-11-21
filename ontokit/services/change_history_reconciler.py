@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ontokit.core.constants import ONTOKIT_SYNC_COMMITTER_EMAIL
+from ontokit.core.limits import MAX_TURTLE_PAYLOAD_BYTES
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.change_event import ChangeOrigin, EntityChangeEvent
 from ontokit.models.change_history_watermark import ChangeHistoryWatermark
@@ -32,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 RECONCILE_CHANGE_HISTORY_TASK = "reconcile_change_history_task"
 _BACKFILL_DAYS = 90
+# Commit times are author-controlled, so the first backfill is also bounded by
+# count: a repository of recent-looking commits cannot make it walk forever.
+_BACKFILL_MAX_COMMITS = 500
+# History parses the same documents an import or save accepts, and no larger.
+_MAX_HISTORY_BLOB_BYTES = MAX_TURTLE_PAYLOAD_BYTES
 _ENQUEUE_TIMEOUT_SECONDS = 2
 
 
@@ -190,7 +196,10 @@ class ChangeHistoryReconciler:
                 if default_ref is not None:
                     fork_from = default_ref.peel(pygit2.Commit).id
 
-            baseline, pending = _select_history(
+            # History walks and RDF parses are CPU-bound; keep them off the
+            # worker's shared event loop so other jobs keep running.
+            baseline, pending = await asyncio.to_thread(
+                _select_history,
                 repository.repo,
                 head,
                 watermark.commit_hash if watermark else None,
@@ -217,10 +226,12 @@ class ChangeHistoryReconciler:
                 else None
             )
             old_graph = None
+            old_blob_id = None
             # A previous batch may have ended on a parse error. Recover the last
             # good graph while leaving those commits marked as processed.
             while baseline is not None:
-                old_graph = read_history_graph(baseline, filename, original_filename)
+                old_blob_id = _history_blob_id(baseline, filename, original_filename)
+                old_graph = await self._parse(baseline, filename, original_filename)
                 if old_graph is not None:
                     break
                 baseline = baseline.parents[0] if baseline.parent_ids else None
@@ -245,7 +256,13 @@ class ChangeHistoryReconciler:
                 attribution = await self._attribution(project, commit) if existing is None else None
 
                 pending.pop()
-                new_graph = read_history_graph(commit, filename, original_filename)
+                blob_id = _history_blob_id(commit, filename, original_filename)
+                if old_graph is not None and blob_id is not None and blob_id == old_blob_id:
+                    # The ontology file is byte-identical, so no entity changed.
+                    advance(commit_hash)
+                    result["processed"] += 1
+                    continue
+                new_graph = await self._parse(commit, filename, original_filename)
                 if new_graph is None:
                     logger.warning("Could not parse ontology at commit %s", commit_hash)
                     result["parse_errors"] += 1
@@ -270,6 +287,7 @@ class ChangeHistoryReconciler:
                     else:
                         result["skipped"] += 1
                     old_graph = new_graph
+                    old_blob_id = blob_id
                 advance(commit_hash)
                 result["processed"] += 1
             # A landing while this job is running may deduplicate against its ID.
@@ -279,6 +297,21 @@ class ChangeHistoryReconciler:
             )
         skips.warn()
         return result
+
+    async def _parse(
+        self, commit: pygit2.Commit, filename: str, original_filename: str | None
+    ) -> Graph | None:
+        size = _history_blob_size(commit, filename, original_filename)
+        if size is not None and size > _MAX_HISTORY_BLOB_BYTES:
+            logger.warning(
+                "Ontology at commit %s is %d bytes, over the %d-byte history limit; "
+                "its changes are not recorded",
+                commit.id,
+                size,
+                _MAX_HISTORY_BLOB_BYTES,
+            )
+            return None
+        return await asyncio.to_thread(read_history_graph, commit, filename, original_filename)
 
     async def _attribution(
         self, project: Project, commit: pygit2.Commit
@@ -366,7 +399,7 @@ def _select_history(
     cutoff = (datetime.now(UTC) - timedelta(days=_BACKFILL_DAYS)).timestamp()
     walk = repo.walk(head.id, pygit2.enums.SortMode.TOPOLOGICAL)
     walk.simplify_first_parent()
-    for commit in walk:
+    for walked, commit in enumerate(walk):
         if previous_hash:
             is_baseline = str(commit.id) == previous_hash
         else:
@@ -374,6 +407,15 @@ def _select_history(
                 fork_from is not None
                 and (commit.id == fork_from or repo.descendant_of(fork_from, commit.id))
             )
+            if not is_baseline and walked >= _BACKFILL_MAX_COMMITS:
+                logger.warning(
+                    "Change history backfill of %s stops at %d commits; "
+                    "history before %s is not recorded",
+                    head.id,
+                    _BACKFILL_MAX_COMMITS,
+                    commit.id,
+                )
+                is_baseline = True
         if is_baseline:
             return commit, pending
         pending.append(commit)
@@ -397,6 +439,34 @@ def _select_history(
 def event_display_name(name: str | None) -> str | None:
     """Keep emails out of the event display name, including provider fallbacks."""
     return name[:255] if name and "@" not in name else None
+
+
+def _history_blob(
+    commit: pygit2.Commit, filename: str, original_filename: str | None
+) -> pygit2.Blob | None:
+    for name in (filename, original_filename):
+        if not name:
+            continue
+        try:
+            entry = commit.tree[name]
+        except KeyError:
+            continue
+        return entry if isinstance(entry, pygit2.Blob) else None
+    return None
+
+
+def _history_blob_id(
+    commit: pygit2.Commit, filename: str, original_filename: str | None
+) -> pygit2.Oid | None:
+    blob = _history_blob(commit, filename, original_filename)
+    return blob.id if blob is not None else None
+
+
+def _history_blob_size(
+    commit: pygit2.Commit, filename: str, original_filename: str | None
+) -> int | None:
+    blob = _history_blob(commit, filename, original_filename)
+    return blob.size if blob is not None else None
 
 
 def read_history_graph(

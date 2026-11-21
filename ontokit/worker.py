@@ -1590,6 +1590,11 @@ async def purge_demo_generations(ctx: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+# One chain of continuation jobs reconciles at most this many batches (2000
+# commits at the default batch size) before yielding to the next trigger.
+RECONCILE_CHANGE_HISTORY_MAX_JOBS = 40
+
+
 async def reconcile_change_history_task(
     ctx: dict[str, Any], project_id: str, branch: str
 ) -> ReconciliationResult:
@@ -1599,6 +1604,17 @@ async def reconcile_change_history_task(
             UUID(project_id), branch
         )
     if result["more"]:
+        if ctx.get("job_try", 1) >= RECONCILE_CHANGE_HISTORY_MAX_JOBS:
+            # The watermark keeps the rest for the next landing or nightly sweep,
+            # so one push of many commits cannot hold the worker indefinitely.
+            logger.info(
+                "Change history for project %s branch %s paused after %d jobs; "
+                "the remaining commits resume on the next landing or sweep",
+                project_id,
+                branch,
+                RECONCILE_CHANGE_HISTORY_MAX_JOBS,
+            )
+            return result
         # ARQ cannot enqueue an ID that is already running. Retry requeues
         # the same job after the transaction and its lock have been released.
         raise Retry(defer=1)
@@ -1697,7 +1713,11 @@ class WorkerSettings:
 
     functions = [
         func(purge_demo_generations, timeout=settings.demo_retention_run_budget_seconds + 300),
-        func(reconcile_change_history_task, keep_result=0, max_tries=1000),
+        func(
+            reconcile_change_history_task,
+            keep_result=0,
+            max_tries=RECONCILE_CHANGE_HISTORY_MAX_JOBS,
+        ),
         run_ontology_index_task,
         run_lint_task,
         func(run_consistency_check_task, timeout=900),  # 15 min for large ontologies

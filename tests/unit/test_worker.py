@@ -1977,3 +1977,33 @@ async def test_history_sweep_skips_suggestions_and_continues_after_repository_er
         "trunk",
     )
     assert str(broken) in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_history_job_chain_stops_at_its_bound_and_leaves_the_rest_for_later(
+    mock_ctx, project_id, caplog
+):
+    import logging
+
+    from arq.worker import Function
+
+    from ontokit import worker
+
+    caplog.set_level(logging.INFO, logger=worker.logger.name)
+    mock_ctx["session_factory"] = MagicMock(return_value=MagicMock())
+    job = next(
+        job
+        for job in worker.WorkerSettings.functions
+        if isinstance(job, Function) and job.coroutine is worker.reconcile_change_history_task
+    )
+    mock_ctx["job_try"] = job.max_tries
+    result = {"processed": 50, "recorded": 50, "skipped": 0, "parse_errors": 0, "more": True}
+    reconcile = AsyncMock(return_value=result)
+    with patch.object(
+        worker, "ChangeHistoryReconciler", return_value=Mock(reconcile_branch=reconcile)
+    ):
+        # No Retry: the watermark keeps the remainder for the next landing or sweep.
+        assert await worker.reconcile_change_history_task(mock_ctx, project_id, "trunk") == result
+
+    assert job.max_tries <= 50
+    assert any("remaining" in record.getMessage() for record in caplog.records)
