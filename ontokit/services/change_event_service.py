@@ -7,7 +7,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import chain
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from uuid import UUID
 
 from rdflib import BNode, Graph, URIRef
@@ -15,9 +15,13 @@ from rdflib import Literal as RDFLiteral
 from rdflib.compare import isomorphic
 from rdflib.namespace import OWL, RDF, RDFS, SKOS
 from rdflib.term import Node
-from sqlalchemy import case, func, or_, select
+from sqlalchemy import Boolean, case, func, literal, or_, select
+from sqlalchemy.exc import CompileError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.sql import ColumnElement
+from sqlalchemy.sql.compiler import SQLCompiler
+from sqlalchemy.sql.functions import FunctionElement
 from sqlalchemy.sql.selectable import CTE
 
 from ontokit.models.change_event import (
@@ -89,6 +93,102 @@ class ChangeEventSkips:
                 self.overlong_iris,
                 MAX_ENTITY_IRI_LENGTH,
             )
+
+
+class _json_document(FunctionElement[Any]):
+    """A JSON column in the form the JSON tests below read: JSONB on PostgreSQL."""
+
+    inherit_cache = True
+    name = "json_document"
+
+
+@compiles(_json_document)
+def _json_document_as_is(element: _json_document, compiler: SQLCompiler, **kw: Any) -> str:
+    (document,) = element.clauses
+    return compiler.process(document, **kw)
+
+
+@compiles(_json_document, "postgresql")
+def _json_document_postgresql(element: _json_document, compiler: SQLCompiler, **kw: Any) -> str:
+    (document,) = element.clauses
+    return f"CAST({compiler.process(document, **kw)} AS JSONB)"
+
+
+class _json_has(FunctionElement[bool]):
+    """True when a JSON array holds the string, or a JSON object has the key."""
+
+    type = Boolean()
+    inherit_cache = True
+    name = "json_has"
+
+
+class _json_truthy(FunctionElement[bool]):
+    """True when a JSON object's member is present and truthy as Python reads it."""
+
+    type = Boolean()
+    inherit_cache = True
+    name = "json_truthy"
+
+
+def _json_arguments(
+    element: FunctionElement[bool], compiler: SQLCompiler, **kw: Any
+) -> tuple[str, str]:
+    document, key = element.clauses
+    return compiler.process(document, **kw), compiler.process(key, **kw)
+
+
+@compiles(_json_has)
+@compiles(_json_truthy)
+def _json_test_unsupported(element: FunctionElement[bool], compiler: SQLCompiler, **_: Any) -> str:
+    raise CompileError(f"{element.name} is not implemented for {compiler.dialect.name}")
+
+
+@compiles(_json_has, "postgresql")
+def _json_has_postgresql(element: _json_has, compiler: SQLCompiler, **kw: Any) -> str:
+    document, key = _json_arguments(element, compiler, **kw)
+    return f"coalesce(jsonb_exists({document}, {key}), false)"
+
+
+@compiles(_json_has, "sqlite")
+def _json_has_sqlite(element: _json_has, compiler: SQLCompiler, **kw: Any) -> str:
+    document, key = _json_arguments(element, compiler, **kw)
+    return (
+        f"EXISTS (SELECT 1 FROM json_each({document}) WHERE CASE json_type({document}) "
+        f"WHEN 'array' THEN json_each.type = 'text' AND json_each.value = {key} "
+        f"WHEN 'object' THEN json_each.key = {key} ELSE 0 END)"
+    )
+
+
+@compiles(_json_truthy, "postgresql")
+def _json_truthy_postgresql(element: _json_truthy, compiler: SQLCompiler, **kw: Any) -> str:
+    document, key = _json_arguments(element, compiler, **kw)
+    value = f"({document} -> {key})"
+    return (
+        f"coalesce(CASE jsonb_typeof({value}) "
+        f"WHEN 'array' THEN jsonb_array_length({value}) > 0 "
+        f"WHEN 'object' THEN {value} <> '{{}}'::jsonb "
+        f"WHEN 'string' THEN {value} <> '\"\"'::jsonb "
+        f"WHEN 'number' THEN {value} <> '0'::jsonb "
+        f"WHEN 'boolean' THEN {value} = 'true'::jsonb "
+        f"ELSE false END, false)"
+    )
+
+
+@compiles(_json_truthy, "sqlite")
+def _json_truthy_sqlite(element: _json_truthy, compiler: SQLCompiler, **kw: Any) -> str:
+    document, key = _json_arguments(element, compiler, **kw)
+    path = f"('$.\"' || {key} || '\"')"
+    value = f"json_extract({document}, {path})"
+    return (
+        f"coalesce(CASE json_type({document}, {path}) "
+        f"WHEN 'array' THEN json_array_length({document}, {path}) > 0 "
+        f"WHEN 'object' THEN {value} <> '{{}}' "
+        f"WHEN 'text' THEN {value} <> '' "
+        f"WHEN 'integer' THEN {value} <> 0 "
+        f"WHEN 'real' THEN {value} <> 0 "
+        f"WHEN 'true' THEN 1 "
+        f"ELSE 0 END, 0)"
+    )
 
 
 def _utc_iso(value: datetime) -> str:
@@ -258,8 +358,13 @@ def _field_changes(events: list[EntityChangeEvent], net_change: NetChange) -> li
 
 
 def _project_change_item(
-    entity_iri: str, net_change: NetChange, events: list[EntityChangeEvent]
+    entity_iri: str, net_change: NetChange, events: list[EntityChangeEvent], event_count: int
 ) -> ProjectChangeItem:
+    """Build an item from its events, newest first.
+
+    ``events`` may omit window events that cannot change the item: see
+    ``_item_events_query`` for the ones it must keep.
+    """
     label = None
     authors: dict[str, str | None] = {}
     for event in events:
@@ -279,12 +384,99 @@ def _project_change_item(
         label=label,
         origins=sorted({ChangeOrigin(event.origin) for event in events}),
         last_changed_at=_utc_iso(latest.created_at),
-        event_count=len(events),
+        event_count=event_count,
         authors=[
             ChangeAuthor(user_id=user_id, user_name=name) for user_id, name in authors.items()
         ],
         field_changes=_field_changes(events, net_change),
         events=[_serialize_event(event) for event in events[:_ITEM_EVENT_LIMIT]],
+    )
+
+
+def _touched(field: ChangeField, events: Any) -> ColumnElement[bool]:
+    """Mirror the events ``_field_changes`` reads a field from."""
+    key = literal(field)
+    listed = _json_has(events.changed_fields, key)
+    if field == "other":
+        return listed
+    edge: ColumnElement[bool] = events.event_type.in_(
+        (ChangeEventType.CREATE, ChangeEventType.DELETE)
+    )
+    return listed | (edge & (_json_has(events.old_values, key) | _json_has(events.new_values, key)))
+
+
+def _item_events_query(filters: list[ColumnElement[bool]], entity_iris: list[str]) -> Any:
+    """Select the window events that decide each entity's item, newest first.
+
+    An item shows its newest events, reads each field's value before its earliest
+    change and after its latest, takes its label from the newest event that has
+    one, and lists every origin and author with the newest name each author used.
+    Every other event only adds to the count, so it stays in the database however
+    many times the entity changed.
+    """
+    event = EntityChangeEvent
+    # The window function keeps this subquery separate, so each document is parsed once.
+    documents = (
+        select(
+            event.id,
+            event.entity_iri,
+            event.event_type,
+            event.user_id,
+            event.user_name,
+            event.origin,
+            func.row_number()
+            .over(partition_by=event.entity_iri, order_by=(event.created_at, event.id))
+            .label("position"),
+            *(
+                _json_document(column).label(column.key)
+                for column in (event.changed_fields, event.old_values, event.new_values)
+            ),
+        )
+        .where(*filters, event.entity_iri.in_(entity_iris))
+        .subquery("documents")
+    ).c
+
+    def latest(condition: ColumnElement[bool], *partition: Any) -> Any:
+        return func.max(case((condition, documents.position))).over(
+            partition_by=(documents.entity_iri, *partition)
+        )
+
+    def earliest(condition: ColumnElement[bool]) -> Any:
+        return func.min(case((condition, documents.position))).over(
+            partition_by=documents.entity_iri
+        )
+
+    label = literal("labels")
+    labelled = _json_truthy(documents.new_values, label) | _json_truthy(documents.old_values, label)
+    always = documents.position.isnot(None)
+    anchors = [
+        latest(always, documents.user_id),
+        latest(documents.user_name.isnot(None), documents.user_id),
+        latest(always, documents.origin),
+        latest(labelled),
+    ]
+    for field in _CHANGE_FIELDS:
+        touched = _touched(field, documents)
+        anchors.append(earliest(touched))
+        if field != "other":
+            anchors.append(latest(touched))
+    marked_events = select(
+        documents.id,
+        documents.position,
+        func.count().over(partition_by=documents.entity_iri).label("event_count"),
+        *(anchor.label(f"anchor_{index}") for index, anchor in enumerate(anchors)),
+    ).subquery("marked")
+    marked = marked_events.c
+    newest = marked.position > marked.event_count - _ITEM_EVENT_LIMIT
+    keep = or_(
+        newest,
+        *(marked.position == getattr(marked, f"anchor_{index}") for index in range(len(anchors))),
+    )
+    return (
+        select(event, marked.event_count)
+        .join(marked_events, marked.id == event.id)
+        .where(keep)
+        .order_by(event.created_at.desc(), event.id.desc())
     )
 
 
@@ -635,19 +827,19 @@ class ChangeEventService:
 
         items = []
         if rows:
-            # Only fetch event payloads for entities on this page. Older events within the
-            # window still contribute to an item's net changes even if its timeline is capped.
-            event = EntityChangeEvent
-            query = (
-                select(event)
-                .where(*filters, event.entity_iri.in_([row.entity_iri for row in rows]))
-                .order_by(event.created_at.desc(), event.id.desc())
-            )
+            query = _item_events_query(filters, [row.entity_iri for row in rows])
             events_by_iri: dict[str, list[EntityChangeEvent]] = defaultdict(list)
-            for result in (await self._db.execute(query)).scalars():
+            counts: dict[str, int] = {}
+            for result, event_count in await self._db.execute(query):
                 events_by_iri[result.entity_iri].append(result)
+                counts[result.entity_iri] = event_count
             items = [
-                _project_change_item(row.entity_iri, row.net_change, events_by_iri[row.entity_iri])
+                _project_change_item(
+                    row.entity_iri,
+                    row.net_change,
+                    events_by_iri[row.entity_iri],
+                    counts[row.entity_iri],
+                )
                 for row in rows
             ]
 

@@ -59,4 +59,13 @@ class EntityChangeEvent(Base):
         Index("ix_change_events_project_branch_time", "project_id", "branch", "created_at"),
         Index("ix_change_events_project_origin_time", "project_id", "origin", "created_at"),
         Index("ix_change_events_project_branch_commit", "project_id", "branch", "commit_hash"),
+        Index(
+            "ix_change_events_project_branch_entity_time",
+            "project_id",
+            "branch",
+            "entity_iri",
+            "created_at",
+            "id",
+            postgresql_include=["event_type", "origin"],
+        ),
     )

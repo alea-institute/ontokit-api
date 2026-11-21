@@ -70,4 +70,4 @@ def test_alembic_has_one_current_head() -> None:
     config = Config()
     config.set_main_option("script_location", str(ROOT / "alembic"))
 
-    assert ScriptDirectory.from_config(config).get_heads() == ["k9l0m1n2o3p4"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["l0m1n2o3p4q5"]

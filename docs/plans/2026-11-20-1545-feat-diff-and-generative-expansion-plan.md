@@ -44,7 +44,7 @@ Verified on PostgreSQL 17 (pgvector) and Redis 7 in throwaway containers: upgrad
 
 Still open:
 
-- A heavily edited entity loads every event in its window to compute its net change, although the response shows 20.
+- ~~A heavily edited entity loads every event in its window to compute its net change, although the response shows 20.~~ Closed 2026-11-21; see Feed scale below.
 - Across pages of one feed, a backfill can still move an entity past the cursor. Each response is consistent; reload to see the settled order.
 - `ruff format --check` reports 16 unit-test files this branch does not touch; the same files fail on `dev`.
 - Not exercised here: remote sync against a real GitHub repository, and the suggestion-session merge path through HTTP (covered by unit tests on real Git).
@@ -58,3 +58,21 @@ These amend the contract in the web plan. Response shapes are unchanged except w
 3. **Filter limits.** `author`, `entity_type`, and `event_type` accept at most 50 values each, `origin` at most 4, each text value at most 255 characters, and `cursor` at most 4,096. Beyond that the feed returns 422.
 4. **Duplicate verdicts without embeddings.** `generate-suggestions` returns `duplicate_verdict` `block` when a proposed subclass or sibling has the same label, ignoring case and spacing, as a class already under the same parent or as an earlier proposal in the same batch. The match leads `duplicate_candidates` with `score` 1.0; for a repeat within a batch the candidate's `iri` is the earlier proposal's.
 5. **Work-branch feeds.** A work branch's feed now includes every commit since it left the default branch, not only commits after its first reconciliation.
+
+## Feed scale (2026-11-21)
+
+An item now reads at most its 20 newest events plus the few that decide it: the earliest and latest event touching each field, the earliest listing `other`, the newest carrying a label, and the newest per origin and per author. The database counts the rest. Net-change rules are unchanged; unit tests on SQLite and integration tests on PostgreSQL compare every item against the item built from all of its events over random histories.
+
+A new index, `ix_change_events_project_branch_entity_time` on `(project_id, branch, entity_iri, created_at, id)` including `event_type` and `origin`, hands the grouping its events in history order, so the window no longer sorts on disk. Revision `l0m1n2o3p4q5` builds it concurrently.
+
+Measured on PostgreSQL 17 with 48,066 events across 2,000 entities in one project (60 with 500 to 600 events each, all on the first page) beside 200,000 events in four other projects, on a shared box under heavy load:
+
+| First page, 50 items | Before | After |
+|---|---|---|
+| Event rows the item query returns | 17,987 | 901 |
+| Client CPU per request (median of 7) | 818 ms | 57 ms |
+| Wall time per request (median of 7) | 2,176 ms | 1,069 ms |
+| Grouping statement, `EXPLAIN ANALYZE` | 108 to 172 ms, external merge sort | 55 to 70 ms, index-only scan |
+
+Every statement uses an index (`ix_change_events_project_time` for the summary scans, the new index for grouping and item reads). The author summary, a window over every event in the window, is now the slowest statement at about 130 to 160 ms.
+
