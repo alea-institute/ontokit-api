@@ -79,11 +79,9 @@ async def test_feed_page_and_summary_agree_while_history_is_being_recorded(
     response = await service.list_changes(project, branch="main")
 
     assert len(response.items) == 3
-    if snapshot:
-        assert (response.summary.entities_changed, response.summary.total_events) == (3, 3)
-    else:
-        # Without the snapshot the same response counts rows its page never saw.
-        assert (response.summary.entities_changed, response.summary.total_events) == (8, 8)
+    # The response reads only events its first statement's snapshot saw, so even
+    # without repeatable read its summary counts nothing its page never saw.
+    assert (response.summary.entities_changed, response.summary.total_events) == (3, 3)
 
     monkeypatch.setattr(service, "_changes_summary", read_summary)
     await _begin_snapshot(real_db_session)

@@ -71,3 +71,88 @@ def test_watermark_schema_and_concurrent_index() -> None:
             call.drop_table(TABLE),
         ]
     )
+
+
+ENTITY_MIGRATION = (
+    Path(__file__).parents[2] / "alembic/versions/l0m1n2o3p4q5_index_change_events_by_entity.py"
+)
+ENTITY_INDEX = "ix_change_events_project_branch_entity_time"
+
+
+def test_entity_history_index_matches_the_model_and_builds_concurrently() -> None:
+    spec = importlib.util.spec_from_file_location(ENTITY_MIGRATION.stem, ENTITY_MIGRATION)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    from ontokit.models import EntityChangeEvent
+
+    module.op = op = MagicMock()
+    assert module.down_revision == "77a67de3294e"
+    module.upgrade()
+
+    columns = ["project_id", "branch", "entity_iri", "created_at", "id"]
+    op.assert_has_calls(
+        [
+            call.get_context().autocommit_block().__enter__(),
+            call.drop_index(
+                ENTITY_INDEX, table_name=EVENTS, postgresql_concurrently=True, if_exists=True
+            ),
+            call.create_index(
+                ENTITY_INDEX,
+                EVENTS,
+                columns,
+                postgresql_include=["event_type", "origin", "recorded_xact"],
+                postgresql_concurrently=True,
+            ),
+            call.get_context().autocommit_block().__exit__(None, None, None),
+        ]
+    )
+    (model_index,) = (
+        index
+        for index in sa.inspect(EntityChangeEvent).local_table.indexes
+        if index.name == ENTITY_INDEX
+    )
+    assert [column.name for column in model_index.columns] == columns
+    assert model_index.dialect_options["postgresql"]["include"] == [
+        "event_type",
+        "origin",
+        "recorded_xact",
+    ]
+
+    op.reset_mock()
+    module.downgrade()
+    op.drop_index.assert_called_once_with(
+        ENTITY_INDEX, table_name=EVENTS, postgresql_concurrently=True, if_exists=True
+    )
+
+
+TRANSACTION_MIGRATION = (
+    Path(__file__).parents[2] / "alembic/versions/77a67de3294e_record_change_event_transactions.py"
+)
+
+
+def test_recorded_transaction_column_is_added_without_a_table_rewrite() -> None:
+    spec = importlib.util.spec_from_file_location(TRANSACTION_MIGRATION.stem, TRANSACTION_MIGRATION)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    from ontokit.models import EntityChangeEvent
+
+    module.op = op = MagicMock()
+    assert module.down_revision == "k9l0m1n2o3p4"
+    module.upgrade()
+
+    table_name, column = op.add_column.call_args.args
+    assert (table_name, column.name, column.nullable) == (EVENTS, "recorded_xact", True)
+    assert isinstance(column.type, sa.BigInteger)
+    # A default on the added column would fill every existing row.
+    assert column.server_default is None
+    (table_name, column_name), options = op.alter_column.call_args
+    assert (table_name, column_name) == (EVENTS, "recorded_xact")
+    assert str(options["server_default"]) == ("CAST(CAST(pg_current_xact_id() AS text) AS bigint)")
+    model_column = sa.inspect(EntityChangeEvent).local_table.c.recorded_xact
+    assert model_column.nullable and isinstance(model_column.type, sa.BigInteger)
+
+    op.reset_mock()
+    module.downgrade()
+    op.drop_column.assert_called_once_with(EVENTS, "recorded_xact")

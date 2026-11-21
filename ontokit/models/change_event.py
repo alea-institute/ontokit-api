@@ -5,7 +5,7 @@ from datetime import datetime
 from enum import StrEnum
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, String, func
+from sqlalchemy import JSON, BigInteger, DateTime, FetchedValue, ForeignKey, Index, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ontokit.core.database import Base
@@ -50,6 +50,12 @@ class EntityChangeEvent(Base):
     old_values: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     new_values: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    # The PostgreSQL transaction that inserted the event, filled by the database.
+    # Events from before the column existed carry NULL. Feed cursors compare it
+    # with a snapshot to page through one fixed set of events.
+    recorded_xact: Mapped[int | None] = mapped_column(
+        BigInteger, nullable=True, server_default=FetchedValue()
+    )
 
     project: Mapped["Project"] = relationship()  # type: ignore[name-defined]  # noqa: F821
 
@@ -59,4 +65,13 @@ class EntityChangeEvent(Base):
         Index("ix_change_events_project_branch_time", "project_id", "branch", "created_at"),
         Index("ix_change_events_project_origin_time", "project_id", "origin", "created_at"),
         Index("ix_change_events_project_branch_commit", "project_id", "branch", "commit_hash"),
+        Index(
+            "ix_change_events_project_branch_entity_time",
+            "project_id",
+            "branch",
+            "entity_iri",
+            "created_at",
+            "id",
+            postgresql_include=["event_type", "origin", "recorded_xact"],
+        ),
     )
