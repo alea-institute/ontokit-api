@@ -15,12 +15,17 @@ from uuid import UUID, uuid4
 import pytest
 import pytest_asyncio
 from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from ontokit.api.utils.redis import close_arq_pool
+from ontokit.core.auth import CurrentUser
 from ontokit.git.bare_repository import BareGitRepositoryService
 from ontokit.models.change_event import EntityChangeEvent
 from ontokit.models.change_history_watermark import ChangeHistoryWatermark
-from ontokit.models.project import Project
+from ontokit.models.project import Project, ProjectMember
+from ontokit.models.pull_request import PullRequest
+from ontokit.schemas.pull_request import PRMergeRequest
+from ontokit.services.pull_request_service import PullRequestService
 from tests.integration.change_history_process import commit
 
 pytestmark = pytest.mark.integration
@@ -167,3 +172,94 @@ async def test_reconciler_waits_for_a_merge_in_another_process_and_credits_its_a
         )
         == 2
     )
+
+
+@pytest.mark.asyncio
+async def test_service_merge_holds_the_target_branch_until_its_commit(
+    real_db_session: AsyncSession, project: UUID, tmp_path: Path
+) -> None:
+    """The real pull-request merge keeps a reconciler in another process out of its window.
+
+    Were the reconciler to read the merge commit before the merged row is
+    visible, it would credit the merger, whose noreply alias authored the
+    merge commit, instead of the pull request's author.
+    """
+    git = BareGitRepositoryService(str(tmp_path))
+    commit(git, project, BRANCH, 1)
+    reconciler = _start("once", tmp_path, project)
+    assert (await _line(reconciler))["recorded"] == 1
+    await _finish(reconciler)
+    git.get_repository(project).create_branch("proposal", BRANCH)
+    commit(git, project, "proposal", 2)
+    base = git.get_repository(project).get_branch_commit_hash(BRANCH)
+    real_db_session.add(ProjectMember(project_id=project, user_id="owner", role="owner"))
+    real_db_session.add(
+        PullRequest(
+            project_id=project,
+            pr_number=1,
+            title="Proposal",
+            source_branch="proposal",
+            target_branch=BRANCH,
+            author_id="contributor",
+            author_name="Contributor",
+        )
+    )
+    await real_db_session.commit()
+
+    sessions = async_sessionmaker(real_db_session.bind, expire_on_commit=False)
+    in_window = asyncio.Event()
+    release = asyncio.Event()
+    observed: dict[str, object] = {}
+
+    async def observe_window() -> None:
+        await in_window.wait()
+        try:
+            process = _start("once", tmp_path, project)
+            observed["blocked"] = await _line(process)
+            await _finish(process)
+        finally:
+            release.set()
+
+    async def merge() -> str:
+        async with sessions() as db:
+            real_commit = db.commit
+
+            async def commit_after_observation() -> None:
+                head = git.get_repository(project).get_branch_commit_hash(BRANCH)
+                if head != base and not in_window.is_set():
+                    # The target ref has moved and the merge row is not yet committed.
+                    observed["head"] = head
+                    in_window.set()
+                    await release.wait()
+                await real_commit()
+
+            db.commit = commit_after_observation  # type: ignore[method-assign]
+            service = PullRequestService(db, git_service=git)  # type: ignore[arg-type]
+            merged = await service.merge_pull_request(
+                project, 1, PRMergeRequest(), CurrentUser(id="owner", name="Olive Owner")
+            )
+            assert merged.merge_commit_hash is not None
+            return merged.merge_commit_hash
+
+    try:
+        merge_commit, _ = await asyncio.wait_for(asyncio.gather(merge(), observe_window()), 180)
+    finally:
+        await close_arq_pool()
+
+    assert observed["head"] == merge_commit
+    blocked = observed["blocked"]
+    assert isinstance(blocked, dict)
+    assert (blocked["processed"], blocked["recorded"], blocked["more"]) == (0, 0, True)
+
+    reconciler = _start("once", tmp_path, project)
+    released = await _line(reconciler)
+    await _finish(reconciler)
+    assert (released["processed"], released["recorded"], released["more"]) == (1, 1, False)
+    events = await _events(real_db_session, project)
+    (event,) = [event for event in events if event.commit_hash == merge_commit]
+    assert (event.user_id, event.user_name, event.origin) == ("contributor", "Contributor", "human")
+    assert (event.event_type, event.entity_iri) == (
+        "create",
+        "https://example.org/ontology#Class1",
+    )
+    assert len(events) == 2
