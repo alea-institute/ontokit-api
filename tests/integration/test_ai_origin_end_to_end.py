@@ -316,3 +316,94 @@ async def test_accepted_edited_and_rejected_suggestions_reach_the_changes_feed(
         {"iri": unchanged["iri"], "label": "Lease", "score": 1.0}
     ]
     assert again["Licence"]["duplicate_verdict"] == again["Wager"]["duplicate_verdict"] == "pass"
+
+
+@pytest.mark.asyncio
+async def test_ai_origin_survives_a_suggestion_merge_into_the_changes_feed(
+    stack: Stack, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, project_id, git, _ = stack
+    # Session creation signs a beacon token.
+    monkeypatch.setattr(settings, "secret_key", "integration-beacon-secret")
+    api = f"/api/v1/projects/{project_id}"
+    suggester = CurrentUser(id="e2e-suggester", name="Sid Suggester", email="sid@example.test")
+    async with async_session_maker() as db:
+        db.add(
+            ProjectMember(
+                project_id=project_id, user_id=suggester.id, role="suggester", is_trusted=True
+            )
+        )
+        await db.commit()
+    acting = [suggester]
+
+    async def current_user() -> CurrentUser:
+        return acting[0]
+
+    main.app.dependency_overrides[get_current_user] = current_user
+    main.app.dependency_overrides[get_current_user_optional] = current_user
+
+    generated = await client.post(
+        f"{api}/llm/generate-suggestions",
+        json={"class_iri": FOCUS, "branch": "main", "suggestion_type": "children", "batch_size": 3},
+    )
+    assert generated.status_code == 200, generated.text
+    batch_id = generated.json()["batch_id"]
+    unchanged, edited, rejected = generated.json()["suggestions"]
+
+    created = await client.post(f"{api}/suggestions/sessions")
+    assert created.status_code == 201, created.text
+    session_id = created.json()["session_id"]
+    saved = await client.put(
+        f"{api}/suggestions/sessions/{session_id}/save",
+        json={
+            "content": ONTOLOGY
+            + _accepted_class(unchanged)
+            + _accepted_class(edited, label="Software licence"),
+            "entity_iri": unchanged["iri"],
+            "entity_label": unchanged["label"],
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    submitted = await client.post(
+        f"{api}/suggestions/sessions/{session_id}/submit", json={"summary": "Two subclasses"}
+    )
+    assert submitted.status_code == 200, submitted.text
+
+    # Nothing reaches the default branch's feed until a reviewer merges it.
+    before = await client.get(f"{api}/analytics/changes", params={"days": 1})
+    assert before.status_code == 200, before.text
+    assert unchanged["iri"] not in {item["entity_iri"] for item in before.json()["items"]}
+
+    acting[0] = USER
+    approved = await client.post(f"{api}/suggestions/sessions/{session_id}/approve")
+    assert approved.status_code == 204, approved.text
+    merge_commit = git.get_repository(project_id).get_branch_commit_hash("main")
+    assert merge_commit != saved.json()["commit_hash"]
+
+    # What the worker does with the job the merge queued.
+    context = {"session_factory": async_session_maker, "redis": await get_arq_pool()}
+    reconciled = await worker.reconcile_change_history_task(context, str(project_id), "main")
+    assert (reconciled["processed"], reconciled["recorded"]) == (1, 2)
+
+    feed = await client.get(f"{api}/analytics/changes", params={"days": 1})
+    assert feed.status_code == 200, feed.text
+    changes = feed.json()
+    items = {item["entity_iri"]: item for item in changes["items"]}
+    assert rejected["iri"] not in items
+    for suggestion, origin in ((unchanged, "ai"), (edited, "ai_edited")):
+        item = items[suggestion["iri"]]
+        assert item["origins"] == [origin]
+        assert (item["net_change"], item["entity_type"]) == ("added", "class")
+        # The suggester wrote the change; the reviewer only merged it.
+        assert item["authors"] == [{"user_id": suggester.id, "user_name": suggester.name}]
+        (event,) = item["events"]
+        assert (event["origin"], event["origin_model"], event["origin_batch_id"]) == (
+            origin,
+            MODEL,
+            batch_id,
+        )
+        assert event["commit_hash"] == merge_commit
+    assert changes["summary"]["by_origin"] == {"human": 0, "ai": 1, "ai_edited": 1, "system": 3}
+
+    only_ai = await client.get(f"{api}/analytics/changes", params={"days": 1, "origin": "ai"})
+    assert [item["entity_iri"] for item in only_ai.json()["items"]] == [unchanged["iri"]]
