@@ -160,6 +160,22 @@ API and web SHA pair, export those two revisions as described above, then run
 `docker compose build` and `docker compose up -d --wait --wait-timeout 240`.
 Rebuilding both images keeps the deployed pair internally consistent.
 
+### Migrations that lose data on downgrade
+
+Rolling back the images does not roll back the schema; a downgrade is a
+separate, deliberate `alembic downgrade`. Downgrading revision `j8k9l0m1n2o3`
+(change origins) drops the `llm_generated_entities` ledger and the `origin`,
+`origin_model`, and `origin_batch_id` columns of `entity_change_events`. Git
+history cannot rebuild them: after a later upgrade, every change recorded
+before the downgrade reads as human-authored. Take and verify a database backup
+before that downgrade. Downgrading `k9l0m1n2o3p4` drops only the change-history
+watermarks, which the reconciler rebuilds.
+
+The schema changes in `j8k9l0m1n2o3` set a 5-second `lock_timeout`. If a
+long-running query holds `entity_change_events`, the migration fails with
+`lock timeout` instead of queueing every later query behind it. Its steps
+tolerate a partial earlier run, so rerun the deploy once that query finishes.
+
 ## Image-based deploy (prepared; not activated)
 
 CI publishes `ghcr.io/alea-institute/ontokit@sha256:<digest>` on every `dev` push

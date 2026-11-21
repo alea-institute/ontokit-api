@@ -16,11 +16,18 @@ down_revision: str | None = "i7j8k9l0m1n2"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
+# Each ALTER needs an ACCESS EXCLUSIVE lock. Waiting for it behind a long
+# reader would queue every later query on the table, so the transaction gives
+# up instead and commits nothing; the deploy reruns it. SET LOCAL ends with the
+# transaction, so the concurrent index builds keep their normal waits.
+_LOCK_TIMEOUT = "SET LOCAL lock_timeout = '5s'"
+
 
 def upgrade() -> None:
     # The concurrent index build below commits these columns before the
     # revision is recorded. If that build is interrupted, the rerun finds the
     # columns and an invalid index, so both steps tolerate their own leftovers.
+    op.execute(_LOCK_TIMEOUT)
     op.add_column(
         "entity_change_events",
         sa.Column("origin", sa.String(20), nullable=False, server_default="human"),
@@ -50,6 +57,8 @@ def upgrade() -> None:
             postgresql_concurrently=True,
         )
 
+    # The ledger's foreign key locks the projects table too.
+    op.execute(_LOCK_TIMEOUT)
     op.create_table(
         "llm_generated_entities",
         sa.Column("id", sa.Uuid(), primary_key=True),
@@ -90,6 +99,7 @@ def downgrade() -> None:
             postgresql_concurrently=True,
             if_exists=True,
         )
+    op.execute(_LOCK_TIMEOUT)
     op.drop_index("ix_llm_generated_project_batch", table_name="llm_generated_entities")
     op.drop_index("ix_llm_generated_project_iri", table_name="llm_generated_entities")
     op.drop_table("llm_generated_entities")

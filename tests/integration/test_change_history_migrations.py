@@ -247,3 +247,37 @@ async def test_downgrade_resumes_after_its_concurrent_index_drop(
     _alembic(name, "downgrade", BEFORE)
 
     assert await _schema(database) == REVERTED
+
+
+@pytest.mark.asyncio
+async def test_upgrade_gives_up_instead_of_queueing_behind_a_long_reader(
+    database: asyncpg.Connection,
+) -> None:
+    """A waiting ALTER would stall every later query on the table; it must time out."""
+    name = await _name(database)
+    _alembic(name, "upgrade", BEFORE)
+    await _seed_events(database)
+    reader = await asyncpg.connect(_url(name, driver="postgresql"))
+    try:
+        reading = reader.transaction()
+        await reading.start()
+        await reader.fetchval("SELECT count(*) FROM entity_change_events")
+
+        blocked = subprocess.run(
+            [sys.executable, "-m", "alembic", "upgrade", ORIGIN],
+            cwd=ROOT,
+            env={**os.environ, "DATABASE_URL": _url(name, driver="postgresql+asyncpg")},
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert blocked.returncode != 0
+        assert "lock timeout" in blocked.stderr
+        assert await _schema(database) == REVERTED
+        await reading.rollback()
+    finally:
+        await reader.close()
+
+    # Nothing was committed, so the rerun applies the whole revision.
+    _alembic(name, "upgrade", WATERMARKS)
+    assert await _schema(database) == UPGRADED
