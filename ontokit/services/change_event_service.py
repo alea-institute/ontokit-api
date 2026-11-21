@@ -1,6 +1,7 @@
 """Change event service — track entity modifications from graph diffs."""
 
 import logging
+import re
 from base64 import b64decode, urlsafe_b64encode
 from collections import defaultdict
 from collections.abc import Awaitable, Callable, Sequence
@@ -15,7 +16,7 @@ from rdflib import Literal as RDFLiteral
 from rdflib.compare import isomorphic
 from rdflib.namespace import OWL, RDF, RDFS, SKOS
 from rdflib.term import Node
-from sqlalchemy import Boolean, case, func, literal, or_, select
+from sqlalchemy import Boolean, String, case, func, literal, or_, select
 from sqlalchemy.exc import CompileError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.ext.compiler import compiles
@@ -191,6 +192,78 @@ def _json_truthy_sqlite(element: _json_truthy, compiler: SQLCompiler, **kw: Any)
     )
 
 
+class _current_snapshot(FunctionElement[str]):
+    """The snapshot this transaction reads, as PostgreSQL writes ``pg_snapshot``."""
+
+    type = String()
+    inherit_cache = True
+    name = "current_snapshot"
+
+
+@compiles(_current_snapshot, "postgresql")
+def _current_snapshot_postgresql(
+    _element: _current_snapshot, _compiler: SQLCompiler, **_: Any
+) -> str:
+    return "CAST(pg_current_snapshot() AS TEXT)"
+
+
+@compiles(_current_snapshot, "sqlite")
+def _current_snapshot_sqlite(_element: _current_snapshot, _compiler: SQLCompiler, **_: Any) -> str:
+    # SQLite records no inserting transaction, and the bound keeps every such event.
+    return "'1:1:'"
+
+
+_SNAPSHOT = re.compile(r"(\d{1,19}):(\d{1,19}):(\d{1,19}(?:,\d{1,19})*)?")
+_MAX_XACT = 2**63 - 1
+
+
+@dataclass(frozen=True)
+class _Snapshot:
+    """Which inserting transactions a snapshot saw, as ``pg_visible_in_snapshot`` decides."""
+
+    xmin: int
+    xmax: int
+    in_progress: tuple[int, ...]
+
+    @staticmethod
+    def _numbers(text: str) -> tuple[int, int, tuple[int, ...]]:
+        match = _SNAPSHOT.fullmatch(text)
+        if match is None:
+            raise ValueError("Invalid snapshot")
+        listed = tuple(int(number) for number in match[3].split(",")) if match[3] else ()
+        return int(match[1]), int(match[2]), listed
+
+    @classmethod
+    def _checked(cls, xmin: int, xmax: int, in_progress: tuple[int, ...]) -> "_Snapshot":
+        if not 0 < xmin <= xmax <= _MAX_XACT or any(
+            not xmin <= xact < xmax for xact in in_progress
+        ):
+            raise ValueError("Invalid snapshot")
+        return cls(xmin, xmax, in_progress)
+
+    @classmethod
+    def from_postgresql(cls, text: str) -> "_Snapshot":
+        """Read ``xmin:xmax:xip,...`` as PostgreSQL writes it."""
+        return cls._checked(*cls._numbers(text))
+
+    @classmethod
+    def from_cursor(cls, text: str) -> "_Snapshot":
+        """Read the cursor form, which counts from ``xmin`` to stay short."""
+        xmin, span, offsets = cls._numbers(text)
+        return cls._checked(xmin, xmin + span, tuple(xmin + offset for offset in offsets))
+
+    def to_cursor(self) -> str:
+        offsets = ",".join(str(xact - self.xmin) for xact in self.in_progress)
+        return f"{self.xmin}:{self.xmax - self.xmin}:{offsets}"
+
+    def visible(self) -> ColumnElement[bool]:
+        recorded = EntityChangeEvent.recorded_xact
+        seen_running = recorded < self.xmax
+        if self.in_progress:
+            seen_running &= recorded.not_in(self.in_progress)
+        return or_(recorded.is_(None), recorded < self.xmin, seen_running)
+
+
 def _utc_iso(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=UTC)
@@ -203,13 +276,21 @@ def _clamp_occurrence_time(value: datetime) -> datetime:
     return min(value.astimezone(UTC), datetime.now(UTC))
 
 
-def _read_cursor(cursor: str, days: int, now: datetime) -> tuple[datetime, datetime, str]:
+def _write_cursor(until: datetime, last_changed_at: datetime, snapshot: _Snapshot, iri: str) -> str:
+    key = f"{_utc_iso(until)}|{_utc_iso(last_changed_at)}|{snapshot.to_cursor()}|{iri}"
+    return urlsafe_b64encode(key.encode()).decode()
+
+
+def _read_cursor(
+    cursor: str, days: int, now: datetime
+) -> tuple[datetime, datetime, _Snapshot, str]:
     try:
-        window_end, last_changed_at, iri = (
-            b64decode(cursor, altchars=b"-_", validate=True).decode().split("|", 2)
+        window_end, last_changed_at, snapshot_text, iri = (
+            b64decode(cursor, altchars=b"-_", validate=True).decode().split("|", 3)
         )
         until = datetime.fromisoformat(window_end)
         timestamp = datetime.fromisoformat(last_changed_at)
+        snapshot = _Snapshot.from_cursor(snapshot_text)
         since = until - timedelta(days=days)
         if (
             until.utcoffset() != timedelta(0)
@@ -222,7 +303,7 @@ def _read_cursor(cursor: str, days: int, now: datetime) -> tuple[datetime, datet
             raise ValueError
     except (ValueError, OverflowError) as exc:
         raise InvalidChangesCursor("Invalid changes cursor") from exc
-    return until, timestamp, iri
+    return until, timestamp, snapshot, iri
 
 
 def _serialize_event(row: EntityChangeEvent) -> ChangeEvent:
@@ -255,6 +336,7 @@ def _event_filters(
     since: datetime,
     until: datetime,
     *,
+    snapshot: _Snapshot | None = None,
     origin: Sequence[str] | None = None,
     author: list[str] | None = None,
     entity_type: list[str] | None = None,
@@ -266,6 +348,8 @@ def _event_filters(
         event.branch == branch,
         event.created_at.between(since, until),
     ]
+    if snapshot is not None:
+        filters.append(snapshot.visible())
     if entity_type:
         filters.append(event.entity_type.in_(entity_type))
 
@@ -793,8 +877,14 @@ class ChangeEventService:
     ) -> ProjectChangesResponse:
         until = datetime.now(UTC)
         position = None
-        if cursor is not None:
-            until, timestamp, iri = _read_cursor(cursor, days, until)
+        if cursor is None:
+            # Every page reads the events this snapshot saw, so history recorded
+            # while a reader pages through, whatever its timestamp, waits for
+            # the next first page.
+            snapshot_text = (await self._db.execute(select(_current_snapshot()))).scalar_one()
+            snapshot = _Snapshot.from_postgresql(snapshot_text)
+        else:
+            until, timestamp, snapshot, iri = _read_cursor(cursor, days, until)
             position = timestamp, iri
         since = until - timedelta(days=days)
         filters = _event_filters(
@@ -802,6 +892,7 @@ class ChangeEventService:
             branch,
             since,
             until,
+            snapshot=snapshot,
             origin=origin,
             author=author,
             entity_type=entity_type,
@@ -822,8 +913,7 @@ class ChangeEventService:
         if len(rows) > limit:
             rows = rows[:limit]
             last = rows[-1]
-            key = f"{_utc_iso(until)}|{_utc_iso(last.last_changed_at)}|{last.entity_iri}"
-            next_cursor = urlsafe_b64encode(key.encode()).decode()
+            next_cursor = _write_cursor(until, last.last_changed_at, snapshot, last.entity_iri)
 
         items = []
         if rows:

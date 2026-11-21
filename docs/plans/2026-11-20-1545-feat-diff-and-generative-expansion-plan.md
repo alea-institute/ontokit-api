@@ -45,7 +45,7 @@ Verified on PostgreSQL 17 (pgvector) and Redis 7 in throwaway containers: upgrad
 Still open:
 
 - ~~A heavily edited entity loads every event in its window to compute its net change, although the response shows 20.~~ Closed 2026-11-21; see Feed scale below.
-- Across pages of one feed, a backfill can still move an entity past the cursor. Each response is consistent; reload to see the settled order.
+- ~~Across pages of one feed, a backfill can still move an entity past the cursor. Each response is consistent; reload to see the settled order.~~ Closed 2026-11-21; see contract change 6.
 - `ruff format --check` reports 16 unit-test files this branch does not touch; the same files fail on `dev`.
 - Not exercised here: remote sync against a real GitHub repository, and the suggestion-session merge path through HTTP (covered by unit tests on real Git).
 
@@ -58,12 +58,13 @@ These amend the contract in the web plan. Response shapes are unchanged except w
 3. **Filter limits.** `author`, `entity_type`, and `event_type` accept at most 50 values each, `origin` at most 4, each text value at most 255 characters, and `cursor` at most 4,096. Beyond that the feed returns 422.
 4. **Duplicate verdicts without embeddings.** `generate-suggestions` returns `duplicate_verdict` `block` when a proposed subclass or sibling has the same label, ignoring case and spacing, as a class already under the same parent or as an earlier proposal in the same batch. The match leads `duplicate_candidates` with `score` 1.0; for a repeat within a batch the candidate's `iri` is the earlier proposal's.
 5. **Work-branch feeds.** A work branch's feed now includes every commit since it left the default branch, not only commits after its first reconciliation.
+6. **Cursor pages share the first page's history.** A feed's first page records the PostgreSQL snapshot it read, and its `next_cursor` carries that snapshot beside the window end. Every later page, and its `summary`, counts only events whose inserting transaction that snapshot saw. Events recorded while a reader pages through, including backfilled or reconciled events with old timestamps, wait for the next first page, so paging never skips or repeats an entity and the union of the pages equals the first page's feed. Every page of one walk returns the same `summary`. `next_cursor` stays opaque and under 4,096 characters for IRIs of ordinary length; a cursor whose snapshot does not parse, or from before this change, returns 422, and the client restarts from the first page.
 
 ## Feed scale (2026-11-21)
 
 An item now reads at most its 20 newest events plus the few that decide it: the earliest and latest event touching each field, the earliest listing `other`, the newest carrying a label, and the newest per origin and per author. The database counts the rest. Net-change rules are unchanged; unit tests on SQLite and integration tests on PostgreSQL compare every item against the item built from all of its events over random histories.
 
-A new index, `ix_change_events_project_branch_entity_time` on `(project_id, branch, entity_iri, created_at, id)` including `event_type` and `origin`, hands the grouping its events in history order, so the window no longer sorts on disk. Revision `l0m1n2o3p4q5` builds it concurrently.
+A new index, `ix_change_events_project_branch_entity_time` on `(project_id, branch, entity_iri, created_at, id)` including `event_type`, `origin`, and `recorded_xact`, hands the grouping its events in history order, so the window no longer sorts on disk. Revision `77a67de3294e` adds the nullable `recorded_xact` column (the inserting transaction, filled by a column default; existing rows stay NULL and count as seen by every snapshot) without rewriting the table, and revision `l0m1n2o3p4q5` then builds the index concurrently.
 
 Measured on PostgreSQL 17 with 48,066 events across 2,000 entities in one project (60 with 500 to 600 events each, all on the first page) beside 200,000 events in four other projects, on a shared box under heavy load:
 
@@ -72,7 +73,7 @@ Measured on PostgreSQL 17 with 48,066 events across 2,000 entities in one projec
 | Event rows the item query returns | 17,987 | 901 |
 | Client CPU per request (median of 7) | 818 ms | 57 ms |
 | Wall time per request (median of 7) | 2,176 ms | 1,069 ms |
-| Grouping statement, `EXPLAIN ANALYZE` | 108 to 172 ms, external merge sort | 55 to 70 ms, index-only scan |
+| Grouping statement, `EXPLAIN ANALYZE` | 108 to 172 ms, external merge sort | 34 ms, index-only scan, no heap fetches |
 
-Every statement uses an index (`ix_change_events_project_time` for the summary scans, the new index for grouping and item reads). The author summary, a window over every event in the window, is now the slowest statement at about 130 to 160 ms.
+Every statement uses an index (`ix_change_events_project_time` for the summary scans, the new index for grouping and item reads). The item query (about 110 ms with 60 heavy entities on the page) and the author summary, a window over every event in the window (about 90 to 160 ms), are now the slowest statements.
 

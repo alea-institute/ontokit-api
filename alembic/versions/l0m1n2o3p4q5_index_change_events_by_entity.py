@@ -1,17 +1,17 @@
 """Index change events by branch and entity in history order.
 
 The changes feed groups a window's events per entity, oldest to newest. This
-index hands them over in that order, so the feed reads it instead of sorting
-the window.
+index hands them over in that order, with every column the grouping filters
+and reads, so the feed scans it alone instead of sorting the window.
 
 Revision ID: l0m1n2o3p4q5
-Revises: k9l0m1n2o3p4
+Revises: 77a67de3294e
 """
 
 from alembic import op
 
 revision: str = "l0m1n2o3p4q5"
-down_revision: str | None = "k9l0m1n2o3p4"
+down_revision: str | None = "77a67de3294e"
 branch_labels: str | None = None
 depends_on: str | None = None
 
@@ -27,7 +27,7 @@ def upgrade() -> None:
             INDEX,
             TABLE,
             ["project_id", "branch", "entity_iri", "created_at", "id"],
-            postgresql_include=["event_type", "origin"],
+            postgresql_include=["event_type", "origin", "recorded_xact"],
             postgresql_concurrently=True,
         )
 
