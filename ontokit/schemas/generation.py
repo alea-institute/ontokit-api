@@ -184,8 +184,11 @@ class GenerateSuggestionsRequest(BaseModel):
     batch_size is configurable per D-05: 1-10, default 5 (or 3-5 by type).
     """
 
-    class_iri: str
-    branch: str = "main"
+    # The generated-entity ledger stores both values. PostgreSQL text cannot
+    # hold NUL, and the lengths match its columns, so an accepted request
+    # can always record its provenance.
+    class_iri: str = Field(max_length=2000, pattern=r"^[^\x00]*$")
+    branch: str = Field(default="main", max_length=255, pattern=r"^[^\x00]*$")
     suggestion_type: SuggestionType
     batch_size: int = Field(default=5, ge=1, le=10)
 

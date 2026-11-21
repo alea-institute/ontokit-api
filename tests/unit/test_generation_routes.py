@@ -778,3 +778,23 @@ def test_validate_entity_valid_when_no_errors(authed_client: tuple[TestClient, A
 
     assert resp.status_code == 200
     assert resp.json() == {"valid": True, "errors": []}
+
+
+@pytest.mark.parametrize(
+    "override",
+    [{"branch": "b" * 256}, {"branch": "main\x00"}, {"class_iri": "http://example.org#\x00"}],
+    ids=["long-branch", "nul-branch", "nul-iri"],
+)
+def test_generate_rejects_a_branch_or_focus_the_ledger_cannot_store(
+    authed_client: tuple[TestClient, AsyncMock],
+    generation_pipeline: AsyncMock,
+    ledger_session: AsyncMock,
+    override: dict[str, str],
+) -> None:
+    client, _ = authed_client
+
+    response = client.post(GENERATE_URL, json={**GENERATE_BODY, **override})
+
+    assert response.status_code == 422
+    generation_pipeline.assert_not_awaited()
+    ledger_session.add_all.assert_not_called()

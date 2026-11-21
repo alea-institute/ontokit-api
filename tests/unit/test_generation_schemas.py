@@ -320,3 +320,29 @@ def test_controlled_relationship_types_contains_all_tiers():
     assert "restricts" in CONTROLLED_RELATIONSHIP_TYPES
     assert "exemplifies" in CONTROLLED_RELATIONSHIP_TYPES
     assert "hasSource" in CONTROLLED_RELATIONSHIP_TYPES
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("branch", "b" * 256),
+        ("branch", "main\x00"),
+        ("class_iri", "http://example.org#" + "x" * 2000),
+        ("class_iri", "http://example.org#X\x00"),
+    ],
+    ids=["long-branch", "nul-branch", "long-iri", "nul-iri"],
+)
+def test_generate_request_rejects_values_the_ledger_cannot_store(field: str, value: str):
+    """Branch and focus IRI fit the ledger columns and carry no NUL."""
+    body = {"class_iri": "http://example.org#X", "suggestion_type": "children", field: value}
+    with pytest.raises(PydanticValidationError):
+        GenerateSuggestionsRequest(**body)
+
+
+def test_generate_request_accepts_values_at_the_ledger_limits():
+    req = GenerateSuggestionsRequest(
+        class_iri="http://example.org#" + "x" * (2000 - len("http://example.org#")),
+        branch="b" * 255,
+        suggestion_type="children",
+    )
+    assert len(req.class_iri) == 2000 and len(req.branch) == 255
