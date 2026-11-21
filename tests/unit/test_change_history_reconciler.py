@@ -429,6 +429,37 @@ async def test_import_or_normalization_is_system_work_credited_to_the_member_who
 
 
 @pytest.mark.asyncio
+async def test_verified_commit_email_credits_only_project_members(history: History):
+    with history.session.begin():
+        history.session.add(ProjectMember(project_id=PROJECT, user_id="member", role="editor"))
+        for user_id in ("member", "outsider"):
+            history.session.add(
+                UserCommitIdentity(
+                    user_id=user_id,
+                    commit_email=f"{user_id}@example.org",
+                    commit_email_verified=True,
+                    use_verified_email=True,
+                )
+            )
+    by_member, _ = history.commit(
+        PREFIXES + "ex:A a owl:Class .", name="Member Name", email="member@example.org"
+    )
+    by_outsider, _ = history.commit(
+        PREFIXES + "ex:A a owl:Class . ex:B a owl:Class .",
+        name="Claimed Name",
+        email="outsider@example.org",
+    )
+
+    assert (await history.reconcile())["recorded"] == 2
+    events = {event.commit_hash: event for event in history.events()}
+    event = events[by_member]
+    assert (event.user_id, event.user_name, event.origin) == ("member", "Member Name", "human")
+    # An outsider's verified email neither credits them nor reveals their account.
+    event = events[by_outsider]
+    assert (event.user_id, event.user_name, event.origin) == ("system", None, "system")
+
+
+@pytest.mark.asyncio
 async def test_suggestion_branch_is_excluded_even_when_it_is_symbolic_head(history: History):
     history.commit(PREFIXES)
     branch = "suggest/contributor/proposal"

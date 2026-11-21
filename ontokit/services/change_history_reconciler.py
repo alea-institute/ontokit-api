@@ -314,10 +314,13 @@ class ChangeHistoryReconciler:
             None,
         )
         if mapped_id is None:
+            # Only a current owner or member can be credited. Matching any
+            # account would let an imported commit claim, and reveal, it.
             verified_ids = (
                 await self._db.scalars(
                     select(UserCommitIdentity.user_id)
                     .where(
+                        UserCommitIdentity.user_id.in_([u for u in user_ids if u]),
                         UserCommitIdentity.commit_email == author.email,
                         UserCommitIdentity.commit_email_verified.is_(True),
                         UserCommitIdentity.use_verified_email.is_(True),
