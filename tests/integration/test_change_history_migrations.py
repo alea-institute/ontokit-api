@@ -281,3 +281,66 @@ async def test_upgrade_gives_up_instead_of_queueing_behind_a_long_reader(
     # Nothing was committed, so the rerun applies the whole revision.
     _alembic(name, "upgrade", WATERMARKS)
     assert await _schema(database) == UPGRADED
+
+
+TRANSACTIONS = "77a67de3294e"
+
+
+async def _recorded_xact(connection: asyncpg.Connection) -> tuple[str | None, str | None]:
+    """Report the revision and the recorded_xact column's default, if the column exists."""
+    revision = await connection.fetchval("SELECT version_num FROM alembic_version")
+    default = await connection.fetchval(
+        "SELECT coalesce(column_default, '') FROM information_schema.columns "
+        "WHERE table_name = 'entity_change_events' AND column_name = 'recorded_xact'"
+    )
+    return revision, default
+
+
+async def _run_behind_a_reader(database: asyncpg.Connection, *arguments: str) -> None:
+    """Run alembic while another session reads the table; it must give up, not wait."""
+    reader = await asyncpg.connect(_url(await _name(database), driver="postgresql"))
+    try:
+        reading = reader.transaction()
+        await reading.start()
+        await reader.fetchval("SELECT count(*) FROM entity_change_events")
+
+        blocked = subprocess.run(
+            [sys.executable, "-m", "alembic", *arguments],
+            cwd=ROOT,
+            env={
+                **os.environ,
+                "DATABASE_URL": _url(await _name(database), driver="postgresql+asyncpg"),
+            },
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert blocked.returncode != 0
+        assert "lock timeout" in blocked.stderr
+        await reading.rollback()
+    finally:
+        await reader.close()
+
+
+@pytest.mark.asyncio
+async def test_transaction_column_gives_up_instead_of_queueing_behind_a_long_reader(
+    database: asyncpg.Connection,
+) -> None:
+    """Both directions of the recorded_xact revision time out, commit nothing, and rerun."""
+    name = await _name(database)
+    _alembic(name, "upgrade", WATERMARKS)
+    await _seed_events(database)
+
+    await _run_behind_a_reader(database, "upgrade", TRANSACTIONS)
+    assert await _recorded_xact(database) == (WATERMARKS, None)
+
+    _alembic(name, "upgrade", TRANSACTIONS)
+    revision, default = await _recorded_xact(database)
+    assert revision == TRANSACTIONS
+    assert default is not None and "pg_current_xact_id" in default
+
+    await _run_behind_a_reader(database, "downgrade", WATERMARKS)
+    assert await _recorded_xact(database) == (TRANSACTIONS, default)
+
+    _alembic(name, "downgrade", WATERMARKS)
+    assert await _recorded_xact(database) == (WATERMARKS, None)
